@@ -38,13 +38,17 @@ def pytest_addoption(parser):
     group.addoption(
         "--ice-root",
         action="store",
-        default="/mnt/data8t/Data/ice_Ih_cubic_box",
-        help="Root directory of the pre-equilibrated ice Ih benchmark case.",
+        default=None,
+        help=(
+            "Root directory of the pre-equilibrated ice Ih benchmark case. "
+            "Defaults to the repository fixture under "
+            "benchmarks/performance/remd/data/ice_ih_cubic_box."
+        ),
     )
     group.addoption(
         "--temperatures",
         action="store",
-        default="100,110,120,130,140",
+        default="220,221,222,223,224",
         help="Comma-separated T-REMD temperature ladder in Kelvin.",
     )
     group.addoption(
@@ -90,7 +94,11 @@ def pytest_addoption(parser):
 
 @pytest.fixture(scope="session")
 def ice_root(pytestconfig):
-    path = Path(pytestconfig.getoption("--ice-root")).resolve()
+    explicit = pytestconfig.getoption("--ice-root")
+    if explicit:
+        path = Path(explicit).resolve()
+    else:
+        path = Path(__file__).resolve().parents[1] / "data" / "ice_ih_cubic_box"
     if not path.exists():
         raise pytest.UsageError(f"--ice-root does not exist: {path}")
     return path

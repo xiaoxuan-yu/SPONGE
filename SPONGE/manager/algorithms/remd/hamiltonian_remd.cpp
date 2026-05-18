@@ -3,13 +3,13 @@
 #include <cmath>
 #include <stdexcept>
 
+#include "../../../common.h"
+
 namespace sponge::manager::remd
 {
 
 namespace
 {
-
-constexpr double kBoltzmannConstantKcalPerMolKelvin = 0.0019872041;
 
 double ComputeBeta(double temperature_kelvin)
 {
@@ -18,7 +18,7 @@ double ComputeBeta(double temperature_kelvin)
         throw std::runtime_error(
             "HamiltonianReplicaExchangePolicy requires temperature > 0");
     }
-    return 1.0 / (kBoltzmannConstantKcalPerMolKelvin * temperature_kelvin);
+    return 1.0 / (static_cast<double>(CONSTANT_kB) * temperature_kelvin);
 }
 
 double RequireInputDouble(const ScheduleRecord& schedule, const char* key)

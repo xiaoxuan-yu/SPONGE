@@ -138,16 +138,19 @@ int RunManagerExecution(
         }
         return 0;
     }
+    sponge::manager::remd::TemperatureReplicaExchangePolicy tremd_policy;
+    sponge::manager::remd::HamiltonianReplicaExchangePolicy hremd_policy;
+    sponge::manager::remd::TemperatureHamiltonianReplicaExchangePolicy
+        htremd_policy;
     for (int epoch = 0; epoch < execution.epochs; epoch++)
     {
         std::vector<sponge::manager::BlockExecutionResult> block_results;
         std::vector<sponge::manager::ExchangeAttempt> exchange_attempts;
         if (execution.remd_mode == "tremd")
         {
-            sponge::manager::remd::TemperatureReplicaExchangePolicy policy;
-            const auto epoch_result =
-                policy.ExecuteEpoch(&manager, execution.exchange_round + epoch,
-                                    execution.emit_output);
+            const auto epoch_result = tremd_policy.ExecuteEpoch(
+                &manager, execution.exchange_round + epoch,
+                execution.emit_output);
             block_results = epoch_result.block_results;
             exchange_attempts = epoch_result.exchange_attempts;
             std::cout << "T-REMD epoch " << epoch << " round "
@@ -158,10 +161,9 @@ int RunManagerExecution(
         }
         else if (execution.remd_mode == "hremd")
         {
-            sponge::manager::remd::HamiltonianReplicaExchangePolicy policy;
-            const auto epoch_result =
-                policy.ExecuteEpoch(&manager, execution.exchange_round + epoch,
-                                    execution.emit_output);
+            const auto epoch_result = hremd_policy.ExecuteEpoch(
+                &manager, execution.exchange_round + epoch,
+                execution.emit_output);
             block_results = epoch_result.block_results;
             exchange_attempts = epoch_result.exchange_attempts;
             std::cout << "H-REMD epoch " << epoch << " round "
@@ -172,11 +174,9 @@ int RunManagerExecution(
         }
         else if (execution.remd_mode == "htremd")
         {
-            sponge::manager::remd::TemperatureHamiltonianReplicaExchangePolicy
-                policy;
-            const auto epoch_result =
-                policy.ExecuteEpoch(&manager, execution.exchange_round + epoch,
-                                    execution.emit_output);
+            const auto epoch_result = htremd_policy.ExecuteEpoch(
+                &manager, execution.exchange_round + epoch,
+                execution.emit_output);
             block_results = epoch_result.block_results;
             exchange_attempts = epoch_result.exchange_attempts;
             std::cout << "HT-REMD epoch " << epoch << " round "
