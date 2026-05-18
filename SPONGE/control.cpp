@@ -908,6 +908,27 @@ void CONTROLLER::Clear()
         MPI_Finalize();
 #endif
     }
+    commands.clear();
+    original_commands.clear();
+    command_check.clear();
+    choice_check.clear();
+    warnings.clear();
+    outputs_content.clear();
+    outputs_format.clear();
+    outputs_key.clear();
+    time_recorders.clear();
+    time_recorder_names.clear();
+    workspace_from_cli = false;
+    mdin_is_toml = false;
+    mdin_toml_source_path.clear();
+    mdin_toml_content.clear();
+    mdinfo = NULL;
+    mdout = NULL;
+    printf_sum = 0;
+    simulation_speed = 0;
+    warn_of_initialization = false;
+    is_initialized = 0;
+    is_controller_printf_initialized = 0;
 }
 
 TIME_RECORDER* CONTROLLER::Get_Time_Recorder(const char* name)

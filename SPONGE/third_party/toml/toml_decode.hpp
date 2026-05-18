@@ -265,6 +265,14 @@ T decode_node(const node& value)
         }
         detail::throw_type_error("string");
     }
+    else if constexpr (std::is_same_v<T, table>)
+    {
+        if (const auto* object = value.as_table())
+        {
+            return *object;
+        }
+        detail::throw_type_error("table");
+    }
     else if constexpr (is_std_optional_v<T>)
     {
         using value_type = typename detail::optional_value_type<T>::type;

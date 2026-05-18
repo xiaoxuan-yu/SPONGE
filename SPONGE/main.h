@@ -41,6 +41,7 @@
 #include "plugin/plugin.h"
 #include "quantum_chemistry/quantum_chemistry.h"
 #include "restrain/restrain.h"
+#include "scheduler/scheduler.h"
 #include "thermostat/Andersen_thermostat.h"
 #include "thermostat/Berendsen_thermostat.h"
 #include "thermostat/Bussi_thermostat.h"
@@ -59,6 +60,15 @@ void Main_Print();
 void Main_Clear();
 void Main_Sync_Dynamic_Targets_To_Controllers();
 void Main_Refresh_Local_State(bool rebuild_dd);
+void Main_Run_Current_Step(bool emit_output = true);
+bool Main_Is_Finished();
+sponge::SchedulerSnapshot Main_Get_Scheduler_Snapshot();
+sponge::RuntimeState Main_Export_Runtime_State();
+void Main_Import_Runtime_State(const sponge::RuntimeState& state);
+sponge::WorkerExchangeObservable Main_Collect_Exchange_Observables();
+void Main_Ensure_Foreign_State_Probe_Safe();
+void Main_Scale_Velocities(float factor);
+void Main_Invalidate_Neighbor_List(bool rebuild_dd);
 
 void Main_MC_Barostat();
 float Main_Box_Change(LTMatrix3 g, int scale_box, int scale_crd, int scale_vel);

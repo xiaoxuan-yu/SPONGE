@@ -4,7 +4,8 @@ void MC_BAROSTAT_INFORMATION::Volume_Change_Attempt(VECTOR boxlength, float dt)
 {
     if (CONTROLLER::MPI_rank == 0)
     {
-        double nrand = ((double)2.0 * rand() / RAND_MAX - 1.0);
+        std::uniform_real_distribution<double> centered(-1.0, 1.0);
+        double nrand = centered(generator);
 
         Delta_Box_Length = {0.0f, 0.0f, 0.0f};
         switch (couple_dimension)
@@ -13,7 +14,7 @@ void MC_BAROSTAT_INFORMATION::Volume_Change_Attempt(VECTOR boxlength, float dt)
                 if (only_direction > 0)
                     xyz = only_direction - 1;
                 else
-                    xyz = rand() % 3;
+                    xyz = std::uniform_int_distribution<int>(0, 2)(generator);
                 if (xyz == 0)
                 {
                     Delta_Box_Length.x = nrand * Delta_Box_Length_Max[xyz];
@@ -31,7 +32,7 @@ void MC_BAROSTAT_INFORMATION::Volume_Change_Attempt(VECTOR boxlength, float dt)
                 if (only_direction > 0)
                     xyz = only_direction - 1;
                 else
-                    xyz = rand() % 2;
+                    xyz = std::uniform_int_distribution<int>(0, 1)(generator);
                 if (xyz == 0)
                 {
                     Delta_Box_Length.z = nrand * Delta_Box_Length_Max[xyz];
@@ -46,7 +47,7 @@ void MC_BAROSTAT_INFORMATION::Volume_Change_Attempt(VECTOR boxlength, float dt)
                 if (only_direction > 0)
                     xyz = only_direction - 1;
                 else
-                    xyz = rand() % 2;
+                    xyz = std::uniform_int_distribution<int>(0, 1)(generator);
                 if (xyz == 0)
                 {
                     Delta_Box_Length.y = nrand * Delta_Box_Length_Max[xyz];
@@ -61,7 +62,7 @@ void MC_BAROSTAT_INFORMATION::Volume_Change_Attempt(VECTOR boxlength, float dt)
                 if (only_direction > 0)
                     xyz = only_direction - 1;
                 else
-                    xyz = rand() % 2;
+                    xyz = std::uniform_int_distribution<int>(0, 1)(generator);
                 if (xyz == 0)
                 {
                     Delta_Box_Length.x = nrand * Delta_Box_Length_Max[xyz];
@@ -131,7 +132,7 @@ int MC_BAROSTAT_INFORMATION::Check_MC_Barostat_Accept()
     float tmp_rand;
     if (CONTROLLER::MPI_rank == 0)
     {
-        tmp_rand = (float)rand() / RAND_MAX;
+        tmp_rand = std::uniform_real_distribution<float>(0.0f, 1.0f)(generator);
     }
 #ifdef USE_MPI
     MPI_Bcast(&tmp_rand, 1, MPI_FLOAT, 0, MPI_COMM_WORLD);
@@ -356,6 +357,7 @@ void MC_BAROSTAT_INFORMATION::Initial(CONTROLLER* controller, int atom_numbers,
     }
     Device_Malloc_Safely((void**)&frc_backup, sizeof(VECTOR) * atom_numbers);
     Device_Malloc_Safely((void**)&crd_backup, sizeof(VECTOR) * atom_numbers);
+    generator = std::default_random_engine(rand());
     is_initialized = 1;
     if (is_initialized && !is_controller_printf_initialized)
     {
