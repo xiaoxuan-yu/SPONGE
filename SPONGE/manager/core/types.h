@@ -106,6 +106,7 @@ struct WorkerConfig
     std::string working_directory;
     std::string executable_path;
     std::string transport = "tcp";
+    int managed_step_limit = 0;
 };
 
 struct ScheduleConfig

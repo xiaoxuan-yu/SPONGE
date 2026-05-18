@@ -118,6 +118,10 @@ Notes:
 - scalar `schedules.inputs` entries are appended to the worker command line as
   SPONGE input overrides, except manager-only metadata such as
   `hamiltonian_id`.
+- when `SPONGE_MANAGER` controls `block_steps` and `epochs`, it also controls
+  the worker `step_limit`. Any `-step_limit` from `mdin`,
+  `worker_defaults.args`, `schedules.worker.args`, or `schedules.inputs` is
+  overridden to `block_steps * epochs`.
 - relative `working_directory`, `executable_path`, and `log_path` are resolved
   relative to the config file location, or to `working_directory_root` when it
   is set.

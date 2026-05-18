@@ -32,7 +32,6 @@ args = [
   "-mdin", "${FEP_ROOT}/step2_mdin.txt",
   "-workspace", ".",
   "-default_in_file_prefix", "TMP",
-  "-step_limit", "1",
   "-write_information_interval", "1",
   "-dont_check_input", "1",
 ]

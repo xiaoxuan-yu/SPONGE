@@ -52,8 +52,8 @@ fs::path MakeProtocolTempDirectory(const std::string& prefix)
 {
     const auto stamp = static_cast<unsigned long long>(
         std::chrono::high_resolution_clock::now().time_since_epoch().count());
-    fs::path directory = fs::temp_directory_path() /
-                         (prefix + "_" + std::to_string(stamp));
+    fs::path directory =
+        fs::temp_directory_path() / (prefix + "_" + std::to_string(stamp));
     fs::create_directories(directory);
     return directory;
 }
@@ -76,8 +76,8 @@ void WaitForFile(const fs::path& path, const std::future<int>* child_exit,
             child_exit->wait_for(std::chrono::milliseconds(0)) ==
                 std::future_status::ready)
         {
-            throw std::runtime_error(
-                "child worker exited while waiting for " + context);
+            throw std::runtime_error("child worker exited while waiting for " +
+                                     context);
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
@@ -370,6 +370,7 @@ WorkerExecutionResponse TcpChildProcessWorkerSession::ExecuteBlock(
 {
     WorkerFileRequest request;
     request.steps = steps;
+    request.managed_step_limit = worker_config_.managed_step_limit;
     request.emit_output = emit_output;
     request.probe_only = false;
     request.has_runtime_state =
@@ -386,6 +387,7 @@ sponge::WorkerExchangeObservable TcpChildProcessWorkerSession::ProbeObservable(
 {
     WorkerFileRequest request;
     request.steps = 0;
+    request.managed_step_limit = worker_config_.managed_step_limit;
     request.emit_output = false;
     request.probe_only = true;
     request.has_runtime_state = true;
@@ -510,6 +512,7 @@ WorkerExecutionResponse FileChildProcessWorkerSession::ExecuteBlock(
 {
     WorkerFileRequest request;
     request.steps = steps;
+    request.managed_step_limit = worker_config_.managed_step_limit;
     request.emit_output = emit_output;
     request.probe_only = false;
     request.has_runtime_state =
@@ -526,6 +529,7 @@ sponge::WorkerExchangeObservable FileChildProcessWorkerSession::ProbeObservable(
 {
     WorkerFileRequest request;
     request.steps = 0;
+    request.managed_step_limit = worker_config_.managed_step_limit;
     request.emit_output = false;
     request.probe_only = true;
     request.has_runtime_state = true;
@@ -650,6 +654,7 @@ ChildProcessWorkerProtocol::ExecuteBlock(
 {
     WorkerFileRequest request;
     request.steps = steps;
+    request.managed_step_limit = worker_config.managed_step_limit;
     request.emit_output = emit_output;
     request.probe_only = false;
     request.has_runtime_state =
@@ -671,6 +676,7 @@ sponge::WorkerExchangeObservable ChildProcessWorkerProtocol::ProbeObservable(
 {
     WorkerFileRequest request;
     request.steps = 0;
+    request.managed_step_limit = worker_config.managed_step_limit;
     request.emit_output = false;
     request.probe_only = true;
     request.has_runtime_state = true;

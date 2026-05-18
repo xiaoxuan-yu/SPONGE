@@ -10,6 +10,7 @@ namespace sponge::worker_protocol
 struct WorkerFileRequest
 {
     int steps = 0;
+    int managed_step_limit = 0;
     bool emit_output = false;
     bool probe_only = false;
     bool has_runtime_state = false;

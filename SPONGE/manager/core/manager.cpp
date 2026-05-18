@@ -92,6 +92,40 @@ void AppendWorkerInputArgs(ScheduleConfig* schedule)
     }
 }
 
+void RemoveWorkerArg(std::vector<std::string>* args, const std::string& key)
+{
+    if (args == nullptr)
+    {
+        return;
+    }
+    std::vector<std::string> filtered;
+    filtered.reserve(args->size());
+    for (std::size_t i = 0; i < args->size(); i++)
+    {
+        if ((*args)[i] == key)
+        {
+            if (i + 1 < args->size())
+            {
+                i += 1;
+            }
+            continue;
+        }
+        filtered.push_back((*args)[i]);
+    }
+    *args = std::move(filtered);
+}
+
+void ApplyManagerControlledArgs(ScheduleConfig* schedule,
+                                int managed_step_limit)
+{
+    if (schedule == nullptr || managed_step_limit <= 0)
+    {
+        return;
+    }
+    RemoveWorkerArg(&schedule->worker.args, "-step_limit");
+    schedule->worker.managed_step_limit = managed_step_limit;
+}
+
 ExchangeObservable MakeExchangeObservable(
     int schedule_id, const sponge::WorkerExchangeObservable& observable)
 {
@@ -216,6 +250,7 @@ void Manager::BuildScheduleRecords()
         ScheduleRecord record;
         record.config = schedule;
         AppendWorkerInputArgs(&record.config);
+        ApplyManagerControlledArgs(&record.config, config_.managed_step_limit);
         schedules_.push_back(record);
 
         WorkerHandle worker;

@@ -64,6 +64,7 @@ sponge::worker_protocol::WorkerFileResponse ExecuteWorkerRequest(
 {
     sponge::SpongeScheduler scheduler;
     scheduler.InitializeFromArgs(scheduler_args);
+    scheduler.SetStepLimit(request.managed_step_limit);
     if (request.probe_only)
     {
         scheduler.EnsureForeignStateProbeSafe();
@@ -71,6 +72,7 @@ sponge::worker_protocol::WorkerFileResponse ExecuteWorkerRequest(
     if (request.has_runtime_state && request.runtime_state.valid)
     {
         scheduler.ImportRuntimeState(request.runtime_state);
+        scheduler.SetStepLimit(request.managed_step_limit);
     }
     if (!request.probe_only)
     {
@@ -135,10 +137,12 @@ int RunWorkerFileSessionMode(const std::vector<std::string>& scheduler_args,
             {
                 scheduler = std::make_unique<sponge::SpongeScheduler>();
                 scheduler->InitializeFromArgs(scheduler_args);
+                scheduler->SetStepLimit(request.managed_step_limit);
             }
             if (request.has_runtime_state && request.runtime_state.valid)
             {
                 scheduler->ImportRuntimeState(request.runtime_state);
+                scheduler->SetStepLimit(request.managed_step_limit);
             }
             scheduler->RunSteps(request.steps, request.emit_output);
             response.execution.runtime_state = scheduler->ExportRuntimeState();
@@ -211,10 +215,12 @@ int RunWorkerTcpMode(const std::vector<std::string>& scheduler_args,
             {
                 scheduler = std::make_unique<sponge::SpongeScheduler>();
                 scheduler->InitializeFromArgs(scheduler_args);
+                scheduler->SetStepLimit(request.managed_step_limit);
             }
             if (request.has_runtime_state && request.runtime_state.valid)
             {
                 scheduler->ImportRuntimeState(request.runtime_state);
+                scheduler->SetStepLimit(request.managed_step_limit);
             }
             scheduler->RunSteps(request.steps, request.emit_output);
             response.execution.runtime_state = scheduler->ExportRuntimeState();

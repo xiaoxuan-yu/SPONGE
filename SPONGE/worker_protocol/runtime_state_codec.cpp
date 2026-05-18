@@ -265,6 +265,7 @@ sponge::WorkerExchangeObservable ReadWorkerExchangeObservable(std::istream* in)
 void WriteWorkerRequest(std::ostream* out, const WorkerFileRequest& request)
 {
     WritePod(out, request.steps);
+    WritePod(out, request.managed_step_limit);
     WritePod(out, request.emit_output);
     WritePod(out, request.probe_only);
     WritePod(out, request.has_runtime_state);
@@ -275,6 +276,7 @@ WorkerFileRequest ReadWorkerRequest(std::istream* in)
 {
     WorkerFileRequest request;
     request.steps = ReadPod<int>(in);
+    request.managed_step_limit = ReadPod<int>(in);
     request.emit_output = ReadPod<bool>(in);
     request.probe_only = ReadPod<bool>(in);
     request.has_runtime_state = ReadPod<bool>(in);

@@ -111,6 +111,7 @@ class SpongeScheduler
     void RunSingleStep(bool emit_output = true);
     void RunSteps(int steps, bool emit_output = true);
     void RunToEnd(bool emit_output = true);
+    void SetStepLimit(int step_limit);
 
     SchedulerSnapshot Snapshot() const;
     RuntimeState ExportRuntimeState();

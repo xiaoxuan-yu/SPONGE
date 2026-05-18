@@ -5,6 +5,7 @@
 #include <sstream>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "algorithms/remd/hamiltonian_remd.h"
@@ -102,7 +103,7 @@ void PrintUsage()
         << "  SPONGE_MANAGER --fep-root <path> [--state-ids 0,1,2,3]\n"
         << "                [--lambda-lj-list 0.0,0.33,0.66,1.0]\n"
         << "                [--thermo-temperatures 300,320,340,360]\n"
-        << "                [--block-steps N] [--epochs N] [--step-limit N]\n"
+        << "                [--block-steps N] [--epochs N]\n"
         << "                [--emit-output 0|1]\n"
         << "                [--remd-mode tremd|hremd|htremd] [--exchange-round "
            "N]\n";
@@ -111,7 +112,10 @@ void PrintUsage()
 int RunManagerExecution(
     const sponge::manager::ManagerExecutionConfig& execution)
 {
-    sponge::manager::Manager manager(execution.manager);
+    sponge::manager::Manager::ManagerConfig manager_config = execution.manager;
+    manager_config.managed_step_limit =
+        execution.manager.block_steps * execution.epochs;
+    sponge::manager::Manager manager(std::move(manager_config));
     std::cout << manager.DescribePlan();
     if (execution.remd_mode.empty())
     {
@@ -224,7 +228,6 @@ int main(int argc, char** argv)
     std::vector<double> lambda_ladder;
     std::vector<double> thermo_temperatures;
     int block_steps = 1000;
-    int step_limit = -1;
     bool emit_output = false;
     std::string remd_mode;
     int epochs = 1;
@@ -277,10 +280,6 @@ int main(int argc, char** argv)
         else if (arg == "--epochs")
         {
             epochs = std::stoi(require_value("--epochs"));
-        }
-        else if (arg == "--step-limit")
-        {
-            step_limit = std::stoi(require_value("--step-limit"));
         }
         else if (arg == "--emit-output")
         {
@@ -374,10 +373,6 @@ int main(int argc, char** argv)
         throw std::runtime_error(
             "thermo temperature list size must match state directory count");
     }
-    if (step_limit < 0)
-    {
-        step_limit = block_steps;
-    }
     sponge::manager::ManagerExecutionConfig execution;
     execution.manager.block_steps = block_steps;
     execution.manager.exchange_log_path =
@@ -421,8 +416,6 @@ int main(int argc, char** argv)
             ".",
             "-default_in_file_prefix",
             "TMP",
-            "-step_limit",
-            std::to_string(step_limit),
             "-write_information_interval",
             "1",
             "-dont_check_input",

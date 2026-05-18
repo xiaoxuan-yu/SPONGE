@@ -60,7 +60,6 @@ def write_ice_mdin(run_dir, ice_root, block_steps, epochs):
     input_prefix = ice_root / "ice_Ih_cubic_8064w"
     coordinate_file = ice_root / "pre_eq" / "pre_eq_coordinate.txt"
     velocity_file = ice_root / "pre_eq" / "pre_eq_velocity.txt"
-    step_limit = block_steps * epochs
     mdin_path.write_text(
         "\n".join(
             [
@@ -68,7 +67,8 @@ def write_ice_mdin(run_dir, ice_root, block_steps, epochs):
                 'mode = "npt"',
                 "pbc = true",
                 "dt = 0.002",
-                f"step_limit = {step_limit}",
+                "# Manager must override this when running multiple epochs.",
+                "step_limit = 1",
                 f'default_in_file_prefix = "{input_prefix}"',
                 f'coordinate_in_file = "{coordinate_file}"',
                 f'velocity_in_file = "{velocity_file}"',

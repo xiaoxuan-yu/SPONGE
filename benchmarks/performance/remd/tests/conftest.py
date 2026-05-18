@@ -65,10 +65,7 @@ def pytest_addoption(parser):
         "--remd-worker-modes",
         action="store",
         default="tcp,shm",
-        help=(
-            "Comma-separated worker modes to benchmark: "
-            "file,tcp,shm."
-        ),
+        help=("Comma-separated worker modes to benchmark: file,tcp,shm."),
     )
     group.addoption(
         "--manager-cmd",

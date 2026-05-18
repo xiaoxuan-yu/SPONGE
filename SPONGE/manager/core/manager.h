@@ -21,6 +21,7 @@ class Manager
     struct ManagerConfig
     {
         int block_steps = 0;
+        int managed_step_limit = 0;
         std::string exchange_log_path;
         std::vector<ScheduleConfig> schedules;
     };

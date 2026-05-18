@@ -246,6 +246,14 @@ void Main_Run_Current_Step(bool emit_output)
 
 bool Main_Is_Finished() { return md_info.sys.steps > md_info.sys.step_limit; }
 
+void Main_Set_Step_Limit(int step_limit)
+{
+    if (step_limit > 0)
+    {
+        md_info.sys.step_limit = step_limit;
+    }
+}
+
 sponge::SchedulerSnapshot Main_Get_Scheduler_Snapshot()
 {
     Main_Probe_Current_Exchange_Observables();
@@ -694,6 +702,12 @@ void SpongeScheduler::RunToEnd(bool emit_output)
     {
         Main_Run_Current_Step(emit_output);
     }
+}
+
+void SpongeScheduler::SetStepLimit(int step_limit)
+{
+    EnsureInitialized("SetStepLimit");
+    Main_Set_Step_Limit(step_limit);
 }
 
 SchedulerSnapshot SpongeScheduler::Snapshot() const
