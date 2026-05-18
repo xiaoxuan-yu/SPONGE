@@ -39,7 +39,7 @@ SPONGE now exposes a lightweight process-local scheduling wrapper through
 - total/effective potential
 - box lengths
 
-`ExportRuntimeState()` currently returns an in-process minimal runtime-state
+`ExportRuntimeState()` currently returns an in-memory minimal runtime-state
 buffer that includes:
 
 - coordinates

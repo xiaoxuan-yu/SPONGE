@@ -175,18 +175,7 @@ void Write_Exchange_Log_Header(std::ofstream* out)
 
 bool CanRunBlockInParallel(const std::vector<WorkerHandle>& workers)
 {
-    if (workers.empty())
-    {
-        return false;
-    }
-    for (const auto& worker : workers)
-    {
-        if (!worker.config.child_process)
-        {
-            return false;
-        }
-    }
-    return true;
+    return !workers.empty();
 }
 
 }  // namespace
@@ -511,13 +500,7 @@ std::string Manager::DescribePlan() const
         {
             oss << " worker=" << schedule.config.worker.name;
         }
-        oss << " launch="
-            << (schedule.config.worker.child_process ? "child_process"
-                                                     : "in_process");
-        if (schedule.config.worker.child_process)
-        {
-            oss << " transport=" << schedule.config.worker.transport;
-        }
+        oss << " transport=" << schedule.config.worker.transport;
         if (!schedule.runtime_state.location.empty())
         {
             oss << " runtime_state="

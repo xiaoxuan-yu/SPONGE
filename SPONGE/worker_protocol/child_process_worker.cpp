@@ -2,9 +2,11 @@
 #include <climits>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <future>
 #include <sstream>
 #include <stdexcept>
+#include <thread>
 #include <utility>
 
 #include "file_protocol.h"
@@ -19,30 +21,6 @@ namespace fs = std::filesystem;
 
 namespace
 {
-
-struct ScopedCurrentPath
-{
-    explicit ScopedCurrentPath(const std::string& path)
-        : original(fs::current_path()), changed(false)
-    {
-        if (!path.empty())
-        {
-            fs::current_path(path);
-            changed = true;
-        }
-    }
-
-    ~ScopedCurrentPath()
-    {
-        if (changed)
-        {
-            fs::current_path(original);
-        }
-    }
-
-    fs::path original;
-    bool changed;
-};
 
 std::string ShellQuote(const std::string& value)
 {
@@ -68,6 +46,41 @@ fs::path MakeProtocolTempPath(const std::string& prefix)
         std::chrono::high_resolution_clock::now().time_since_epoch().count());
     return fs::temp_directory_path() /
            (prefix + "_" + std::to_string(stamp) + ".bin");
+}
+
+fs::path MakeProtocolTempDirectory(const std::string& prefix)
+{
+    const auto stamp = static_cast<unsigned long long>(
+        std::chrono::high_resolution_clock::now().time_since_epoch().count());
+    fs::path directory = fs::temp_directory_path() /
+                         (prefix + "_" + std::to_string(stamp));
+    fs::create_directories(directory);
+    return directory;
+}
+
+void TouchFile(const fs::path& path)
+{
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out)
+    {
+        throw std::runtime_error("failed to create file: " + path.string());
+    }
+}
+
+void WaitForFile(const fs::path& path, const std::future<int>* child_exit,
+                 const std::string& context)
+{
+    while (!fs::exists(path))
+    {
+        if (child_exit != nullptr && child_exit->valid() &&
+            child_exit->wait_for(std::chrono::milliseconds(0)) ==
+                std::future_status::ready)
+        {
+            throw std::runtime_error(
+                "child worker exited while waiting for " + context);
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
 }
 
 void SetOrAppendArg(std::vector<std::string>* args, const std::string& key,
@@ -368,6 +381,18 @@ WorkerExecutionResponse TcpChildProcessWorkerSession::ExecuteBlock(
     return SendRequest(request);
 }
 
+sponge::WorkerExchangeObservable TcpChildProcessWorkerSession::ProbeObservable(
+    const sponge::RuntimeState& imported_state)
+{
+    WorkerFileRequest request;
+    request.steps = 0;
+    request.emit_output = false;
+    request.probe_only = true;
+    request.has_runtime_state = true;
+    request.runtime_state = imported_state;
+    return SendRequest(request).observable;
+}
+
 void TcpChildProcessWorkerSession::Shutdown()
 {
     if (shutdown_)
@@ -395,27 +420,149 @@ void TcpChildProcessWorkerSession::Shutdown()
     }
 }
 
-InProcessWorkerSession::InProcessWorkerSession(
-    sponge::manager::WorkerConfig config)
-    : config_(std::move(config))
+FileChildProcessWorkerSession::FileChildProcessWorkerSession(
+    sponge::manager::WorkerConfig worker_config)
+    : worker_config_(std::move(worker_config))
 {
 }
 
-WorkerExecutionResponse InProcessWorkerSession::RunBlock(
+FileChildProcessWorkerSession::~FileChildProcessWorkerSession()
+{
+    try
+    {
+        Shutdown();
+    }
+    catch (...)
+    {
+    }
+}
+
+void FileChildProcessWorkerSession::Start()
+{
+    if (started_)
+    {
+        return;
+    }
+    if (worker_config_.executable_path.empty())
+    {
+        throw std::runtime_error(
+            "FileChildProcessWorkerSession requires executable_path");
+    }
+    if (worker_config_.args.empty())
+    {
+        throw std::runtime_error(
+            "FileChildProcessWorkerSession requires non-empty args");
+    }
+
+    const fs::path session_directory =
+        MakeProtocolTempDirectory("sponge_worker_file_session");
+    session_directory_ = session_directory.string();
+
+    std::ostringstream command;
+    if (!worker_config_.working_directory.empty())
+    {
+        command << "cd " << ShellQuote(worker_config_.working_directory)
+                << " && ";
+    }
+    command << ShellQuote(worker_config_.executable_path);
+    for (const auto& arg : worker_config_.args)
+    {
+        command << ' ' << ShellQuote(arg);
+    }
+    command << " --worker-file-session "
+            << ShellQuote(session_directory.string());
+
+    child_exit_ =
+        std::async(std::launch::async, [command_text = command.str()]()
+                   { return std::system(command_text.c_str()); });
+    WaitForFile(session_directory / "ready", &child_exit_,
+                "file worker ready marker");
+    started_ = true;
+}
+
+WorkerExecutionResponse FileChildProcessWorkerSession::SendRequest(
+    const WorkerFileRequest& request)
+{
+    Start();
+    const auto request_id = next_request_id_++;
+    const fs::path session_directory(session_directory_);
+    const std::string request_name =
+        "request_" + std::to_string(request_id) + ".bin";
+    const std::string response_name =
+        "response_" + std::to_string(request_id) + ".bin";
+    const fs::path request_path = session_directory / request_name;
+    const fs::path response_path = session_directory / response_name;
+    const fs::path request_tmp_path =
+        session_directory / (request_name + ".tmp");
+
+    WriteWorkerFileRequest(request_tmp_path.string(), request);
+    fs::rename(request_tmp_path, request_path);
+    WaitForFile(response_path, &child_exit_, "file worker response");
+
+    const auto response = ReadWorkerFileResponse(response_path.string());
+    fs::remove(request_path);
+    fs::remove(response_path);
+    return response.execution;
+}
+
+WorkerExecutionResponse FileChildProcessWorkerSession::ExecuteBlock(
     int steps, bool emit_output, const sponge::RuntimeState* imported_state)
 {
-    InProcessWorkerProtocol protocol;
-    return protocol.ExecuteBlock(config_, steps, emit_output, imported_state);
+    WorkerFileRequest request;
+    request.steps = steps;
+    request.emit_output = emit_output;
+    request.probe_only = false;
+    request.has_runtime_state =
+        imported_state != nullptr && imported_state->valid;
+    if (request.has_runtime_state)
+    {
+        request.runtime_state = *imported_state;
+    }
+    return SendRequest(request);
 }
 
-sponge::WorkerExchangeObservable InProcessWorkerSession::ProbeObservable(
+sponge::WorkerExchangeObservable FileChildProcessWorkerSession::ProbeObservable(
     const sponge::RuntimeState& imported_state)
 {
-    InProcessWorkerProtocol protocol;
-    return protocol.ProbeObservable(config_, imported_state);
+    WorkerFileRequest request;
+    request.steps = 0;
+    request.emit_output = false;
+    request.probe_only = true;
+    request.has_runtime_state = true;
+    request.runtime_state = imported_state;
+    return SendRequest(request).observable;
 }
 
-void InProcessWorkerSession::Shutdown() {}
+void FileChildProcessWorkerSession::Shutdown()
+{
+    if (shutdown_)
+    {
+        return;
+    }
+    shutdown_ = true;
+    if (!session_directory_.empty())
+    {
+        const fs::path session_directory(session_directory_);
+        const fs::path shutdown_tmp_path = session_directory / "shutdown.tmp";
+        const fs::path shutdown_path = session_directory / "shutdown";
+        TouchFile(shutdown_tmp_path);
+        fs::rename(shutdown_tmp_path, shutdown_path);
+    }
+    if (child_exit_.valid())
+    {
+        const int exit_code = child_exit_.get();
+        if (exit_code != 0)
+        {
+            throw std::runtime_error(
+                "child worker command failed with exit code " +
+                std::to_string(exit_code));
+        }
+    }
+    if (!session_directory_.empty())
+    {
+        fs::remove_all(session_directory_);
+    }
+}
 
 ChildProcessWorkerSession::ChildProcessWorkerSession(
     sponge::manager::WorkerConfig config)
@@ -437,29 +584,52 @@ ChildProcessWorkerSession::~ChildProcessWorkerSession()
 WorkerExecutionResponse ChildProcessWorkerSession::RunBlock(
     int steps, bool emit_output, const sponge::RuntimeState* imported_state)
 {
-    if (config_.persistent)
+    if (config_.transport == "file")
     {
-        if (tcp_session_ == nullptr)
+        if (file_session_ == nullptr)
         {
-            tcp_session_ = std::make_unique<TcpChildProcessWorkerSession>(
-                config_, config_.transport == "shm");
+            file_session_ =
+                std::make_unique<FileChildProcessWorkerSession>(config_);
         }
-        return tcp_session_->ExecuteBlock(steps, emit_output, imported_state);
+        return file_session_->ExecuteBlock(steps, emit_output, imported_state);
     }
 
-    ChildProcessWorkerProtocol protocol;
-    return protocol.ExecuteBlock(config_, steps, emit_output, imported_state);
+    if (tcp_session_ == nullptr)
+    {
+        tcp_session_ = std::make_unique<TcpChildProcessWorkerSession>(
+            config_, config_.transport == "shm");
+    }
+    return tcp_session_->ExecuteBlock(steps, emit_output, imported_state);
 }
 
 sponge::WorkerExchangeObservable ChildProcessWorkerSession::ProbeObservable(
     const sponge::RuntimeState& imported_state)
 {
-    ChildProcessWorkerProtocol protocol;
-    return protocol.ProbeObservable(config_, imported_state);
+    if (config_.transport == "file")
+    {
+        if (file_session_ == nullptr)
+        {
+            file_session_ =
+                std::make_unique<FileChildProcessWorkerSession>(config_);
+        }
+        return file_session_->ProbeObservable(imported_state);
+    }
+
+    if (tcp_session_ == nullptr)
+    {
+        tcp_session_ = std::make_unique<TcpChildProcessWorkerSession>(
+            config_, config_.transport == "shm");
+    }
+    return tcp_session_->ProbeObservable(imported_state);
 }
 
 void ChildProcessWorkerSession::Shutdown()
 {
+    if (file_session_ != nullptr)
+    {
+        file_session_->Shutdown();
+        file_session_.reset();
+    }
     if (tcp_session_ != nullptr)
     {
         tcp_session_->Shutdown();
@@ -470,44 +640,7 @@ void ChildProcessWorkerSession::Shutdown()
 std::unique_ptr<WorkerSession> CreateWorkerSession(
     sponge::manager::WorkerConfig config)
 {
-    if (config.child_process)
-    {
-        return std::make_unique<ChildProcessWorkerSession>(std::move(config));
-    }
-    return std::make_unique<InProcessWorkerSession>(std::move(config));
-}
-
-WorkerExecutionResponse InProcessWorkerProtocol::ExecuteBlock(
-    const sponge::manager::WorkerConfig& worker_config, int steps,
-    bool emit_output, const sponge::RuntimeState* imported_state)
-{
-    if (steps <= 0)
-    {
-        throw std::runtime_error(
-            "InProcessWorkerProtocol::ExecuteBlock requires steps > 0");
-    }
-    if (worker_config.args.empty())
-    {
-        throw std::runtime_error(
-            "InProcessWorkerProtocol::ExecuteBlock requires non-empty args");
-    }
-
-    sponge::SpongeScheduler scheduler;
-    ScopedCurrentPath scoped_path(worker_config.working_directory);
-    scheduler.InitializeFromArgs(worker_config.args);
-    if (imported_state != nullptr && imported_state->valid)
-    {
-        scheduler.ImportRuntimeState(*imported_state);
-    }
-    scheduler.RunSteps(steps, emit_output);
-
-    WorkerExecutionResponse response;
-    response.runtime_state = scheduler.ExportRuntimeState();
-    response.snapshot = scheduler.Snapshot();
-    response.observable = scheduler.CollectExchangeObservables();
-    response.finished = response.snapshot.finished;
-    scheduler.Finalize();
-    return response;
+    return std::make_unique<ChildProcessWorkerSession>(std::move(config));
 }
 
 sponge::worker_protocol::WorkerExecutionResponse
@@ -525,37 +658,11 @@ ChildProcessWorkerProtocol::ExecuteBlock(
     {
         request.runtime_state = *imported_state;
     }
-    if (worker_config.persistent)
+    if (worker_config.transport == "tcp" || worker_config.transport == "shm")
     {
         return RunTcpChildProcessWorker(worker_config, request);
     }
     return RunChildProcessWorker(worker_config, request);
-}
-
-sponge::WorkerExchangeObservable InProcessWorkerProtocol::ProbeObservable(
-    const sponge::manager::WorkerConfig& worker_config,
-    const sponge::RuntimeState& imported_state)
-{
-    if (!imported_state.valid)
-    {
-        throw std::runtime_error(
-            "InProcessWorkerProtocol::ProbeObservable requires a valid "
-            "runtime state");
-    }
-    if (worker_config.args.empty())
-    {
-        throw std::runtime_error(
-            "InProcessWorkerProtocol::ProbeObservable requires non-empty args");
-    }
-
-    sponge::SpongeScheduler scheduler;
-    ScopedCurrentPath scoped_path(worker_config.working_directory);
-    scheduler.InitializeFromArgs(worker_config.args);
-    scheduler.EnsureForeignStateProbeSafe();
-    scheduler.ImportRuntimeState(imported_state);
-    const auto observable = scheduler.CollectExchangeObservables();
-    scheduler.Finalize();
-    return observable;
 }
 
 sponge::WorkerExchangeObservable ChildProcessWorkerProtocol::ProbeObservable(
@@ -568,7 +675,7 @@ sponge::WorkerExchangeObservable ChildProcessWorkerProtocol::ProbeObservable(
     request.probe_only = true;
     request.has_runtime_state = true;
     request.runtime_state = imported_state;
-    if (worker_config.persistent)
+    if (worker_config.transport == "tcp" || worker_config.transport == "shm")
     {
         return RunTcpChildProcessWorker(worker_config, request).observable;
     }

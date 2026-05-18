@@ -35,18 +35,6 @@ class WorkerProtocol
         const sponge::RuntimeState& imported_state) = 0;
 };
 
-class InProcessWorkerProtocol : public WorkerProtocol
-{
-   public:
-    WorkerExecutionResponse ExecuteBlock(
-        const sponge::manager::WorkerConfig& worker_config, int steps,
-        bool emit_output, const sponge::RuntimeState* imported_state) override;
-
-    sponge::WorkerExchangeObservable ProbeObservable(
-        const sponge::manager::WorkerConfig& worker_config,
-        const sponge::RuntimeState& imported_state) override;
-};
-
 class ChildProcessWorkerProtocol : public WorkerProtocol
 {
    public:
@@ -89,6 +77,8 @@ class TcpChildProcessWorkerSession
     WorkerExecutionResponse ExecuteBlock(
         int steps, bool emit_output,
         const sponge::RuntimeState* imported_state);
+    sponge::WorkerExchangeObservable ProbeObservable(
+        const sponge::RuntimeState& imported_state);
     void Shutdown();
 
    private:
@@ -104,22 +94,35 @@ class TcpChildProcessWorkerSession
     bool shutdown_ = false;
 };
 
-class InProcessWorkerSession : public WorkerSession
+class FileChildProcessWorkerSession
 {
    public:
-    explicit InProcessWorkerSession(sponge::manager::WorkerConfig config);
+    explicit FileChildProcessWorkerSession(
+        sponge::manager::WorkerConfig worker_config);
+    ~FileChildProcessWorkerSession();
 
-    WorkerExecutionResponse RunBlock(
+    FileChildProcessWorkerSession(const FileChildProcessWorkerSession&) =
+        delete;
+    FileChildProcessWorkerSession& operator=(
+        const FileChildProcessWorkerSession&) = delete;
+
+    WorkerExecutionResponse ExecuteBlock(
         int steps, bool emit_output,
-        const sponge::RuntimeState* imported_state) override;
-
+        const sponge::RuntimeState* imported_state);
     sponge::WorkerExchangeObservable ProbeObservable(
-        const sponge::RuntimeState& imported_state) override;
-
-    void Shutdown() override;
+        const sponge::RuntimeState& imported_state);
+    void Shutdown();
 
    private:
-    sponge::manager::WorkerConfig config_;
+    void Start();
+    WorkerExecutionResponse SendRequest(const WorkerFileRequest& request);
+
+    sponge::manager::WorkerConfig worker_config_;
+    std::string session_directory_;
+    std::future<int> child_exit_;
+    std::uint64_t next_request_id_ = 1;
+    bool started_ = false;
+    bool shutdown_ = false;
 };
 
 class ChildProcessWorkerSession : public WorkerSession
@@ -139,6 +142,7 @@ class ChildProcessWorkerSession : public WorkerSession
 
    private:
     sponge::manager::WorkerConfig config_;
+    std::unique_ptr<FileChildProcessWorkerSession> file_session_;
     std::unique_ptr<TcpChildProcessWorkerSession> tcp_session_;
 };
 

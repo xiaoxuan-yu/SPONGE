@@ -25,7 +25,6 @@ struct ManagerTomlSection
     std::optional<std::string> remd_mode;
     std::optional<int> exchange_round;
     std::optional<std::string> transport;
-    std::optional<std::string> worker_launch;
 };
 
 struct ExchangeTomlSection
@@ -42,8 +41,6 @@ struct WorkerTomlSection
     std::optional<std::vector<std::string>> args;
     std::optional<std::string> working_directory;
     std::optional<std::string> executable_path;
-    std::optional<bool> child_process;
-    std::optional<bool> persistent;
 };
 
 struct WorkerDefaultsTomlSection
@@ -52,9 +49,6 @@ struct WorkerDefaultsTomlSection
     std::optional<std::string> executable_path;
     std::optional<std::vector<std::string>> args;
     std::optional<std::string> working_directory_root;
-    std::optional<std::string> launch;
-    std::optional<bool> child_process;
-    std::optional<bool> persistent;
 };
 
 struct ScheduleTomlSection
@@ -213,9 +207,7 @@ SPONGE_TOML_DECODE_REFLECT(
     SPONGE_TOML_DECODE_MEMBER(sponge::manager::ManagerTomlSection, remd_mode),
     SPONGE_TOML_DECODE_MEMBER(sponge::manager::ManagerTomlSection,
                               exchange_round),
-    SPONGE_TOML_DECODE_MEMBER(sponge::manager::ManagerTomlSection, transport),
-    SPONGE_TOML_DECODE_MEMBER(sponge::manager::ManagerTomlSection,
-                              worker_launch))
+    SPONGE_TOML_DECODE_MEMBER(sponge::manager::ManagerTomlSection, transport))
 
 SPONGE_TOML_DECODE_REFLECT(
     sponge::manager::ExchangeTomlSection,
@@ -232,10 +224,7 @@ SPONGE_TOML_DECODE_REFLECT(
     SPONGE_TOML_DECODE_MEMBER(sponge::manager::WorkerTomlSection,
                               working_directory),
     SPONGE_TOML_DECODE_MEMBER(sponge::manager::WorkerTomlSection,
-                              executable_path),
-    SPONGE_TOML_DECODE_MEMBER(sponge::manager::WorkerTomlSection,
-                              child_process),
-    SPONGE_TOML_DECODE_MEMBER(sponge::manager::WorkerTomlSection, persistent))
+                              executable_path))
 
 SPONGE_TOML_DECODE_REFLECT(
     sponge::manager::WorkerDefaultsTomlSection,
@@ -245,13 +234,7 @@ SPONGE_TOML_DECODE_REFLECT(
                               executable_path),
     SPONGE_TOML_DECODE_MEMBER(sponge::manager::WorkerDefaultsTomlSection, args),
     SPONGE_TOML_DECODE_MEMBER(sponge::manager::WorkerDefaultsTomlSection,
-                              working_directory_root),
-    SPONGE_TOML_DECODE_MEMBER(sponge::manager::WorkerDefaultsTomlSection,
-                              launch),
-    SPONGE_TOML_DECODE_MEMBER(sponge::manager::WorkerDefaultsTomlSection,
-                              child_process),
-    SPONGE_TOML_DECODE_MEMBER(sponge::manager::WorkerDefaultsTomlSection,
-                              persistent))
+                              working_directory_root))
 
 SPONGE_TOML_DECODE_REFLECT(
     sponge::manager::ScheduleTomlSection,
@@ -328,16 +311,6 @@ ManagerExecutionConfig LoadManagerExecutionConfigFromToml(
             (config_dir / "manager_exchange.log").string();
     }
 
-    const std::string global_worker_launch =
-        parsed.worker_defaults.launch.value_or(
-            parsed.manager.worker_launch.value_or("in_process"));
-    if (global_worker_launch != "in_process" &&
-        global_worker_launch != "child_process")
-    {
-        throw std::runtime_error(
-            "manager.worker_launch must be in_process or child_process");
-    }
-
     if (parsed.schedules.empty())
     {
         throw std::runtime_error(
@@ -379,26 +352,8 @@ ManagerExecutionConfig LoadManagerExecutionConfigFromToml(
         schedule.worker.working_directory = ResolveWorkingDirectory(
             config_dir, parsed.worker_defaults.working_directory_root,
             working_directory);
-        schedule.worker.child_process =
-            schedule_in.worker.child_process.value_or(global_worker_launch ==
-                                                      "child_process");
-        const bool persistent_from_transport =
-            manager_transport == "tcp" || manager_transport == "shm";
-        schedule.worker.persistent = schedule_in.worker.persistent.value_or(
-            parsed.worker_defaults.persistent.value_or(
-                persistent_from_transport));
-        if (schedule.worker.child_process)
-        {
-            if (!manager_transport.empty())
-            {
-                schedule.worker.transport = manager_transport;
-            }
-            else
-            {
-                schedule.worker.transport =
-                    schedule.worker.persistent ? "tcp" : "file";
-            }
-        }
+        schedule.worker.transport =
+            !manager_transport.empty() ? manager_transport : "tcp";
 
         if (schedule_in.worker.executable_path.has_value())
         {
@@ -410,7 +365,7 @@ ManagerExecutionConfig LoadManagerExecutionConfigFromToml(
             schedule.worker.executable_path =
                 ResolveMaybeRelativePath(config_dir, *default_executable);
         }
-        else if (schedule.worker.child_process)
+        else
         {
             schedule.worker.executable_path =
                 default_sponge_worker.lexically_normal().string();

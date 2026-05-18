@@ -1,10 +1,10 @@
 ﻿#include "shm_transport.h"
 
 #include <atomic>
+#include <cstring>
 #include <limits>
 #include <sstream>
 #include <stdexcept>
-#include <cstring>
 #include <utility>
 
 #include "tcp_protocol.h"
@@ -12,11 +12,12 @@
 #if defined(_WIN32)
 #include <windows.h>
 #else
-#include <cerrno>
-#include <cstring>
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <unistd.h>
+
+#include <cerrno>
+#include <cstring>
 #endif
 
 namespace sponge::worker_protocol
@@ -124,7 +125,8 @@ void ShmTransport::Send(const WorkerMessage& message)
         control_message.inline_payload =
             EncodePayloadRef(control_message.payload_ref);
         control_message.payload_ref = WorkerPayloadRef{};
-        control_message.payload_ref.size = control_message.inline_payload.size();
+        control_message.payload_ref.size =
+            control_message.inline_payload.size();
     }
     control_transport_->Send(control_message);
 }
@@ -163,19 +165,17 @@ WorkerPayloadRef ShmTransport::WritePayload(const std::string& payload)
 #if defined(_WIN32)
     if (ref.size > std::numeric_limits<DWORD>::max())
     {
-        throw std::runtime_error(
-            "ShmTransport Windows payload exceeds 4 GiB");
+        throw std::runtime_error("ShmTransport Windows payload exceeds 4 GiB");
     }
-    HANDLE mapping = CreateFileMappingA(
-        INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0,
-        static_cast<DWORD>(ref.size), ref.name.c_str());
+    HANDLE mapping =
+        CreateFileMappingA(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE, 0,
+                           static_cast<DWORD>(ref.size), ref.name.c_str());
     if (mapping == nullptr)
     {
         throw std::runtime_error(WindowsErrorMessage("CreateFileMapping"));
     }
-    void* view =
-        MapViewOfFile(mapping, FILE_MAP_WRITE, 0, 0,
-                      static_cast<SIZE_T>(ref.size));
+    void* view = MapViewOfFile(mapping, FILE_MAP_WRITE, 0, 0,
+                               static_cast<SIZE_T>(ref.size));
     if (view == nullptr)
     {
         CloseHandle(mapping);
@@ -225,11 +225,10 @@ std::string ShmTransport::ReadPayload(const WorkerPayloadRef& ref)
     {
         throw std::runtime_error(WindowsErrorMessage("OpenFileMapping"));
     }
-    void* view =
-        MapViewOfFile(mapping, FILE_MAP_READ,
-                      static_cast<DWORD>(ref.offset >> 32),
-                      static_cast<DWORD>(ref.offset & 0xffffffffu),
-                      static_cast<SIZE_T>(ref.size));
+    void* view = MapViewOfFile(mapping, FILE_MAP_READ,
+                               static_cast<DWORD>(ref.offset >> 32),
+                               static_cast<DWORD>(ref.offset & 0xffffffffu),
+                               static_cast<SIZE_T>(ref.size));
     if (view == nullptr)
     {
         CloseHandle(mapping);
@@ -244,8 +243,7 @@ std::string ShmTransport::ReadPayload(const WorkerPayloadRef& ref)
     {
         throw std::runtime_error(PosixErrorMessage("shm_open"));
     }
-    void* view =
-        mmap(nullptr, ref.size, PROT_READ, MAP_SHARED, fd, ref.offset);
+    void* view = mmap(nullptr, ref.size, PROT_READ, MAP_SHARED, fd, ref.offset);
     if (view == MAP_FAILED)
     {
         close(fd);
@@ -273,8 +271,7 @@ void ShmTransport::ReleaseOwnedPayloads()
 std::unique_ptr<WorkerTransport> CreateTcpControlTransport(
     TcpSocket socket, bool use_shared_memory_payloads)
 {
-    auto tcp_transport =
-        std::make_unique<TcpTransport>(std::move(socket));
+    auto tcp_transport = std::make_unique<TcpTransport>(std::move(socket));
     if (use_shared_memory_payloads)
     {
         return std::make_unique<ShmTransport>(std::move(tcp_transport));

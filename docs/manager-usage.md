@@ -12,27 +12,26 @@ It can be driven in two ways:
 - an explicit `--config manager.toml`, which declares schedules, workers, and
   manager-level execution settings directly
 
-It can run schedules in two worker modes:
+It runs schedules as persistent external `SPONGE` child-process workers.
 
-- `in_process`: the manager reuses the SPONGE runtime in the same process
-- `child_process`: the manager launches external `SPONGE` workers
+The transport is selected by `[manager].transport`:
 
-For `child_process`, the transport is selected by `[manager].transport`:
-
-- `transport = "file"`: prototype file request/response protocol
+- `transport = "file"`: persistent worker process with file request/response
+  payloads
 - `transport = "tcp"`: TCP loopback request/response protocol using
   `SPONGE --worker-tcp host:port`
 - `transport = "shm"`: TCP loopback control messages plus shared-memory
   request/response payloads
 
-Advanced users may still override the transport per worker with
-`worker_defaults.persistent` or `schedules.worker.persistent`. The higher-level
-`manager.transport` field is the preferred user-facing knob.
+There is no user-facing worker launch or persistence switch. The manager always
+launches child-process workers, and workers always stay alive for the manager
+run.
 
-When every schedule uses `child_process`, block execution is dispatched in
-parallel and gathered by the manager. Mixed or `in_process` execution remains
-serial for now because the in-process SPONGE runtime still owns process-global
-state such as the current working directory and CUDA runtime initialization.
+Block execution is dispatched to child-process workers in parallel and gathered
+by the manager. The earlier in-process backend has been removed from the
+manager path because the current SPONGE runtime still owns process-global state
+such as the current working directory, CUDA initialization, and module-level MD
+objects.
 
 The current CLI keeps `SPONGE` itself directly runnable for ordinary
 single-replica usage. The worker mode is only used internally by the manager.
@@ -90,7 +89,6 @@ mode = "hremd"
 start_round = 0
 
 [worker_defaults]
-launch = "child_process"
 args = [
   "-mdin", "/abs/path/to/step2_mdin.txt",
   "-workspace", ".",
@@ -125,9 +123,8 @@ Notes:
   is set.
 - the effective `default_out_file_prefix` is made schedule-local by appending
   the schedule id, for example `manager_smoke_0` and `manager_smoke_1`.
-- if `worker_defaults.launch = "child_process"` and a schedule omits
-  `worker.executable_path`, the manager defaults to a sibling `SPONGE`
-  executable next to `SPONGE_MANAGER`.
+- if a schedule omits `worker.executable_path`, the manager defaults to a
+  sibling `SPONGE` executable next to `SPONGE_MANAGER`.
 - `manager.transport = "tcp"` enables the TCP loopback worker protocol and
   avoids temporary request/response files for child-process dispatch.
 - `manager.transport = "shm"` keeps TCP as the control channel, but moves the
@@ -136,9 +133,7 @@ Notes:
   mapping objects. This is still host-memory IPC, not CUDA IPC or direct GPU
   pointer exchange.
 
-## T-REMD examples
-
-In-process worker mode:
+## T-REMD example
 
 ```bash
 /media/yuh/BCDC9249DC91FDB8/Software/SPONGE/SPONGE/build-dev-cuda13/SPONGE_MANAGER \
@@ -149,23 +144,6 @@ In-process worker mode:
   --block-steps 1 \
   --epochs 1 \
   --emit-output 0 \
-  --worker-launch in_process \
-  --remd-mode tremd \
-  --exchange-round 0
-```
-
-Child-process worker mode:
-
-```bash
-/media/yuh/BCDC9249DC91FDB8/Software/SPONGE/SPONGE/build-dev-cuda13/SPONGE_MANAGER \
-  --fep-root /media/yuh/BCDC9249DC91FDB8/Data/FEP_test_for_REMD \
-  --state-ids 0,1 \
-  --lambda-lj-list 0.0,0.333333 \
-  --thermo-temperatures 300,600 \
-  --block-steps 1 \
-  --epochs 1 \
-  --emit-output 0 \
-  --worker-launch child_process \
   --remd-mode tremd \
   --exchange-round 0
 ```
@@ -180,7 +158,6 @@ Child-process worker mode:
   --block-steps 1 \
   --epochs 1 \
   --emit-output 0 \
-  --worker-launch child_process \
   --remd-mode hremd \
   --exchange-round 0
 ```
@@ -196,7 +173,6 @@ Child-process worker mode:
   --block-steps 1 \
   --epochs 1 \
   --emit-output 0 \
-  --worker-launch child_process \
   --remd-mode htremd \
   --exchange-round 0
 ```

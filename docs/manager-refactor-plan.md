@@ -21,10 +21,10 @@ The current prototype works, but it still has several design debts:
 
 - manager core still exposes `lambda`-centric fields
 - CLI usage still centers on the FEP sample shortcut
-- child-process worker mode uses temporary request/response files
-- in-process multi-schedule execution is sequential; child-process block
-  execution can now be dispatched in parallel, but still uses the prototype
-  file transport
+- file transport remains available as a compatibility/debug fallback, now also
+  using persistent workers to avoid repeated SPONGE initialization
+- child-process block execution can now be dispatched in parallel through
+  persistent file, TCP, or shared-memory transports
 - manager currently knows more about scenario-specific parameters than it
   should
 - some prototype files do not yet follow SPONGE source style, including BOM,
@@ -78,13 +78,13 @@ This keeps:
 - rerun workflows natural
 - semantics close to full-state replica exchange
 
-### 4. Use persistent workers and communication, not files
+### 4. Use persistent workers for every transport
 
 For real multi-process execution, the primary direction should be:
 
 - persistent worker processes
 - long-lived communication channels
-- no temporary request/response files
+- no repeated SPONGE runtime initialization between manager blocks
 
 ### 5. Prefer one cross-platform transport
 
@@ -223,7 +223,7 @@ mode.
 
 ### Recommended primary backend
 
-- persistent TCP loopback connections
+- persistent TCP loopback connections for the default transport
 - binary request/response messages
 
 ### Message shape
@@ -264,12 +264,11 @@ to:
 ### Current prototype
 
 - multiple schedules exist
-- workers may run in-process or child-process mode
-- child-process mode can use either the prototype file protocol or, with
-  `persistent = true`, the TCP loopback protocol
-- in-process schedules are executed sequentially
-- child-process block execution can be dispatched in parallel and gathered by
-  the manager
+- workers run as child processes
+- child-process mode can use file, TCP loopback, or shared-memory payload
+  transport
+- all transports use persistent workers and are dispatched in parallel and
+  gathered by the manager
 
 ### Target execution model
 
@@ -354,17 +353,15 @@ shims.
 
 - introduce a persistent manager/worker protocol abstraction
 - define message headers and binary payload shapes
-- keep `in_process` as a testing backend
+- keep the session abstraction independent from the selected transport
 
-### Phase 3: implement persistent TCP worker backend
+### Phase 3: implement persistent child-process worker backends
 
-- add a persistent worker mode to `SPONGE`
+- add persistent worker modes to `SPONGE`
 - add manager-side session handling
-- replace file-based child-process transport with socket transport
-- first milestone: `persistent = true` child-process workers use TCP loopback
-  request/response while preserving the existing manager API
-- follow-up milestone: keep worker sessions alive across multiple blocks rather
-  than launching a fresh worker per request
+- keep worker sessions alive across multiple blocks rather than launching a
+  fresh worker per request
+- support file, TCP, and shared-memory transport under the same session model
 
 ### Phase 4: parallel block execution
 

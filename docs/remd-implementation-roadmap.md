@@ -110,9 +110,9 @@ Boundary between manager and worker.
 
 Recommended evolution:
 
-- phase A: in-process manager prototype
-- phase B: local child-process workers + files
-- phase C: long-lived workers + pipe/socket protocol
+- phase A: local child-process workers + files
+- phase B: long-lived workers + TCP/shared-memory protocol
+- phase C: future transports such as MPI or CUDA IPC
 
 ### 4. `exchange policies`
 
@@ -369,15 +369,14 @@ The repository now contains a working first-pass external scheduling prototype:
   state used by current REMD smoke paths, including Nose-Hoover chain data,
   pressure-based barostat RNG state, Bussi/Andersen/Langevin RNG state, and
   MC-barostat adaptive proposal counters plus its serialized RNG engine.
-- manager execution now goes through a `worker_protocol` abstraction with an
-  in-process backend, so future child-process or long-lived worker backends can
-  replace it without changing the REMD policy layer.
-- the current `worker_protocol` already includes a file-based child-process
-  path that reuses the existing `SPONGE` executable in a hidden worker mode,
-  while preserving normal direct-run behavior for ordinary users.
-- `persistent = true` child-process workers now use the TCP loopback protocol
-  instead of temporary request/response files, reusing the same serialized
-  runtime-state payloads as the file protocol.
+- manager execution now goes through a `worker_protocol` abstraction, so
+  child-process transport details can change without changing the REMD policy
+  layer.
+- the current `worker_protocol` keeps a file-based child-process path as a
+  compatibility fallback while preserving normal direct-run behavior for
+  ordinary users.
+- child-process workers now stay alive across manager blocks for file, TCP, and
+  shared-memory transports, reusing the same serialized runtime-state payloads.
 - `SPONGE_MANAGER` can drive multiple schedules block-by-block against the FEP
   sample in `/media/yuh/BCDC9249DC91FDB8/Data/FEP_test_for_REMD`.
 - `SPONGE_MANAGER` now supports both the current FEP shortcut CLI and an

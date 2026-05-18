@@ -104,7 +104,6 @@ void PrintUsage()
         << "                [--thermo-temperatures 300,320,340,360]\n"
         << "                [--block-steps N] [--epochs N] [--step-limit N]\n"
         << "                [--emit-output 0|1]\n"
-        << "                [--worker-launch in_process|child_process]\n"
         << "                [--remd-mode tremd|hremd|htremd] [--exchange-round "
            "N]\n";
 }
@@ -227,7 +226,6 @@ int main(int argc, char** argv)
     int block_steps = 1000;
     int step_limit = -1;
     bool emit_output = false;
-    std::string worker_launch = "in_process";
     std::string remd_mode;
     int epochs = 1;
     int exchange_round = 0;
@@ -287,10 +285,6 @@ int main(int argc, char** argv)
         else if (arg == "--emit-output")
         {
             emit_output = std::stoi(require_value("--emit-output")) != 0;
-        }
-        else if (arg == "--worker-launch")
-        {
-            worker_launch = require_value("--worker-launch");
         }
         else if (arg == "--remd-mode")
         {
@@ -384,12 +378,6 @@ int main(int argc, char** argv)
     {
         step_limit = block_steps;
     }
-    if (worker_launch != "in_process" && worker_launch != "child_process")
-    {
-        throw std::runtime_error("unsupported worker launch mode: " +
-                                 worker_launch);
-    }
-
     sponge::manager::ManagerExecutionConfig execution;
     execution.manager.block_steps = block_steps;
     execution.manager.exchange_log_path =
@@ -424,11 +412,8 @@ int main(int argc, char** argv)
             std::string("manager_smoke");
         schedule.worker.name = "worker_" + std::to_string(state_id);
         schedule.worker.working_directory = state_dir.string();
-        schedule.worker.child_process = (worker_launch == "child_process");
-        if (schedule.worker.child_process)
-        {
-            schedule.worker.executable_path = sponge_worker_exe.string();
-        }
+        schedule.worker.executable_path = sponge_worker_exe.string();
+        schedule.worker.transport = "tcp";
         schedule.worker.args = {
             "-mdin",
             mdin_path.string(),

@@ -5,7 +5,6 @@
 Refactor the current manager/worker communication code into a transport-neutral
 framework so `SPONGE_MANAGER` can support:
 
-- in-process workers
 - child-process workers over TCP
 - child-process workers over shared memory
 - future transports such as MPI, named pipes, or CUDA IPC
@@ -22,7 +21,6 @@ The current implementation already has useful pieces:
 - `SPONGE_MANAGER` can launch child-process workers.
 - `SPONGE --worker-tcp host:port` supports TCP loopback worker mode.
 - TCP child-process workers can stay alive across `RUN_BLOCK` requests.
-- `in_process` workers bypass IPC and call `SpongeScheduler` directly.
 - the legacy file protocol still works as a fallback.
 
 However, transport details are still too visible in the orchestration layer:
@@ -94,10 +92,7 @@ Worker sessions own the lifecycle and request semantics for one worker.
 
 Recommended implementations:
 
-- `InProcessWorkerSession`
 - `ChildProcessWorkerSession`
-
-`InProcessWorkerSession` directly owns or constructs a `SpongeScheduler`.
 
 `ChildProcessWorkerSession` owns:
 
@@ -316,9 +311,6 @@ Recommended default:
 ```toml
 [manager]
 transport = "tcp"
-
-[worker_defaults]
-launch = "child_process"
 ```
 
 Shared-memory mode:
@@ -326,9 +318,6 @@ Shared-memory mode:
 ```toml
 [manager]
 transport = "shm"
-
-[worker_defaults]
-launch = "child_process"
 ```
 
 Optional advanced settings:
@@ -378,8 +367,6 @@ SPONGE/worker_protocol/
 
   child_process_session.h
   child_process_session.cpp
-  in_process_session.h
-  in_process_session.cpp
 ```
 
 Current files can be migrated as follows:
@@ -389,7 +376,7 @@ message_protocol.*  -> protocol_message.*
 tcp_socket.*        -> transports/tcp_socket.*
 tcp_protocol.*      -> transports/tcp_transport.*
 file_protocol.*     -> runtime_state_codec.* + transports/file_transport.*
-in_process_worker.* -> child_process_session.* + in_process_session.*
+child_process_worker.* -> child_process_session.*
 ```
 
 ## Migration Plan
@@ -397,11 +384,10 @@ in_process_worker.* -> child_process_session.* + in_process_session.*
 ### Phase 1: Introduce WorkerSession
 
 - add `WorkerSession` interface
-- add `InProcessWorkerSession`
 - add `ChildProcessWorkerSession`
 - move TCP child session ownership out of `Manager`
 - make `Manager` call only `sessions_[i]->RunBlock(...)`
-- preserve existing TCP/file/in-process behavior
+- preserve existing TCP/file behavior
 
 Validation:
 

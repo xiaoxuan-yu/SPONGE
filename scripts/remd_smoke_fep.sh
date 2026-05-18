@@ -28,7 +28,6 @@ mode = "hremd"
 start_round = 0
 
 [worker_defaults]
-launch = "child_process"
 args = [
   "-mdin", "${FEP_ROOT}/step2_mdin.txt",
   "-workspace", ".",
@@ -100,7 +99,6 @@ run_case \
   --block-steps 1 \
   --epochs 1 \
   --emit-output 0 \
-  --worker-launch child_process \
   --remd-mode tremd \
   --exchange-round 0
 
@@ -112,7 +110,6 @@ run_case \
   --block-steps 1 \
   --epochs 1 \
   --emit-output 0 \
-  --worker-launch child_process \
   --remd-mode hremd \
   --exchange-round 0
 
@@ -125,6 +122,5 @@ run_case \
   --block-steps 1 \
   --epochs 1 \
   --emit-output 0 \
-  --worker-launch child_process \
   --remd-mode htremd \
   --exchange-round 0

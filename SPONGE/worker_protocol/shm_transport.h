@@ -5,8 +5,8 @@
 #include <string>
 #include <vector>
 
-#include "transport.h"
 #include "tcp_socket.h"
+#include "transport.h"
 
 namespace sponge::worker_protocol
 {
