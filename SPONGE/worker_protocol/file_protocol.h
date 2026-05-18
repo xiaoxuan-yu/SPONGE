@@ -1,6 +1,5 @@
 ﻿#pragma once
 
-#include <iosfwd>
 #include <string>
 
 #include "worker_protocol.h"
@@ -25,13 +24,9 @@ struct WorkerFileResponse
 void WriteWorkerFileRequest(const std::string& path,
                             const WorkerFileRequest& request);
 WorkerFileRequest ReadWorkerFileRequest(const std::string& path);
-void WriteWorkerRequest(std::ostream* out, const WorkerFileRequest& request);
-WorkerFileRequest ReadWorkerRequest(std::istream* in);
 
 void WriteWorkerFileResponse(const std::string& path,
                              const WorkerFileResponse& response);
 WorkerFileResponse ReadWorkerFileResponse(const std::string& path);
-void WriteWorkerResponse(std::ostream* out, const WorkerFileResponse& response);
-WorkerFileResponse ReadWorkerResponse(std::istream* in);
 
 }  // namespace sponge::worker_protocol

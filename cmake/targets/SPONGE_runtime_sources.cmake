@@ -1,5 +1,7 @@
 set(SPONGE_RUNTIME_SOURCES
     ${PROJECT_ROOT_DIR}/SPONGE/worker_protocol/message_protocol.cpp
+    ${PROJECT_ROOT_DIR}/SPONGE/worker_protocol/runtime_state_codec.cpp
+    ${PROJECT_ROOT_DIR}/SPONGE/worker_protocol/shm_transport.cpp
     ${PROJECT_ROOT_DIR}/SPONGE/worker_protocol/tcp_socket.cpp
     ${PROJECT_ROOT_DIR}/SPONGE/worker_protocol/tcp_protocol.cpp
     ${PROJECT_ROOT_DIR}/SPONGE/worker_protocol/file_protocol.cpp

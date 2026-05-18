@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <iosfwd>
+#include <string>
 
 namespace sponge::worker_protocol
 {
@@ -33,6 +34,30 @@ struct WORKER_MESSAGE_HEADER
     WORKER_MESSAGE_TYPE message_type = WORKER_MESSAGE_TYPE::ERROR;
     std::uint64_t request_id = 0;
     std::uint64_t payload_size = 0;
+};
+
+enum class WorkerPayloadKind : std::uint32_t
+{
+    kInlineBinary = 1,
+    kSharedMemoryRef = 2,
+    kFileRef = 3,
+};
+
+struct WorkerPayloadRef
+{
+    WorkerPayloadKind kind = WorkerPayloadKind::kInlineBinary;
+    std::string name;
+    std::uint64_t offset = 0;
+    std::uint64_t size = 0;
+    std::uint64_t generation = 0;
+};
+
+struct WorkerMessage
+{
+    WORKER_MESSAGE_TYPE type = WORKER_MESSAGE_TYPE::ERROR;
+    std::uint64_t request_id = 0;
+    std::string inline_payload;
+    WorkerPayloadRef payload_ref;
 };
 
 bool Is_Known_Worker_Message_Type(std::uint32_t message_type);

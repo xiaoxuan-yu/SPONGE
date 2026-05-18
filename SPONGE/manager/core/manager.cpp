@@ -173,18 +173,6 @@ void Write_Exchange_Log_Header(std::ofstream* out)
               "log_acceptance,acceptance_probability,random_value,accepted\n";
 }
 
-sponge::worker_protocol::WorkerProtocol* MakeWorkerProtocol(
-    const sponge::manager::WorkerConfig& worker_config,
-    sponge::worker_protocol::InProcessWorkerProtocol* in_process_protocol,
-    sponge::worker_protocol::ChildProcessWorkerProtocol* child_process_protocol)
-{
-    if (worker_config.child_process)
-    {
-        return child_process_protocol;
-    }
-    return in_process_protocol;
-}
-
 bool CanRunBlockInParallel(const std::vector<WorkerHandle>& workers)
 {
     if (workers.empty())
@@ -229,11 +217,11 @@ void Manager::BuildScheduleRecords()
     schedules_.clear();
     workers_.clear();
     runtime_state_buffers_.clear();
-    tcp_worker_sessions_.clear();
+    worker_sessions_.clear();
     schedules_.reserve(config_.schedules.size());
     workers_.reserve(config_.schedules.size());
     runtime_state_buffers_.resize(config_.schedules.size());
-    tcp_worker_sessions_.resize(config_.schedules.size());
+    worker_sessions_.resize(config_.schedules.size());
     for (const auto& schedule : config_.schedules)
     {
         ScheduleRecord record;
@@ -260,14 +248,13 @@ int Manager::FindScheduleIndex(int schedule_id) const
                              std::to_string(schedule_id));
 }
 
-sponge::worker_protocol::TcpChildProcessWorkerSession&
-Manager::GetTcpWorkerSession(int schedule_index)
+sponge::worker_protocol::WorkerSession& Manager::GetWorkerSession(
+    int schedule_index)
 {
-    auto& session = tcp_worker_sessions_.at(schedule_index);
+    auto& session = worker_sessions_.at(schedule_index);
     if (session == nullptr)
     {
-        session = std::make_unique<
-            sponge::worker_protocol::TcpChildProcessWorkerSession>(
+        session = sponge::worker_protocol::CreateWorkerSession(
             workers_.at(schedule_index).config);
     }
     return *session;
@@ -292,19 +279,13 @@ BlockExecutionResult Manager::ExecuteScheduleBlock(
             "Manager::ExecuteScheduleBlock requires non-empty worker args");
     }
 
-    sponge::worker_protocol::InProcessWorkerProtocol protocol;
-    sponge::worker_protocol::ChildProcessWorkerProtocol child_protocol;
     worker.initialized = true;
     const sponge::RuntimeState* imported_state =
         (worker.has_runtime_state && runtime_state.valid) ? &runtime_state
                                                           : nullptr;
     const auto response =
-        (worker.config.child_process && worker.config.persistent)
-            ? GetTcpWorkerSession(schedule_index)
-                  .ExecuteBlock(plan.steps, plan.emit_output, imported_state)
-            : MakeWorkerProtocol(worker.config, &protocol, &child_protocol)
-                  ->ExecuteBlock(worker.config, plan.steps, plan.emit_output,
-                                 imported_state);
+        GetWorkerSession(schedule_index)
+            .RunBlock(plan.steps, plan.emit_output, imported_state);
     ValidateWorkerObservableInputs(schedule.config, response.observable);
     runtime_state = response.runtime_state;
     worker.has_runtime_state = runtime_state.valid;
@@ -369,9 +350,7 @@ std::vector<BlockExecutionResult> Manager::ExecuteAllSchedulesOnce(
             const bool has_imported_state =
                 worker.has_runtime_state && runtime_state.valid;
             const sponge::RuntimeState imported_state = runtime_state;
-            const WorkerConfig worker_config = worker.config;
-            auto* tcp_session =
-                worker.config.persistent ? &GetTcpWorkerSession(i) : nullptr;
+            auto* worker_session = &GetWorkerSession(i);
             worker.initialized = true;
 
             PendingBlock pending;
@@ -379,21 +358,12 @@ std::vector<BlockExecutionResult> Manager::ExecuteAllSchedulesOnce(
             pending.plan = plan;
             pending.response = std::async(
                 std::launch::async,
-                [worker_config, tcp_session, plan, has_imported_state,
-                 imported_state]()
+                [worker_session, plan, has_imported_state, imported_state]()
                 {
                     const sponge::RuntimeState* imported_state_ptr =
                         has_imported_state ? &imported_state : nullptr;
-                    if (tcp_session != nullptr)
-                    {
-                        return tcp_session->ExecuteBlock(
-                            plan.steps, plan.emit_output, imported_state_ptr);
-                    }
-                    sponge::worker_protocol::ChildProcessWorkerProtocol
-                        protocol;
-                    return protocol.ExecuteBlock(worker_config, plan.steps,
-                                                 plan.emit_output,
-                                                 imported_state_ptr);
+                    return worker_session->RunBlock(
+                        plan.steps, plan.emit_output, imported_state_ptr);
                 });
             pending_blocks.push_back(std::move(pending));
         }
@@ -502,12 +472,8 @@ ExchangeObservable Manager::ProbeObservable(int source_schedule_id,
             "Manager::ProbeObservable requires non-empty target worker args");
     }
 
-    sponge::worker_protocol::InProcessWorkerProtocol protocol;
-    sponge::worker_protocol::ChildProcessWorkerProtocol child_protocol;
-    auto* worker_protocol =
-        MakeWorkerProtocol(target_worker.config, &protocol, &child_protocol);
     const auto observable =
-        worker_protocol->ProbeObservable(target_worker.config, source_state);
+        GetWorkerSession(target_index).ProbeObservable(source_state);
     return MakeExchangeObservable(source_schedule_id, observable);
 }
 
@@ -550,8 +516,7 @@ std::string Manager::DescribePlan() const
                                                      : "in_process");
         if (schedule.config.worker.child_process)
         {
-            oss << " transport="
-                << (schedule.config.worker.persistent ? "tcp" : "file");
+            oss << " transport=" << schedule.config.worker.transport;
         }
         if (!schedule.runtime_state.location.empty())
         {

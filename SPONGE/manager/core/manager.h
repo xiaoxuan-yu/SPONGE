@@ -9,7 +9,7 @@
 
 namespace sponge::worker_protocol
 {
-class TcpChildProcessWorkerSession;
+class WorkerSession;
 }
 
 namespace sponge::manager
@@ -46,16 +46,15 @@ class Manager
    private:
     void BuildScheduleRecords();
     int FindScheduleIndex(int schedule_id) const;
-    sponge::worker_protocol::TcpChildProcessWorkerSession& GetTcpWorkerSession(
+    sponge::worker_protocol::WorkerSession& GetWorkerSession(
         int schedule_index);
 
     ManagerConfig config_;
     std::vector<ScheduleRecord> schedules_;
     std::vector<WorkerHandle> workers_;
     std::vector<sponge::RuntimeState> runtime_state_buffers_;
-    std::vector<
-        std::unique_ptr<sponge::worker_protocol::TcpChildProcessWorkerSession>>
-        tcp_worker_sessions_;
+    std::vector<std::unique_ptr<sponge::worker_protocol::WorkerSession>>
+        worker_sessions_;
 };
 
 }  // namespace sponge::manager

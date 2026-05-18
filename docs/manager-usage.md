@@ -22,6 +22,8 @@ For `child_process`, the transport is selected by `[manager].transport`:
 - `transport = "file"`: prototype file request/response protocol
 - `transport = "tcp"`: TCP loopback request/response protocol using
   `SPONGE --worker-tcp host:port`
+- `transport = "shm"`: TCP loopback control messages plus shared-memory
+  request/response payloads
 
 Advanced users may still override the transport per worker with
 `worker_defaults.persistent` or `schedules.worker.persistent`. The higher-level
@@ -128,6 +130,11 @@ Notes:
   executable next to `SPONGE_MANAGER`.
 - `manager.transport = "tcp"` enables the TCP loopback worker protocol and
   avoids temporary request/response files for child-process dispatch.
+- `manager.transport = "shm"` keeps TCP as the control channel, but moves the
+  serialized worker request/response payload through shared memory. On
+  Linux/macOS this uses POSIX shared memory; on Windows it uses named file
+  mapping objects. This is still host-memory IPC, not CUDA IPC or direct GPU
+  pointer exchange.
 
 ## T-REMD examples
 
@@ -242,6 +249,10 @@ summary aligned.
   instead of temporary request/response files. `RUN_BLOCK` workers are kept
   alive across blocks and epochs; foreign-state probe workers remain one-shot
   sessions so probes do not overwrite a schedule's own runtime state.
+- `manager.transport = "shm"` uses the same worker/session protocol as TCP, but
+  wraps the TCP control channel with shared-memory bulk payload transfer. It has
+  passed the current two-worker T-REMD and H-REMD smoke paths, including
+  foreign-state probes.
 - `manager.transport = "file"` child-process workers keep the older file
   protocol as a migration fallback.
 - H-REMD and HT-REMD foreign-state energies are still obtained by target-state

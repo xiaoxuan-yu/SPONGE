@@ -3,9 +3,10 @@
 #include <cstdint>
 #include <string>
 
-#include "file_protocol.h"
 #include "message_protocol.h"
+#include "runtime_state_codec.h"
 #include "tcp_socket.h"
+#include "transport.h"
 
 namespace sponge::worker_protocol
 {
@@ -22,9 +23,17 @@ void WriteWorkerTcpMessage(const TcpSocket& socket,
                            const std::string& payload);
 WorkerTcpMessage ReadWorkerTcpMessage(const TcpSocket& socket);
 
-std::string SerializeWorkerRequest(const WorkerFileRequest& request);
-WorkerFileRequest DeserializeWorkerRequest(const std::string& payload);
-std::string SerializeWorkerResponse(const WorkerFileResponse& response);
-WorkerFileResponse DeserializeWorkerResponse(const std::string& payload);
+class TcpTransport : public WorkerTransport
+{
+   public:
+    explicit TcpTransport(TcpSocket socket);
+
+    void Send(const WorkerMessage& message) override;
+    WorkerMessage Receive() override;
+    void Close() override;
+
+   private:
+    TcpSocket socket_;
+};
 
 }  // namespace sponge::worker_protocol

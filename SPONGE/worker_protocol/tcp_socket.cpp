@@ -34,7 +34,8 @@ SOCKET ToNativeSocket(TcpSocket::NativeHandle handle)
 
 void EnsureSocketRuntime()
 {
-    static const bool initialized = []() {
+    static const bool initialized = []()
+    {
         WSADATA data;
         if (WSAStartup(MAKEWORD(2, 2), &data) != 0)
         {
@@ -62,10 +63,7 @@ void CloseNativeSocket(TcpSocket::NativeHandle handle)
 constexpr TcpSocket::NativeHandle kInvalidSocket = -1;
 using SockLen = socklen_t;
 
-int ToNativeSocket(TcpSocket::NativeHandle handle)
-{
-    return handle;
-}
+int ToNativeSocket(TcpSocket::NativeHandle handle) { return handle; }
 
 void EnsureSocketRuntime() {}
 
@@ -126,10 +124,7 @@ TcpSocket& TcpSocket::operator=(TcpSocket&& other) noexcept
     return *this;
 }
 
-TcpSocket::~TcpSocket()
-{
-    Close();
-}
+TcpSocket::~TcpSocket() { Close(); }
 
 TcpSocket TcpSocket::Connect(const std::string& host, int port)
 {
@@ -169,8 +164,7 @@ TcpSocket TcpSocket::ListenLoopback(int port)
 
     const sockaddr_in address = MakeLoopbackAddress(port);
     if (bind(ToNativeSocket(handle),
-             reinterpret_cast<const sockaddr*>(&address),
-             sizeof(address)) != 0)
+             reinterpret_cast<const sockaddr*>(&address), sizeof(address)) != 0)
     {
         throw std::runtime_error(SocketErrorMessage("bind"));
     }
@@ -187,9 +181,8 @@ TcpSocket TcpSocket::Accept() const
     {
         throw std::runtime_error("cannot accept on an invalid TCP socket");
     }
-    const NativeHandle handle =
-        static_cast<NativeHandle>(accept(ToNativeSocket(handle_), nullptr,
-                                         nullptr));
+    const NativeHandle handle = static_cast<NativeHandle>(
+        accept(ToNativeSocket(handle_), nullptr, nullptr));
     if (handle == kInvalidSocket)
     {
         throw std::runtime_error(SocketErrorMessage("accept"));
@@ -213,10 +206,7 @@ int TcpSocket::LocalPort() const
     return ntohs(address.sin_port);
 }
 
-bool TcpSocket::Valid() const
-{
-    return handle_ != kInvalidSocket;
-}
+bool TcpSocket::Valid() const { return handle_ != kInvalidSocket; }
 
 void TcpSocket::Close()
 {
@@ -229,13 +219,11 @@ void TcpSocket::ReadExact(char* data, std::size_t size) const
     std::size_t offset = 0;
     while (offset < size)
     {
-        const auto chunk =
-            std::min<std::size_t>(size - offset,
-                                  static_cast<std::size_t>(
-                                      std::numeric_limits<int>::max()));
-        const int received =
-            recv(ToNativeSocket(handle_), data + offset,
-                 static_cast<int>(chunk), 0);
+        const auto chunk = std::min<std::size_t>(
+            size - offset,
+            static_cast<std::size_t>(std::numeric_limits<int>::max()));
+        const int received = recv(ToNativeSocket(handle_), data + offset,
+                                  static_cast<int>(chunk), 0);
         if (received == 0)
         {
             throw std::runtime_error("worker TCP connection closed");
@@ -253,10 +241,9 @@ void TcpSocket::WriteAll(const char* data, std::size_t size) const
     std::size_t offset = 0;
     while (offset < size)
     {
-        const auto chunk =
-            std::min<std::size_t>(size - offset,
-                                  static_cast<std::size_t>(
-                                      std::numeric_limits<int>::max()));
+        const auto chunk = std::min<std::size_t>(
+            size - offset,
+            static_cast<std::size_t>(std::numeric_limits<int>::max()));
         const int sent = send(ToNativeSocket(handle_), data + offset,
                               static_cast<int>(chunk), 0);
         if (sent == 0)

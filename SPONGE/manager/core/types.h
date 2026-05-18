@@ -105,6 +105,7 @@ struct WorkerConfig
     std::vector<std::string> args;
     std::string working_directory;
     std::string executable_path;
+    std::string transport = "file";
     bool child_process = false;
     bool persistent = false;
 };

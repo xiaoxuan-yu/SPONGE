@@ -5,6 +5,7 @@
 
 #include "scheduler/scheduler.h"
 #include "worker_protocol/file_protocol.h"
+#include "worker_protocol/shm_transport.h"
 #include "worker_protocol/tcp_protocol.h"
 
 namespace
@@ -50,35 +51,37 @@ int RunWorkerMode(const std::vector<std::string>& scheduler_args,
 }
 
 int RunWorkerTcpMode(const std::vector<std::string>& scheduler_args,
-                     const std::string& endpoint)
+                     const std::string& endpoint,
+                     const std::string& worker_transport)
 {
     const auto parsed = sponge::worker_protocol::ParseTcpEndpoint(endpoint);
-    auto socket =
-        sponge::worker_protocol::TcpSocket::Connect(parsed.host, parsed.port);
-    sponge::worker_protocol::WriteWorkerTcpMessage(
-        socket, sponge::worker_protocol::WORKER_MESSAGE_TYPE::HELLO, 0, "");
+    auto transport = sponge::worker_protocol::CreateTcpControlTransport(
+        sponge::worker_protocol::TcpSocket::Connect(parsed.host, parsed.port),
+        worker_transport == "shm");
+    sponge::worker_protocol::WorkerMessage hello;
+    hello.type = sponge::worker_protocol::WORKER_MESSAGE_TYPE::HELLO;
+    transport->Send(hello);
 
     std::unique_ptr<sponge::SpongeScheduler> scheduler;
     while (true)
     {
-        const auto message =
-            sponge::worker_protocol::ReadWorkerTcpMessage(socket);
-        if (message.header.message_type ==
+        const auto message = transport->Receive();
+        if (message.type ==
             sponge::worker_protocol::WORKER_MESSAGE_TYPE::SHUTDOWN)
         {
             break;
         }
-        if (message.header.message_type !=
+        if (message.type !=
                 sponge::worker_protocol::WORKER_MESSAGE_TYPE::RUN_BLOCK &&
-            message.header.message_type !=
+            message.type !=
                 sponge::worker_protocol::WORKER_MESSAGE_TYPE::PROBE_OBSERVABLE)
         {
             throw std::runtime_error("unsupported worker TCP message type");
         }
 
-        auto request =
-            sponge::worker_protocol::DeserializeWorkerRequest(message.payload);
-        if (message.header.message_type ==
+        auto request = sponge::worker_protocol::DeserializeWorkerRequest(
+            message.inline_payload);
+        if (message.type ==
             sponge::worker_protocol::WORKER_MESSAGE_TYPE::PROBE_OBSERVABLE)
         {
             request.probe_only = true;
@@ -110,9 +113,12 @@ int RunWorkerTcpMode(const std::vector<std::string>& scheduler_args,
             request.probe_only
                 ? sponge::worker_protocol::WORKER_MESSAGE_TYPE::PROBE_RESULT
                 : sponge::worker_protocol::WORKER_MESSAGE_TYPE::RUN_RESULT;
-        sponge::worker_protocol::WriteWorkerTcpMessage(
-            socket, response_type, message.header.request_id,
-            sponge::worker_protocol::SerializeWorkerResponse(response));
+        sponge::worker_protocol::WorkerMessage response_message;
+        response_message.type = response_type;
+        response_message.request_id = message.request_id;
+        response_message.inline_payload =
+            sponge::worker_protocol::SerializeWorkerResponse(response);
+        transport->Send(response_message);
     }
     if (scheduler != nullptr)
     {
@@ -132,12 +138,13 @@ int main(int argc, char* argv[])
     std::string worker_request_path;
     std::string worker_response_path;
     std::string worker_tcp_endpoint;
+    std::string worker_transport = "tcp";
 
     for (int i = 1; i < argc; i++)
     {
         const std::string arg = argv[i];
         if (arg == "--worker-request" || arg == "--worker-response" ||
-            arg == "--worker-tcp")
+            arg == "--worker-tcp" || arg == "--worker-transport")
         {
             if (i + 1 >= argc)
             {
@@ -152,9 +159,18 @@ int main(int argc, char* argv[])
             {
                 worker_response_path = value;
             }
-            else
+            else if (arg == "--worker-tcp")
             {
                 worker_tcp_endpoint = value;
+            }
+            else
+            {
+                if (value != "tcp" && value != "shm")
+                {
+                    throw std::runtime_error(
+                        "--worker-transport must be tcp or shm");
+                }
+                worker_transport = value;
             }
             continue;
         }
@@ -168,7 +184,8 @@ int main(int argc, char* argv[])
             throw std::runtime_error(
                 "--worker-tcp cannot be combined with file worker mode");
         }
-        return RunWorkerTcpMode(scheduler_args, worker_tcp_endpoint);
+        return RunWorkerTcpMode(scheduler_args, worker_tcp_endpoint,
+                                worker_transport);
     }
 
     if (!worker_request_path.empty() || !worker_response_path.empty())

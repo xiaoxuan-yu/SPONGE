@@ -2,15 +2,14 @@
 
 #include <sstream>
 #include <stdexcept>
-#include <vector>
+#include <utility>
 
 namespace sponge::worker_protocol
 {
 
 void WriteWorkerTcpMessage(const TcpSocket& socket,
                            WORKER_MESSAGE_TYPE message_type,
-                           std::uint64_t request_id,
-                           const std::string& payload)
+                           std::uint64_t request_id, const std::string& payload)
 {
     WORKER_MESSAGE_HEADER header;
     header.message_type = message_type;
@@ -44,30 +43,31 @@ WorkerTcpMessage ReadWorkerTcpMessage(const TcpSocket& socket)
     return message;
 }
 
-std::string SerializeWorkerRequest(const WorkerFileRequest& request)
+TcpTransport::TcpTransport(TcpSocket socket) : socket_(std::move(socket)) {}
+
+void TcpTransport::Send(const WorkerMessage& message)
 {
-    std::ostringstream out;
-    WriteWorkerRequest(&out, request);
-    return out.str();
+    if (message.payload_ref.kind != WorkerPayloadKind::kInlineBinary)
+    {
+        throw std::runtime_error(
+            "TcpTransport currently supports only inline payloads");
+    }
+    WriteWorkerTcpMessage(socket_, message.type, message.request_id,
+                          message.inline_payload);
 }
 
-WorkerFileRequest DeserializeWorkerRequest(const std::string& payload)
+WorkerMessage TcpTransport::Receive()
 {
-    std::istringstream in(payload);
-    return ReadWorkerRequest(&in);
+    const auto tcp_message = ReadWorkerTcpMessage(socket_);
+    WorkerMessage message;
+    message.type = tcp_message.header.message_type;
+    message.request_id = tcp_message.header.request_id;
+    message.inline_payload = tcp_message.payload;
+    message.payload_ref.kind = WorkerPayloadKind::kInlineBinary;
+    message.payload_ref.size = message.inline_payload.size();
+    return message;
 }
 
-std::string SerializeWorkerResponse(const WorkerFileResponse& response)
-{
-    std::ostringstream out;
-    WriteWorkerResponse(&out, response);
-    return out.str();
-}
-
-WorkerFileResponse DeserializeWorkerResponse(const std::string& payload)
-{
-    std::istringstream in(payload);
-    return ReadWorkerResponse(&in);
-}
+void TcpTransport::Close() { socket_.Close(); }
 
 }  // namespace sponge::worker_protocol

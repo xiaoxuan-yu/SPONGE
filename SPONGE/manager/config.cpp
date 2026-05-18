@@ -112,10 +112,10 @@ void ValidateTransport(const std::string& transport)
     {
         return;
     }
-    if (transport != "tcp" && transport != "file")
+    if (transport != "tcp" && transport != "file" && transport != "shm")
     {
         throw std::runtime_error(
-            "manager.transport must be tcp or file when set");
+            "manager.transport must be tcp, file, or shm when set");
     }
 }
 
@@ -382,10 +382,23 @@ ManagerExecutionConfig LoadManagerExecutionConfigFromToml(
         schedule.worker.child_process =
             schedule_in.worker.child_process.value_or(global_worker_launch ==
                                                       "child_process");
-        const bool persistent_from_transport = manager_transport == "tcp";
+        const bool persistent_from_transport =
+            manager_transport == "tcp" || manager_transport == "shm";
         schedule.worker.persistent = schedule_in.worker.persistent.value_or(
             parsed.worker_defaults.persistent.value_or(
                 persistent_from_transport));
+        if (schedule.worker.child_process)
+        {
+            if (!manager_transport.empty())
+            {
+                schedule.worker.transport = manager_transport;
+            }
+            else
+            {
+                schedule.worker.transport =
+                    schedule.worker.persistent ? "tcp" : "file";
+            }
+        }
 
         if (schedule_in.worker.executable_path.has_value())
         {

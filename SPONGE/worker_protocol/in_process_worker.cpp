@@ -8,6 +8,7 @@
 #include <utility>
 
 #include "file_protocol.h"
+#include "shm_transport.h"
 #include "tcp_protocol.h"
 #include "worker_protocol.h"
 
@@ -190,6 +191,11 @@ WorkerExecutionResponse RunTcpChildProcessWorker(
     {
         command << ' ' << ShellQuote(arg);
     }
+    const bool use_shared_memory_payloads = worker_config.transport == "shm";
+    if (use_shared_memory_payloads)
+    {
+        command << " --worker-transport " << ShellQuote("shm");
+    }
     command << " --worker-tcp "
             << ShellQuote("127.0.0.1:" + std::to_string(port));
 
@@ -197,9 +203,10 @@ WorkerExecutionResponse RunTcpChildProcessWorker(
         std::async(std::launch::async, [command_text = command.str()]()
                    { return std::system(command_text.c_str()); });
 
-    auto socket = listener.Accept();
-    const auto hello = ReadWorkerTcpMessage(socket);
-    if (hello.header.message_type != WORKER_MESSAGE_TYPE::HELLO)
+    auto transport = CreateTcpControlTransport(listener.Accept(),
+                                               use_shared_memory_payloads);
+    const auto hello = transport->Receive();
+    if (hello.type != WORKER_MESSAGE_TYPE::HELLO)
     {
         throw std::runtime_error("worker TCP session did not start with HELLO");
     }
@@ -207,21 +214,26 @@ WorkerExecutionResponse RunTcpChildProcessWorker(
     const auto request_type = request.probe_only
                                   ? WORKER_MESSAGE_TYPE::PROBE_OBSERVABLE
                                   : WORKER_MESSAGE_TYPE::RUN_BLOCK;
-    WriteWorkerTcpMessage(socket, request_type, 1,
-                          SerializeWorkerRequest(request));
-    const auto response_message = ReadWorkerTcpMessage(socket);
+    WorkerMessage request_message;
+    request_message.type = request_type;
+    request_message.request_id = 1;
+    request_message.inline_payload = SerializeWorkerRequest(request);
+    transport->Send(request_message);
+    const auto response_message = transport->Receive();
     const auto expected_response_type = request.probe_only
                                             ? WORKER_MESSAGE_TYPE::PROBE_RESULT
                                             : WORKER_MESSAGE_TYPE::RUN_RESULT;
-    if (response_message.header.message_type != expected_response_type)
+    if (response_message.type != expected_response_type)
     {
         throw std::runtime_error(
             "worker TCP session returned unexpected "
             "message type");
     }
 
-    WriteWorkerTcpMessage(socket, WORKER_MESSAGE_TYPE::SHUTDOWN,
-                          response_message.header.request_id, "");
+    WorkerMessage shutdown_message;
+    shutdown_message.type = WORKER_MESSAGE_TYPE::SHUTDOWN;
+    shutdown_message.request_id = response_message.request_id;
+    transport->Send(shutdown_message);
     const int exit_code = child_exit.get();
     if (exit_code != 0)
     {
@@ -229,14 +241,16 @@ WorkerExecutionResponse RunTcpChildProcessWorker(
                                  std::to_string(exit_code));
     }
 
-    return DeserializeWorkerResponse(response_message.payload).execution;
+    return DeserializeWorkerResponse(response_message.inline_payload).execution;
 }
 
 }  // namespace
 
 TcpChildProcessWorkerSession::TcpChildProcessWorkerSession(
-    sponge::manager::WorkerConfig worker_config)
-    : worker_config_(std::move(worker_config))
+    sponge::manager::WorkerConfig worker_config,
+    bool use_shared_memory_payloads)
+    : worker_config_(std::move(worker_config)),
+      use_shared_memory_payloads_(use_shared_memory_payloads)
 {
 }
 
@@ -282,6 +296,10 @@ void TcpChildProcessWorkerSession::Start()
     {
         command << ' ' << ShellQuote(arg);
     }
+    if (use_shared_memory_payloads_)
+    {
+        command << " --worker-transport " << ShellQuote("shm");
+    }
     command << " --worker-tcp "
             << ShellQuote("127.0.0.1:" + std::to_string(port));
 
@@ -289,14 +307,13 @@ void TcpChildProcessWorkerSession::Start()
         std::async(std::launch::async, [command_text = command.str()]()
                    { return std::system(command_text.c_str()); });
 
-    auto socket = listener.Accept();
-    const auto hello = ReadWorkerTcpMessage(socket);
-    if (hello.header.message_type != WORKER_MESSAGE_TYPE::HELLO)
+    transport_ = CreateTcpControlTransport(listener.Accept(),
+                                           use_shared_memory_payloads_);
+    const auto hello = transport_->Receive();
+    if (hello.type != WORKER_MESSAGE_TYPE::HELLO)
     {
         throw std::runtime_error("worker TCP session did not start with HELLO");
     }
-
-    socket_ = std::make_unique<TcpSocket>(std::move(socket));
     started_ = true;
 }
 
@@ -304,7 +321,7 @@ WorkerExecutionResponse TcpChildProcessWorkerSession::SendRequest(
     const WorkerFileRequest& request)
 {
     Start();
-    if (socket_ == nullptr || !socket_->Valid())
+    if (transport_ == nullptr)
     {
         throw std::runtime_error("worker TCP session is not connected");
     }
@@ -313,23 +330,26 @@ WorkerExecutionResponse TcpChildProcessWorkerSession::SendRequest(
     const auto request_type = request.probe_only
                                   ? WORKER_MESSAGE_TYPE::PROBE_OBSERVABLE
                                   : WORKER_MESSAGE_TYPE::RUN_BLOCK;
-    WriteWorkerTcpMessage(*socket_, request_type, request_id,
-                          SerializeWorkerRequest(request));
-    const auto response_message = ReadWorkerTcpMessage(*socket_);
+    WorkerMessage request_message;
+    request_message.type = request_type;
+    request_message.request_id = request_id;
+    request_message.inline_payload = SerializeWorkerRequest(request);
+    transport_->Send(request_message);
+    const auto response_message = transport_->Receive();
     const auto expected_response_type = request.probe_only
                                             ? WORKER_MESSAGE_TYPE::PROBE_RESULT
                                             : WORKER_MESSAGE_TYPE::RUN_RESULT;
-    if (response_message.header.message_type != expected_response_type)
+    if (response_message.type != expected_response_type)
     {
         throw std::runtime_error(
             "worker TCP session returned unexpected message type");
     }
-    if (response_message.header.request_id != request_id)
+    if (response_message.request_id != request_id)
     {
         throw std::runtime_error(
             "worker TCP session returned unexpected request id");
     }
-    return DeserializeWorkerResponse(response_message.payload).execution;
+    return DeserializeWorkerResponse(response_message.inline_payload).execution;
 }
 
 WorkerExecutionResponse TcpChildProcessWorkerSession::ExecuteBlock(
@@ -355,11 +375,13 @@ void TcpChildProcessWorkerSession::Shutdown()
         return;
     }
     shutdown_ = true;
-    if (started_ && socket_ != nullptr && socket_->Valid())
+    if (started_ && transport_ != nullptr)
     {
-        WriteWorkerTcpMessage(*socket_, WORKER_MESSAGE_TYPE::SHUTDOWN,
-                              next_request_id_++, "");
-        socket_.reset();
+        WorkerMessage shutdown_message;
+        shutdown_message.type = WORKER_MESSAGE_TYPE::SHUTDOWN;
+        shutdown_message.request_id = next_request_id_++;
+        transport_->Send(shutdown_message);
+        transport_.reset();
     }
     if (child_exit_.valid())
     {
@@ -371,6 +393,88 @@ void TcpChildProcessWorkerSession::Shutdown()
                 std::to_string(exit_code));
         }
     }
+}
+
+InProcessWorkerSession::InProcessWorkerSession(
+    sponge::manager::WorkerConfig config)
+    : config_(std::move(config))
+{
+}
+
+WorkerExecutionResponse InProcessWorkerSession::RunBlock(
+    int steps, bool emit_output, const sponge::RuntimeState* imported_state)
+{
+    InProcessWorkerProtocol protocol;
+    return protocol.ExecuteBlock(config_, steps, emit_output, imported_state);
+}
+
+sponge::WorkerExchangeObservable InProcessWorkerSession::ProbeObservable(
+    const sponge::RuntimeState& imported_state)
+{
+    InProcessWorkerProtocol protocol;
+    return protocol.ProbeObservable(config_, imported_state);
+}
+
+void InProcessWorkerSession::Shutdown() {}
+
+ChildProcessWorkerSession::ChildProcessWorkerSession(
+    sponge::manager::WorkerConfig config)
+    : config_(std::move(config))
+{
+}
+
+ChildProcessWorkerSession::~ChildProcessWorkerSession()
+{
+    try
+    {
+        Shutdown();
+    }
+    catch (...)
+    {
+    }
+}
+
+WorkerExecutionResponse ChildProcessWorkerSession::RunBlock(
+    int steps, bool emit_output, const sponge::RuntimeState* imported_state)
+{
+    if (config_.persistent)
+    {
+        if (tcp_session_ == nullptr)
+        {
+            tcp_session_ = std::make_unique<TcpChildProcessWorkerSession>(
+                config_, config_.transport == "shm");
+        }
+        return tcp_session_->ExecuteBlock(steps, emit_output, imported_state);
+    }
+
+    ChildProcessWorkerProtocol protocol;
+    return protocol.ExecuteBlock(config_, steps, emit_output, imported_state);
+}
+
+sponge::WorkerExchangeObservable ChildProcessWorkerSession::ProbeObservable(
+    const sponge::RuntimeState& imported_state)
+{
+    ChildProcessWorkerProtocol protocol;
+    return protocol.ProbeObservable(config_, imported_state);
+}
+
+void ChildProcessWorkerSession::Shutdown()
+{
+    if (tcp_session_ != nullptr)
+    {
+        tcp_session_->Shutdown();
+        tcp_session_.reset();
+    }
+}
+
+std::unique_ptr<WorkerSession> CreateWorkerSession(
+    sponge::manager::WorkerConfig config)
+{
+    if (config.child_process)
+    {
+        return std::make_unique<ChildProcessWorkerSession>(std::move(config));
+    }
+    return std::make_unique<InProcessWorkerSession>(std::move(config));
 }
 
 WorkerExecutionResponse InProcessWorkerProtocol::ExecuteBlock(
