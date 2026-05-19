@@ -96,17 +96,16 @@ std::vector<double> BuildDefaultLambdaLadder(std::size_t count)
 
 void PrintUsage()
 {
-    std::cout
-        << "Usage:\n"
-        << "  SPONGE_MANAGER\n"
-        << "  SPONGE_MANAGER --config <manager.toml>\n"
-        << "  SPONGE_MANAGER --fep-root <path> [--state-ids 0,1,2,3]\n"
-        << "                [--lambda-lj-list 0.0,0.33,0.66,1.0]\n"
-        << "                [--thermo-temperatures 300,320,340,360]\n"
-        << "                [--block-steps N] [--epochs N]\n"
-        << "                [--emit-output 0|1]\n"
-        << "                [--remd-mode tremd|hremd|htremd] [--exchange-round "
-           "N]\n";
+    std::cout << "Usage:\n"
+              << "  SPONGE_MANAGER\n"
+              << "  SPONGE_MANAGER --config <manager.toml>\n"
+              << "  SPONGE_MANAGER --fep-root <path> [--state-ids 0,1,2,3]\n"
+              << "                [--lambda-lj-list 0.0,0.33,0.66,1.0]\n"
+              << "                [--thermo-temperatures 300,320,340,360]\n"
+              << "                [--block-steps N] [--epochs N]\n"
+              << "                [--emit-output 0|1]\n"
+              << "                [--remd-mode tremd|hremd|htremd|rest2]\n"
+              << "                [--exchange-round N]\n";
 }
 
 int RunManagerExecution(
@@ -140,6 +139,13 @@ int RunManagerExecution(
     }
     sponge::manager::remd::TemperatureReplicaExchangePolicy tremd_policy;
     sponge::manager::remd::HamiltonianReplicaExchangePolicy hremd_policy;
+    sponge::manager::remd::HamiltonianReplicaExchangePolicy::Config
+        rest2_policy_config;
+    rest2_policy_config.random_seed = 20260515u;
+    rest2_policy_config.hamiltonian_key = "REST2_lambda_m";
+    rest2_policy_config.hamiltonian_key_is_integer = false;
+    sponge::manager::remd::HamiltonianReplicaExchangePolicy rest2_policy(
+        rest2_policy_config);
     sponge::manager::remd::TemperatureHamiltonianReplicaExchangePolicy
         htremd_policy;
     for (int epoch = 0; epoch < execution.epochs; epoch++)
@@ -180,6 +186,19 @@ int RunManagerExecution(
             block_results = epoch_result.block_results;
             exchange_attempts = epoch_result.exchange_attempts;
             std::cout << "HT-REMD epoch " << epoch << " round "
+                      << epoch_result.exchange_round
+                      << " blocks=" << epoch_result.block_results.size()
+                      << " attempts=" << epoch_result.exchange_attempts.size()
+                      << '\n';
+        }
+        else if (execution.remd_mode == "rest2")
+        {
+            const auto epoch_result = rest2_policy.ExecuteEpoch(
+                &manager, execution.exchange_round + epoch,
+                execution.emit_output);
+            block_results = epoch_result.block_results;
+            exchange_attempts = epoch_result.exchange_attempts;
+            std::cout << "REST2-REMD epoch " << epoch << " round "
                       << epoch_result.exchange_round
                       << " blocks=" << epoch_result.block_results.size()
                       << " attempts=" << epoch_result.exchange_attempts.size()

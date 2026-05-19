@@ -1,6 +1,7 @@
 ﻿#pragma once
 
 #include <random>
+#include <string>
 #include <vector>
 
 #include "../../core/manager.h"
@@ -21,6 +22,8 @@ class HamiltonianReplicaExchangePolicy
     struct Config
     {
         unsigned int random_seed = 20260515u;
+        std::string hamiltonian_key = "hamiltonian_id";
+        bool hamiltonian_key_is_integer = true;
     };
 
     HamiltonianReplicaExchangePolicy();
@@ -37,6 +40,7 @@ class HamiltonianReplicaExchangePolicy
                              bool emit_output = false);
 
    private:
+    Config config_;
     std::mt19937 rng_;
 };
 

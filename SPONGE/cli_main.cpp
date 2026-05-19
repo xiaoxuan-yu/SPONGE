@@ -88,6 +88,38 @@ sponge::worker_protocol::WorkerFileResponse ExecuteWorkerRequest(
     return response;
 }
 
+sponge::worker_protocol::WorkerFileResponse ExecuteProbeOnExistingScheduler(
+    sponge::SpongeScheduler* scheduler,
+    const sponge::worker_protocol::WorkerFileRequest& request)
+{
+    if (scheduler == nullptr)
+    {
+        throw std::runtime_error(
+            "ExecuteProbeOnExistingScheduler requires a scheduler");
+    }
+    scheduler->EnsureForeignStateProbeSafe();
+    const auto original_state = scheduler->ExportRuntimeState();
+    sponge::worker_protocol::WorkerFileResponse response;
+    try
+    {
+        scheduler->ImportRuntimeState(request.runtime_state);
+        scheduler->SetStepLimit(request.managed_step_limit);
+        response.execution.runtime_state = scheduler->ExportRuntimeState();
+        response.execution.snapshot = scheduler->Snapshot();
+        response.execution.observable = scheduler->CollectExchangeObservables();
+        response.execution.finished = response.execution.snapshot.finished;
+    }
+    catch (...)
+    {
+        scheduler->ImportRuntimeState(original_state);
+        scheduler->SetStepLimit(original_state.step_limit);
+        throw;
+    }
+    scheduler->ImportRuntimeState(original_state);
+    scheduler->SetStepLimit(original_state.step_limit);
+    return response;
+}
+
 int RunWorkerMode(const std::vector<std::string>& scheduler_args,
                   const std::string& request_path,
                   const std::string& response_path)
@@ -129,7 +161,15 @@ int RunWorkerFileSessionMode(const std::vector<std::string>& scheduler_args,
         sponge::worker_protocol::WorkerFileResponse response;
         if (request.probe_only)
         {
-            response = ExecuteWorkerRequest(scheduler_args, request);
+            if (scheduler == nullptr)
+            {
+                response = ExecuteWorkerRequest(scheduler_args, request);
+            }
+            else
+            {
+                response =
+                    ExecuteProbeOnExistingScheduler(scheduler.get(), request);
+            }
         }
         else
         {
@@ -207,7 +247,15 @@ int RunWorkerTcpMode(const std::vector<std::string>& scheduler_args,
         sponge::worker_protocol::WorkerFileResponse response;
         if (request.probe_only)
         {
-            response = ExecuteWorkerRequest(scheduler_args, request);
+            if (scheduler == nullptr)
+            {
+                response = ExecuteWorkerRequest(scheduler_args, request);
+            }
+            else
+            {
+                response =
+                    ExecuteProbeOnExistingScheduler(scheduler.get(), request);
+            }
         }
         else
         {

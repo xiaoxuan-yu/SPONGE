@@ -195,7 +195,15 @@ void CONTROLLER::Arguments_Parse(int argc, char** argv)
                 else
                     break;
             }
+            if (commands.count(temp1 + 1))
+            {
+                sprintf(temp3, "Reason:\n\t'%s' is set more than once\n",
+                        temp1 + 1);
+                Throw_SPONGE_Error(spongeErrorConflictingCommand,
+                                   "CONTROLLER::Arguments_Parse", temp3);
+            }
             Set_Command(temp1 + 1, temp2);
+            command_from_cli[temp1 + 1] = 1;
             if (is_str_equal(temp1 + 1, "workspace", 1))
             {
                 workspace_from_cli = true;
@@ -555,6 +563,10 @@ void CONTROLLER::Set_Command(const char* Flag, const char* Value, int Check,
     strcat(temp, Flag);
     if (commands.count(temp))
     {
+        if (command_from_cli.count(temp))
+        {
+            return;
+        }
         sprintf(temp2, "Reason:\n\t'%s' is set more than once\n", temp);
         Throw_SPONGE_Error(spongeErrorConflictingCommand,
                            "CONTROLLER::Set_Command", temp2);

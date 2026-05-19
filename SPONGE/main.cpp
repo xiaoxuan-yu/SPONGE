@@ -52,7 +52,7 @@ SOFT_WALLS soft_walls;
 LENNARD_JONES_NO_PBC_INFORMATION LJ_NOPBC;
 COULOMB_FORCE_NO_PBC_INFORMATION CF_NOPBC;
 GENERALIZED_BORN_INFORMATION gb;
-SITS_INFORMATION sits;
+SELECTIVE_INTERACTION selective_interaction;
 DIHEDRAL sits_dihedral;
 NON_BOND_14 sits_nb14;
 CMAP sits_cmap;
@@ -588,7 +588,7 @@ void Main_Ensure_Foreign_State_Probe_Safe()
             "sink metadynamics bias is enabled, because the probe worker does "
             "not serialize/import metadynamics history state yet.\n");
     }
-    if (sits.is_initialized)
+    if (!selective_interaction.Is_Probe_Safe())
     {
         controller.Throw_SPONGE_Error(
             spongeErrorValueErrorCommand,
@@ -868,16 +868,16 @@ void Main_Initial(int argc, char* argv[])
         pairwise_force.Initial(&controller);
         nb14.Initial(&controller, lj.h_LJ_A, lj.h_LJ_B, lj.h_atom_LJ_type);
 
-        sits.Initial(&controller, md_info.atom_numbers);
-        if (sits.is_initialized && sits.selectively_applied)
+        selective_interaction.Initial(&controller, md_info.atom_numbers);
+        if (selective_interaction.Uses_SITS_Listed_Forces())
         {
             sits_dihedral.Initial(&controller, "sits_dihedral");
             sits_nb14.Initial(&controller, lj.h_LJ_A, lj.h_LJ_B,
                               lj.h_atom_LJ_type, "sits_nb14");
             sits_cmap.Initial(&controller, "sits_cmap");
         }
-        sits.Check_Solvent(&controller, md_info.atom_numbers,
-                           solvent_lj.solvent_numbers);
+        selective_interaction.Check_Solvent(&controller, md_info.atom_numbers,
+                                            solvent_lj.solvent_numbers);
     }
     else
     {
@@ -889,7 +889,7 @@ void Main_Initial(int argc, char* argv[])
         }
         nb14.Initial(&controller, LJ_NOPBC.h_LJ_A, LJ_NOPBC.h_LJ_B,
                      LJ_NOPBC.h_atom_LJ_type);
-        sits.Initial(&controller, md_info.atom_numbers);
+        selective_interaction.Initial(&controller, md_info.atom_numbers);
     }
 
     bond.Initial(&controller, &md_info.sys.connectivity,
@@ -1008,7 +1008,7 @@ void Main_Calculate_Force()
     {
         md_info.need_kinetic = 1;
     }
-    sits.Reset_Force_Energy(&md_info.need_potential);
+    selective_interaction.Reset_Force_Energy(&md_info.need_potential);
 
     controller.Get_Time_Recorder("Calculate_Force")->Start();
     pm.Get_Atoms(&controller, md_info.crd, md_info.d_charge, dd.atom_numbers,
@@ -1051,37 +1051,47 @@ void Main_Calculate_Force()
                 dd.d_energy, md_info.need_pressure, dd.d_virial);
         }
 
-        if (sits.is_initialized && sits.selectively_applied)
+        if (selective_interaction.Uses_SITS_Listed_Forces())
         {
             sits_dihedral.Dihedral_Force_With_Atom_Energy_And_Virial(
                 dd.crd, md_info.pbc.cell, md_info.pbc.rcell,
-                sits.pw_select.select_force[0], md_info.need_potential,
-                sits.pw_select.select_atom_energy[0], md_info.need_pressure,
-                sits.pw_select.select_atom_virial_tensor[0]);
+                selective_interaction.Select_Force(), md_info.need_potential,
+                selective_interaction.Select_Atom_Energy(),
+                md_info.need_pressure,
+                selective_interaction.Select_Atom_Virial_Tensor());
             sits_nb14.Non_Bond_14_LJ_CF_Force_With_Atom_Energy_And_Virial(
                 dd.crd, dd.d_charge, md_info.pbc.cell, md_info.pbc.rcell,
-                sits.pw_select.select_force[0], md_info.need_potential,
-                sits.pw_select.select_atom_energy[0], md_info.need_pressure,
-                sits.pw_select.select_atom_virial_tensor[0]);
+                selective_interaction.Select_Force(), md_info.need_potential,
+                selective_interaction.Select_Atom_Energy(),
+                md_info.need_pressure,
+                selective_interaction.Select_Atom_Virial_Tensor());
             sits_cmap.CMAP_Force_With_Atom_Energy_And_Virial(
                 dd.crd, md_info.pbc.cell, md_info.pbc.rcell,
-                sits.pw_select.select_force[0], md_info.need_potential,
-                sits.pw_select.select_atom_energy[0], md_info.need_pressure,
-                sits.pw_select.select_atom_virial_tensor[0]);
-            sits.SITS_LJ_Direct_CF_Force_With_Atom_Energy_And_Virial(
-                md_info.atom_numbers, dd.atom_numbers,
-                solvent_lj.local_solvent_numbers, dd.ghost_numbers, dd.crd,
-                dd.d_charge, &lj, dd.frc, md_info.pbc.cell, md_info.pbc.rcell,
-                neighbor_list.d_nl, md_info.nb.cutoff, pm.beta,
-                md_info.need_potential, dd.d_energy, md_info.need_pressure,
-                dd.d_virial, pm.d_direct_atom_energy);
-            sits.SITS_LJ_Soft_Core_Direct_CF_Force_With_Atom_Energy_And_Virial(
-                md_info.atom_numbers, dd.atom_numbers,
-                solvent_lj.local_solvent_numbers, dd.ghost_numbers, dd.crd,
-                dd.d_charge, &lj_soft, dd.frc, md_info.pbc.cell,
-                md_info.pbc.rcell, neighbor_list.d_nl, md_info.nb.cutoff,
-                pm.beta, md_info.need_potential, dd.d_energy,
-                md_info.need_pressure, dd.d_virial, pm.d_direct_atom_energy);
+                selective_interaction.Select_Force(), md_info.need_potential,
+                selective_interaction.Select_Atom_Energy(),
+                md_info.need_pressure,
+                selective_interaction.Select_Atom_Virial_Tensor());
+        }
+        if (selective_interaction.Has_Direct_LJ_Coulomb())
+        {
+            selective_interaction
+                .LJ_Direct_CF_Force_With_Atom_Energy_And_Virial(
+                    md_info.atom_numbers, dd.atom_numbers,
+                    solvent_lj.local_solvent_numbers, dd.ghost_numbers, dd.crd,
+                    dd.d_charge, &lj, dd.frc, md_info.pbc.cell,
+                    md_info.pbc.rcell, neighbor_list.d_nl, md_info.nb.cutoff,
+                    pm.beta, md_info.need_potential, dd.d_energy,
+                    md_info.need_pressure, dd.d_virial,
+                    pm.d_direct_atom_energy);
+            selective_interaction
+                .LJ_Soft_Core_Direct_CF_Force_With_Atom_Energy_And_Virial(
+                    md_info.atom_numbers, dd.atom_numbers,
+                    solvent_lj.local_solvent_numbers, dd.ghost_numbers, dd.crd,
+                    dd.d_charge, &lj_soft, dd.frc, md_info.pbc.cell,
+                    md_info.pbc.rcell, neighbor_list.d_nl, md_info.nb.cutoff,
+                    pm.beta, md_info.need_potential, dd.d_energy,
+                    md_info.need_pressure, dd.d_virial,
+                    pm.d_direct_atom_energy);
         }
         else
         {
@@ -1223,7 +1233,7 @@ void Main_Calculate_Force()
                                    dd.atom_numbers);
             }
         }
-        sits.Update_And_Enhance(
+        selective_interaction.Update_And_Enhance(
             md_info.sys.steps, md_info.sys.d_potential, md_info.need_pressure,
             dd.d_virial, dd.frc,
             1.0f / (CONSTANT_kB * md_info.sys.target_temperature));
@@ -1323,8 +1333,9 @@ void Main_Refresh_Local_State(bool rebuild_dd)
     constrain.Get_Local(dd.atom_local_id, dd.atom_local_label, dd.atom_numbers);
     settle.Get_Local(dd.atom_local_id, dd.atom_local_label, dd.atom_numbers);
     vatom.Get_Local(dd.atom_local_id, dd.atom_local_label, dd.atom_numbers);
-    sits.Get_Local(dd.atom_local, dd.atom_numbers, dd.ghost_numbers);
-    if (sits.is_initialized && sits.selectively_applied)
+    selective_interaction.Get_Local(dd.atom_local, dd.atom_numbers,
+                                    dd.ghost_numbers);
+    if (selective_interaction.Uses_SITS_Listed_Forces())
     {
         sits_dihedral.Get_Local(dd.atom_local, dd.atom_numbers,
                                 dd.ghost_numbers, dd.atom_local_label,
@@ -1501,8 +1512,9 @@ void Main_Print()
             lj.Step_Print(&controller);
             lj_soft.Step_Print(&controller);
             pm.Step_Print(&controller);
-            sits.Step_Print(&controller, 1.0f / md_info.sys.target_temperature /
-                                             CONSTANT_kB);
+            selective_interaction.Step_Print(
+                &controller,
+                1.0f / md_info.sys.target_temperature / CONSTANT_kB);
         }
         sits_dihedral.Step_Print(&controller, false);
         sits_nb14.Step_Print(&controller, false);

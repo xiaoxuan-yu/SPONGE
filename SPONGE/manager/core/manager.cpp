@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <initializer_list>
 #include <iomanip>
 #include <sstream>
 #include <stdexcept>
@@ -205,6 +206,31 @@ void Write_Exchange_Log_Header(std::ofstream* out)
               "walker_id,left_schedule,right_schedule,step,time_ps,"
               "potential_energy,effective_potential,temperature,volume,"
               "log_acceptance,acceptance_probability,random_value,accepted\n";
+}
+
+std::string DoubleToLogString(double value)
+{
+    std::ostringstream oss;
+    oss << std::setprecision(12) << value;
+    return oss.str();
+}
+
+std::string IntToLogString(int value) { return std::to_string(value); }
+
+void WriteCsvRow(std::ofstream* out, std::initializer_list<std::string> fields)
+{
+    if (out == nullptr) return;
+    bool first = true;
+    for (const auto& field : fields)
+    {
+        if (!first)
+        {
+            (*out) << ',';
+        }
+        (*out) << field;
+        first = false;
+    }
+    (*out) << '\n';
 }
 
 bool CanRunBlockInParallel(const std::vector<WorkerHandle>& workers)
@@ -577,13 +603,16 @@ void Manager::AppendExchangeAttempts(
     }
     for (const auto& attempt : attempts)
     {
-        out << "exchange_attempt," << mode << ',' << epoch << ','
-            << attempt.exchange_round << ',' << attempt.pair_index << ','
-            << ",," << attempt.pair.left_schedule_id << ','
-            << attempt.pair.right_schedule_id << ",,,,,,"
-            << attempt.log_acceptance << ',' << attempt.acceptance_probability
-            << ',' << attempt.random_value << ',' << (attempt.accepted ? 1 : 0)
-            << '\n';
+        WriteCsvRow(&out,
+                    {"exchange_attempt", mode, IntToLogString(epoch),
+                     IntToLogString(attempt.exchange_round),
+                     IntToLogString(attempt.pair_index), "", "",
+                     IntToLogString(attempt.pair.left_schedule_id),
+                     IntToLogString(attempt.pair.right_schedule_id), "", "", "",
+                     "", "", "", DoubleToLogString(attempt.log_acceptance),
+                     DoubleToLogString(attempt.acceptance_probability),
+                     DoubleToLogString(attempt.random_value),
+                     attempt.accepted ? "1" : "0"});
     }
 }
 
@@ -607,15 +636,18 @@ void Manager::AppendScheduleStates(const std::string& mode, int epoch)
     }
     for (const auto& schedule : schedules_)
     {
-        out << "schedule_state," << mode << ',' << epoch << ",,";
-        out << schedule.config.schedule_id << ','
-            << schedule.runtime_state.walker_id << ',' << ",,"
-            << schedule.last_observable.step << ','
-            << schedule.last_observable.time_ps << ','
-            << schedule.last_observable.potential_energy << ','
-            << schedule.last_observable.effective_potential << ','
-            << schedule.last_observable.temperature << ','
-            << schedule.last_observable.volume << ",,,,\n";
+        WriteCsvRow(
+            &out,
+            {"schedule_state", mode, IntToLogString(epoch), "", "",
+             IntToLogString(schedule.config.schedule_id),
+             IntToLogString(schedule.runtime_state.walker_id), "", "",
+             IntToLogString(schedule.last_observable.step),
+             DoubleToLogString(schedule.last_observable.time_ps),
+             DoubleToLogString(schedule.last_observable.potential_energy),
+             DoubleToLogString(schedule.last_observable.effective_potential),
+             DoubleToLogString(schedule.last_observable.temperature),
+             DoubleToLogString(schedule.last_observable.volume), "", "", "",
+             ""});
     }
 }
 

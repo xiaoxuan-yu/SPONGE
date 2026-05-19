@@ -10,7 +10,7 @@
 #include "NO_PBC/Lennard_Jones_force_No_PBC.h"
 #include "NO_PBC/generalized_Born.h"
 #include "PM_force/PM_force.h"
-#include "SITS/SITS.h"
+#include "Selective_Interaction/Selective_Interaction.h"
 #include "angle/Urey_Bradley_force.h"
 #include "angle/angle.h"
 #include "barostat/MC_barostat.h"

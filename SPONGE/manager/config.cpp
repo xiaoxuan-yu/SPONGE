@@ -93,7 +93,8 @@ void ValidateRemdMode(const std::string& remd_mode)
     {
         return;
     }
-    if (remd_mode != "tremd" && remd_mode != "hremd" && remd_mode != "htremd")
+    if (remd_mode != "tremd" && remd_mode != "hremd" && remd_mode != "htremd" &&
+        remd_mode != "rest2")
     {
         throw std::runtime_error("unsupported remd mode in manager config: " +
                                  remd_mode);
@@ -175,7 +176,7 @@ void ValidateExchangeInputs(const std::string& remd_mode,
     for (const auto& schedule : schedules)
     {
         if ((remd_mode == "tremd" || remd_mode == "hremd" ||
-             remd_mode == "htremd") &&
+             remd_mode == "htremd" || remd_mode == "rest2") &&
             !schedule.inputs.FindDouble("target_temperature").has_value())
         {
             throw std::runtime_error(
@@ -187,6 +188,12 @@ void ValidateExchangeInputs(const std::string& remd_mode,
         {
             throw std::runtime_error(
                 "schedules.inputs.hamiltonian_id is required for " + remd_mode);
+        }
+        if (remd_mode == "rest2" &&
+            !schedule.inputs.FindDouble("REST2_lambda_m").has_value())
+        {
+            throw std::runtime_error(
+                "schedules.inputs.REST2_lambda_m is required for rest2");
         }
     }
 }

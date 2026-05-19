@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <stdexcept>
+#include <utility>
 
 #include "../../../common.h"
 
@@ -33,13 +34,38 @@ double RequireInputDouble(const ScheduleRecord& schedule, const char* key)
     return *value;
 }
 
-void RequireHamiltonianId(const ScheduleRecord& schedule)
+void RequireHamiltonianKey(
+    const ScheduleRecord& schedule,
+    const HamiltonianReplicaExchangePolicy::Config& config)
 {
-    if (!schedule.config.inputs.FindInt("hamiltonian_id").has_value())
+    if (config.hamiltonian_key_is_integer)
+    {
+        if (schedule.config.inputs.FindInt(config.hamiltonian_key).has_value())
+        {
+            return;
+        }
+    }
+    else
+    {
+        if (schedule.config.inputs.FindDouble(config.hamiltonian_key)
+                .has_value())
+        {
+            return;
+        }
+    }
+    throw std::runtime_error(
+        "HamiltonianReplicaExchangePolicy requires schedules.inputs." +
+        config.hamiltonian_key);
+}
+
+void ValidateHamiltonianPolicyConfig(
+    const HamiltonianReplicaExchangePolicy::Config& config)
+{
+    if (config.hamiltonian_key.empty())
     {
         throw std::runtime_error(
-            "HamiltonianReplicaExchangePolicy requires "
-            "schedules.inputs.hamiltonian_id");
+            "HamiltonianReplicaExchangePolicy requires a non-empty "
+            "hamiltonian key");
     }
 }
 
@@ -52,8 +78,9 @@ HamiltonianReplicaExchangePolicy::HamiltonianReplicaExchangePolicy()
 
 HamiltonianReplicaExchangePolicy::HamiltonianReplicaExchangePolicy(
     Config config)
-    : rng_(config.random_seed)
+    : config_(std::move(config)), rng_(config_.random_seed)
 {
+    ValidateHamiltonianPolicyConfig(config_);
 }
 
 std::vector<ExchangePair> HamiltonianReplicaExchangePolicy::BuildOddEvenPairs(
@@ -86,8 +113,8 @@ ExchangeAttempt HamiltonianReplicaExchangePolicy::EvaluatePair(
             "HamiltonianReplicaExchangePolicy requires valid observables");
     }
 
-    RequireHamiltonianId(left);
-    RequireHamiltonianId(right);
+    RequireHamiltonianKey(left, config_);
+    RequireHamiltonianKey(right, config_);
     const double temperature_left =
         RequireInputDouble(left, "target_temperature");
     const double temperature_right =
