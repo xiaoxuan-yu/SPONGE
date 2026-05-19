@@ -39,6 +39,7 @@ struct MC_BAROSTAT_INFORMATION
 
     // 每次允许变化最大的边长
     float Delta_Box_Length_Max[3];
+    std::default_random_engine generator;  // MC proposal 随机数引擎
 
     //// 温度常数， 等于1 / k_B / T
     // float beta;

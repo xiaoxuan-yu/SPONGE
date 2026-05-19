@@ -56,6 +56,7 @@ struct CONTROLLER
     StringMap commands;               // 由文件读入的命令（去除空格）
     CheckMap command_check;           // 检查输入是否都使用了
     CheckMap choice_check;            // 检查选项是否都使用了
+    CheckMap command_from_cli;        // 记录由命令行设置的命令
     bool workspace_from_cli = false;  // 记录workspace是否由命令行设置
     bool mdin_is_toml = false;        // 当前mdin是否为TOML输入
     std::string mdin_toml_source_path;

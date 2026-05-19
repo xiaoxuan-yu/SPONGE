@@ -1,5 +1,7 @@
 ﻿#include "main.h"
 
+#include <sstream>
+
 #define SUBPACKAGE_HINT \
     "SPONGE, for general-purpose molecular dynamics simulations"
 #define THERMOSTAT_IS(name)                              \
@@ -50,7 +52,7 @@ SOFT_WALLS soft_walls;
 LENNARD_JONES_NO_PBC_INFORMATION LJ_NOPBC;
 COULOMB_FORCE_NO_PBC_INFORMATION CF_NOPBC;
 GENERALIZED_BORN_INFORMATION gb;
-SITS_INFORMATION sits;
+SELECTIVE_INTERACTION selective_interaction;
 DIHEDRAL sits_dihedral;
 NON_BOND_14 sits_nb14;
 CMAP sits_cmap;
@@ -64,20 +66,731 @@ SPONGE_PLUGIN plugin;
 
 deviceStream_t main_stream;
 
-int main(int argc, char* argv[])
+namespace
 {
-    Main_Initial(argc, argv);
-    for (md_info.sys.steps = 0; md_info.sys.steps <= md_info.sys.step_limit;
-         md_info.sys.steps++)
+
+sponge::RuntimeStateAtom Make_Runtime_State_Atom(const VECTOR& value)
+{
+    return {value.x, value.y, value.z};
+}
+
+VECTOR Make_Vector(const sponge::RuntimeStateAtom& value)
+{
+    return {value.x, value.y, value.z};
+}
+
+std::vector<sponge::RuntimeStateAtom> Copy_Device_Vector_Array_To_Runtime_State(
+    const VECTOR* device_pointer, std::size_t count)
+{
+    std::vector<sponge::RuntimeStateAtom> values(count);
+    if (count == 0)
     {
-        Main_Sync_Dynamic_Targets_To_Controllers();
-        Main_Calculate_Force();
-        Main_Iteration();
+        return values;
+    }
+    std::vector<VECTOR> host_values(count);
+    deviceMemcpy(host_values.data(), device_pointer, sizeof(VECTOR) * count,
+                 deviceMemcpyDeviceToHost);
+    for (std::size_t i = 0; i < count; i++)
+    {
+        values[i] = Make_Runtime_State_Atom(host_values[i]);
+    }
+    return values;
+}
+
+void Copy_Runtime_State_Vector_Array_To_Device(
+    const std::vector<sponge::RuntimeStateAtom>& values, VECTOR* device_pointer,
+    std::size_t expected_count, const char* error_by, const char* blob_name)
+{
+    if (values.size() != expected_count)
+    {
+        std::string reason = "Reason:\n\tunexpected vector count for ";
+        reason += blob_name;
+        reason += "\n";
+        controller.Throw_SPONGE_Error(spongeErrorValueErrorCommand, error_by,
+                                      reason.c_str());
+    }
+    if (expected_count == 0)
+    {
+        return;
+    }
+    std::vector<VECTOR> host_values(expected_count);
+    for (std::size_t i = 0; i < expected_count; i++)
+    {
+        host_values[i] = Make_Vector(values[i]);
+    }
+    deviceMemcpy(device_pointer, host_values.data(),
+                 sizeof(VECTOR) * expected_count, deviceMemcpyHostToDevice);
+}
+
+template <typename T>
+std::vector<std::uint8_t> Copy_Device_Bytes_To_Host(T* device_pointer,
+                                                    std::size_t count)
+{
+    std::vector<std::uint8_t> bytes(sizeof(T) * count);
+    if (!bytes.empty())
+    {
+        deviceMemcpy(bytes.data(), device_pointer, bytes.size(),
+                     deviceMemcpyDeviceToHost);
+    }
+    return bytes;
+}
+
+template <typename T>
+void Copy_Host_Bytes_To_Device(const std::vector<std::uint8_t>& bytes,
+                               T* device_pointer, std::size_t count,
+                               const char* error_by, const char* blob_name)
+{
+    const std::size_t expected_size = sizeof(T) * count;
+    if (bytes.size() != expected_size)
+    {
+        std::string reason = "Reason:\n\tunexpected byte count for ";
+        reason += blob_name;
+        reason += "\n";
+        controller.Throw_SPONGE_Error(spongeErrorValueErrorCommand, error_by,
+                                      reason.c_str());
+    }
+    if (expected_size > 0)
+    {
+        deviceMemcpy(device_pointer, bytes.data(), expected_size,
+                     deviceMemcpyHostToDevice);
+    }
+}
+
+template <typename Engine>
+std::string Serialize_Stream_State(const Engine& engine)
+{
+    std::ostringstream oss;
+    oss << engine;
+    return oss.str();
+}
+
+template <typename Engine>
+void Deserialize_Stream_State(const std::string& serialized, Engine* engine,
+                              const char* error_by, const char* state_name)
+{
+    if (engine == nullptr || serialized.empty())
+    {
+        return;
+    }
+    std::istringstream iss(serialized);
+    if (!(iss >> *engine))
+    {
+        std::string reason = "Reason:\n\tfailed to deserialize ";
+        reason += state_name;
+        reason += "\n";
+        controller.Throw_SPONGE_Error(spongeErrorValueErrorCommand, error_by,
+                                      reason.c_str());
+    }
+}
+
+float Read_Output_Field_Float(const char* key, float fallback)
+{
+    auto iter = controller.outputs_content.find(key);
+    if (iter == controller.outputs_content.end() || iter->second == "****")
+    {
+        return fallback;
+    }
+    return static_cast<float>(atof(iter->second.c_str()));
+}
+
+void Main_Populate_Core_Output_Content()
+{
+    md_info.Step_Print(&controller);
+    controller.Step_Print("potential", dd.h_sum_ene_total);
+}
+
+void Main_Probe_Current_Exchange_Observables()
+{
+    const int saved_write_mdout_interval = md_info.output.write_mdout_interval;
+    const bool saved_print_zeroth_frame = md_info.output.print_zeroth_frame;
+    const bool saved_print_virial = md_info.output.print_virial;
+
+    md_info.output.write_mdout_interval = 1;
+    md_info.output.print_zeroth_frame = true;
+    md_info.output.print_virial = (md_info.mode == md_info.NPT);
+
+    Main_Sync_Dynamic_Targets_To_Controllers();
+    Main_Calculate_Force();
+    dd.Get_Ek_and_Temperature(&controller, &md_info);
+    dd.Get_Potential(&controller, &md_info);
+    if (md_info.mode == md_info.NPT)
+    {
+        md_info.need_pressure = 1;
+        md_info.Get_pressure(&controller, dd.atom_numbers, dd.vel, dd.d_mass,
+                             dd.d_virial, main_stream);
+    }
+
+    md_info.output.write_mdout_interval = saved_write_mdout_interval;
+    md_info.output.print_zeroth_frame = saved_print_zeroth_frame;
+    md_info.output.print_virial = saved_print_virial;
+}
+
+}  // namespace
+
+void Main_Run_Current_Step(bool emit_output)
+{
+    if (Main_Is_Finished())
+    {
+        return;
+    }
+
+    Main_Sync_Dynamic_Targets_To_Controllers();
+    Main_Calculate_Force();
+    Main_Iteration();
+    if (emit_output)
+    {
         Main_Print();
     }
-    Main_Clear();
-    return 0;
+    md_info.sys.steps++;
 }
+
+bool Main_Is_Finished() { return md_info.sys.steps > md_info.sys.step_limit; }
+
+void Main_Set_Step_Limit(int step_limit)
+{
+    if (step_limit > 0)
+    {
+        md_info.sys.step_limit = step_limit;
+    }
+}
+
+sponge::SchedulerSnapshot Main_Get_Scheduler_Snapshot()
+{
+    Main_Probe_Current_Exchange_Observables();
+    Main_Populate_Core_Output_Content();
+    sponge::SchedulerSnapshot snapshot;
+    snapshot.next_step = md_info.sys.steps;
+    snapshot.last_completed_step = md_info.sys.steps - 1;
+    snapshot.step_limit = md_info.sys.step_limit;
+    snapshot.current_time_ps = md_info.sys.Get_Current_Time(false);
+    snapshot.dt_ps = md_info.sys.dt_in_ps;
+    snapshot.temperature = md_info.sys.h_temperature;
+    snapshot.target_temperature = md_info.sys.target_temperature;
+    snapshot.pressure = md_info.sys.h_pressure * CONSTANT_PRES_CONVERTION;
+    snapshot.target_pressure = md_info.sys.target_pressure;
+    snapshot.total_potential = dd.h_sum_ene_total;
+    snapshot.effective_potential = md_info.sys.h_potential;
+    snapshot.box_length = {md_info.sys.box_length.x, md_info.sys.box_length.y,
+                           md_info.sys.box_length.z};
+    snapshot.initialized = controller.is_initialized != 0;
+    snapshot.finished = Main_Is_Finished();
+    return snapshot;
+}
+
+sponge::RuntimeState Main_Export_Runtime_State()
+{
+    sponge::RuntimeState state;
+    if (!controller.is_initialized || !md_info.is_initialized)
+    {
+        return state;
+    }
+
+    if (CONTROLLER::MPI_rank < CONTROLLER::PP_MPI_size)
+    {
+        md_info.Crd_Vel_dd_to_Device(dd.crd, dd.vel, dd.atom_local_label,
+                                     dd.atom_local_id, main_stream);
+    }
+    md_info.Crd_Vel_Device_To_Host(1);
+    state.atom_count = md_info.atom_numbers;
+    state.step = md_info.sys.steps;
+    state.step_limit = md_info.sys.step_limit;
+    state.start_time_ps = md_info.sys.start_time;
+    state.current_time_ps = md_info.sys.Get_Current_Time(false);
+    state.box_length = {md_info.sys.box_length.x, md_info.sys.box_length.y,
+                        md_info.sys.box_length.z};
+    state.box_angle = {md_info.sys.box_angle.x, md_info.sys.box_angle.y,
+                       md_info.sys.box_angle.z};
+    state.coordinates.reserve(md_info.atom_numbers);
+    state.velocities.reserve(md_info.atom_numbers);
+    for (int i = 0; i < md_info.atom_numbers; i++)
+    {
+        state.coordinates.push_back(
+            Make_Runtime_State_Atom(md_info.coordinate[i]));
+        state.velocities.push_back(
+            Make_Runtime_State_Atom(md_info.velocity[i]));
+    }
+    if (CONTROLLER::MPI_rank < CONTROLLER::PP_MPI_size)
+    {
+        state.local_accelerations =
+            Copy_Device_Vector_Array_To_Runtime_State(dd.acc, dd.atom_numbers);
+        state.has_local_accelerations = true;
+    }
+    if (nhc.is_initialized)
+    {
+        deviceMemcpy(nhc.h_coordinate, nhc.coordinate,
+                     sizeof(float) * nhc.chain_length,
+                     deviceMemcpyDeviceToHost);
+        deviceMemcpy(nhc.h_velocity, nhc.velocity,
+                     sizeof(float) * (nhc.chain_length + 1),
+                     deviceMemcpyDeviceToHost);
+        state.nhc_coordinates.assign(nhc.h_coordinate,
+                                     nhc.h_coordinate + nhc.chain_length);
+        state.nhc_velocities.assign(nhc.h_velocity,
+                                    nhc.h_velocity + nhc.chain_length + 1);
+        state.has_nhc_state = true;
+    }
+    if (settle.is_initialized)
+    {
+        state.settle_last_pair_ab = Copy_Device_Vector_Array_To_Runtime_State(
+            settle.last_pair_AB, settle.num_pair_local);
+        state.settle_last_triangle_ba =
+            Copy_Device_Vector_Array_To_Runtime_State(
+                settle.last_triangle_BA, settle.num_triangle_local);
+        state.settle_last_triangle_ca =
+            Copy_Device_Vector_Array_To_Runtime_State(
+                settle.last_triangle_CA, settle.num_triangle_local);
+        state.has_settle_state = true;
+    }
+    if (shake.is_initialized)
+    {
+        state.shake_last_pair_dr = Copy_Device_Vector_Array_To_Runtime_State(
+            shake.last_pair_dr, constrain.num_pair_local);
+        state.has_shake_state = true;
+    }
+    if (press_baro.is_initialized)
+    {
+        state.pressure_barostat_g = {press_baro.g.a11, press_baro.g.a21,
+                                     press_baro.g.a22, press_baro.g.a31,
+                                     press_baro.g.a32, press_baro.g.a33};
+        state.pressure_barostat_v0 = press_baro.V0;
+        state.pressure_barostat_rng_state =
+            Serialize_Stream_State(press_baro.generator);
+        state.pressure_barostat_distribution_state =
+            Serialize_Stream_State(press_baro.distribution);
+        state.has_pressure_barostat_state = true;
+    }
+    if (mc_baro.is_initialized)
+    {
+        state.mc_barostat_total_count = {mc_baro.total_count[0],
+                                         mc_baro.total_count[1],
+                                         mc_baro.total_count[2]};
+        state.mc_barostat_accept_count = {mc_baro.accep_count[0],
+                                          mc_baro.accep_count[1],
+                                          mc_baro.accep_count[2]};
+        state.mc_barostat_accept_rate = {mc_baro.accept_rate[0],
+                                         mc_baro.accept_rate[1],
+                                         mc_baro.accept_rate[2]};
+        state.mc_barostat_delta_box_length_max = {
+            mc_baro.Delta_Box_Length_Max[0], mc_baro.Delta_Box_Length_Max[1],
+            mc_baro.Delta_Box_Length_Max[2]};
+        state.mc_barostat_rng_state = Serialize_Stream_State(mc_baro.generator);
+        state.has_mc_barostat_state = true;
+    }
+    if (middle_langevin.is_initialized)
+    {
+        state.middle_langevin_rng_state = Copy_Device_Bytes_To_Host(
+            middle_langevin.rand_state, middle_langevin.float4_numbers);
+        state.has_middle_langevin_rng_state = true;
+    }
+    if (ad_thermo.is_initialized)
+    {
+        state.andersen_rng_state = Copy_Device_Bytes_To_Host(
+            ad_thermo.rand_state, ad_thermo.float4_numbers);
+        state.has_andersen_rng_state = true;
+    }
+    if (bussi_thermo.is_initialized)
+    {
+        state.bussi_rng_state = Serialize_Stream_State(bussi_thermo.e);
+        state.bussi_distribution_state =
+            Serialize_Stream_State(bussi_thermo.normal01);
+        state.has_bussi_rng_state = true;
+    }
+    state.valid = true;
+    return state;
+}
+
+void Main_Import_Runtime_State(const sponge::RuntimeState& state)
+{
+    if (!controller.is_initialized || !md_info.is_initialized)
+    {
+        controller.Throw_SPONGE_Error(
+            spongeErrorValueErrorCommand, "Main_Import_Runtime_State",
+            "Reason:\n\tSPONGE runtime is not initialized\n");
+    }
+    if (!state.valid)
+    {
+        controller.Throw_SPONGE_Error(
+            spongeErrorValueErrorCommand, "Main_Import_Runtime_State",
+            "Reason:\n\tinput runtime state is invalid\n");
+    }
+    if (state.atom_count != md_info.atom_numbers)
+    {
+        controller.Throw_SPONGE_Error(
+            spongeErrorValueErrorCommand, "Main_Import_Runtime_State",
+            "Reason:\n\tatom count mismatch while importing runtime state\n");
+    }
+    if (static_cast<int>(state.coordinates.size()) != md_info.atom_numbers ||
+        static_cast<int>(state.velocities.size()) != md_info.atom_numbers)
+    {
+        controller.Throw_SPONGE_Error(
+            spongeErrorValueErrorCommand, "Main_Import_Runtime_State",
+            "Reason:\n\tcoordinate/velocity array size mismatch while "
+            "importing runtime state\n");
+    }
+
+    for (int i = 0; i < md_info.atom_numbers; i++)
+    {
+        md_info.coordinate[i] = Make_Vector(state.coordinates[i]);
+        md_info.velocity[i] = Make_Vector(state.velocities[i]);
+    }
+    deviceMemcpy(md_info.crd, md_info.coordinate,
+                 sizeof(VECTOR) * md_info.atom_numbers,
+                 deviceMemcpyHostToDevice);
+    deviceMemcpy(md_info.vel, md_info.velocity,
+                 sizeof(VECTOR) * md_info.atom_numbers,
+                 deviceMemcpyHostToDevice);
+
+    md_info.sys.steps = state.step;
+    md_info.sys.step_limit = state.step_limit;
+    md_info.sys.start_time = state.start_time_ps;
+    md_info.sys.current_time = state.current_time_ps;
+    md_info.sys.box_length = {state.box_length[0], state.box_length[1],
+                              state.box_length[2]};
+    md_info.sys.box_angle = {state.box_angle[0], state.box_angle[1],
+                             state.box_angle[2]};
+    if (state.has_nhc_state && nhc.is_initialized)
+    {
+        if (static_cast<int>(state.nhc_coordinates.size()) !=
+                nhc.chain_length ||
+            static_cast<int>(state.nhc_velocities.size()) !=
+                nhc.chain_length + 1)
+        {
+            controller.Throw_SPONGE_Error(
+                spongeErrorValueErrorCommand, "Main_Import_Runtime_State",
+                "Reason:\n\tNHC state size mismatch while importing runtime "
+                "state\n");
+        }
+        for (int i = 0; i < nhc.chain_length; i++)
+        {
+            nhc.h_coordinate[i] = state.nhc_coordinates[i];
+        }
+        for (int i = 0; i < nhc.chain_length + 1; i++)
+        {
+            nhc.h_velocity[i] = state.nhc_velocities[i];
+        }
+        deviceMemcpy(nhc.coordinate, nhc.h_coordinate,
+                     sizeof(float) * nhc.chain_length,
+                     deviceMemcpyHostToDevice);
+        deviceMemcpy(nhc.velocity, nhc.h_velocity,
+                     sizeof(float) * (nhc.chain_length + 1),
+                     deviceMemcpyHostToDevice);
+    }
+    if (state.has_pressure_barostat_state && press_baro.is_initialized)
+    {
+        press_baro.g = {
+            state.pressure_barostat_g[0], state.pressure_barostat_g[1],
+            state.pressure_barostat_g[2], state.pressure_barostat_g[3],
+            state.pressure_barostat_g[4], state.pressure_barostat_g[5]};
+        press_baro.V0 = state.pressure_barostat_v0;
+        Deserialize_Stream_State(
+            state.pressure_barostat_rng_state, &press_baro.generator,
+            "Main_Import_Runtime_State", "pressure barostat generator state");
+        Deserialize_Stream_State(state.pressure_barostat_distribution_state,
+                                 &press_baro.distribution,
+                                 "Main_Import_Runtime_State",
+                                 "pressure barostat distribution state");
+    }
+    if (state.has_mc_barostat_state && mc_baro.is_initialized)
+    {
+        for (int i = 0; i < 3; i++)
+        {
+            mc_baro.total_count[i] = state.mc_barostat_total_count[i];
+            mc_baro.accep_count[i] = state.mc_barostat_accept_count[i];
+            mc_baro.accept_rate[i] = state.mc_barostat_accept_rate[i];
+            mc_baro.Delta_Box_Length_Max[i] =
+                state.mc_barostat_delta_box_length_max[i];
+        }
+        Deserialize_Stream_State(
+            state.mc_barostat_rng_state, &mc_baro.generator,
+            "Main_Import_Runtime_State", "MC barostat RNG state");
+    }
+    if (state.has_middle_langevin_rng_state && middle_langevin.is_initialized)
+    {
+        Copy_Host_Bytes_To_Device(
+            state.middle_langevin_rng_state, middle_langevin.rand_state,
+            middle_langevin.float4_numbers, "Main_Import_Runtime_State",
+            "middle_langevin RNG state");
+    }
+    if (state.has_andersen_rng_state && ad_thermo.is_initialized)
+    {
+        Copy_Host_Bytes_To_Device(
+            state.andersen_rng_state, ad_thermo.rand_state,
+            ad_thermo.float4_numbers, "Main_Import_Runtime_State",
+            "Andersen RNG state");
+    }
+    if (state.has_bussi_rng_state && bussi_thermo.is_initialized)
+    {
+        Deserialize_Stream_State(state.bussi_rng_state, &bussi_thermo.e,
+                                 "Main_Import_Runtime_State",
+                                 "Bussi RNG state");
+        Deserialize_Stream_State(
+            state.bussi_distribution_state, &bussi_thermo.normal01,
+            "Main_Import_Runtime_State", "Bussi distribution state");
+    }
+    md_info.pbc.PBC_Check();
+    md_info.output.current_crd_synchronized_step = -1;
+    Main_Refresh_Local_State(true);
+    if (state.has_local_accelerations &&
+        CONTROLLER::MPI_rank < CONTROLLER::PP_MPI_size)
+    {
+        Copy_Runtime_State_Vector_Array_To_Device(
+            state.local_accelerations, dd.acc, dd.atom_numbers,
+            "Main_Import_Runtime_State", "local accelerations");
+    }
+    if (state.has_settle_state && settle.is_initialized)
+    {
+        Copy_Runtime_State_Vector_Array_To_Device(
+            state.settle_last_pair_ab, settle.last_pair_AB,
+            settle.num_pair_local, "Main_Import_Runtime_State",
+            "SETTLE last pair AB");
+        Copy_Runtime_State_Vector_Array_To_Device(
+            state.settle_last_triangle_ba, settle.last_triangle_BA,
+            settle.num_triangle_local, "Main_Import_Runtime_State",
+            "SETTLE last triangle BA");
+        Copy_Runtime_State_Vector_Array_To_Device(
+            state.settle_last_triangle_ca, settle.last_triangle_CA,
+            settle.num_triangle_local, "Main_Import_Runtime_State",
+            "SETTLE last triangle CA");
+    }
+    if (state.has_shake_state && shake.is_initialized)
+    {
+        Copy_Runtime_State_Vector_Array_To_Device(
+            state.shake_last_pair_dr, shake.last_pair_dr,
+            constrain.num_pair_local, "Main_Import_Runtime_State",
+            "SHAKE last pair dr");
+    }
+}
+
+sponge::WorkerExchangeObservable Main_Collect_Exchange_Observables()
+{
+    Main_Probe_Current_Exchange_Observables();
+    sponge::WorkerExchangeObservable observable;
+    observable.step = md_info.sys.steps;
+    observable.time_ps = md_info.sys.Get_Current_Time(false);
+    observable.total_potential = dd.h_sum_ene_total;
+    observable.effective_potential = md_info.sys.h_potential;
+    observable.temperature = md_info.sys.h_temperature;
+    observable.target_temperature = md_info.sys.target_temperature;
+    observable.pressure = md_info.sys.h_pressure * CONSTANT_PRES_CONVERTION;
+    observable.target_pressure = md_info.sys.target_pressure;
+    observable.volume = md_info.sys.Get_Volume();
+    return observable;
+}
+
+void Main_Ensure_Foreign_State_Probe_Safe()
+{
+    if (meta.is_initialized)
+    {
+        controller.Throw_SPONGE_Error(
+            spongeErrorValueErrorCommand,
+            "Main_Ensure_Foreign_State_Probe_Safe",
+            "Reason:\n\tforeign-state observable probing is not safe when "
+            "sink metadynamics bias is enabled, because the probe worker does "
+            "not serialize/import metadynamics history state yet.\n");
+    }
+    if (!selective_interaction.Is_Probe_Safe())
+    {
+        controller.Throw_SPONGE_Error(
+            spongeErrorValueErrorCommand,
+            "Main_Ensure_Foreign_State_Probe_Safe",
+            "Reason:\n\tforeign-state observable probing is not safe when "
+            "SITS/enhanced-sampling bias is enabled, because the probe worker "
+            "does not serialize/import SITS bias history state yet.\n");
+    }
+}
+
+void Main_Scale_Velocities(float factor)
+{
+    if (factor == 1.0f)
+    {
+        return;
+    }
+    md_info.Crd_Vel_Device_To_Host(1);
+    for (int i = 0; i < md_info.atom_numbers; i++)
+    {
+        md_info.velocity[i] = factor * md_info.velocity[i];
+    }
+    deviceMemcpy(md_info.vel, md_info.velocity,
+                 sizeof(VECTOR) * md_info.atom_numbers,
+                 deviceMemcpyHostToDevice);
+    md_info.output.current_crd_synchronized_step = -1;
+}
+
+void Main_Invalidate_Neighbor_List(bool rebuild_dd)
+{
+    Main_Refresh_Local_State(rebuild_dd);
+}
+
+namespace sponge
+{
+
+SpongeScheduler::~SpongeScheduler()
+{
+    if (initialized_ && !finalized_)
+    {
+        Finalize();
+    }
+}
+
+void SpongeScheduler::InitializeFromArgv(int argc, char** argv)
+{
+    owned_args_.clear();
+    owned_args_.reserve(argc > 0 ? argc : 1);
+    if (argc <= 0)
+    {
+        owned_args_.push_back("SPONGE");
+    }
+    else
+    {
+        for (int i = 0; i < argc; i++)
+        {
+            owned_args_.emplace_back(argv[i] == nullptr ? "" : argv[i]);
+        }
+    }
+    InitializeFromOwnedArgs();
+}
+
+void SpongeScheduler::InitializeFromArgs(const std::vector<std::string>& args)
+{
+    owned_args_.clear();
+    owned_args_.reserve(args.size() + 1);
+    if (args.empty() || (!args.front().empty() && args.front()[0] == '-'))
+    {
+        owned_args_.push_back("SPONGE");
+    }
+    owned_args_.insert(owned_args_.end(), args.begin(), args.end());
+    InitializeFromOwnedArgs();
+}
+
+void SpongeScheduler::InitializeFromOwnedArgs()
+{
+    if (initialized_ && !finalized_)
+    {
+        throw std::runtime_error(
+            "SpongeScheduler::Initialize called on an active runtime");
+    }
+
+    RebuildArgvCache();
+    finalized_ = false;
+    Main_Initial(static_cast<int>(argv_cache_.size()), argv_cache_.data());
+    initialized_ = true;
+}
+
+void SpongeScheduler::RunSingleStep(bool emit_output)
+{
+    EnsureInitialized("RunSingleStep");
+    Main_Run_Current_Step(emit_output);
+}
+
+void SpongeScheduler::RunSteps(int steps, bool emit_output)
+{
+    EnsureInitialized("RunSteps");
+    if (steps <= 0)
+    {
+        return;
+    }
+    for (int i = 0; i < steps && !Main_Is_Finished(); i++)
+    {
+        Main_Run_Current_Step(emit_output);
+    }
+}
+
+void SpongeScheduler::RunToEnd(bool emit_output)
+{
+    EnsureInitialized("RunToEnd");
+    while (!Main_Is_Finished())
+    {
+        Main_Run_Current_Step(emit_output);
+    }
+}
+
+void SpongeScheduler::SetStepLimit(int step_limit)
+{
+    EnsureInitialized("SetStepLimit");
+    Main_Set_Step_Limit(step_limit);
+}
+
+SchedulerSnapshot SpongeScheduler::Snapshot() const
+{
+    EnsureInitialized("Snapshot");
+    return Main_Get_Scheduler_Snapshot();
+}
+
+RuntimeState SpongeScheduler::ExportRuntimeState()
+{
+    EnsureInitialized("ExportRuntimeState");
+    return Main_Export_Runtime_State();
+}
+
+void SpongeScheduler::ImportRuntimeState(const RuntimeState& state)
+{
+    EnsureInitialized("ImportRuntimeState");
+    Main_Import_Runtime_State(state);
+}
+
+WorkerExchangeObservable SpongeScheduler::CollectExchangeObservables() const
+{
+    EnsureInitialized("CollectExchangeObservables");
+    return Main_Collect_Exchange_Observables();
+}
+
+void SpongeScheduler::EnsureForeignStateProbeSafe() const
+{
+    EnsureInitialized("EnsureForeignStateProbeSafe");
+    Main_Ensure_Foreign_State_Probe_Safe();
+}
+
+void SpongeScheduler::ScaleVelocities(float factor)
+{
+    EnsureInitialized("ScaleVelocities");
+    Main_Scale_Velocities(factor);
+}
+
+void SpongeScheduler::InvalidateNeighborList(bool rebuild_dd)
+{
+    EnsureInitialized("InvalidateNeighborList");
+    Main_Invalidate_Neighbor_List(rebuild_dd);
+}
+
+bool SpongeScheduler::IsInitialized() const
+{
+    return initialized_ && !finalized_;
+}
+
+bool SpongeScheduler::IsFinished() const
+{
+    EnsureInitialized("IsFinished");
+    return Main_Is_Finished();
+}
+
+void SpongeScheduler::Finalize()
+{
+    EnsureInitialized("Finalize");
+    Main_Clear();
+    initialized_ = false;
+    finalized_ = true;
+}
+
+void SpongeScheduler::EnsureInitialized(const char* caller) const
+{
+    if (!initialized_ || finalized_)
+    {
+        throw std::runtime_error(std::string("SpongeScheduler::") + caller +
+                                 " called before initialization");
+    }
+}
+
+void SpongeScheduler::RebuildArgvCache()
+{
+    argv_cache_.clear();
+    argv_cache_.reserve(owned_args_.size());
+    for (std::string& arg : owned_args_)
+    {
+        argv_cache_.push_back(arg.data());
+    }
+}
+
+}  // namespace sponge
 
 void Main_Initial(int argc, char* argv[])
 {
@@ -155,16 +868,16 @@ void Main_Initial(int argc, char* argv[])
         pairwise_force.Initial(&controller);
         nb14.Initial(&controller, lj.h_LJ_A, lj.h_LJ_B, lj.h_atom_LJ_type);
 
-        sits.Initial(&controller, md_info.atom_numbers);
-        if (sits.is_initialized && sits.selectively_applied)
+        selective_interaction.Initial(&controller, md_info.atom_numbers);
+        if (selective_interaction.Uses_SITS_Listed_Forces())
         {
             sits_dihedral.Initial(&controller, "sits_dihedral");
             sits_nb14.Initial(&controller, lj.h_LJ_A, lj.h_LJ_B,
                               lj.h_atom_LJ_type, "sits_nb14");
             sits_cmap.Initial(&controller, "sits_cmap");
         }
-        sits.Check_Solvent(&controller, md_info.atom_numbers,
-                           solvent_lj.solvent_numbers);
+        selective_interaction.Check_Solvent(&controller, md_info.atom_numbers,
+                                            solvent_lj.solvent_numbers);
     }
     else
     {
@@ -176,7 +889,7 @@ void Main_Initial(int argc, char* argv[])
         }
         nb14.Initial(&controller, LJ_NOPBC.h_LJ_A, LJ_NOPBC.h_LJ_B,
                      LJ_NOPBC.h_atom_LJ_type);
-        sits.Initial(&controller, md_info.atom_numbers);
+        selective_interaction.Initial(&controller, md_info.atom_numbers);
     }
 
     bond.Initial(&controller, &md_info.sys.connectivity,
@@ -295,7 +1008,7 @@ void Main_Calculate_Force()
     {
         md_info.need_kinetic = 1;
     }
-    sits.Reset_Force_Energy(&md_info.need_potential);
+    selective_interaction.Reset_Force_Energy(&md_info.need_potential);
 
     controller.Get_Time_Recorder("Calculate_Force")->Start();
     pm.Get_Atoms(&controller, md_info.crd, md_info.d_charge, dd.atom_numbers,
@@ -338,37 +1051,47 @@ void Main_Calculate_Force()
                 dd.d_energy, md_info.need_pressure, dd.d_virial);
         }
 
-        if (sits.is_initialized && sits.selectively_applied)
+        if (selective_interaction.Uses_SITS_Listed_Forces())
         {
             sits_dihedral.Dihedral_Force_With_Atom_Energy_And_Virial(
                 dd.crd, md_info.pbc.cell, md_info.pbc.rcell,
-                sits.pw_select.select_force[0], md_info.need_potential,
-                sits.pw_select.select_atom_energy[0], md_info.need_pressure,
-                sits.pw_select.select_atom_virial_tensor[0]);
+                selective_interaction.Select_Force(), md_info.need_potential,
+                selective_interaction.Select_Atom_Energy(),
+                md_info.need_pressure,
+                selective_interaction.Select_Atom_Virial_Tensor());
             sits_nb14.Non_Bond_14_LJ_CF_Force_With_Atom_Energy_And_Virial(
                 dd.crd, dd.d_charge, md_info.pbc.cell, md_info.pbc.rcell,
-                sits.pw_select.select_force[0], md_info.need_potential,
-                sits.pw_select.select_atom_energy[0], md_info.need_pressure,
-                sits.pw_select.select_atom_virial_tensor[0]);
+                selective_interaction.Select_Force(), md_info.need_potential,
+                selective_interaction.Select_Atom_Energy(),
+                md_info.need_pressure,
+                selective_interaction.Select_Atom_Virial_Tensor());
             sits_cmap.CMAP_Force_With_Atom_Energy_And_Virial(
                 dd.crd, md_info.pbc.cell, md_info.pbc.rcell,
-                sits.pw_select.select_force[0], md_info.need_potential,
-                sits.pw_select.select_atom_energy[0], md_info.need_pressure,
-                sits.pw_select.select_atom_virial_tensor[0]);
-            sits.SITS_LJ_Direct_CF_Force_With_Atom_Energy_And_Virial(
-                md_info.atom_numbers, dd.atom_numbers,
-                solvent_lj.local_solvent_numbers, dd.ghost_numbers, dd.crd,
-                dd.d_charge, &lj, dd.frc, md_info.pbc.cell, md_info.pbc.rcell,
-                neighbor_list.d_nl, md_info.nb.cutoff, pm.beta,
-                md_info.need_potential, dd.d_energy, md_info.need_pressure,
-                dd.d_virial, pm.d_direct_atom_energy);
-            sits.SITS_LJ_Soft_Core_Direct_CF_Force_With_Atom_Energy_And_Virial(
-                md_info.atom_numbers, dd.atom_numbers,
-                solvent_lj.local_solvent_numbers, dd.ghost_numbers, dd.crd,
-                dd.d_charge, &lj_soft, dd.frc, md_info.pbc.cell,
-                md_info.pbc.rcell, neighbor_list.d_nl, md_info.nb.cutoff,
-                pm.beta, md_info.need_potential, dd.d_energy,
-                md_info.need_pressure, dd.d_virial, pm.d_direct_atom_energy);
+                selective_interaction.Select_Force(), md_info.need_potential,
+                selective_interaction.Select_Atom_Energy(),
+                md_info.need_pressure,
+                selective_interaction.Select_Atom_Virial_Tensor());
+        }
+        if (selective_interaction.Has_Direct_LJ_Coulomb())
+        {
+            selective_interaction
+                .LJ_Direct_CF_Force_With_Atom_Energy_And_Virial(
+                    md_info.atom_numbers, dd.atom_numbers,
+                    solvent_lj.local_solvent_numbers, dd.ghost_numbers, dd.crd,
+                    dd.d_charge, &lj, dd.frc, md_info.pbc.cell,
+                    md_info.pbc.rcell, neighbor_list.d_nl, md_info.nb.cutoff,
+                    pm.beta, md_info.need_potential, dd.d_energy,
+                    md_info.need_pressure, dd.d_virial,
+                    pm.d_direct_atom_energy);
+            selective_interaction
+                .LJ_Soft_Core_Direct_CF_Force_With_Atom_Energy_And_Virial(
+                    md_info.atom_numbers, dd.atom_numbers,
+                    solvent_lj.local_solvent_numbers, dd.ghost_numbers, dd.crd,
+                    dd.d_charge, &lj_soft, dd.frc, md_info.pbc.cell,
+                    md_info.pbc.rcell, neighbor_list.d_nl, md_info.nb.cutoff,
+                    pm.beta, md_info.need_potential, dd.d_energy,
+                    md_info.need_pressure, dd.d_virial,
+                    pm.d_direct_atom_energy);
         }
         else
         {
@@ -510,7 +1233,7 @@ void Main_Calculate_Force()
                                    dd.atom_numbers);
             }
         }
-        sits.Update_And_Enhance(
+        selective_interaction.Update_And_Enhance(
             md_info.sys.steps, md_info.sys.d_potential, md_info.need_pressure,
             dd.d_virial, dd.frc,
             1.0f / (CONSTANT_kB * md_info.sys.target_temperature));
@@ -610,8 +1333,9 @@ void Main_Refresh_Local_State(bool rebuild_dd)
     constrain.Get_Local(dd.atom_local_id, dd.atom_local_label, dd.atom_numbers);
     settle.Get_Local(dd.atom_local_id, dd.atom_local_label, dd.atom_numbers);
     vatom.Get_Local(dd.atom_local_id, dd.atom_local_label, dd.atom_numbers);
-    sits.Get_Local(dd.atom_local, dd.atom_numbers, dd.ghost_numbers);
-    if (sits.is_initialized && sits.selectively_applied)
+    selective_interaction.Get_Local(dd.atom_local, dd.atom_numbers,
+                                    dd.ghost_numbers);
+    if (selective_interaction.Uses_SITS_Listed_Forces())
     {
         sits_dihedral.Get_Local(dd.atom_local, dd.atom_numbers,
                                 dd.ghost_numbers, dd.atom_local_label,
@@ -776,7 +1500,7 @@ void Main_Print()
 {
     if (md_info.output.Check_Mdout_Step())
     {
-        md_info.Step_Print(&controller);
+        Main_Populate_Core_Output_Content();
         if (!md_info.pbc.pbc)
         {
             CF_NOPBC.Step_Print(&controller);
@@ -788,8 +1512,9 @@ void Main_Print()
             lj.Step_Print(&controller);
             lj_soft.Step_Print(&controller);
             pm.Step_Print(&controller);
-            sits.Step_Print(&controller, 1.0f / md_info.sys.target_temperature /
-                                             CONSTANT_kB);
+            selective_interaction.Step_Print(
+                &controller,
+                1.0f / md_info.sys.target_temperature / CONSTANT_kB);
         }
         sits_dihedral.Step_Print(&controller, false);
         sits_nb14.Step_Print(&controller, false);
@@ -808,8 +1533,6 @@ void Main_Print()
         dihedral.Step_Print(&controller);
         improper.Step_Print(&controller);
         nb14.Step_Print(&controller);
-
-        controller.Step_Print("potential", dd.h_sum_ene_total);
 
         restrain.Step_Print(&controller);
         if (qc.is_initialized)

@@ -71,6 +71,11 @@ static auto quote_path(const fs::path& path)
 #include <unistd.h>
 #define PLUGIN_API extern "C"
 typedef void* HMODULE;
+#define fcloseall()   \
+    do                \
+    {                 \
+        fflush(NULL); \
+    } while (0)
 #elif defined(__APPLE__)
 #define sincosf __sincosf
 #include <dlfcn.h>
