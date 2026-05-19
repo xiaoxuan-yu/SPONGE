@@ -1,5 +1,6 @@
 import math
 import shutil
+import subprocess
 
 import pytest
 
@@ -84,9 +85,7 @@ def test_rest2_manager_smoke_with_schedule_input_overrides(
         shutil.rmtree(run_dir)
 
     for schedule_id in range(len(lambdas)):
-        case_dir = copy_ala2_case(
-            repo_root, run_dir, f"schedule_{schedule_id}"
-        )
+        case_dir = copy_ala2_case(repo_root, run_dir, str(schedule_id))
         write_rest2_mdin(case_dir, 1.0, step_limit=1000)
 
     config_path, log_path = write_rest2_manager_config(
@@ -127,19 +126,115 @@ def test_rest2_manager_smoke_with_schedule_input_overrides(
     assert final_walker_ids != list(range(len(lambdas)))
 
     for schedule_id, lambda_m in enumerate(lambdas):
-        mdout = (
-            run_dir
-            / f"schedule_{schedule_id}"
-            / f"rest2_smoke_{schedule_id}.out"
-        )
-        mdinfo = (
-            run_dir
-            / f"schedule_{schedule_id}"
-            / f"rest2_smoke_{schedule_id}.info"
-        )
+        mdout = run_dir / str(schedule_id) / f"rest2_smoke_{schedule_id}.out"
+        mdinfo = run_dir / str(schedule_id) / f"rest2_smoke_{schedule_id}.info"
         assert mdout.exists()
         assert mdinfo.exists()
         mdout_header = mdout.read_text().splitlines()[0]
         for column in REST2_COLUMNS:
             assert column in mdout_header
         assert f"REST2 lambda_m set to {lambda_m:.6f}" in mdinfo.read_text()
+
+
+def test_manager_rejects_conflicting_bulk_schedule_outputs(
+    outputs_path, manager_cmd, rest2_timeout
+):
+    repo_root = _repo_root()
+    resolved_manager = resolve_executable(
+        manager_cmd, "SPONGE_MANAGER", repo_root
+    )
+    run_dir = outputs_path / "manager_conflict_smoke"
+    if run_dir.exists():
+        shutil.rmtree(run_dir)
+    run_dir.mkdir(parents=True)
+    config_path = run_dir / "manager.toml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "[manager]",
+                "block_steps = 1",
+                "epochs = 1",
+                'log_path = "0/mdout_0.out"',
+                "",
+                "[exchange]",
+                "enabled = false",
+                "",
+                "[worker_defaults]",
+                f'executable = "{resolved_manager}"',
+                'args = ["-mdin", "missing.spg.toml"]',
+                'working_directory_root = "."',
+                "",
+                "[worker_defaults.inputs]",
+                'default_out_file_prefix = "mdout"',
+                "",
+                "[schedules]",
+                "ids = [0]",
+                "",
+                "[schedules.inputs]",
+                "target_temperature = [300.0]",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [str(resolved_manager), "--config", str(config_path)],
+        cwd=run_dir,
+        capture_output=True,
+        text=True,
+        timeout=rest2_timeout,
+        check=False,
+        env=runtime_env(repo_root),
+    )
+    output = result.stdout + "\n" + result.stderr
+    assert result.returncode != 0
+    assert "conflicts with worker output path" in output
+
+
+def test_manager_rejects_duplicate_bulk_schedule_ids(
+    outputs_path, manager_cmd, rest2_timeout
+):
+    repo_root = _repo_root()
+    resolved_manager = resolve_executable(
+        manager_cmd, "SPONGE_MANAGER", repo_root
+    )
+    run_dir = outputs_path / "manager_duplicate_id_smoke"
+    if run_dir.exists():
+        shutil.rmtree(run_dir)
+    run_dir.mkdir(parents=True)
+    config_path = run_dir / "manager.toml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "[manager]",
+                "block_steps = 1",
+                "epochs = 1",
+                "",
+                "[exchange]",
+                "enabled = false",
+                "",
+                "[worker_defaults]",
+                f'executable = "{resolved_manager}"',
+                'args = ["-mdin", "missing.spg.toml"]',
+                'working_directory_root = "."',
+                "",
+                "[schedules]",
+                "ids = [0, 0]",
+                "",
+                "[schedules.inputs]",
+                "target_temperature = [300.0, 301.0]",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [str(resolved_manager), "--config", str(config_path)],
+        cwd=run_dir,
+        capture_output=True,
+        text=True,
+        timeout=rest2_timeout,
+        check=False,
+        env=runtime_env(repo_root),
+    )
+    output = result.stdout + "\n" + result.stderr
+    assert result.returncode != 0
+    assert "duplicate schedule_id" in output

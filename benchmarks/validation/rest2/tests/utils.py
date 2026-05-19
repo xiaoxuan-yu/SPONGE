@@ -97,11 +97,11 @@ def write_rest2_manager_config(
     sponge_cmd,
 ):
     log_path = Path(run_dir) / "manager_exchange.log"
+    ids = list(range(len(lambdas)))
     lines = [
         "[manager]",
         f"block_steps = {block_steps}",
         f"epochs = {epochs}",
-        "emit_output = false",
         'transport = "tcp"',
         f'log_path = "{log_path}"',
         "",
@@ -110,25 +110,24 @@ def write_rest2_manager_config(
         'mode = "rest2"',
         "",
         "[worker_defaults]",
+        "emit_output = false",
         f'executable = "{sponge_cmd}"',
         'args = ["-mdin", "mdin.spg.toml", "-dont_check_input", "1"]',
+        f'working_directory_root = "{run_dir}"',
+        "",
+        "[worker_defaults.inputs]",
+        "target_temperature = 300.0",
+        'default_out_file_prefix = "rest2_smoke"',
+        "",
+        "[schedules]",
+        "ids = [" + ", ".join(str(schedule_id) for schedule_id in ids) + "]",
+        "",
+        "[schedules.inputs]",
+        "REST2_lambda_m = ["
+        + ", ".join(f"{lambda_m:g}" for lambda_m in lambdas)
+        + "]",
         "",
     ]
-    for schedule_id, lambda_m in enumerate(lambdas):
-        schedule_dir = Path(run_dir) / f"schedule_{schedule_id}"
-        lines.extend(
-            [
-                "[[schedules]]",
-                f"schedule_id = {schedule_id}",
-                f'name = "rest2_lambda_{lambda_m:g}"',
-                f'working_directory = "{schedule_dir}"',
-                "[schedules.inputs]",
-                "target_temperature = 300.0",
-                f"REST2_lambda_m = {lambda_m:g}",
-                'default_out_file_prefix = "rest2_smoke"',
-                "",
-            ]
-        )
     config_path = Path(run_dir) / "manager.toml"
     config_path.write_text("\n".join(lines))
     return config_path, log_path

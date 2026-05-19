@@ -61,7 +61,6 @@ schedule controls the Hamiltonian slot.
 block_steps = 1000
 epochs = 100
 transport = "tcp"
-emit_output = false
 log_path = "manager_exchange.log"
 
 [exchange]
@@ -69,26 +68,20 @@ enabled = true
 mode = "rest2"
 
 [worker_defaults]
-executable = "/path/to/SPONGE"
-args = ["-mdin", "mdin.spg.toml", "-dont_check_input", "1"]
+mdin = "mdin.spg.toml"
+emit_output = false
+args = ["-dont_check_input", "1"]
+working_directory_root = "replicas"
 
-[[schedules]]
-schedule_id = 0
-name = "rest2_lambda_1"
-working_directory = "replica_0"
-[schedules.inputs]
+[worker_defaults.inputs]
 target_temperature = 300.0
-REST2_lambda_m = 1.0
 default_out_file_prefix = "rest2"
 
-[[schedules]]
-schedule_id = 1
-name = "rest2_lambda_09"
-working_directory = "replica_1"
+[schedules]
+ids = [0, 1]
+
 [schedules.inputs]
-target_temperature = 300.0
-REST2_lambda_m = 0.9
-default_out_file_prefix = "rest2"
+REST2_lambda_m = [1.0, 0.9]
 ```
 
 The `rest2` exchange policy reuses the Hamiltonian REMD acceptance form:

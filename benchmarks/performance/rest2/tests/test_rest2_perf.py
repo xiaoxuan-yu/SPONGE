@@ -134,9 +134,7 @@ def test_rest2_remd_manager_micro_benchmark(
         shutil.rmtree(run_dir)
 
     for schedule_id in range(len(lambdas)):
-        case_dir = copy_ala2_case(
-            repo_root, run_dir, f"schedule_{schedule_id}"
-        )
+        case_dir = copy_ala2_case(repo_root, run_dir, str(schedule_id))
         _write_mdin(case_dir, step_limit=1000, lambda_m=1.0)
 
     config_path, log_path = write_rest2_manager_config(

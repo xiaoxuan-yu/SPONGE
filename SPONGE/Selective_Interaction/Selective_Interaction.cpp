@@ -14,8 +14,7 @@ void SELECTIVE_INTERACTION::Initial(CONTROLLER* controller, int atom_numbers)
 }
 
 void SELECTIVE_INTERACTION::Check_Solvent(CONTROLLER* controller,
-                                          int atom_numbers,
-                                          int solvent_numbers)
+                                          int atom_numbers, int solvent_numbers)
 {
     sits.Check_Solvent(controller, atom_numbers, solvent_numbers);
 }
@@ -26,9 +25,11 @@ void SELECTIVE_INTERACTION::Reset_Force_Energy(int* md_need_potential)
     rest2.Reset_Force_Energy(md_need_potential);
 }
 
-void SELECTIVE_INTERACTION::Update_And_Enhance(
-    const int step, float* d_total_potential, const int need_pressure,
-    LTMatrix3* d_total_virial, VECTOR* frc, float beta0)
+void SELECTIVE_INTERACTION::Update_And_Enhance(const int step,
+                                               float* d_total_potential,
+                                               const int need_pressure,
+                                               LTMatrix3* d_total_virial,
+                                               VECTOR* frc, float beta0)
 {
     sits.Update_And_Enhance(step, d_total_potential, need_pressure,
                             d_total_virial, frc, beta0);
@@ -91,8 +92,8 @@ void SELECTIVE_INTERACTION::LJ_Direct_CF_Force_With_Atom_Energy_And_Virial(
     const float* charge, LENNARD_JONES_INFORMATION* lj_info, VECTOR* md_frc,
     const LTMatrix3 cell, const LTMatrix3 rcell, const ATOM_GROUP* nl,
     const float cutoff, const float pme_beta, const int need_energy,
-    float* atom_energy_ww, const int need_pressure,
-    LTMatrix3* atom_virial_ww, float* elect_atom_ene)
+    float* atom_energy_ww, const int need_pressure, LTMatrix3* atom_virial_ww,
+    float* elect_atom_ene)
 {
     if (rest2.is_initialized)
     {

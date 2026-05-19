@@ -102,12 +102,12 @@ def write_manager_config(
     sponge_cmd,
 ):
     log_path = run_dir / "manager_exchange.log"
+    ids = list(range(len(temperatures)))
     lines = [
         "[manager]",
         f"block_steps = {block_steps}",
         f"epochs = {epochs}",
         f'transport = "{manager_mode}"',
-        "emit_output = false",
         f'log_path = "{log_path}"',
         "",
         "[exchange]",
@@ -116,40 +116,36 @@ def write_manager_config(
         "start_round = 0",
         "",
         "[worker_defaults]",
+        f'mdin = "{mdin_path}"',
+        "emit_output = false",
     ]
-    if sponge_cmd is not None:
-        lines.append(f'executable_path = "{sponge_cmd}"')
+    _ = sponge_cmd
     lines.extend(
         [
             "args = [",
-            f'  "-mdin", "{mdin_path}",',
             '  "-workspace", ".",',
             '  "-dont_check_input", "1",',
             "]",
             f'working_directory_root = "{run_dir}"',
             "",
+            "[worker_defaults.inputs]",
+            'default_out_file_prefix = "ice_tremd"',
+            "",
+            "[schedules]",
+            "ids = ["
+            + ", ".join(str(schedule_id) for schedule_id in ids)
+            + "]",
+            "",
+            "[schedules.inputs]",
+            "target_temperature = ["
+            + ", ".join(f"{temperature:g}" for temperature in temperatures)
+            + "]",
+            "",
         ]
     )
 
-    for schedule_id, temperature in enumerate(temperatures):
-        schedule_dir = run_dir / f"replica_{schedule_id:02d}"
-        schedule_dir.mkdir(parents=True, exist_ok=True)
-        lines.extend(
-            [
-                "[[schedules]]",
-                f"schedule_id = {schedule_id}",
-                f'label = "T_{temperature:g}"',
-                f'working_directory = "{schedule_dir.name}"',
-                "",
-                "[schedules.inputs]",
-                f"target_temperature = {temperature:g}",
-                f'default_out_file_prefix = "ice_tremd_{schedule_id:02d}"',
-                "",
-                "[schedules.worker]",
-                f'name = "worker_{schedule_id:02d}"',
-                "",
-            ]
-        )
+    for schedule_id in ids:
+        (run_dir / str(schedule_id)).mkdir(parents=True, exist_ok=True)
 
     config_path = run_dir / "manager.toml"
     config_path.write_text("\n".join(lines), encoding="utf-8")

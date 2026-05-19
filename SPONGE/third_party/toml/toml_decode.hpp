@@ -217,7 +217,11 @@ void assign_all_fields(const table& input, T& out, const Tuple& fields,
 template <class T>
 T decode_node(const node& value)
 {
-    if constexpr (std::is_same_v<T, int>)
+    if constexpr (std::is_same_v<T, node>)
+    {
+        return value;
+    }
+    else if constexpr (std::is_same_v<T, int>)
     {
         if (const auto* integer = value.as_integer())
         {

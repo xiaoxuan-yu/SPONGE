@@ -80,7 +80,6 @@ Minimal shape:
 block_steps = 1
 epochs = 1
 transport = "tcp"
-emit_output = false
 log_path = "/tmp/manager_exchange.log"
 
 [exchange]
@@ -89,26 +88,24 @@ mode = "hremd"
 start_round = 0
 
 [worker_defaults]
+mdin = "/abs/path/to/step2_mdin.txt"
+emit_output = false
 args = [
-  "-mdin", "/abs/path/to/step2_mdin.txt",
   "-workspace", ".",
   "-default_in_file_prefix", "TMP",
 ]
 working_directory_root = "/abs/path/to/remd_root"
 
-[[schedules]]
-schedule_id = 0
-label = "state_0"
-working_directory = "0"
-
-[schedules.inputs]
-target_temperature = 300.0
-hamiltonian_id = 0
-lambda_lj = 0.0
+[worker_defaults.inputs]
 default_out_file_prefix = "manager_smoke"
 
-[schedules.worker]
-name = "worker_0"
+[schedules]
+ids = [0, 1]
+
+[schedules.inputs]
+target_temperature = [300.0, 310.0]
+hamiltonian_id = [0, 1]
+lambda_lj = [0.0, 0.5]
 ```
 
 Notes:
@@ -118,17 +115,21 @@ Notes:
 - scalar `schedules.inputs` entries are appended to the worker command line as
   SPONGE input overrides, except manager-only metadata such as
   `hamiltonian_id`.
+- `worker_defaults.inputs` provides shared SPONGE input overrides for every
+  schedule. Schedule-local inputs override shared inputs.
+- `[schedules]` bulk syntax expands `ids` and list-valued inputs into multiple
+  schedules. It must not be mixed with `[[schedules]]`.
 - when `SPONGE_MANAGER` controls `block_steps` and `epochs`, it also controls
   the worker `step_limit`. Any `-step_limit` from `mdin`,
   `worker_defaults.args`, `schedules.worker.args`, or `schedules.inputs` is
   overridden to `block_steps * epochs`.
-- relative `working_directory`, `executable_path`, and `log_path` are resolved
-  relative to the config file location, or to `working_directory_root` when it
-  is set.
+- schedule working directories default to `<working_directory_root>/<id>`.
+  Relative `executable_path`, `mdin`, and `log_path` are resolved relative to
+  the config file location.
 - the effective `default_out_file_prefix` is made schedule-local by appending
   the schedule id, for example `manager_smoke_0` and `manager_smoke_1`.
-- if a schedule omits `worker.executable_path`, the manager defaults to a
-  sibling `SPONGE` executable next to `SPONGE_MANAGER`.
+- if no worker executable is configured, the manager searches for a sibling
+  `SPONGE` executable next to `SPONGE_MANAGER`, then falls back to `PATH`.
 - `manager.transport = "tcp"` enables the TCP loopback worker protocol and
   avoids temporary request/response files for child-process dispatch.
 - `manager.transport = "shm"` keeps TCP as the control channel, but moves the

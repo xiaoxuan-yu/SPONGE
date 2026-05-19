@@ -1,4 +1,4 @@
-#include "REST2.h"
+﻿#include "REST2.h"
 
 namespace
 {
@@ -170,8 +170,7 @@ void REST2_INFORMATION::Initial(CONTROLLER* controller, int atom_numbers_)
             spongeErrorMissingCommand, "REST2_INFORMATION::Initial",
             "Reason:\n\tREST2_lambda_m is required when REST2 is enabled.\n");
     }
-    controller->Check_Float("REST2", "lambda_m",
-                            "REST2_INFORMATION::Initial");
+    controller->Check_Float("REST2", "lambda_m", "REST2_INFORMATION::Initial");
     lambda_m = atof(controller->Command("REST2", "lambda_m"));
     if (lambda_m <= 0.0f)
     {
@@ -277,13 +276,13 @@ void REST2_INFORMATION::Get_Local(int* atom_local, int local_atom_numbers_,
     if (!is_initialized) return;
     local_atom_numbers = local_atom_numbers_;
     ghost_numbers = ghost_numbers_;
-    Launch_Device_Kernel(
-        REST2_Get_Local_Device,
-        (local_atom_numbers + ghost_numbers + CONTROLLER::device_max_thread -
-         1) /
-            CONTROLLER::device_max_thread,
-        CONTROLLER::device_max_thread, 0, NULL, atom_local, local_atom_numbers,
-        ghost_numbers, atom_sys_mark, atom_sys_mark_local);
+    Launch_Device_Kernel(REST2_Get_Local_Device,
+                         (local_atom_numbers + ghost_numbers +
+                          CONTROLLER::device_max_thread - 1) /
+                             CONTROLLER::device_max_thread,
+                         CONTROLLER::device_max_thread, 0, NULL, atom_local,
+                         local_atom_numbers, ghost_numbers, atom_sys_mark,
+                         atom_sys_mark_local);
 }
 
 void REST2_INFORMATION::Step_Print(CONTROLLER* controller)
@@ -317,8 +316,8 @@ void REST2_INFORMATION::LJ_Direct_CF_Force_With_Atom_Energy_And_Virial(
     const float* charge, LENNARD_JONES_INFORMATION* lj_info, VECTOR* md_frc,
     const LTMatrix3 cell, const LTMatrix3 rcell, const ATOM_GROUP* nl,
     const float cutoff, const float pme_beta, const int need_energy,
-    float* atom_energy_ww, const int need_pressure,
-    LTMatrix3* atom_virial_ww, float* elect_atom_ene)
+    float* atom_energy_ww, const int need_pressure, LTMatrix3* atom_virial_ww,
+    float* elect_atom_ene)
 {
     if (!is_initialized || !lj_info->is_initialized) return;
     Launch_Device_Kernel(
@@ -359,9 +358,9 @@ void REST2_INFORMATION::LJ_Direct_CF_Force_With_Atom_Energy_And_Virial(
     }
     Launch_Device_Kernel(
         f, gridSize, blockSize, 0, NULL, local_atom_numbers, solvent_numbers,
-        nl, lj_info->crd_with_LJ_parameters_local, cell, rcell,
-        lj_info->d_LJ_A, lj_info->d_LJ_B, atom_sys_mark_local, cutoff, md_frc,
-        pme_beta, atom_energy_ww, atom_virial_ww, elect_atom_ene,
+        nl, lj_info->crd_with_LJ_parameters_local, cell, rcell, lj_info->d_LJ_A,
+        lj_info->d_LJ_B, atom_sys_mark_local, cutoff, md_frc, pme_beta,
+        atom_energy_ww, atom_virial_ww, elect_atom_ene,
         lj_info->d_LJ_energy_atom, d_unscaled_atom_energy,
         d_effective_atom_energy, lambda_m, sqrt_lambda_m);
 }

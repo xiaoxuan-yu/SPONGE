@@ -14,9 +14,8 @@ struct SELECTIVE_INTERACTION
                        int solvent_numbers);
     void Reset_Force_Energy(int* md_need_potential);
     void Update_And_Enhance(const int step, float* d_total_potential,
-                            const int need_pressure,
-                            LTMatrix3* d_total_virial, VECTOR* frc,
-                            float beta0);
+                            const int need_pressure, LTMatrix3* d_total_virial,
+                            VECTOR* frc, float beta0);
     void Get_Local(int* atom_local, int local_atom_numbers, int ghost_numbers);
     void Step_Print(CONTROLLER* controller, float beta0);
 
