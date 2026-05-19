@@ -6,6 +6,7 @@ set(SOURCES
     ${PROJECT_ROOT_DIR}/SPONGE/manager/algorithms/remd/hamiltonian_remd.cpp
     ${PROJECT_ROOT_DIR}/SPONGE/manager/algorithms/remd/temperature_remd.cpp
     ${PROJECT_ROOT_DIR}/SPONGE/manager/algorithms/remd/temperature_hamiltonian_remd.cpp
+    ${PROJECT_ROOT_DIR}/SPONGE/manager/output/manager_printer.cpp
     ${PROJECT_ROOT_DIR}/SPONGE/worker_protocol/child_process_worker.cpp
     ${PROJECT_ROOT_DIR}/SPONGE/manager/manager_main.cpp
     ${SPONGE_RUNTIME_SOURCES})

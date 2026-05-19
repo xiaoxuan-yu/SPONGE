@@ -127,6 +127,28 @@ void ApplyManagerControlledArgs(ScheduleConfig* schedule,
     schedule->worker.managed_step_limit = managed_step_limit;
 }
 
+void EnsureWorkerWorkingDirectory(const WorkerConfig& worker)
+{
+    if (worker.working_directory.empty())
+    {
+        return;
+    }
+    const fs::path directory(worker.working_directory);
+    std::error_code error;
+    fs::create_directories(directory, error);
+    if (error)
+    {
+        throw std::runtime_error(
+            "failed to create worker directory: " + directory.string() + " (" +
+            error.message() + ")");
+    }
+    if (!fs::is_directory(directory))
+    {
+        throw std::runtime_error("worker path is not a directory: " +
+                                 directory.string());
+    }
+}
+
 ExchangeObservable MakeExchangeObservable(
     int schedule_id, const sponge::WorkerExchangeObservable& observable)
 {
@@ -277,6 +299,7 @@ void Manager::BuildScheduleRecords()
         record.config = schedule;
         AppendWorkerInputArgs(&record.config);
         ApplyManagerControlledArgs(&record.config, config_.managed_step_limit);
+        EnsureWorkerWorkingDirectory(record.config.worker);
         schedules_.push_back(record);
 
         WorkerHandle worker;

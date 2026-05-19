@@ -220,6 +220,8 @@ working_directory_root = "replicas"
 /data/run/replicas/0
 ```
 
+如果工作目录不存在，`SPONGE_MANAGER` 会在启动 worker 前自动创建。
+
 `worker_defaults.inputs` 和 `schedules.inputs` 中的字符串路径参数会由 manager 解析。相对路径会按 `manager.toml` 所在目录解析成绝对路径，再传给 worker。例如：
 
 ```toml
@@ -428,4 +430,6 @@ block_steps * epochs
 
 `SPONGE_MANAGER` 总是要求 worker 走正常 SPONGE 输出路径。是否每步打印、多久写一次 mdout、trajectory、restart 或 box，由 mdin 或 `worker_defaults.inputs` / `schedules.inputs` 中的 `write_*_interval` 参数控制。
 
-因此 `manager.toml` 不提供 `emit_output` 开关。如果想减少 I/O，应把对应输出 interval 调大，或把不需要的输出 interval 设为 `0`。
+manager 托管 worker 时，worker 的 stdout/stderr 不直接打印到屏幕，而是追加到各自工作目录下的 `worker_<id>_manager.log`。屏幕上只保留 manager 自己的摘要和错误信息。
+
+因此 `manager.toml` 不提供 `emit_output` 开关。如果想减少文件 I/O，应把对应输出 interval 调大，或把不需要的输出 interval 设为 `0`。

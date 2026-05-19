@@ -10,6 +10,7 @@
 #include "algorithms/remd/temperature_remd.h"
 #include "config.h"
 #include "core/manager.h"
+#include "output/manager_printer.h"
 
 namespace
 {
@@ -29,25 +30,12 @@ int RunManagerExecution(
     manager_config.managed_step_limit =
         execution.manager.block_steps * execution.epochs;
     sponge::manager::Manager manager(std::move(manager_config));
-    std::cout << manager.DescribePlan();
+    sponge::manager::ManagerPrinter printer(std::cout);
+    printer.PrintStartupSummary(execution, manager);
     if (execution.remd_mode.empty())
     {
         const auto results = manager.ExecuteAllSchedulesOnce(kEmitOutput);
-        std::cout << "Executed " << results.size() << " schedule block(s)\n";
-        for (const auto& result : results)
-        {
-            std::cout << "schedule[" << result.schedule_id
-                      << "] step=" << result.observable.step
-                      << " time_ps=" << result.observable.time_ps
-                      << " potential=" << result.observable.potential_energy
-                      << " temperature=" << result.observable.temperature
-                      << " snapshot_time_ps=" << result.snapshot.current_time_ps
-                      << " snapshot_potential="
-                      << result.snapshot.total_potential
-                      << " snapshot_temperature=" << result.snapshot.temperature
-                      << " runtime_state=" << result.runtime_state.location
-                      << '\n';
-        }
+        printer.PrintSingleRunSummary(results);
         return 0;
     }
     sponge::manager::remd::TemperatureReplicaExchangePolicy tremd_policy;
@@ -61,87 +49,65 @@ int RunManagerExecution(
         rest2_policy_config);
     sponge::manager::remd::TemperatureHamiltonianReplicaExchangePolicy
         htremd_policy;
+    int cumulative_accepted = 0;
+    int cumulative_attempts = 0;
     for (int epoch = 0; epoch < execution.epochs; epoch++)
     {
         std::vector<sponge::manager::BlockExecutionResult> block_results;
         std::vector<sponge::manager::ExchangeAttempt> exchange_attempts;
+        int exchange_round = execution.exchange_round + epoch;
         if (execution.remd_mode == "tremd")
         {
             const auto epoch_result = tremd_policy.ExecuteEpoch(
-                &manager, execution.exchange_round + epoch, kEmitOutput);
+                &manager, exchange_round, kEmitOutput);
             block_results = epoch_result.block_results;
             exchange_attempts = epoch_result.exchange_attempts;
-            std::cout << "T-REMD epoch " << epoch << " round "
-                      << epoch_result.exchange_round
-                      << " blocks=" << epoch_result.block_results.size()
-                      << " attempts=" << epoch_result.exchange_attempts.size()
-                      << '\n';
+            exchange_round = epoch_result.exchange_round;
         }
         else if (execution.remd_mode == "hremd")
         {
             const auto epoch_result = hremd_policy.ExecuteEpoch(
-                &manager, execution.exchange_round + epoch, kEmitOutput);
+                &manager, exchange_round, kEmitOutput);
             block_results = epoch_result.block_results;
             exchange_attempts = epoch_result.exchange_attempts;
-            std::cout << "H-REMD epoch " << epoch << " round "
-                      << epoch_result.exchange_round
-                      << " blocks=" << epoch_result.block_results.size()
-                      << " attempts=" << epoch_result.exchange_attempts.size()
-                      << '\n';
+            exchange_round = epoch_result.exchange_round;
         }
         else if (execution.remd_mode == "htremd")
         {
             const auto epoch_result = htremd_policy.ExecuteEpoch(
-                &manager, execution.exchange_round + epoch, kEmitOutput);
+                &manager, exchange_round, kEmitOutput);
             block_results = epoch_result.block_results;
             exchange_attempts = epoch_result.exchange_attempts;
-            std::cout << "HT-REMD epoch " << epoch << " round "
-                      << epoch_result.exchange_round
-                      << " blocks=" << epoch_result.block_results.size()
-                      << " attempts=" << epoch_result.exchange_attempts.size()
-                      << '\n';
+            exchange_round = epoch_result.exchange_round;
         }
         else if (execution.remd_mode == "rest2")
         {
             const auto epoch_result = rest2_policy.ExecuteEpoch(
-                &manager, execution.exchange_round + epoch, kEmitOutput);
+                &manager, exchange_round, kEmitOutput);
             block_results = epoch_result.block_results;
             exchange_attempts = epoch_result.exchange_attempts;
-            std::cout << "REST2-REMD epoch " << epoch << " round "
-                      << epoch_result.exchange_round
-                      << " blocks=" << epoch_result.block_results.size()
-                      << " attempts=" << epoch_result.exchange_attempts.size()
-                      << '\n';
+            exchange_round = epoch_result.exchange_round;
         }
         else
         {
             throw std::runtime_error("unsupported remd mode: " +
                                      execution.remd_mode);
         }
-        for (const auto& result : block_results)
-        {
-            std::cout << "schedule[" << result.schedule_id
-                      << "] step=" << result.observable.step
-                      << " time_ps=" << result.observable.time_ps
-                      << " potential=" << result.observable.potential_energy
-                      << " temperature=" << result.observable.temperature
-                      << " runtime_state=" << result.runtime_state.location
-                      << " walker=" << result.runtime_state.walker_id << '\n';
-        }
         for (const auto& attempt : exchange_attempts)
         {
-            std::cout << "pair[" << attempt.pair_index << "] "
-                      << attempt.pair.left_schedule_id << "<->"
-                      << attempt.pair.right_schedule_id
-                      << " log_acc=" << attempt.log_acceptance
-                      << " p=" << attempt.acceptance_probability
-                      << " r=" << attempt.random_value
-                      << " accepted=" << (attempt.accepted ? 1 : 0) << '\n';
+            if (attempt.accepted)
+            {
+                cumulative_accepted += 1;
+            }
         }
+        cumulative_attempts += static_cast<int>(exchange_attempts.size());
+        printer.PrintEpochReport(execution.remd_mode, epoch, execution.epochs,
+                                 exchange_round, execution.manager.block_steps,
+                                 block_results, exchange_attempts,
+                                 cumulative_accepted, cumulative_attempts);
         manager.AppendExchangeAttempts(execution.remd_mode, epoch,
                                        exchange_attempts);
         manager.AppendScheduleStates(execution.remd_mode, epoch);
-        std::cout << manager.DescribePlan();
     }
     return 0;
 }

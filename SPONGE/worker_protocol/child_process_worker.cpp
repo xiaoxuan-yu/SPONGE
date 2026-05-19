@@ -83,6 +83,30 @@ void WaitForFile(const fs::path& path, const std::future<int>* child_exit,
     }
 }
 
+fs::path ManagerWorkerLogPath(
+    const sponge::manager::WorkerConfig& worker_config)
+{
+    const fs::path directory = worker_config.working_directory.empty()
+                                   ? fs::current_path()
+                                   : fs::path(worker_config.working_directory);
+    const std::string worker_name =
+        worker_config.name.empty() ? "worker" : worker_config.name;
+    return directory / (worker_name + "_manager.log");
+}
+
+void AppendManagerOutputRedirection(
+    std::ostringstream* command,
+    const sponge::manager::WorkerConfig& worker_config)
+{
+    if (command == nullptr)
+    {
+        return;
+    }
+    (*command) << " >> "
+               << ShellQuote(ManagerWorkerLogPath(worker_config).string())
+               << " 2>&1";
+}
+
 void SetOrAppendArg(std::vector<std::string>* args, const std::string& key,
                     const std::string& value)
 {
@@ -147,6 +171,7 @@ WorkerExecutionResponse RunChildProcessWorker(
     }
     command << " --worker-request " << ShellQuote(request_path.string())
             << " --worker-response " << ShellQuote(response_path.string());
+    AppendManagerOutputRedirection(&command, worker_config);
 
     const int exit_code = std::system(command.str().c_str());
     if (exit_code != 0)
@@ -211,6 +236,7 @@ WorkerExecutionResponse RunTcpChildProcessWorker(
     }
     command << " --worker-tcp "
             << ShellQuote("127.0.0.1:" + std::to_string(port));
+    AppendManagerOutputRedirection(&command, worker_config);
 
     auto child_exit =
         std::async(std::launch::async, [command_text = command.str()]()
@@ -315,6 +341,7 @@ void TcpChildProcessWorkerSession::Start()
     }
     command << " --worker-tcp "
             << ShellQuote("127.0.0.1:" + std::to_string(port));
+    AppendManagerOutputRedirection(&command, worker_config_);
 
     child_exit_ =
         std::async(std::launch::async, [command_text = command.str()]()
@@ -473,6 +500,7 @@ void FileChildProcessWorkerSession::Start()
     }
     command << " --worker-file-session "
             << ShellQuote(session_directory.string());
+    AppendManagerOutputRedirection(&command, worker_config_);
 
     child_exit_ =
         std::async(std::launch::async, [command_text = command.str()]()
