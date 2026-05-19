@@ -127,4 +127,5 @@ pixi run -e dev-cuda13 vali-barostat    # barostat validation
 
 - [Build Guide](build-guide.md) — detailed multi-platform build instructions
 - [Input Reference](input-reference/README.md) — full TOML input parameter reference
+- [SPONGE_MANAGER Config](manager-config.md) — multi-worker scheduling and REMD config
 - [Contributing](contributing.md) — code style and contribution guidelines

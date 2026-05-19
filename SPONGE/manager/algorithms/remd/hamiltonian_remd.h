@@ -37,7 +37,7 @@ class HamiltonianReplicaExchangePolicy
     std::vector<ExchangeAttempt> AttemptOddEvenRound(Manager* manager,
                                                      int exchange_round);
     EpochResult ExecuteEpoch(Manager* manager, int exchange_round,
-                             bool emit_output = false);
+                             bool emit_output = true);
 
    private:
     Config config_;

@@ -11,7 +11,6 @@ struct ManagerExecutionConfig
 {
     Manager::ManagerConfig manager;
     int epochs = 1;
-    bool emit_output = false;
     std::string remd_mode;
     int exchange_round = 0;
 };

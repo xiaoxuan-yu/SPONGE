@@ -161,10 +161,13 @@ def test_manager_rejects_conflicting_bulk_schedule_outputs(
                 "",
                 "[worker_defaults]",
                 f'executable = "{resolved_manager}"',
-                'args = ["-mdin", "missing.spg.toml"]',
                 'working_directory_root = "."',
                 "",
                 "[worker_defaults.inputs]",
+                'mode = "NVT"',
+                "dt = 0.002",
+                "cutoff = 8.0",
+                'default_in_file_prefix = "ALA"',
                 'default_out_file_prefix = "mdout"',
                 "",
                 "[schedules]",
@@ -238,3 +241,85 @@ def test_manager_rejects_duplicate_bulk_schedule_ids(
     output = result.stdout + "\n" + result.stderr
     assert result.returncode != 0
     assert "duplicate schedule_id" in output
+
+
+def test_manager_resolves_input_paths_relative_to_config(
+    outputs_path, sponge_cmd, manager_cmd, rest2_timeout
+):
+    repo_root = _repo_root()
+    resolved_sponge = resolve_executable(sponge_cmd, "SPONGE", repo_root)
+    resolved_manager = resolve_executable(
+        manager_cmd, "SPONGE_MANAGER", repo_root
+    )
+    run_dir = outputs_path / "manager_input_path_resolution"
+    if run_dir.exists():
+        shutil.rmtree(run_dir)
+    run_dir.mkdir(parents=True)
+    copy_ala2_case(repo_root, run_dir, "system")
+    (run_dir / "replicas" / "0").mkdir(parents=True)
+    config_path = run_dir / "manager.toml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "[manager]",
+                "block_steps = 1",
+                "epochs = 1",
+                "",
+                "[exchange]",
+                "enabled = false",
+                "",
+                "[worker_defaults]",
+                f'executable = "{resolved_sponge}"',
+                'args = ["-dont_check_input", "1"]',
+                'working_directory_root = "replicas"',
+                "",
+                "[worker_defaults.inputs]",
+                'md_name = "no-mdin manager path resolution"',
+                'mode = "nvt"',
+                "dt = 0.002",
+                "cutoff = 8.0",
+                'thermostat = "middle_langevin"',
+                "thermostat_tau = 1.0",
+                "thermostat_seed = 2026",
+                'default_in_file_prefix = "unused/ALA"',
+                'constrain_mode = "SHAKE"',
+                "print_zeroth_frame = 1",
+                "write_mdout_interval = 1",
+                "write_information_interval = 1",
+                'default_out_file_prefix = "mdout"',
+                "",
+                "[schedules]",
+                "ids = [0]",
+                "",
+                "[schedules.inputs]",
+                "target_temperature = [300.0]",
+                'default_in_file_prefix = ["system/ALA"]',
+                'coordinate_in_file = ["system/ALA_coordinate.txt"]',
+            ]
+        ),
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [str(resolved_manager), "--config", str(config_path)],
+        cwd=run_dir,
+        capture_output=True,
+        text=True,
+        timeout=rest2_timeout,
+        check=False,
+        env=runtime_env(repo_root),
+    )
+    output = result.stdout + "\n" + result.stderr
+    assert result.returncode == 0, output
+    mdinfo = run_dir / "replicas" / "0" / "mdout_0.info"
+    mdout = run_dir / "replicas" / "0" / "mdout_0.out"
+    assert mdinfo.exists()
+    assert mdout.exists()
+    mdinfo_text = mdinfo.read_text()
+    assert (
+        f"-default_in_file_prefix {run_dir / 'system' / 'ALA'}" in mdinfo_text
+    )
+    assert (
+        f"-coordinate_in_file {run_dir / 'system' / 'ALA_coordinate.txt'}"
+        in mdinfo_text
+    )
+    assert "-default_out_file_prefix mdout_0" in mdinfo_text

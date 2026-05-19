@@ -24,7 +24,6 @@ struct ManagerTomlSection
     std::optional<std::string> log_path;
     std::optional<std::string> exchange_log_path;
     std::optional<int> epochs;
-    std::optional<bool> emit_output;
     std::optional<std::string> remd_mode;
     std::optional<int> exchange_round;
     std::optional<std::string> transport;
@@ -53,7 +52,6 @@ struct WorkerDefaultsTomlSection
     std::optional<std::string> mdin;
     std::optional<std::vector<std::string>> args;
     std::optional<std::string> working_directory_root;
-    std::optional<bool> emit_output;
     std::optional<sponge::toml_decode::table> inputs;
 };
 
@@ -144,13 +142,46 @@ ScheduleInputValue DecodeScheduleInputValue(
         " must be a scalar string, integer, float, or bool");
 }
 
-ScheduleInputs DecodeScheduleInputs(const sponge::toml_decode::table& input)
+bool EndsWith(const std::string& text, const std::string& suffix)
+{
+    return text.size() >= suffix.size() &&
+           text.compare(text.size() - suffix.size(), suffix.size(), suffix) ==
+               0;
+}
+
+bool IsManagerResolvedPathInput(const std::string& key)
+{
+    if (key == "default_out_file_prefix")
+    {
+        return false;
+    }
+    return key == "default_in_file_prefix" || EndsWith(key, "_in_file") ||
+           EndsWith(key, "_out_file") || EndsWith(key, "_file") ||
+           EndsWith(key, "_path") || EndsWith(key, "_directory");
+}
+
+ScheduleInputValue ResolvePathInputValue(const fs::path& config_dir,
+                                         const std::string& key,
+                                         ScheduleInputValue value)
+{
+    auto* text = std::get_if<std::string>(&value);
+    if (text == nullptr || text->empty() || !IsManagerResolvedPathInput(key))
+    {
+        return value;
+    }
+    *text = ResolveMaybeRelativePath(config_dir, *text);
+    return value;
+}
+
+ScheduleInputs DecodeScheduleInputs(const fs::path& config_dir,
+                                    const sponge::toml_decode::table& input)
 {
     ScheduleInputs out;
     for (const auto& item : input)
     {
-        out.values[item.first] =
-            DecodeScheduleInputValue(item.first, item.second);
+        out.values[item.first] = ResolvePathInputValue(
+            config_dir, item.first,
+            DecodeScheduleInputValue(item.first, item.second));
     }
     return out;
 }
@@ -502,7 +533,6 @@ SPONGE_TOML_DECODE_REFLECT(
     SPONGE_TOML_DECODE_MEMBER(sponge::manager::ManagerTomlSection,
                               exchange_log_path),
     SPONGE_TOML_DECODE_MEMBER(sponge::manager::ManagerTomlSection, epochs),
-    SPONGE_TOML_DECODE_MEMBER(sponge::manager::ManagerTomlSection, emit_output),
     SPONGE_TOML_DECODE_MEMBER(sponge::manager::ManagerTomlSection, remd_mode),
     SPONGE_TOML_DECODE_MEMBER(sponge::manager::ManagerTomlSection,
                               exchange_round),
@@ -535,8 +565,6 @@ SPONGE_TOML_DECODE_REFLECT(
     SPONGE_TOML_DECODE_MEMBER(sponge::manager::WorkerDefaultsTomlSection, args),
     SPONGE_TOML_DECODE_MEMBER(sponge::manager::WorkerDefaultsTomlSection,
                               working_directory_root),
-    SPONGE_TOML_DECODE_MEMBER(sponge::manager::WorkerDefaultsTomlSection,
-                              emit_output),
     SPONGE_TOML_DECODE_MEMBER(sponge::manager::WorkerDefaultsTomlSection,
                               inputs))
 
@@ -576,8 +604,6 @@ ManagerExecutionConfig LoadManagerExecutionConfigFromToml(
     ManagerExecutionConfig out;
     out.manager.block_steps = parsed.manager.block_steps.value_or(1000);
     out.epochs = parsed.manager.epochs.value_or(1);
-    out.emit_output = parsed.worker_defaults.emit_output.value_or(
-        parsed.manager.emit_output.value_or(true));
     out.remd_mode =
         parsed.exchange.mode.value_or(parsed.manager.remd_mode.value_or(""));
     const bool exchange_enabled =
@@ -628,7 +654,8 @@ ManagerExecutionConfig LoadManagerExecutionConfigFromToml(
     ScheduleInputs default_inputs;
     if (parsed.worker_defaults.inputs.has_value())
     {
-        default_inputs = DecodeScheduleInputs(*parsed.worker_defaults.inputs);
+        default_inputs =
+            DecodeScheduleInputs(config_dir, *parsed.worker_defaults.inputs);
     }
     const auto default_executable =
         parsed.worker_defaults.executable.has_value()
@@ -645,8 +672,9 @@ ManagerExecutionConfig LoadManagerExecutionConfigFromToml(
         schedule.inputs = default_inputs;
         if (schedule_in.inputs.has_value())
         {
-            MergeScheduleInputs(&schedule.inputs,
-                                DecodeScheduleInputs(*schedule_in.inputs));
+            MergeScheduleInputs(
+                &schedule.inputs,
+                DecodeScheduleInputs(config_dir, *schedule_in.inputs));
         }
 
         schedule.worker.name = schedule_in.worker.name.value_or(

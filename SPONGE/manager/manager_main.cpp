@@ -103,7 +103,6 @@ void PrintUsage()
               << "                [--lambda-lj-list 0.0,0.33,0.66,1.0]\n"
               << "                [--thermo-temperatures 300,320,340,360]\n"
               << "                [--block-steps N] [--epochs N]\n"
-              << "                [--emit-output 0|1]\n"
               << "                [--remd-mode tremd|hremd|htremd|rest2]\n"
               << "                [--exchange-round N]\n";
 }
@@ -111,6 +110,7 @@ void PrintUsage()
 int RunManagerExecution(
     const sponge::manager::ManagerExecutionConfig& execution)
 {
+    constexpr bool kEmitOutput = true;
     sponge::manager::Manager::ManagerConfig manager_config = execution.manager;
     manager_config.managed_step_limit =
         execution.manager.block_steps * execution.epochs;
@@ -118,8 +118,7 @@ int RunManagerExecution(
     std::cout << manager.DescribePlan();
     if (execution.remd_mode.empty())
     {
-        const auto results =
-            manager.ExecuteAllSchedulesOnce(execution.emit_output);
+        const auto results = manager.ExecuteAllSchedulesOnce(kEmitOutput);
         std::cout << "Executed " << results.size() << " schedule block(s)\n";
         for (const auto& result : results)
         {
@@ -155,8 +154,7 @@ int RunManagerExecution(
         if (execution.remd_mode == "tremd")
         {
             const auto epoch_result = tremd_policy.ExecuteEpoch(
-                &manager, execution.exchange_round + epoch,
-                execution.emit_output);
+                &manager, execution.exchange_round + epoch, kEmitOutput);
             block_results = epoch_result.block_results;
             exchange_attempts = epoch_result.exchange_attempts;
             std::cout << "T-REMD epoch " << epoch << " round "
@@ -168,8 +166,7 @@ int RunManagerExecution(
         else if (execution.remd_mode == "hremd")
         {
             const auto epoch_result = hremd_policy.ExecuteEpoch(
-                &manager, execution.exchange_round + epoch,
-                execution.emit_output);
+                &manager, execution.exchange_round + epoch, kEmitOutput);
             block_results = epoch_result.block_results;
             exchange_attempts = epoch_result.exchange_attempts;
             std::cout << "H-REMD epoch " << epoch << " round "
@@ -181,8 +178,7 @@ int RunManagerExecution(
         else if (execution.remd_mode == "htremd")
         {
             const auto epoch_result = htremd_policy.ExecuteEpoch(
-                &manager, execution.exchange_round + epoch,
-                execution.emit_output);
+                &manager, execution.exchange_round + epoch, kEmitOutput);
             block_results = epoch_result.block_results;
             exchange_attempts = epoch_result.exchange_attempts;
             std::cout << "HT-REMD epoch " << epoch << " round "
@@ -194,8 +190,7 @@ int RunManagerExecution(
         else if (execution.remd_mode == "rest2")
         {
             const auto epoch_result = rest2_policy.ExecuteEpoch(
-                &manager, execution.exchange_round + epoch,
-                execution.emit_output);
+                &manager, execution.exchange_round + epoch, kEmitOutput);
             block_results = epoch_result.block_results;
             exchange_attempts = epoch_result.exchange_attempts;
             std::cout << "REST2-REMD epoch " << epoch << " round "
@@ -247,7 +242,6 @@ int main(int argc, char** argv)
     std::vector<double> lambda_ladder;
     std::vector<double> thermo_temperatures;
     int block_steps = 1000;
-    bool emit_output = false;
     std::string remd_mode;
     int epochs = 1;
     int exchange_round = 0;
@@ -299,10 +293,6 @@ int main(int argc, char** argv)
         else if (arg == "--epochs")
         {
             epochs = std::stoi(require_value("--epochs"));
-        }
-        else if (arg == "--emit-output")
-        {
-            emit_output = std::stoi(require_value("--emit-output")) != 0;
         }
         else if (arg == "--remd-mode")
         {
@@ -397,7 +387,6 @@ int main(int argc, char** argv)
     execution.manager.exchange_log_path =
         (root / "manager_exchange.log").string();
     execution.epochs = epochs;
-    execution.emit_output = emit_output;
     execution.remd_mode = remd_mode;
     execution.exchange_round = exchange_round;
     const fs::path manager_exe = fs::absolute(argv[0]).lexically_normal();

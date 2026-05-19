@@ -31,6 +31,15 @@ def pytest_addoption(parser):
         default=1200,
         help="Timeout in seconds for each REST2 performance command.",
     )
+    group.addoption(
+        "--fep-rest2-root",
+        action="store",
+        default=None,
+        help=(
+            "Root directory of the four-replica FEP test system used by the "
+            "FEP+REST2 manager benchmark. Defaults to the repository fixture."
+        ),
+    )
 
 
 @pytest.fixture(scope="session")
@@ -59,3 +68,11 @@ def rest2_perf_timeout(pytestconfig):
     if value <= 0:
         raise pytest.UsageError("--rest2-perf-timeout must be positive")
     return value
+
+
+@pytest.fixture(scope="session")
+def fep_rest2_root(pytestconfig):
+    value = pytestconfig.getoption("--fep-rest2-root")
+    if value:
+        return Path(value).resolve()
+    return Path(__file__).resolve().parents[1] / "data" / "fep_test_for_remd"

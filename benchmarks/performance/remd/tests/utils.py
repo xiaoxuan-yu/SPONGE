@@ -117,7 +117,6 @@ def write_manager_config(
         "",
         "[worker_defaults]",
         f'mdin = "{mdin_path}"',
-        "emit_output = false",
     ]
     _ = sponge_cmd
     lines.extend(

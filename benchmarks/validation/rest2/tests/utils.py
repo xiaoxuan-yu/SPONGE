@@ -110,7 +110,6 @@ def write_rest2_manager_config(
         'mode = "rest2"',
         "",
         "[worker_defaults]",
-        "emit_output = false",
         f'executable = "{sponge_cmd}"',
         'args = ["-mdin", "mdin.spg.toml", "-dont_check_input", "1"]',
         f'working_directory_root = "{run_dir}"',

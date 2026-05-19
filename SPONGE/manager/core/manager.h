@@ -36,7 +36,7 @@ class Manager
     std::string DescribePlan() const;
     BlockExecutionResult ExecuteScheduleBlock(const BlockExecutionPlan& plan);
     std::vector<BlockExecutionResult> ExecuteAllSchedulesOnce(
-        bool emit_output = false);
+        bool emit_output = true);
     void ApplyRuntimeStateSwap(const RuntimeStateSwapOperation& operation);
     ExchangeObservable ProbeObservable(int source_schedule_id,
                                        int target_schedule_id);
