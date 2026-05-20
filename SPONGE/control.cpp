@@ -195,7 +195,15 @@ void CONTROLLER::Arguments_Parse(int argc, char** argv)
                 else
                     break;
             }
+            if (commands.count(temp1 + 1))
+            {
+                sprintf(temp3, "Reason:\n\t'%s' is set more than once\n",
+                        temp1 + 1);
+                Throw_SPONGE_Error(spongeErrorConflictingCommand,
+                                   "CONTROLLER::Arguments_Parse", temp3);
+            }
             Set_Command(temp1 + 1, temp2);
+            command_from_cli[temp1 + 1] = 1;
             if (is_str_equal(temp1 + 1, "workspace", 1))
             {
                 workspace_from_cli = true;
@@ -555,6 +563,10 @@ void CONTROLLER::Set_Command(const char* Flag, const char* Value, int Check,
     strcat(temp, Flag);
     if (commands.count(temp))
     {
+        if (command_from_cli.count(temp))
+        {
+            return;
+        }
         sprintf(temp2, "Reason:\n\t'%s' is set more than once\n", temp);
         Throw_SPONGE_Error(spongeErrorConflictingCommand,
                            "CONTROLLER::Set_Command", temp2);
@@ -908,6 +920,27 @@ void CONTROLLER::Clear()
         MPI_Finalize();
 #endif
     }
+    commands.clear();
+    original_commands.clear();
+    command_check.clear();
+    choice_check.clear();
+    warnings.clear();
+    outputs_content.clear();
+    outputs_format.clear();
+    outputs_key.clear();
+    time_recorders.clear();
+    time_recorder_names.clear();
+    workspace_from_cli = false;
+    mdin_is_toml = false;
+    mdin_toml_source_path.clear();
+    mdin_toml_content.clear();
+    mdinfo = NULL;
+    mdout = NULL;
+    printf_sum = 0;
+    simulation_speed = 0;
+    warn_of_initialization = false;
+    is_initialized = 0;
+    is_controller_printf_initialized = 0;
 }
 
 TIME_RECORDER* CONTROLLER::Get_Time_Recorder(const char* name)

@@ -1,0 +1,325 @@
+import math
+import shutil
+import subprocess
+
+import pytest
+
+from benchmarks.utils import Runner
+from benchmarks.validation.rest2.tests.utils import (
+    copy_ala2_case,
+    parse_exchange_log,
+    repo_root_from_test_file,
+    resolve_executable,
+    runtime_env,
+    write_rest2_manager_config,
+    write_rest2_mdin,
+)
+from benchmarks.validation.utils import parse_mdout_rows
+
+
+REST2_COLUMNS = (
+    "REST2_lambda_m",
+    "REST2_unscaled",
+    "REST2_effective",
+    "REST2_bias",
+)
+
+
+def _repo_root():
+    return repo_root_from_test_file(__file__)
+
+
+def _run_sponge(case_dir, *, sponge_cmd, timeout):
+    repo_root = _repo_root()
+    resolved_sponge = resolve_executable(sponge_cmd, "SPONGE", repo_root)
+    Runner.run_sponge(
+        case_dir,
+        timeout=timeout,
+        sponge_cmd=resolved_sponge,
+        env=runtime_env(repo_root),
+    )
+
+
+def test_rest2_single_replica_energy_columns_and_scaling(
+    outputs_path, sponge_cmd, rest2_timeout
+):
+    repo_root = _repo_root()
+    first_rows = {}
+    for lambda_m in (1.0, 0.8, 0.6):
+        run_name = f"single_lambda_{str(lambda_m).replace('.', 'p')}"
+        case_dir = copy_ala2_case(repo_root, outputs_path, run_name)
+        write_rest2_mdin(case_dir, lambda_m, step_limit=20)
+        _run_sponge(case_dir, sponge_cmd=sponge_cmd, timeout=rest2_timeout)
+
+        rows = parse_mdout_rows(
+            case_dir / "mdout.txt", REST2_COLUMNS, int_columns=()
+        )
+        assert rows
+        first_rows[lambda_m] = rows[0]
+        for row in rows:
+            assert row["REST2_lambda_m"] == pytest.approx(lambda_m)
+            for column in REST2_COLUMNS[1:]:
+                assert math.isfinite(row[column])
+
+    assert first_rows[1.0]["REST2_bias"] == pytest.approx(0.0, abs=1.0e-4)
+    assert first_rows[1.0]["REST2_effective"] == pytest.approx(
+        first_rows[1.0]["REST2_unscaled"], abs=1.0e-4
+    )
+    assert first_rows[0.8]["REST2_bias"] > first_rows[1.0]["REST2_bias"]
+    assert first_rows[0.6]["REST2_bias"] > first_rows[0.8]["REST2_bias"]
+
+
+def test_rest2_manager_smoke_with_schedule_input_overrides(
+    outputs_path, sponge_cmd, manager_cmd, rest2_timeout
+):
+    repo_root = _repo_root()
+    resolved_sponge = resolve_executable(sponge_cmd, "SPONGE", repo_root)
+    resolved_manager = resolve_executable(
+        manager_cmd, "SPONGE_MANAGER", repo_root
+    )
+    run_dir = outputs_path / "manager_rest2_smoke"
+    lambdas = (1.0, 0.9, 0.8, 0.7)
+    block_steps = 3
+    epochs = 3
+    if run_dir.exists():
+        shutil.rmtree(run_dir)
+
+    for schedule_id in range(len(lambdas)):
+        case_dir = copy_ala2_case(repo_root, run_dir, str(schedule_id))
+        write_rest2_mdin(case_dir, 1.0, step_limit=1000)
+
+    config_path, log_path = write_rest2_manager_config(
+        run_dir,
+        lambdas=lambdas,
+        block_steps=block_steps,
+        epochs=epochs,
+        sponge_cmd=resolved_sponge,
+    )
+
+    output = Runner.run_command(
+        [resolved_manager, "--config", config_path],
+        cwd=run_dir,
+        timeout=rest2_timeout,
+        env=runtime_env(repo_root),
+    )
+    assert "REST2-REMD epoch" in output
+    assert log_path.exists()
+
+    attempts, states = parse_exchange_log(log_path)
+    assert len(attempts) == 5
+    assert len(states) == len(lambdas) * epochs
+    assert {row["mode"] for row in attempts} == {"rest2"}
+    assert {row["mode"] for row in states} == {"rest2"}
+
+    probabilities = [float(row["acceptance_probability"]) for row in attempts]
+    random_values = [float(row["random_value"]) for row in attempts]
+    assert all(0.0 <= value <= 1.0 for value in probabilities)
+    assert all(0.0 <= value <= 1.0 for value in random_values)
+    assert len(set(random_values)) > 1
+
+    accepted = [row for row in attempts if row["accepted"] == "1"]
+    assert accepted
+    final_walker_ids = [
+        int(row["walker_id"]) for row in states[-len(lambdas) :]
+    ]
+    assert sorted(final_walker_ids) == list(range(len(lambdas)))
+    assert final_walker_ids != list(range(len(lambdas)))
+
+    for schedule_id, lambda_m in enumerate(lambdas):
+        mdout = run_dir / str(schedule_id) / f"rest2_smoke_{schedule_id}.out"
+        mdinfo = run_dir / str(schedule_id) / f"rest2_smoke_{schedule_id}.info"
+        assert mdout.exists()
+        assert mdinfo.exists()
+        mdout_header = mdout.read_text().splitlines()[0]
+        for column in REST2_COLUMNS:
+            assert column in mdout_header
+        assert f"REST2 lambda_m set to {lambda_m:.6f}" in mdinfo.read_text()
+
+
+def test_manager_rejects_conflicting_bulk_schedule_outputs(
+    outputs_path, manager_cmd, rest2_timeout
+):
+    repo_root = _repo_root()
+    resolved_manager = resolve_executable(
+        manager_cmd, "SPONGE_MANAGER", repo_root
+    )
+    run_dir = outputs_path / "manager_conflict_smoke"
+    if run_dir.exists():
+        shutil.rmtree(run_dir)
+    run_dir.mkdir(parents=True)
+    config_path = run_dir / "manager.toml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "[manager]",
+                "block_steps = 1",
+                "epochs = 1",
+                'log_path = "0/mdout_0.out"',
+                "",
+                "[exchange]",
+                "enabled = false",
+                "",
+                "[worker_defaults]",
+                f'executable = "{resolved_manager}"',
+                'working_directory_root = "."',
+                "",
+                "[worker_defaults.inputs]",
+                'mode = "NVT"',
+                "dt = 0.002",
+                "cutoff = 8.0",
+                'default_in_file_prefix = "ALA"',
+                'default_out_file_prefix = "mdout"',
+                "",
+                "[schedules]",
+                "ids = [0]",
+                "",
+                "[schedules.inputs]",
+                "target_temperature = [300.0]",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [str(resolved_manager), "--config", str(config_path)],
+        cwd=run_dir,
+        capture_output=True,
+        text=True,
+        timeout=rest2_timeout,
+        check=False,
+        env=runtime_env(repo_root),
+    )
+    output = result.stdout + "\n" + result.stderr
+    assert result.returncode != 0
+    assert "conflicts with worker output path" in output
+
+
+def test_manager_rejects_duplicate_bulk_schedule_ids(
+    outputs_path, manager_cmd, rest2_timeout
+):
+    repo_root = _repo_root()
+    resolved_manager = resolve_executable(
+        manager_cmd, "SPONGE_MANAGER", repo_root
+    )
+    run_dir = outputs_path / "manager_duplicate_id_smoke"
+    if run_dir.exists():
+        shutil.rmtree(run_dir)
+    run_dir.mkdir(parents=True)
+    config_path = run_dir / "manager.toml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "[manager]",
+                "block_steps = 1",
+                "epochs = 1",
+                "",
+                "[exchange]",
+                "enabled = false",
+                "",
+                "[worker_defaults]",
+                f'executable = "{resolved_manager}"',
+                'args = ["-mdin", "missing.spg.toml"]',
+                'working_directory_root = "."',
+                "",
+                "[schedules]",
+                "ids = [0, 0]",
+                "",
+                "[schedules.inputs]",
+                "target_temperature = [300.0, 301.0]",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [str(resolved_manager), "--config", str(config_path)],
+        cwd=run_dir,
+        capture_output=True,
+        text=True,
+        timeout=rest2_timeout,
+        check=False,
+        env=runtime_env(repo_root),
+    )
+    output = result.stdout + "\n" + result.stderr
+    assert result.returncode != 0
+    assert "duplicate schedule_id" in output
+
+
+def test_manager_resolves_input_paths_relative_to_config(
+    outputs_path, sponge_cmd, manager_cmd, rest2_timeout
+):
+    repo_root = _repo_root()
+    resolved_sponge = resolve_executable(sponge_cmd, "SPONGE", repo_root)
+    resolved_manager = resolve_executable(
+        manager_cmd, "SPONGE_MANAGER", repo_root
+    )
+    run_dir = outputs_path / "manager_input_path_resolution"
+    if run_dir.exists():
+        shutil.rmtree(run_dir)
+    run_dir.mkdir(parents=True)
+    copy_ala2_case(repo_root, run_dir, "system")
+    (run_dir / "replicas" / "0").mkdir(parents=True)
+    config_path = run_dir / "manager.toml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "[manager]",
+                "block_steps = 1",
+                "epochs = 1",
+                "",
+                "[exchange]",
+                "enabled = false",
+                "",
+                "[worker_defaults]",
+                f'executable = "{resolved_sponge}"',
+                'args = ["-dont_check_input", "1"]',
+                'working_directory_root = "replicas"',
+                "",
+                "[worker_defaults.inputs]",
+                'md_name = "no-mdin manager path resolution"',
+                'mode = "nvt"',
+                "dt = 0.002",
+                "cutoff = 8.0",
+                'thermostat = "middle_langevin"',
+                "thermostat_tau = 1.0",
+                "thermostat_seed = 2026",
+                'default_in_file_prefix = "unused/ALA"',
+                'constrain_mode = "SHAKE"',
+                "print_zeroth_frame = 1",
+                "write_mdout_interval = 1",
+                "write_information_interval = 1",
+                'default_out_file_prefix = "mdout"',
+                "",
+                "[schedules]",
+                "ids = [0]",
+                "",
+                "[schedules.inputs]",
+                "target_temperature = [300.0]",
+                'default_in_file_prefix = ["system/ALA"]',
+                'coordinate_in_file = ["system/ALA_coordinate.txt"]',
+            ]
+        ),
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [str(resolved_manager), "--config", str(config_path)],
+        cwd=run_dir,
+        capture_output=True,
+        text=True,
+        timeout=rest2_timeout,
+        check=False,
+        env=runtime_env(repo_root),
+    )
+    output = result.stdout + "\n" + result.stderr
+    assert result.returncode == 0, output
+    mdinfo = run_dir / "replicas" / "0" / "mdout_0.info"
+    mdout = run_dir / "replicas" / "0" / "mdout_0.out"
+    assert mdinfo.exists()
+    assert mdout.exists()
+    mdinfo_text = mdinfo.read_text()
+    assert (
+        f"-default_in_file_prefix {run_dir / 'system' / 'ALA'}" in mdinfo_text
+    )
+    assert (
+        f"-coordinate_in_file {run_dir / 'system' / 'ALA_coordinate.txt'}"
+        in mdinfo_text
+    )
+    assert "-default_out_file_prefix mdout_0" in mdinfo_text
