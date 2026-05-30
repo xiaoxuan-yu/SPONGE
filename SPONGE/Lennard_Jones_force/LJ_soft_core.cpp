@@ -80,6 +80,51 @@ __global__ void Copy_Crd_To_New_Crd(const int atom_numbers, const VECTOR* crd,
     }
 }
 
+#ifdef USE_GPU
+static __device__ __forceinline__ unsigned int Clustered_Subgroup_Mask(
+    int lane, int subgroup_width)
+{
+    const unsigned int subgroup =
+        static_cast<unsigned int>(lane / subgroup_width);
+    const unsigned int width_mask =
+        (1u << static_cast<unsigned int>(subgroup_width)) - 1u;
+    return width_mask << (subgroup * static_cast<unsigned int>(subgroup_width));
+}
+
+static __device__ __forceinline__ VECTOR Reduce_Clustered_Subgroup_Vector(
+    VECTOR value, int lane, int subgroup_width)
+{
+    const unsigned int subgroup_mask =
+        Clustered_Subgroup_Mask(lane, subgroup_width);
+    for (int delta = subgroup_width >> 1; delta > 0; delta >>= 1)
+    {
+        value.x +=
+            deviceShflDown(subgroup_mask, value.x, delta, subgroup_width);
+        value.y +=
+            deviceShflDown(subgroup_mask, value.y, delta, subgroup_width);
+        value.z +=
+            deviceShflDown(subgroup_mask, value.z, delta, subgroup_width);
+    }
+    return value;
+}
+#endif
+
+static __global__ void Gather_Sorted_Soft_Core_Crd(
+    const int atom_numbers, const int* permutation,
+    const VECTOR_LJ_SOFT_TYPE* src, VECTOR_LJ_SOFT_TYPE* dest)
+{
+#ifdef USE_GPU
+    int sorted_i = blockDim.x * blockIdx.x + threadIdx.x;
+    if (sorted_i < atom_numbers)
+#else
+#pragma omp parallel for
+    for (int sorted_i = 0; sorted_i < atom_numbers; sorted_i++)
+#endif
+    {
+        dest[sorted_i] = src[permutation[sorted_i]];
+    }
+}
+
 static __global__ void Total_C6_Get(int atom_numbers, int* atom_lj_type_A,
                                     int* atom_lj_type_B, float* d_lj_Ab,
                                     float* d_lj_Bb, double* d_factor,
@@ -434,6 +479,1528 @@ static __global__ void Lennard_Jones_And_Direct_Coulomb_Soft_Core_CUDA(
     }
 }
 
+template <bool need_force, bool need_energy, bool need_virial,
+          bool need_coulomb>
+static __global__ void Clustered_Lennard_Jones_And_Direct_Coulomb_Soft_Core(
+    const int sci_numbers, const int cluster_size,
+    const int super_cluster_clusters, const int local_atom_numbers,
+    const int* permutation, const int* cluster_offsets,
+    const unsigned int* cluster_valid_masks,
+    const unsigned int* cluster_local_masks,
+    const int* super_cluster_offsets, const int* sci_supercluster_ids,
+    const int* sci_offsets, const int* cjpacked_cluster_ids,
+    const unsigned int* cjpacked_imasks,
+    const int* cjpacked_exclusion_indices,
+    const unsigned long long* exclusion_mask_pool,
+    const VECTOR_LJ_SOFT_TYPE* sorted_crd, const LTMatrix3 cell,
+    const LTMatrix3 rcell, const float* LJ_type_AA, const float* LJ_type_AB,
+    const float* LJ_type_BA, const float* LJ_type_BB, const float cutoff,
+    VECTOR* frc, const float pme_beta, float* atom_energy,
+    LTMatrix3* atom_lj_virial, float* atom_direct_pme_energy,
+    const float lambda, const float alpha, const float p,
+    const float input_sigma_6, const float input_sigma_6_min,
+    float* this_energy)
+{
+    const float lambda_ = 1.0f - lambda;
+    constexpr int max_cluster_size = 8;
+    constexpr int max_super_cluster_atoms = 64;
+    constexpr int max_block_warps = 2;
+#ifdef USE_GPU
+    const int sci = blockIdx.x;
+    const int tid = threadIdx.x;
+    if (sci < sci_numbers &&
+        tid < super_cluster_clusters * cluster_size)
+#else
+#pragma omp parallel for schedule(dynamic)
+    for (int sci = 0; sci < sci_numbers; sci += 1)
+#endif
+    {
+#ifndef USE_GPU
+        const int super_i = sci_supercluster_ids[sci];
+        const int cluster_i_start = super_cluster_offsets[super_i];
+        const int cluster_i_end = super_cluster_offsets[super_i + 1];
+        for (int cluster_i = cluster_i_start; cluster_i < cluster_i_end;
+             cluster_i += 1)
+        {
+            const unsigned int valid_mask_i = cluster_valid_masks[cluster_i];
+            const unsigned int local_mask_i = cluster_local_masks[cluster_i];
+            for (int lane_i = 0; lane_i < cluster_size; lane_i += 1)
+            {
+                if ((valid_mask_i & (1u << lane_i)) == 0u ||
+                    (local_mask_i & (1u << lane_i)) == 0u)
+                {
+                    continue;
+                }
+                const int start_i = cluster_offsets[cluster_i];
+                const int sorted_atom_i = start_i + lane_i;
+                const int atom_i = permutation[sorted_atom_i];
+                const VECTOR_LJ_SOFT_TYPE r1 = sorted_crd[sorted_atom_i];
+                VECTOR frc_i = {0.0f, 0.0f, 0.0f};
+                float energy_lj = 0.0f;
+                float energy_coulomb = 0.0f;
+                LTMatrix3 virial = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+
+                for (int cj = sci_offsets[sci]; cj < sci_offsets[sci + 1];
+                     cj += 1)
+                {
+                    const unsigned int imask = cjpacked_imasks[cj];
+                    if (imask == 0u)
+                    {
+                        continue;
+                    }
+                    const int i_local = cluster_i - cluster_i_start;
+                    if ((imask & (1u << i_local)) == 0u)
+                    {
+                        continue;
+                    }
+                    const int cluster_j = cjpacked_cluster_ids[cj];
+                    const unsigned int valid_mask_j =
+                        cluster_valid_masks[cluster_j];
+                    const int exclusion_index =
+                        cjpacked_exclusion_indices[cj * super_cluster_clusters +
+                                                   i_local];
+                    const unsigned long long exclusion_mask =
+                        exclusion_index >= 0 ? exclusion_mask_pool[exclusion_index]
+                                             : 0ull;
+                    VECTOR frc_j[max_cluster_size];
+                    for (int lane_j = 0; lane_j < cluster_size; lane_j += 1)
+                    {
+                        frc_j[lane_j] = {0.0f, 0.0f, 0.0f};
+                    }
+                    for (int lane_j = 0; lane_j < cluster_size; lane_j += 1)
+                    {
+                        if ((valid_mask_j & (1u << lane_j)) == 0u)
+                        {
+                            continue;
+                        }
+                        const int sorted_atom_j =
+                            cluster_offsets[cluster_j] + lane_j;
+                        const int atom_j = permutation[sorted_atom_j];
+                        if (cluster_i == cluster_j && atom_j < local_atom_numbers &&
+                            lane_j <= lane_i)
+                        {
+                            continue;
+                        }
+                        if ((exclusion_mask &
+                             (1ull << (lane_i * cluster_size + lane_j))) != 0ull)
+                        {
+                            continue;
+                        }
+                        const VECTOR_LJ_SOFT_TYPE r2 = sorted_crd[sorted_atom_j];
+                        const VECTOR dr =
+                            Get_Periodic_Displacement(r2, r1, cell, rcell);
+                        const float dr2 = dr * dr;
+                        if (dr2 >= cutoff * cutoff || dr2 == 0.0f)
+                        {
+                            continue;
+                        }
+                        const float dr_abs = sqrtf(dr2);
+                        const float ij_factor =
+                            atom_j < local_atom_numbers ? 1.0f : 0.5f;
+                        const int atom_pair_LJ_type_A =
+                            Get_LJ_Type(r1.LJ_type, r2.LJ_type);
+                        const int atom_pair_LJ_type_B =
+                            Get_LJ_Type(r1.LJ_type_B, r2.LJ_type_B);
+                        const float AA = LJ_type_AA[atom_pair_LJ_type_A];
+                        const float AB = LJ_type_AB[atom_pair_LJ_type_A];
+                        const float BA = LJ_type_BA[atom_pair_LJ_type_B];
+                        const float BB = LJ_type_BB[atom_pair_LJ_type_B];
+
+                        float pair_lj_energy = 0.0f;
+                        float pair_coulomb_energy = 0.0f;
+                        VECTOR frc_lin = {0.0f, 0.0f, 0.0f};
+                        bool active_force = false;
+                        if (BA * AA != 0 || BA + AA == 0)
+                        {
+                            if (need_force)
+                            {
+                                float frc_abs =
+                                    lambda_ * Get_LJ_Force(r1, r2, dr_abs, AA, AB) +
+                                    lambda *
+                                        Get_LJ_Force(r1, r2, dr_abs, BA, BB);
+                                if (need_coulomb)
+                                {
+                                    frc_abs -= Get_Direct_Coulomb_Force(
+                                        r1, r2, dr_abs, pme_beta);
+                                }
+                                frc_lin = frc_abs * dr;
+                                active_force = true;
+                            }
+                            pair_lj_energy =
+                                ij_factor *
+                                (lambda_ * Get_LJ_Energy(r1, r2, dr_abs, AA, AB) +
+                                 lambda * Get_LJ_Energy(r1, r2, dr_abs, BA, BB));
+                            if (need_coulomb)
+                            {
+                                pair_coulomb_energy =
+                                    ij_factor * Get_Direct_Coulomb_Energy(
+                                                    r1, r2, dr_abs, pme_beta);
+                            }
+                        }
+                        else
+                        {
+                            const float sigma_A = Get_Soft_Core_Sigma(
+                                AA, AB, input_sigma_6, input_sigma_6_min);
+                            const float sigma_B = Get_Soft_Core_Sigma(
+                                BA, BB, input_sigma_6, input_sigma_6_min);
+                            const float dr_softcore_A = Get_Soft_Core_Distance(
+                                AA, AB, sigma_A, dr_abs, alpha, p, lambda);
+                            const float dr_softcore_B = Get_Soft_Core_Distance(
+                                BB, BA, sigma_B, dr_abs, alpha, p,
+                                1.0f - lambda);
+                            if (need_force)
+                            {
+                                float frc_abs =
+                                    lambda_ * Get_Soft_Core_LJ_Force(
+                                                  r1, r2, dr_abs, dr_softcore_A,
+                                                  AA, AB) +
+                                    lambda * Get_Soft_Core_LJ_Force(
+                                                 r1, r2, dr_abs, dr_softcore_B,
+                                                 BA, BB);
+                                if (need_coulomb)
+                                {
+                                    frc_abs -= lambda_ *
+                                               Get_Soft_Core_Direct_Coulomb_Force(
+                                                   r1, r2, dr_abs,
+                                                   dr_softcore_A, pme_beta);
+                                    frc_abs -= lambda *
+                                               Get_Soft_Core_Direct_Coulomb_Force(
+                                                   r1, r2, dr_abs,
+                                                   dr_softcore_B, pme_beta);
+                                }
+                                frc_lin = frc_abs * dr;
+                                active_force = true;
+                            }
+                            pair_lj_energy =
+                                ij_factor *
+                                (lambda_ * Get_LJ_Energy(r1, r2, dr_softcore_A, AA,
+                                                         AB) +
+                                 lambda * Get_LJ_Energy(r1, r2, dr_softcore_B, BA,
+                                                        BB));
+                            if (need_coulomb)
+                            {
+                                pair_coulomb_energy =
+                                    ij_factor *
+                                    (lambda_ * Get_Direct_Coulomb_Energy(
+                                                   r1, r2, dr_softcore_A,
+                                                   pme_beta) +
+                                     lambda * Get_Direct_Coulomb_Energy(
+                                                  r1, r2, dr_softcore_B,
+                                                  pme_beta));
+                            }
+                        }
+
+                        if (need_force && active_force)
+                        {
+                            frc_i = frc_i + frc_lin;
+                            if (atom_j < local_atom_numbers)
+                            {
+                                frc_j[lane_j] = frc_j[lane_j] - frc_lin;
+                            }
+                            if (need_virial)
+                            {
+                                virial = virial -
+                                         ij_factor *
+                                             Get_Virial_From_Force_Dis(frc_lin, dr);
+                            }
+                        }
+                        if (need_energy)
+                        {
+                            energy_lj += pair_lj_energy;
+                            energy_coulomb += pair_coulomb_energy;
+                        }
+                    }
+                    if (need_force)
+                    {
+                        for (int lane_j = 0; lane_j < cluster_size; lane_j += 1)
+                        {
+                            if ((valid_mask_j & (1u << lane_j)) == 0u)
+                            {
+                                continue;
+                            }
+                            const int sorted_atom_j =
+                                cluster_offsets[cluster_j] + lane_j;
+                            const int atom_j = permutation[sorted_atom_j];
+                            if (atom_j < local_atom_numbers)
+                            {
+                                atomicAdd(frc + atom_j, frc_j[lane_j]);
+                            }
+                        }
+                    }
+                }
+                if (need_energy)
+                {
+                    atomicAdd(atom_energy + atom_i, energy_lj + energy_coulomb);
+                    atomicAdd(this_energy + atom_i, energy_lj);
+                    if (need_coulomb)
+                    {
+                        atomicAdd(atom_direct_pme_energy + atom_i,
+                                  energy_coulomb);
+                    }
+                }
+                if (need_force)
+                {
+                    atomicAdd(frc + atom_i, frc_i);
+                }
+                if (need_virial)
+                {
+                    atomicAdd(atom_lj_virial + atom_i, virial);
+                }
+            }
+        }
+#else
+        __shared__ VECTOR_LJ_SOFT_TYPE shared_i_atoms[max_super_cluster_atoms];
+        __shared__ int shared_i_atom_ids[max_super_cluster_atoms];
+        __shared__ VECTOR_LJ_SOFT_TYPE shared_j_atoms[max_cluster_size];
+        __shared__ int shared_j_atom_ids[max_cluster_size];
+        __shared__ int shared_j_local_flags[max_cluster_size];
+        __shared__ unsigned int shared_j_valid_mask;
+        __shared__ VECTOR warp_j_force[max_block_warps][max_cluster_size];
+
+        const int super_i = sci_supercluster_ids[sci];
+        const int cluster_i_start = super_cluster_offsets[super_i];
+        const int cluster_i_end = super_cluster_offsets[super_i + 1];
+        const int i_cluster_local = tid / cluster_size;
+        const int i_lane = tid % cluster_size;
+        const int active_cluster_count = cluster_i_end - cluster_i_start;
+        bool active_i = false;
+        int cluster_i = -1;
+        int atom_i = -1;
+        VECTOR frc_i = {0.0f, 0.0f, 0.0f};
+        float energy_lj = 0.0f;
+        float energy_coulomb = 0.0f;
+        LTMatrix3 virial = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+        VECTOR_LJ_SOFT_TYPE r1 = {};
+
+        if (i_cluster_local < active_cluster_count)
+        {
+            cluster_i = cluster_i_start + i_cluster_local;
+            if ((cluster_valid_masks[cluster_i] & (1u << i_lane)) != 0u)
+            {
+                const int sorted_atom_i = cluster_offsets[cluster_i] + i_lane;
+                shared_i_atoms[tid] = sorted_crd[sorted_atom_i];
+                shared_i_atom_ids[tid] = permutation[sorted_atom_i];
+                if ((cluster_local_masks[cluster_i] & (1u << i_lane)) != 0u)
+                {
+                    active_i = true;
+                    atom_i = shared_i_atom_ids[tid];
+                    r1 = shared_i_atoms[tid];
+                }
+            }
+        }
+        __syncthreads();
+
+        const int lane = tid & (warpSize - 1);
+        const int warp_id = tid / warpSize;
+        const int warp_count =
+            (super_cluster_clusters * cluster_size + warpSize - 1) / warpSize;
+
+        for (int cj = sci_offsets[sci]; cj < sci_offsets[sci + 1]; cj += 1)
+        {
+            const unsigned int imask = cjpacked_imasks[cj];
+            if (imask == 0u)
+            {
+                continue;
+            }
+            const int cluster_j = cjpacked_cluster_ids[cj];
+            if (tid == 0)
+            {
+                shared_j_valid_mask = cluster_valid_masks[cluster_j];
+            }
+            if (tid < cluster_size)
+            {
+                if ((cluster_valid_masks[cluster_j] & (1u << tid)) != 0u)
+                {
+                    const int sorted_atom_j = cluster_offsets[cluster_j] + tid;
+                    shared_j_atoms[tid] = sorted_crd[sorted_atom_j];
+                    shared_j_atom_ids[tid] = permutation[sorted_atom_j];
+                    shared_j_local_flags[tid] =
+                        shared_j_atom_ids[tid] < local_atom_numbers ? 1 : 0;
+                }
+                else
+                {
+                    shared_j_atom_ids[tid] = -1;
+                    shared_j_local_flags[tid] = 0;
+                }
+            }
+            __syncthreads();
+
+            VECTOR j_force_local[max_cluster_size];
+            for (int lane_j = 0; lane_j < cluster_size; lane_j += 1)
+            {
+                j_force_local[lane_j] = {0.0f, 0.0f, 0.0f};
+            }
+
+            if (active_i)
+            {
+                if ((imask & (1u << i_cluster_local)) != 0u)
+                {
+                    const int exclusion_index =
+                        cjpacked_exclusion_indices[cj * super_cluster_clusters +
+                                                   i_cluster_local];
+                    const unsigned long long exclusion_mask =
+                        exclusion_index >= 0 ? exclusion_mask_pool[exclusion_index]
+                                             : 0ull;
+                    for (int lane_j = 0; lane_j < cluster_size; lane_j += 1)
+                    {
+                        if ((shared_j_valid_mask & (1u << lane_j)) == 0u)
+                        {
+                            continue;
+                        }
+                        const int atom_j = shared_j_atom_ids[lane_j];
+                        if (cluster_i == cluster_j && atom_j < local_atom_numbers &&
+                            lane_j <= i_lane)
+                        {
+                            continue;
+                        }
+                        if ((exclusion_mask &
+                             (1ull << (i_lane * cluster_size + lane_j))) != 0ull)
+                        {
+                            continue;
+                        }
+                        const VECTOR_LJ_SOFT_TYPE r2 = shared_j_atoms[lane_j];
+                        const VECTOR dr =
+                            Get_Periodic_Displacement(r2, r1, cell, rcell);
+                        const float dr2 = dr * dr;
+                        if (dr2 >= cutoff * cutoff || dr2 == 0.0f)
+                        {
+                            continue;
+                        }
+                        const float dr_abs = sqrtf(dr2);
+                        const float ij_factor =
+                            atom_j < local_atom_numbers ? 1.0f : 0.5f;
+                        const int atom_pair_LJ_type_A =
+                            Get_LJ_Type(r1.LJ_type, r2.LJ_type);
+                        const int atom_pair_LJ_type_B =
+                            Get_LJ_Type(r1.LJ_type_B, r2.LJ_type_B);
+                        const float AA = LJ_type_AA[atom_pair_LJ_type_A];
+                        const float AB = LJ_type_AB[atom_pair_LJ_type_A];
+                        const float BA = LJ_type_BA[atom_pair_LJ_type_B];
+                        const float BB = LJ_type_BB[atom_pair_LJ_type_B];
+
+                        float pair_lj_energy = 0.0f;
+                        float pair_coulomb_energy = 0.0f;
+                        VECTOR frc_lin = {0.0f, 0.0f, 0.0f};
+                        bool active_force = false;
+                        if (BA * AA != 0 || BA + AA == 0)
+                        {
+                            if (need_force)
+                            {
+                                float frc_abs =
+                                    lambda_ * Get_LJ_Force(r1, r2, dr_abs, AA, AB) +
+                                    lambda *
+                                        Get_LJ_Force(r1, r2, dr_abs, BA, BB);
+                                if (need_coulomb)
+                                {
+                                    frc_abs -= Get_Direct_Coulomb_Force(
+                                        r1, r2, dr_abs, pme_beta);
+                                }
+                                frc_lin = frc_abs * dr;
+                                active_force = true;
+                            }
+                            pair_lj_energy =
+                                ij_factor *
+                                (lambda_ * Get_LJ_Energy(r1, r2, dr_abs, AA, AB) +
+                                 lambda * Get_LJ_Energy(r1, r2, dr_abs, BA, BB));
+                            if (need_coulomb)
+                            {
+                                pair_coulomb_energy =
+                                    ij_factor * Get_Direct_Coulomb_Energy(
+                                                    r1, r2, dr_abs, pme_beta);
+                            }
+                        }
+                        else
+                        {
+                            const float sigma_A = Get_Soft_Core_Sigma(
+                                AA, AB, input_sigma_6, input_sigma_6_min);
+                            const float sigma_B = Get_Soft_Core_Sigma(
+                                BA, BB, input_sigma_6, input_sigma_6_min);
+                            const float dr_softcore_A = Get_Soft_Core_Distance(
+                                AA, AB, sigma_A, dr_abs, alpha, p, lambda);
+                            const float dr_softcore_B = Get_Soft_Core_Distance(
+                                BB, BA, sigma_B, dr_abs, alpha, p,
+                                1.0f - lambda);
+                            if (need_force)
+                            {
+                                float frc_abs =
+                                    lambda_ * Get_Soft_Core_LJ_Force(
+                                                  r1, r2, dr_abs, dr_softcore_A,
+                                                  AA, AB) +
+                                    lambda * Get_Soft_Core_LJ_Force(
+                                                 r1, r2, dr_abs, dr_softcore_B,
+                                                 BA, BB);
+                                if (need_coulomb)
+                                {
+                                    frc_abs -= lambda_ *
+                                               Get_Soft_Core_Direct_Coulomb_Force(
+                                                   r1, r2, dr_abs,
+                                                   dr_softcore_A, pme_beta);
+                                    frc_abs -= lambda *
+                                               Get_Soft_Core_Direct_Coulomb_Force(
+                                                   r1, r2, dr_abs,
+                                                   dr_softcore_B, pme_beta);
+                                }
+                                frc_lin = frc_abs * dr;
+                                active_force = true;
+                            }
+                            pair_lj_energy =
+                                ij_factor *
+                                (lambda_ * Get_LJ_Energy(r1, r2, dr_softcore_A, AA,
+                                                         AB) +
+                                 lambda * Get_LJ_Energy(r1, r2, dr_softcore_B, BA,
+                                                        BB));
+                            if (need_coulomb)
+                            {
+                                pair_coulomb_energy =
+                                    ij_factor *
+                                    (lambda_ * Get_Direct_Coulomb_Energy(
+                                                   r1, r2, dr_softcore_A,
+                                                   pme_beta) +
+                                     lambda * Get_Direct_Coulomb_Energy(
+                                                  r1, r2, dr_softcore_B,
+                                                  pme_beta));
+                            }
+                        }
+
+                        if (need_force && active_force)
+                        {
+                            frc_i = frc_i + frc_lin;
+                            if (shared_j_local_flags[lane_j] != 0)
+                            {
+                                j_force_local[lane_j] =
+                                    j_force_local[lane_j] - frc_lin;
+                            }
+                            if (need_virial)
+                            {
+                                virial = virial -
+                                         ij_factor *
+                                             Get_Virial_From_Force_Dis(frc_lin, dr);
+                            }
+                        }
+                        if (need_energy)
+                        {
+                            energy_lj += pair_lj_energy;
+                            energy_coulomb += pair_coulomb_energy;
+                        }
+                    }
+                }
+            }
+
+            if (need_force)
+            {
+                for (int lane_j = 0; lane_j < cluster_size; lane_j += 1)
+                {
+                    VECTOR reduced = j_force_local[lane_j];
+                    for (int delta = warpSize >> 1; delta > 0; delta >>= 1)
+                    {
+                        reduced.x +=
+                            deviceShflDown(FULL_MASK, reduced.x, delta, warpSize);
+                        reduced.y +=
+                            deviceShflDown(FULL_MASK, reduced.y, delta, warpSize);
+                        reduced.z +=
+                            deviceShflDown(FULL_MASK, reduced.z, delta, warpSize);
+                    }
+                    if (lane == 0)
+                    {
+                        warp_j_force[warp_id][lane_j] = reduced;
+                    }
+                }
+                __syncthreads();
+                if (tid < cluster_size &&
+                    (shared_j_valid_mask & (1u << tid)) != 0u &&
+                    shared_j_local_flags[tid] != 0)
+                {
+                    VECTOR total = {0.0f, 0.0f, 0.0f};
+                    for (int warp_i = 0; warp_i < warp_count; warp_i += 1)
+                    {
+                        total = total + warp_j_force[warp_i][tid];
+                    }
+                    atomicAdd(frc + shared_j_atom_ids[tid], total);
+                }
+                __syncthreads();
+            }
+        }
+
+        if (active_i)
+        {
+            if (need_force)
+            {
+                atomicAdd(frc + atom_i, frc_i);
+            }
+            if (need_energy)
+            {
+                atomicAdd(atom_energy + atom_i, energy_lj + energy_coulomb);
+                atomicAdd(this_energy + atom_i, energy_lj);
+                if (need_coulomb)
+                {
+                    atomicAdd(atom_direct_pme_energy + atom_i, energy_coulomb);
+                }
+            }
+            if (need_virial)
+            {
+                atomicAdd(atom_lj_virial + atom_i, virial);
+            }
+        }
+#endif
+    }
+}
+
+template <bool need_force, bool need_energy, bool need_virial,
+          bool need_coulomb>
+static __global__ void Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb_Soft_Core(
+    const int sci_numbers, const int cluster_size,
+    const int super_cluster_clusters, const int local_atom_numbers,
+    const int* sorted_atom_ids, const int* cluster_offsets,
+    const unsigned int* cluster_valid_masks,
+    const unsigned int* cluster_local_masks,
+    const int* super_cluster_offsets, const LJ_CLUSTERED_SCI* sci_entries,
+    const LJ_CLUSTERED_CJ_PACKED* cj_packed_entries,
+    const unsigned long long* exclusion_mask_pool,
+    const VECTOR_LJ_SOFT_TYPE* sorted_crd, const LTMatrix3 cell,
+    const LTMatrix3 rcell,
+    const float* LJ_type_AA, const float* LJ_type_AB, const float* LJ_type_BA,
+    const float* LJ_type_BB, const float cutoff, VECTOR* frc,
+    const float pme_beta, float* atom_energy, LTMatrix3* atom_lj_virial,
+    float* atom_direct_pme_energy, const float lambda, const float alpha,
+    const float p, const float input_sigma_6, const float input_sigma_6_min,
+    float* this_energy)
+{
+    const float lambda_ = 1.0f - lambda;
+    constexpr int max_cluster_size = kClusteredClusterSize;
+    constexpr int max_super_cluster_atoms =
+        kClusteredClusterSize * kClusteredSuperClusterClusters;
+    constexpr int max_block_warps = 2;
+#ifdef USE_GPU
+    const int sci = blockIdx.x;
+    const int tid = threadIdx.y * blockDim.x + threadIdx.x;
+    if (sci >= sci_numbers ||
+        tid >= super_cluster_clusters * cluster_size)
+    {
+        return;
+    }
+#else
+#pragma omp parallel for schedule(dynamic)
+    for (int sci = 0; sci < sci_numbers; sci += 1)
+#endif
+    {
+        const LJ_CLUSTERED_SCI sci_entry = sci_entries[sci];
+        const int super_i = sci_entry.supercluster_id;
+        const int cluster_i_start = super_cluster_offsets[super_i];
+        const int cluster_i_end = super_cluster_offsets[super_i + 1];
+        const VECTOR shift_vec =
+            Clustered_Shift_Vector_From_Id(sci_entry.shift_id, cell);
+        const float cutoff_sq = cutoff * cutoff;
+
+#ifndef USE_GPU
+        for (int cluster_i = cluster_i_start; cluster_i < cluster_i_end;
+             cluster_i += 1)
+        {
+            const unsigned int valid_mask_i = cluster_valid_masks[cluster_i];
+            const unsigned int local_mask_i = cluster_local_masks[cluster_i];
+            const int i_local = cluster_i - cluster_i_start;
+            for (int lane_i = 0; lane_i < cluster_size; lane_i += 1)
+            {
+                if ((valid_mask_i & (1u << lane_i)) == 0u ||
+                    (local_mask_i & (1u << lane_i)) == 0u)
+                {
+                    continue;
+                }
+                const int sorted_atom_i = cluster_offsets[cluster_i] + lane_i;
+                const int atom_i = sorted_atom_ids[sorted_atom_i];
+                VECTOR_LJ_SOFT_TYPE r1 = sorted_crd[sorted_atom_i];
+                r1.crd = r1.crd + shift_vec;
+                VECTOR frc_i = {0.0f, 0.0f, 0.0f};
+                float energy_lj = 0.0f;
+                float energy_coulomb = 0.0f;
+                LTMatrix3 virial = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+
+                for (int packed_idx = sci_entry.cjpacked_begin;
+                     packed_idx < sci_entry.cjpacked_end; packed_idx += 1)
+                {
+                    const LJ_CLUSTERED_CJ_PACKED& packed =
+                        cj_packed_entries[packed_idx];
+                    for (int jm = 0; jm < kClusteredJGroupSize; jm += 1)
+                    {
+                        const int cluster_j = packed.cj[jm];
+                        if (cluster_j < 0)
+                        {
+                            continue;
+                        }
+                        const unsigned int imask =
+                            Clustered_Jm_Imask(packed.imei[0], jm) |
+                            Clustered_Jm_Imask(packed.imei[1], jm);
+                        if ((imask & (1u << i_local)) == 0u)
+                        {
+                            continue;
+                        }
+                        const unsigned int valid_mask_j =
+                            cluster_valid_masks[cluster_j];
+                        const int exclusion_index =
+                            Clustered_First_Exclusion_Index(packed, jm, i_local);
+                        const unsigned long long exclusion_mask =
+                            exclusion_index >= 0
+                                ? exclusion_mask_pool[exclusion_index]
+                                : 0ull;
+                        VECTOR frc_j[max_cluster_size] = {};
+                        for (int lane_j = 0; lane_j < cluster_size; lane_j += 1)
+                        {
+                            if ((valid_mask_j & (1u << lane_j)) == 0u)
+                            {
+                                continue;
+                            }
+                            const int sorted_atom_j =
+                                cluster_offsets[cluster_j] + lane_j;
+                            const int atom_j = sorted_atom_ids[sorted_atom_j];
+                            if (sci_entry.shift_id == kClusteredCentralShiftId &&
+                                cluster_i == cluster_j &&
+                                atom_j < local_atom_numbers &&
+                                lane_j <= lane_i)
+                            {
+                                continue;
+                            }
+                            if ((exclusion_mask &
+                                 (1ull << (lane_i * cluster_size + lane_j))) !=
+                                0ull)
+                            {
+                                continue;
+                            }
+                            const VECTOR_LJ_SOFT_TYPE r2 = sorted_crd[sorted_atom_j];
+                            const VECTOR dr =
+                                Get_Periodic_Displacement(r2, r1, cell, rcell);
+                            const float dr2 = dr * dr;
+                            if (dr2 >= cutoff_sq || dr2 == 0.0f)
+                            {
+                                continue;
+                            }
+                            const float dr_abs = sqrtf(dr2);
+                            const float ij_factor =
+                                atom_j < local_atom_numbers ? 1.0f : 0.5f;
+                            const int atom_pair_LJ_type_A =
+                                Get_LJ_Type(r1.LJ_type, r2.LJ_type);
+                            const int atom_pair_LJ_type_B =
+                                Get_LJ_Type(r1.LJ_type_B, r2.LJ_type_B);
+                            const float AA = LJ_type_AA[atom_pair_LJ_type_A];
+                            const float AB = LJ_type_AB[atom_pair_LJ_type_A];
+                            const float BA = LJ_type_BA[atom_pair_LJ_type_B];
+                            const float BB = LJ_type_BB[atom_pair_LJ_type_B];
+
+                            float pair_lj_energy = 0.0f;
+                            float pair_coulomb_energy = 0.0f;
+                            VECTOR frc_lin = {0.0f, 0.0f, 0.0f};
+                            bool active_force = false;
+                            if (BA * AA != 0 || BA + AA == 0)
+                            {
+                                if (need_force)
+                                {
+                                    float frc_abs =
+                                        lambda_ * Get_LJ_Force(r1, r2, dr_abs, AA,
+                                                               AB) +
+                                        lambda *
+                                            Get_LJ_Force(r1, r2, dr_abs, BA, BB);
+                                    if (need_coulomb)
+                                    {
+                                        frc_abs -= Get_Direct_Coulomb_Force(
+                                            r1, r2, dr_abs, pme_beta);
+                                    }
+                                    frc_lin = frc_abs * dr;
+                                    active_force = true;
+                                }
+                                pair_lj_energy =
+                                    ij_factor *
+                                    (lambda_ *
+                                         Get_LJ_Energy(r1, r2, dr_abs, AA, AB) +
+                                     lambda *
+                                         Get_LJ_Energy(r1, r2, dr_abs, BA, BB));
+                                if (need_coulomb)
+                                {
+                                    pair_coulomb_energy =
+                                        ij_factor *
+                                        Get_Direct_Coulomb_Energy(
+                                            r1, r2, dr_abs, pme_beta);
+                                }
+                            }
+                            else
+                            {
+                                const float sigma_A = Get_Soft_Core_Sigma(
+                                    AA, AB, input_sigma_6, input_sigma_6_min);
+                                const float sigma_B = Get_Soft_Core_Sigma(
+                                    BA, BB, input_sigma_6, input_sigma_6_min);
+                                const float dr_softcore_A =
+                                    Get_Soft_Core_Distance(AA, AB, sigma_A, dr_abs,
+                                                           alpha, p, lambda);
+                                const float dr_softcore_B =
+                                    Get_Soft_Core_Distance(BB, BA, sigma_B, dr_abs,
+                                                           alpha, p, 1.0f - lambda);
+                                if (need_force)
+                                {
+                                    float frc_abs =
+                                        lambda_ * Get_Soft_Core_LJ_Force(
+                                                      r1, r2, dr_abs,
+                                                      dr_softcore_A, AA, AB) +
+                                        lambda * Get_Soft_Core_LJ_Force(
+                                                     r1, r2, dr_abs,
+                                                     dr_softcore_B, BA, BB);
+                                    if (need_coulomb)
+                                    {
+                                        frc_abs -=
+                                            lambda_ *
+                                            Get_Soft_Core_Direct_Coulomb_Force(
+                                                r1, r2, dr_abs, dr_softcore_A,
+                                                pme_beta);
+                                        frc_abs -=
+                                            lambda *
+                                            Get_Soft_Core_Direct_Coulomb_Force(
+                                                r1, r2, dr_abs, dr_softcore_B,
+                                                pme_beta);
+                                    }
+                                    frc_lin = frc_abs * dr;
+                                    active_force = true;
+                                }
+                                pair_lj_energy =
+                                    ij_factor *
+                                    (lambda_ * Get_LJ_Energy(r1, r2, dr_softcore_A,
+                                                             AA, AB) +
+                                     lambda * Get_LJ_Energy(r1, r2, dr_softcore_B,
+                                                            BA, BB));
+                                if (need_coulomb)
+                                {
+                                    pair_coulomb_energy =
+                                        ij_factor *
+                                        (lambda_ * Get_Direct_Coulomb_Energy(
+                                                       r1, r2, dr_softcore_A,
+                                                       pme_beta) +
+                                         lambda * Get_Direct_Coulomb_Energy(
+                                                      r1, r2, dr_softcore_B,
+                                                      pme_beta));
+                                }
+                            }
+
+                            if (need_force && active_force)
+                            {
+                                frc_i = frc_i + frc_lin;
+                                if (atom_j < local_atom_numbers)
+                                {
+                                    frc_j[lane_j] = frc_j[lane_j] - frc_lin;
+                                }
+                                if (need_virial)
+                                {
+                                    virial = virial -
+                                             ij_factor *
+                                                 Get_Virial_From_Force_Dis(
+                                                     frc_lin, dr);
+                                }
+                            }
+                            if (need_energy)
+                            {
+                                energy_lj += pair_lj_energy;
+                                energy_coulomb += pair_coulomb_energy;
+                            }
+                        }
+                        if (need_force)
+                        {
+                            for (int lane_j = 0; lane_j < cluster_size;
+                                 lane_j += 1)
+                            {
+                                const int sorted_atom_j =
+                                    cluster_offsets[cluster_j] + lane_j;
+                                const int atom_j = sorted_atom_ids[sorted_atom_j];
+                                if ((valid_mask_j & (1u << lane_j)) != 0u &&
+                                    atom_j < local_atom_numbers)
+                                {
+                                    atomicAdd(frc + atom_j, frc_j[lane_j]);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if (need_force)
+                {
+                    atomicAdd(frc + atom_i, frc_i);
+                }
+                if (need_energy)
+                {
+                    atomicAdd(atom_energy + atom_i, energy_lj + energy_coulomb);
+                    atomicAdd(this_energy + atom_i, energy_lj);
+                    if (need_coulomb)
+                    {
+                        atomicAdd(atom_direct_pme_energy + atom_i,
+                                  energy_coulomb);
+                    }
+                }
+                if (need_virial)
+                {
+                    atomicAdd(atom_lj_virial + atom_i, virial);
+                }
+            }
+        }
+#else
+        if constexpr (need_virial)
+        {
+            __shared__ VECTOR_LJ_SOFT_TYPE shared_i_atoms[max_super_cluster_atoms];
+            __shared__ int shared_i_atom_ids[max_super_cluster_atoms];
+            __shared__ VECTOR_LJ_SOFT_TYPE shared_j_atoms[max_cluster_size];
+            __shared__ int shared_j_atom_ids[max_cluster_size];
+            __shared__ int shared_j_local_flags[max_cluster_size];
+            __shared__ unsigned int shared_j_valid_mask;
+            __shared__ VECTOR warp_j_force[max_block_warps][max_cluster_size];
+
+            const int i_cluster_local = tid / cluster_size;
+            const int i_lane = tid % cluster_size;
+            const int active_cluster_count = cluster_i_end - cluster_i_start;
+            const int lane = tid & (warpSize - 1);
+            const int warp_id = tid / warpSize;
+            const int warp_count =
+                (super_cluster_clusters * cluster_size + warpSize - 1) /
+                warpSize;
+
+            bool active_i = false;
+            int cluster_i = -1;
+            int atom_i = -1;
+            VECTOR frc_i = {0.0f, 0.0f, 0.0f};
+            float energy_lj = 0.0f;
+            float energy_coulomb = 0.0f;
+            LTMatrix3 virial = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+            VECTOR_LJ_SOFT_TYPE r1 = {};
+
+            if (i_cluster_local < active_cluster_count)
+            {
+                cluster_i = cluster_i_start + i_cluster_local;
+                if ((cluster_valid_masks[cluster_i] & (1u << i_lane)) != 0u)
+                {
+                    const int sorted_atom_i = cluster_offsets[cluster_i] + i_lane;
+                    shared_i_atoms[tid] = sorted_crd[sorted_atom_i];
+                    shared_i_atoms[tid].crd = shared_i_atoms[tid].crd + shift_vec;
+                    shared_i_atom_ids[tid] = sorted_atom_ids[sorted_atom_i];
+                    if ((cluster_local_masks[cluster_i] & (1u << i_lane)) != 0u)
+                    {
+                        active_i = true;
+                        atom_i = shared_i_atom_ids[tid];
+                        r1 = shared_i_atoms[tid];
+                    }
+                }
+            }
+            __syncthreads();
+
+            for (int packed_idx = sci_entry.cjpacked_begin;
+                 packed_idx < sci_entry.cjpacked_end; packed_idx += 1)
+            {
+                const LJ_CLUSTERED_CJ_PACKED packed =
+                    cj_packed_entries[packed_idx];
+                for (int jm = 0; jm < kClusteredJGroupSize; jm += 1)
+                {
+                    const int cluster_j = packed.cj[jm];
+                    if (cluster_j < 0)
+                    {
+                        continue;
+                    }
+                    const unsigned int imask =
+                        Clustered_Jm_Imask(packed.imei[0], jm) |
+                        Clustered_Jm_Imask(packed.imei[1], jm);
+                    if (imask == 0u)
+                    {
+                        continue;
+                    }
+                    if (tid == 0)
+                    {
+                        shared_j_valid_mask = cluster_valid_masks[cluster_j];
+                    }
+                    __syncthreads();
+                    if (tid < cluster_size)
+                    {
+                        if ((shared_j_valid_mask & (1u << tid)) != 0u)
+                        {
+                            const int sorted_atom_j =
+                                cluster_offsets[cluster_j] + tid;
+                            shared_j_atoms[tid] = sorted_crd[sorted_atom_j];
+                            shared_j_atom_ids[tid] = sorted_atom_ids[sorted_atom_j];
+                            shared_j_local_flags[tid] =
+                                shared_j_atom_ids[tid] < local_atom_numbers ? 1 : 0;
+                        }
+                        else
+                        {
+                            shared_j_atom_ids[tid] = -1;
+                            shared_j_local_flags[tid] = 0;
+                        }
+                    }
+                    __syncthreads();
+
+                    VECTOR j_force_local[max_cluster_size] = {};
+                    if (active_i && ((imask & (1u << i_cluster_local)) != 0u))
+                    {
+                        const int exclusion_index =
+                            Clustered_First_Exclusion_Index(
+                                packed, jm, i_cluster_local);
+                        const unsigned long long exclusion_mask =
+                            exclusion_index >= 0 ? exclusion_mask_pool[exclusion_index]
+                                                 : 0ull;
+                        for (int lane_j = 0; lane_j < cluster_size; lane_j += 1)
+                        {
+                            if ((shared_j_valid_mask & (1u << lane_j)) == 0u)
+                            {
+                                continue;
+                            }
+                            const int atom_j = shared_j_atom_ids[lane_j];
+                            const bool skip_self =
+                                sci_entry.shift_id == kClusteredCentralShiftId &&
+                                cluster_i == cluster_j &&
+                                atom_j < local_atom_numbers && lane_j <= i_lane;
+                            if (skip_self ||
+                                (exclusion_mask &
+                                 (1ull << (i_lane * cluster_size + lane_j))) !=
+                                    0ull)
+                            {
+                                continue;
+                            }
+                            const VECTOR_LJ_SOFT_TYPE r2 = shared_j_atoms[lane_j];
+                            const VECTOR dr =
+                                Get_Periodic_Displacement(r2, r1, cell, rcell);
+                            const float dr2 = dr * dr;
+                            if (dr2 >= cutoff_sq || dr2 == 0.0f)
+                            {
+                                continue;
+                            }
+                            const float dr_abs = sqrtf(dr2);
+                            const float ij_factor =
+                                atom_j < local_atom_numbers ? 1.0f : 0.5f;
+                            const int atom_pair_LJ_type_A =
+                                Get_LJ_Type(r1.LJ_type, r2.LJ_type);
+                            const int atom_pair_LJ_type_B =
+                                Get_LJ_Type(r1.LJ_type_B, r2.LJ_type_B);
+                            const float AA = LJ_type_AA[atom_pair_LJ_type_A];
+                            const float AB = LJ_type_AB[atom_pair_LJ_type_A];
+                            const float BA = LJ_type_BA[atom_pair_LJ_type_B];
+                            const float BB = LJ_type_BB[atom_pair_LJ_type_B];
+
+                            float pair_lj_energy = 0.0f;
+                            float pair_coulomb_energy = 0.0f;
+                            VECTOR frc_lin = {0.0f, 0.0f, 0.0f};
+                            bool active_force = false;
+                            if (BA * AA != 0 || BA + AA == 0)
+                            {
+                                if (need_force)
+                                {
+                                    float frc_abs =
+                                        lambda_ * Get_LJ_Force(r1, r2, dr_abs, AA,
+                                                               AB) +
+                                        lambda *
+                                            Get_LJ_Force(r1, r2, dr_abs, BA, BB);
+                                    if (need_coulomb)
+                                    {
+                                        frc_abs -= Get_Direct_Coulomb_Force(
+                                            r1, r2, dr_abs, pme_beta);
+                                    }
+                                    frc_lin = frc_abs * dr;
+                                    active_force = true;
+                                }
+                                pair_lj_energy =
+                                    ij_factor *
+                                    (lambda_ *
+                                         Get_LJ_Energy(r1, r2, dr_abs, AA, AB) +
+                                     lambda *
+                                         Get_LJ_Energy(r1, r2, dr_abs, BA, BB));
+                                if (need_coulomb)
+                                {
+                                    pair_coulomb_energy =
+                                        ij_factor *
+                                        Get_Direct_Coulomb_Energy(
+                                            r1, r2, dr_abs, pme_beta);
+                                }
+                            }
+                            else
+                            {
+                                const float sigma_A = Get_Soft_Core_Sigma(
+                                    AA, AB, input_sigma_6, input_sigma_6_min);
+                                const float sigma_B = Get_Soft_Core_Sigma(
+                                    BA, BB, input_sigma_6, input_sigma_6_min);
+                                const float dr_softcore_A =
+                                    Get_Soft_Core_Distance(AA, AB, sigma_A, dr_abs,
+                                                           alpha, p, lambda);
+                                const float dr_softcore_B =
+                                    Get_Soft_Core_Distance(BB, BA, sigma_B, dr_abs,
+                                                           alpha, p, 1.0f - lambda);
+                                if (need_force)
+                                {
+                                    float frc_abs =
+                                        lambda_ * Get_Soft_Core_LJ_Force(
+                                                      r1, r2, dr_abs,
+                                                      dr_softcore_A, AA, AB) +
+                                        lambda * Get_Soft_Core_LJ_Force(
+                                                     r1, r2, dr_abs,
+                                                     dr_softcore_B, BA, BB);
+                                    if (need_coulomb)
+                                    {
+                                        frc_abs -=
+                                            lambda_ *
+                                            Get_Soft_Core_Direct_Coulomb_Force(
+                                                r1, r2, dr_abs, dr_softcore_A,
+                                                pme_beta);
+                                        frc_abs -=
+                                            lambda *
+                                            Get_Soft_Core_Direct_Coulomb_Force(
+                                                r1, r2, dr_abs, dr_softcore_B,
+                                                pme_beta);
+                                    }
+                                    frc_lin = frc_abs * dr;
+                                    active_force = true;
+                                }
+                                pair_lj_energy =
+                                    ij_factor *
+                                    (lambda_ * Get_LJ_Energy(r1, r2, dr_softcore_A,
+                                                             AA, AB) +
+                                     lambda * Get_LJ_Energy(r1, r2, dr_softcore_B,
+                                                            BA, BB));
+                                if (need_coulomb)
+                                {
+                                    pair_coulomb_energy =
+                                        ij_factor *
+                                        (lambda_ * Get_Direct_Coulomb_Energy(
+                                                       r1, r2, dr_softcore_A,
+                                                       pme_beta) +
+                                         lambda * Get_Direct_Coulomb_Energy(
+                                                      r1, r2, dr_softcore_B,
+                                                      pme_beta));
+                                }
+                            }
+
+                            if (need_force && active_force)
+                            {
+                                frc_i = frc_i + frc_lin;
+                                if (shared_j_local_flags[lane_j] != 0)
+                                {
+                                    j_force_local[lane_j] =
+                                        j_force_local[lane_j] - frc_lin;
+                                }
+                                if (need_virial)
+                                {
+                                    virial = virial -
+                                             ij_factor *
+                                                 Get_Virial_From_Force_Dis(
+                                                     frc_lin, dr);
+                                }
+                            }
+                            if (need_energy)
+                            {
+                                energy_lj += pair_lj_energy;
+                                energy_coulomb += pair_coulomb_energy;
+                            }
+                        }
+                    }
+
+                    if (need_force)
+                    {
+                        for (int lane_j = 0; lane_j < cluster_size; lane_j += 1)
+                        {
+                            VECTOR reduced = j_force_local[lane_j];
+                            for (int delta = warpSize >> 1; delta > 0; delta >>= 1)
+                            {
+                                reduced.x +=
+                                    deviceShflDown(FULL_MASK, reduced.x, delta,
+                                                   warpSize);
+                                reduced.y +=
+                                    deviceShflDown(FULL_MASK, reduced.y, delta,
+                                                   warpSize);
+                                reduced.z +=
+                                    deviceShflDown(FULL_MASK, reduced.z, delta,
+                                                   warpSize);
+                            }
+                            if (lane == 0)
+                            {
+                                warp_j_force[warp_id][lane_j] = reduced;
+                            }
+                        }
+                        __syncthreads();
+                        if (tid < cluster_size &&
+                            (shared_j_valid_mask & (1u << tid)) != 0u &&
+                            shared_j_local_flags[tid] != 0)
+                        {
+                            VECTOR total = {0.0f, 0.0f, 0.0f};
+                            for (int warp_i = 0; warp_i < warp_count; warp_i += 1)
+                            {
+                                total = total + warp_j_force[warp_i][tid];
+                            }
+                            atomicAdd(frc + shared_j_atom_ids[tid], total);
+                        }
+                        __syncthreads();
+                    }
+                }
+            }
+
+            if (active_i)
+            {
+                if (need_force)
+                {
+                    atomicAdd(frc + atom_i, frc_i);
+                }
+                if (need_energy)
+                {
+                    atomicAdd(atom_energy + atom_i, energy_lj + energy_coulomb);
+                    atomicAdd(this_energy + atom_i, energy_lj);
+                    if (need_coulomb)
+                    {
+                        atomicAdd(atom_direct_pme_energy + atom_i, energy_coulomb);
+                    }
+                }
+                if (need_virial)
+                {
+                    atomicAdd(atom_lj_virial + atom_i, virial);
+                }
+            }
+        }
+        else
+        {
+            __shared__ VECTOR_LJ_SOFT_TYPE shared_i_atoms[max_super_cluster_atoms];
+            __shared__ int shared_i_atom_ids[max_super_cluster_atoms];
+            __shared__ unsigned int shared_i_valid_masks[kClusteredSuperClusterClusters];
+            __shared__ unsigned int shared_i_local_masks[kClusteredSuperClusterClusters];
+            __shared__ int shared_i_cluster_ids[kClusteredSuperClusterClusters];
+            __shared__ VECTOR warp_i_force[max_block_warps][max_cluster_size];
+            __shared__ float warp_i_energy_lj[max_block_warps][max_cluster_size];
+            __shared__ float warp_i_energy_coulomb[max_block_warps][max_cluster_size];
+
+            const int i_lane = threadIdx.x;
+            const int j_lane = threadIdx.y;
+            const int lane = tid & (warpSize - 1);
+            const int warp_id = tid / warpSize;
+            const int active_cluster_count = cluster_i_end - cluster_i_start;
+            const int i_slot = j_lane * cluster_size + i_lane;
+
+            VECTOR fci_buf[kClusteredSuperClusterClusters];
+            float energy_lj_buf[kClusteredSuperClusterClusters] = {};
+            float energy_coulomb_buf[kClusteredSuperClusterClusters] = {};
+            for (int i_local = 0; i_local < kClusteredSuperClusterClusters;
+                 i_local += 1)
+            {
+                fci_buf[i_local] = {0.0f, 0.0f, 0.0f};
+            }
+
+            if (j_lane < active_cluster_count)
+            {
+                const int cluster_i = cluster_i_start + j_lane;
+                if (i_lane == 0)
+                {
+                    shared_i_valid_masks[j_lane] = cluster_valid_masks[cluster_i];
+                    shared_i_local_masks[j_lane] = cluster_local_masks[cluster_i];
+                    shared_i_cluster_ids[j_lane] = cluster_i;
+                }
+                if ((cluster_valid_masks[cluster_i] & (1u << i_lane)) != 0u)
+                {
+                    const int sorted_atom_i = cluster_offsets[cluster_i] + i_lane;
+                    shared_i_atoms[i_slot] = sorted_crd[sorted_atom_i];
+                    shared_i_atoms[i_slot].crd =
+                        shared_i_atoms[i_slot].crd + shift_vec;
+                    shared_i_atom_ids[i_slot] = sorted_atom_ids[sorted_atom_i];
+                }
+                else
+                {
+                    shared_i_atom_ids[i_slot] = -1;
+                }
+            }
+            else if (i_lane == 0 && j_lane < kClusteredSuperClusterClusters)
+            {
+                shared_i_valid_masks[j_lane] = 0u;
+                shared_i_local_masks[j_lane] = 0u;
+                shared_i_cluster_ids[j_lane] = -1;
+            }
+            __syncthreads();
+
+            for (int packed_idx = sci_entry.cjpacked_begin;
+                 packed_idx < sci_entry.cjpacked_end; packed_idx += 1)
+            {
+                const LJ_CLUSTERED_CJ_PACKED packed =
+                    cj_packed_entries[packed_idx];
+                const LJ_CLUSTERED_IMEI imei = packed.imei[warp_id];
+                if (imei.imask == 0u)
+                {
+                    continue;
+                }
+                for (int jm = 0; jm < kClusteredJGroupSize; jm += 1)
+                {
+                    const int cluster_j = packed.cj[jm];
+                    if (cluster_j < 0)
+                    {
+                        continue;
+                    }
+                    const unsigned int imask = Clustered_Jm_Imask(imei, jm);
+                    if (imask == 0u)
+                    {
+                        continue;
+                    }
+                    const unsigned int valid_mask_j =
+                        cluster_valid_masks[cluster_j];
+                    if ((valid_mask_j & (1u << j_lane)) == 0u)
+                    {
+                        continue;
+                    }
+                    const int sorted_atom_j =
+                        cluster_offsets[cluster_j] + j_lane;
+                    const VECTOR_LJ_SOFT_TYPE r2 = sorted_crd[sorted_atom_j];
+                    const int atom_j = sorted_atom_ids[sorted_atom_j];
+                    const int atom_j_is_local = atom_j < local_atom_numbers ? 1 : 0;
+                    VECTOR fcj_buf = {0.0f, 0.0f, 0.0f};
+                    for (int i_local = 0; i_local < active_cluster_count;
+                         i_local += 1)
+                    {
+                        if ((imask & (1u << i_local)) == 0u)
+                        {
+                            continue;
+                        }
+                        const unsigned int valid_mask_i =
+                            shared_i_valid_masks[i_local];
+                        const unsigned int local_mask_i =
+                            shared_i_local_masks[i_local];
+                        if ((valid_mask_i & (1u << i_lane)) == 0u ||
+                            (local_mask_i & (1u << i_lane)) == 0u)
+                        {
+                            continue;
+                        }
+                        const int cluster_i = shared_i_cluster_ids[i_local];
+                        const int exclusion_index =
+                            Clustered_Exclusion_Index(imei, jm, i_local);
+                        const unsigned long long exclusion_mask =
+                            exclusion_index >= 0
+                                ? exclusion_mask_pool[exclusion_index]
+                                : 0ull;
+                        if (sci_entry.shift_id == kClusteredCentralShiftId &&
+                            cluster_i == cluster_j &&
+                            atom_j < local_atom_numbers && j_lane <= i_lane)
+                        {
+                            continue;
+                        }
+                        if ((exclusion_mask &
+                             (1ull << (i_lane * cluster_size + j_lane))) != 0ull)
+                        {
+                            continue;
+                        }
+
+                        const VECTOR_LJ_SOFT_TYPE r1 =
+                            shared_i_atoms[i_local * cluster_size + i_lane];
+                        const VECTOR dr =
+                            Get_Periodic_Displacement(r2, r1, cell, rcell);
+                        const float dr2 = dr * dr;
+                        if (dr2 >= cutoff_sq || dr2 == 0.0f)
+                        {
+                            continue;
+                        }
+                        const float dr_abs = sqrtf(dr2);
+                        const float ij_factor =
+                            atom_j < local_atom_numbers ? 1.0f : 0.5f;
+                        const int atom_pair_LJ_type_A =
+                            Get_LJ_Type(r1.LJ_type, r2.LJ_type);
+                        const int atom_pair_LJ_type_B =
+                            Get_LJ_Type(r1.LJ_type_B, r2.LJ_type_B);
+                        const float AA = LJ_type_AA[atom_pair_LJ_type_A];
+                        const float AB = LJ_type_AB[atom_pair_LJ_type_A];
+                        const float BA = LJ_type_BA[atom_pair_LJ_type_B];
+                        const float BB = LJ_type_BB[atom_pair_LJ_type_B];
+
+                        float pair_lj_energy = 0.0f;
+                        float pair_coulomb_energy = 0.0f;
+                        VECTOR frc_lin = {0.0f, 0.0f, 0.0f};
+                        bool active_force = false;
+                        if (BA * AA != 0 || BA + AA == 0)
+                        {
+                            if (need_force)
+                            {
+                                float frc_abs =
+                                    lambda_ * Get_LJ_Force(r1, r2, dr_abs, AA, AB) +
+                                    lambda *
+                                        Get_LJ_Force(r1, r2, dr_abs, BA, BB);
+                                if (need_coulomb)
+                                {
+                                    frc_abs -= Get_Direct_Coulomb_Force(
+                                        r1, r2, dr_abs, pme_beta);
+                                }
+                                frc_lin = frc_abs * dr;
+                                active_force = true;
+                            }
+                            pair_lj_energy =
+                                ij_factor *
+                                (lambda_ *
+                                     Get_LJ_Energy(r1, r2, dr_abs, AA, AB) +
+                                 lambda *
+                                     Get_LJ_Energy(r1, r2, dr_abs, BA, BB));
+                            if (need_coulomb)
+                            {
+                                pair_coulomb_energy =
+                                    ij_factor * Get_Direct_Coulomb_Energy(
+                                                    r1, r2, dr_abs, pme_beta);
+                            }
+                        }
+                        else
+                        {
+                            const float sigma_A = Get_Soft_Core_Sigma(
+                                AA, AB, input_sigma_6, input_sigma_6_min);
+                            const float sigma_B = Get_Soft_Core_Sigma(
+                                BA, BB, input_sigma_6, input_sigma_6_min);
+                            const float dr_softcore_A =
+                                Get_Soft_Core_Distance(AA, AB, sigma_A, dr_abs,
+                                                       alpha, p, lambda);
+                            const float dr_softcore_B =
+                                Get_Soft_Core_Distance(BB, BA, sigma_B, dr_abs,
+                                                       alpha, p, 1.0f - lambda);
+                            if (need_force)
+                            {
+                                float frc_abs =
+                                    lambda_ * Get_Soft_Core_LJ_Force(
+                                                  r1, r2, dr_abs,
+                                                  dr_softcore_A, AA, AB) +
+                                    lambda * Get_Soft_Core_LJ_Force(
+                                                 r1, r2, dr_abs,
+                                                 dr_softcore_B, BA, BB);
+                                if (need_coulomb)
+                                {
+                                    frc_abs -=
+                                        lambda_ *
+                                        Get_Soft_Core_Direct_Coulomb_Force(
+                                            r1, r2, dr_abs, dr_softcore_A,
+                                            pme_beta);
+                                    frc_abs -=
+                                        lambda *
+                                        Get_Soft_Core_Direct_Coulomb_Force(
+                                            r1, r2, dr_abs, dr_softcore_B,
+                                            pme_beta);
+                                }
+                                frc_lin = frc_abs * dr;
+                                active_force = true;
+                            }
+                            pair_lj_energy =
+                                ij_factor *
+                                (lambda_ * Get_LJ_Energy(r1, r2, dr_softcore_A,
+                                                         AA, AB) +
+                                 lambda * Get_LJ_Energy(r1, r2, dr_softcore_B,
+                                                        BA, BB));
+                            if (need_coulomb)
+                            {
+                                pair_coulomb_energy =
+                                    ij_factor *
+                                    (lambda_ * Get_Direct_Coulomb_Energy(
+                                                   r1, r2, dr_softcore_A,
+                                                   pme_beta) +
+                                     lambda * Get_Direct_Coulomb_Energy(
+                                                  r1, r2, dr_softcore_B,
+                                                  pme_beta));
+                            }
+                        }
+
+                        if (need_force && active_force)
+                        {
+                            fci_buf[i_local] = fci_buf[i_local] + frc_lin;
+                            if (atom_j_is_local != 0)
+                            {
+                                fcj_buf = fcj_buf - frc_lin;
+                            }
+                        }
+                        if (need_energy)
+                        {
+                            energy_lj_buf[i_local] += pair_lj_energy;
+                            energy_coulomb_buf[i_local] += pair_coulomb_energy;
+                        }
+                    }
+
+                    if (need_force && atom_j_is_local != 0)
+                    {
+                        VECTOR reduced = fcj_buf;
+                        for (int delta = cluster_size >> 1; delta > 0;
+                             delta >>= 1)
+                        {
+                            reduced.x += deviceShflDown(FULL_MASK, reduced.x,
+                                                        delta, cluster_size);
+                            reduced.y += deviceShflDown(FULL_MASK, reduced.y,
+                                                        delta, cluster_size);
+                                reduced.z += deviceShflDown(FULL_MASK, reduced.z,
+                                                            delta, cluster_size);
+                        }
+                        if (i_lane == 0)
+                        {
+                            atomicAdd(frc + atom_j, reduced);
+                        }
+                    }
+                }
+            }
+
+            for (int i_local = 0; i_local < active_cluster_count; i_local += 1)
+            {
+                const unsigned int valid_mask_i = shared_i_valid_masks[i_local];
+                const unsigned int local_mask_i = shared_i_local_masks[i_local];
+                const bool active_i =
+                    (valid_mask_i & (1u << i_lane)) != 0u &&
+                    (local_mask_i & (1u << i_lane)) != 0u;
+
+                if (need_force)
+                {
+                    VECTOR reduced = active_i ? fci_buf[i_local]
+                                              : VECTOR{0.0f, 0.0f, 0.0f};
+                    reduced.x +=
+                        deviceShflDown(FULL_MASK, reduced.x, 16, warpSize);
+                    reduced.y +=
+                        deviceShflDown(FULL_MASK, reduced.y, 16, warpSize);
+                    reduced.z +=
+                        deviceShflDown(FULL_MASK, reduced.z, 16, warpSize);
+                    reduced.x += deviceShflDown(FULL_MASK, reduced.x, 8, warpSize);
+                    reduced.y += deviceShflDown(FULL_MASK, reduced.y, 8, warpSize);
+                    reduced.z += deviceShflDown(FULL_MASK, reduced.z, 8, warpSize);
+                    if (lane < cluster_size)
+                    {
+                        warp_i_force[warp_id][lane] = reduced;
+                    }
+                }
+                if (need_energy)
+                {
+                    float reduced_lj = active_i ? energy_lj_buf[i_local] : 0.0f;
+                    float reduced_coulomb =
+                        active_i ? energy_coulomb_buf[i_local] : 0.0f;
+                    reduced_lj +=
+                        deviceShflDown(FULL_MASK, reduced_lj, 16, warpSize);
+                    reduced_coulomb +=
+                        deviceShflDown(FULL_MASK, reduced_coulomb, 16, warpSize);
+                    reduced_lj +=
+                        deviceShflDown(FULL_MASK, reduced_lj, 8, warpSize);
+                    reduced_coulomb +=
+                        deviceShflDown(FULL_MASK, reduced_coulomb, 8, warpSize);
+                    if (lane < cluster_size)
+                    {
+                        warp_i_energy_lj[warp_id][lane] = reduced_lj;
+                        warp_i_energy_coulomb[warp_id][lane] = reduced_coulomb;
+                    }
+                }
+                __syncthreads();
+
+                if (j_lane == 0 && active_i)
+                {
+                    const int atom_i =
+                        shared_i_atom_ids[i_local * cluster_size + i_lane];
+                    if (need_force)
+                    {
+                        atomicAdd(frc + atom_i,
+                                  warp_i_force[0][i_lane] +
+                                      warp_i_force[1][i_lane]);
+                    }
+                    if (need_energy)
+                    {
+                        const float total_energy_lj =
+                            warp_i_energy_lj[0][i_lane] +
+                            warp_i_energy_lj[1][i_lane];
+                        const float total_energy_coulomb =
+                            warp_i_energy_coulomb[0][i_lane] +
+                            warp_i_energy_coulomb[1][i_lane];
+                        atomicAdd(atom_energy + atom_i,
+                                  total_energy_lj + total_energy_coulomb);
+                        atomicAdd(this_energy + atom_i, total_energy_lj);
+                        if (need_coulomb)
+                        {
+                            atomicAdd(atom_direct_pme_energy + atom_i,
+                                      total_energy_coulomb);
+                        }
+                    }
+                }
+                __syncthreads();
+            }
+        }
+#endif
+    }
+}
+
 void LJ_SOFT_CORE::Initial(CONTROLLER* controller, float cutoff,
                            char* module_name)
 {
@@ -595,6 +2162,8 @@ void LJ_SOFT_CORE::Initial(CONTROLLER* controller, float cutoff,
     if (is_initialized)
     {
         this->cutoff = cutoff;
+        clustered_direct_cache = Acquire_Shared_LJ_Clustered_Direct_Cache(
+            controller, this->module_name, false);
         Device_Malloc_Safely((void**)&crd_with_parameters,
                              sizeof(VECTOR_LJ_SOFT_TYPE) * atom_numbers);
         Launch_Device_Kernel(
@@ -728,6 +2297,10 @@ void LJ_SOFT_CORE::LJ_Soft_Core_PME_Direct_Force_With_Atom_Energy_And_Virial(
 {
     if (is_initialized)
     {
+        if (Use_Clustered_Direct())
+        {
+            clustered_direct_cache->Build(crd, cell, rcell, cutoff);
+        }
         Launch_Device_Kernel(
             Copy_Crd_And_Charge_To_New_Crd,
             (this->atom_numbers + CONTROLLER::device_max_thread - 1) /
@@ -735,6 +2308,12 @@ void LJ_SOFT_CORE::LJ_Soft_Core_PME_Direct_Force_With_Atom_Energy_And_Virial(
             CONTROLLER::device_max_thread, 0, NULL,
             this->local_atom_numbers + this->ghost_numbers, crd,
             crd_with_LJ_parameters_local, charge);
+        if (Use_Clustered_Direct() &&
+            clustered_direct_cache->layout.total_atom_numbers > 0)
+        {
+            clustered_direct_cache->Gather_Soft_Core(
+                crd_with_LJ_parameters_local);
+        }
 
         if (need_atom_energy)
         {
@@ -745,41 +2324,104 @@ void LJ_SOFT_CORE::LJ_Soft_Core_PME_Direct_Force_With_Atom_Energy_And_Virial(
 
         if (atom_numbers == 0 || local_atom_numbers == 0) return;
 
-        dim3 blockSize = {
-            CONTROLLER::device_warp,
-            CONTROLLER::device_max_thread / CONTROLLER::device_warp};
-        dim3 gridSize = (atom_numbers + blockSize.y - 1) / blockSize.y;
+        if (Use_Clustered_Direct())
+        {
+            auto& clustered_layout = clustered_direct_cache->layout;
+            if (clustered_layout.cjpacked_numbers == 0 ||
+                clustered_layout.sci_numbers == 0)
+                return;
+            dim3 blockSize = {
+                static_cast<unsigned int>(clustered_layout.cluster_size),
+                static_cast<unsigned int>(clustered_layout.cluster_size), 1u};
+            dim3 gridSize = {
+                static_cast<unsigned int>(clustered_layout.sci_numbers), 1u, 1u};
 
-        auto f =
-            Lennard_Jones_And_Direct_Coulomb_Soft_Core_CUDA<true, false, false,
-                                                            true, false>;
+            auto f = Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb_Soft_Core<
+                true, false, false, true>;
 
-        if (!need_atom_energy && !need_virial)
-        {
-            f = Lennard_Jones_And_Direct_Coulomb_Soft_Core_CUDA<
-                true, false, false, true, false>;
-        }
-        else if (need_atom_energy && !need_virial)
-        {
-            f = Lennard_Jones_And_Direct_Coulomb_Soft_Core_CUDA<
-                true, true, false, true, false>;
-        }
-        else if (!need_atom_energy && need_virial)
-        {
-            f = Lennard_Jones_And_Direct_Coulomb_Soft_Core_CUDA<
-                true, false, true, true, false>;
+            if (!need_atom_energy && !need_virial)
+            {
+                f = Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb_Soft_Core<
+                    true, false, false, true>;
+            }
+            else if (need_atom_energy && !need_virial)
+            {
+                f = Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb_Soft_Core<
+                    true, true, false, true>;
+            }
+            else if (!need_atom_energy && need_virial)
+            {
+                f = Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb_Soft_Core<
+                    true, false, true, true>;
+            }
+            else
+            {
+                f = Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb_Soft_Core<
+                    true, true, true, true>;
+            }
+            if (clustered_direct_cache->direct_kernel_time_recorder != NULL)
+            {
+                clustered_direct_cache->direct_kernel_time_recorder->Start();
+            }
+            Launch_Device_Kernel(
+                f, gridSize, blockSize, 0, NULL, clustered_layout.sci_numbers,
+                clustered_layout.cluster_size,
+                clustered_layout.super_cluster_clusters, local_atom_numbers,
+                clustered_layout.d_sort_permutation,
+                clustered_layout.d_cluster_offsets,
+                clustered_layout.d_cluster_valid_masks,
+                clustered_layout.d_cluster_local_masks,
+                clustered_layout.d_super_cluster_offsets,
+                clustered_layout.d_nbnxm_sci,
+                clustered_layout.d_nbnxm_cjpacked,
+                clustered_layout.d_exclusion_mask_pool,
+                clustered_direct_cache->d_sorted_soft_crd, cell, rcell, d_LJ_AA,
+                d_LJ_AB, d_LJ_BA, d_LJ_BB, cutoff, frc, pme_beta,
+                atom_energy, atom_lj_virial, atom_direct_pme_energy, lambda,
+                alpha, p, sigma_6, sigma_6_min, d_LJ_energy_atom);
+            if (clustered_direct_cache->direct_kernel_time_recorder != NULL)
+            {
+                clustered_direct_cache->direct_kernel_time_recorder->Stop();
+            }
         }
         else
         {
-            f = Lennard_Jones_And_Direct_Coulomb_Soft_Core_CUDA<
-                true, true, true, true, false>;
+            dim3 blockSize = {
+                CONTROLLER::device_warp,
+                CONTROLLER::device_max_thread / CONTROLLER::device_warp};
+            dim3 gridSize = (atom_numbers + blockSize.y - 1) / blockSize.y;
+
+            auto f = Lennard_Jones_And_Direct_Coulomb_Soft_Core_CUDA<
+                true, false, false, true, false>;
+
+            if (!need_atom_energy && !need_virial)
+            {
+                f = Lennard_Jones_And_Direct_Coulomb_Soft_Core_CUDA<
+                    true, false, false, true, false>;
+            }
+            else if (need_atom_energy && !need_virial)
+            {
+                f = Lennard_Jones_And_Direct_Coulomb_Soft_Core_CUDA<
+                    true, true, false, true, false>;
+            }
+            else if (!need_atom_energy && need_virial)
+            {
+                f = Lennard_Jones_And_Direct_Coulomb_Soft_Core_CUDA<
+                    true, false, true, true, false>;
+            }
+            else
+            {
+                f = Lennard_Jones_And_Direct_Coulomb_Soft_Core_CUDA<
+                    true, true, true, true, false>;
+            }
+            Launch_Device_Kernel(
+                f, gridSize, blockSize, 0, NULL, local_atom_numbers,
+                solvent_numbers, nl, crd_with_LJ_parameters_local, cell, rcell,
+                d_LJ_AA, d_LJ_AB, d_LJ_BA, d_LJ_BB, cutoff, frc, pme_beta,
+                atom_energy, atom_lj_virial, atom_direct_pme_energy, NULL,
+                NULL, lambda, alpha, p, sigma_6, sigma_6_min,
+                d_LJ_energy_atom);
         }
-        Launch_Device_Kernel(
-            f, gridSize, blockSize, 0, NULL, local_atom_numbers,
-            solvent_numbers, nl, crd_with_LJ_parameters_local, cell, rcell,
-            d_LJ_AA, d_LJ_AB, d_LJ_BA, d_LJ_BB, cutoff, frc, pme_beta,
-            atom_energy, atom_lj_virial, atom_direct_pme_energy, NULL, NULL,
-            lambda, alpha, p, sigma_6, sigma_6_min, d_LJ_energy_atom);
     }
 }
 
@@ -917,4 +2559,25 @@ void LJ_SOFT_CORE::Get_Local(int* atom_local, int local_atom_numbers,
                          local_atom_numbers, ghost_numbers, d_atom_LJ_type_A,
                          d_atom_LJ_type_B, d_subsys_division,
                          crd_with_LJ_parameters_local);
+}
+
+void LJ_SOFT_CORE::Refresh_Clustered_Metadata(int solvent_numbers,
+                                              const int* d_excluded_list_start,
+                                              const int* d_excluded_list,
+                                              const int* d_excluded_numbers)
+{
+    if (!is_initialized) return;
+    if (clustered_direct_cache != NULL)
+    {
+        const int capped_solvent_numbers =
+            solvent_numbers > 0 ? solvent_numbers : 0;
+        const int direct_local_atom_numbers =
+            local_atom_numbers > capped_solvent_numbers
+                ? (local_atom_numbers - capped_solvent_numbers)
+                : 0;
+        clustered_direct_cache->Refresh_Metadata(
+            local_atom_numbers, direct_local_atom_numbers, ghost_numbers,
+            d_excluded_list_start,
+            d_excluded_list, d_excluded_numbers);
+    }
 }

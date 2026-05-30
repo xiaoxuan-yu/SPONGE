@@ -31,6 +31,31 @@ endif()
 
 add_executable(${CURRENT_TARGET} ${SOURCES})
 target_link_libraries(${CURRENT_TARGET} PRIVATE sponge_toml)
+set_target_properties(${CURRENT_TARGET}
+                      PROPERTIES CXX_STANDARD 20
+                                 CXX_STANDARD_REQUIRED ON
+                                 CUDA_STANDARD 20
+                                 CUDA_STANDARD_REQUIRED ON
+                                 HIP_STANDARD 20
+                                 HIP_STANDARD_REQUIRED ON)
+target_include_directories(
+  ${CURRENT_TARGET}
+  PRIVATE ${PROJECT_ROOT_DIR}/SPONGE
+          ${PROJECT_ROOT_DIR}/SPONGE/third_party/cornerstone_octree/include)
+
+set(SPONGE_CSTONE_STANDARD_SOURCES
+    ${PROJECT_ROOT_DIR}/SPONGE/Lennard_Jones_force/clustered_lj.cpp
+    ${SPONGE_CSTONE_SOURCES})
+if(SPONGE_CSTONE_STANDARD_SOURCES)
+  set_source_files_properties(
+    ${SPONGE_CSTONE_STANDARD_SOURCES}
+    PROPERTIES CXX_STANDARD 20
+               CXX_STANDARD_REQUIRED ON
+               CUDA_STANDARD 20
+               CUDA_STANDARD_REQUIRED ON
+               HIP_STANDARD 20
+               HIP_STANDARD_REQUIRED ON)
+endif()
 if(WIN32)
   target_link_libraries(${CURRENT_TARGET} PRIVATE ws2_32)
 endif()

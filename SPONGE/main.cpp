@@ -1072,12 +1072,17 @@ void Main_Calculate_Force()
                 md_info.need_pressure,
                 selective_interaction.Select_Atom_Virial_Tensor());
         }
+        const bool clustered_direct_active =
+            !selective_interaction.Has_Direct_LJ_Coulomb() &&
+            (lj.Use_Clustered_Direct() || lj_soft.Use_Clustered_Direct());
+        const int direct_solvent_numbers =
+            clustered_direct_active ? 0 : solvent_lj.local_solvent_numbers;
         if (selective_interaction.Has_Direct_LJ_Coulomb())
         {
             selective_interaction
                 .LJ_Direct_CF_Force_With_Atom_Energy_And_Virial(
                     md_info.atom_numbers, dd.atom_numbers,
-                    solvent_lj.local_solvent_numbers, dd.ghost_numbers, dd.crd,
+                    direct_solvent_numbers, dd.ghost_numbers, dd.crd,
                     dd.d_charge, &lj, dd.frc, md_info.pbc.cell,
                     md_info.pbc.rcell, neighbor_list.d_nl, md_info.nb.cutoff,
                     pm.beta, md_info.need_potential, dd.d_energy,
@@ -1086,7 +1091,7 @@ void Main_Calculate_Force()
             selective_interaction
                 .LJ_Soft_Core_Direct_CF_Force_With_Atom_Energy_And_Virial(
                     md_info.atom_numbers, dd.atom_numbers,
-                    solvent_lj.local_solvent_numbers, dd.ghost_numbers, dd.crd,
+                    direct_solvent_numbers, dd.ghost_numbers, dd.crd,
                     dd.d_charge, &lj_soft, dd.frc, md_info.pbc.cell,
                     md_info.pbc.rcell, neighbor_list.d_nl, md_info.nb.cutoff,
                     pm.beta, md_info.need_potential, dd.d_energy,
@@ -1097,25 +1102,29 @@ void Main_Calculate_Force()
         {
             lj.LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
                 md_info.atom_numbers, dd.atom_numbers,
-                solvent_lj.local_solvent_numbers, dd.ghost_numbers, dd.crd,
-                dd.d_charge, dd.frc, md_info.pbc.cell, md_info.pbc.rcell,
-                neighbor_list.d_nl, pm.beta, md_info.need_potential,
-                dd.d_energy, md_info.need_pressure, dd.d_virial,
+                direct_solvent_numbers, dd.ghost_numbers, dd.crd, dd.d_charge,
+                dd.frc, md_info.pbc.cell, md_info.pbc.rcell, neighbor_list.d_nl,
+                pm.beta, md_info.need_potential, dd.d_energy,
+                md_info.need_pressure, dd.d_virial,
                 pm.d_direct_atom_energy);
 
             lj_soft.LJ_Soft_Core_PME_Direct_Force_With_Atom_Energy_And_Virial(
                 md_info.atom_numbers, dd.atom_numbers,
-                solvent_lj.local_solvent_numbers, dd.ghost_numbers, dd.crd,
+                direct_solvent_numbers, dd.ghost_numbers, dd.crd, dd.d_charge,
+                dd.frc, md_info.pbc.cell, md_info.pbc.rcell, neighbor_list.d_nl,
+                pm.beta, md_info.need_potential, dd.d_energy,
+                md_info.need_pressure, dd.d_virial,
+                pm.d_direct_atom_energy);
+        }
+        if (direct_solvent_numbers > 0)
+        {
+            solvent_lj.LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
+                dd.atom_numbers, dd.res_numbers, dd.res_start, dd.crd,
                 dd.d_charge, dd.frc, md_info.pbc.cell, md_info.pbc.rcell,
                 neighbor_list.d_nl, pm.beta, md_info.need_potential,
                 dd.d_energy, md_info.need_pressure, dd.d_virial,
                 pm.d_direct_atom_energy);
         }
-        solvent_lj.LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
-            dd.atom_numbers, dd.res_numbers, dd.res_start, dd.crd, dd.d_charge,
-            dd.frc, md_info.pbc.cell, md_info.pbc.rcell, neighbor_list.d_nl,
-            pm.beta, md_info.need_potential, dd.d_energy, md_info.need_pressure,
-            dd.d_virial, pm.d_direct_atom_energy);
 
         lj.Long_Range_Correction(
             md_info.need_pressure, dd.d_virial, md_info.need_potential,
@@ -1293,6 +1302,8 @@ void Main_Refresh_Local_State(bool rebuild_dd)
         dd.Get_Atoms(&controller, &md_info);
     }
     dd.Get_Ghost(&controller, &md_info);
+    lj.Maybe_Apply_Ordered_Layout(&controller, &dd, md_info.pbc.cell,
+                                  md_info.pbc.rcell, md_info.sys.box_length);
     dd.Get_Excluded(&controller, &md_info);
 
     neighbor_list.Update(
@@ -1309,6 +1320,18 @@ void Main_Refresh_Local_State(bool rebuild_dd)
     lj_soft.Get_Local(dd.atom_local, dd.atom_numbers, dd.ghost_numbers);
     solvent_lj.Get_Local(dd.res_numbers, dd.res_len, dd.atom_numbers,
                          dd.d_mass);
+    const int clustered_direct_solvent_numbers =
+        (lj.Use_Clustered_Direct() || lj_soft.Use_Clustered_Direct())
+            ? 0
+            : solvent_lj.local_solvent_numbers;
+    lj.Refresh_Clustered_Metadata(clustered_direct_solvent_numbers,
+                                  dd.d_excluded_list_start,
+                                  dd.d_excluded_list,
+                                  dd.d_excluded_numbers);
+    lj_soft.Refresh_Clustered_Metadata(clustered_direct_solvent_numbers,
+                                       dd.d_excluded_list_start,
+                                       dd.d_excluded_list,
+                                       dd.d_excluded_numbers);
     listed_forces.Get_Local(dd.atom_local, dd.atom_numbers, dd.ghost_numbers,
                             dd.atom_local_label, dd.atom_local_id);
     pairwise_force.Get_Local(dd.atom_local, dd.atom_numbers, dd.ghost_numbers,
@@ -1585,6 +1608,7 @@ void Main_Clear()
         md_info.sys.steps, md_info.sys.speed_time_factor,
         md_info.sys.speed_unit_name.c_str(), md_info.mode);
 
+    Release_Shared_LJ_Clustered_Direct_Cache();
     controller.Clear();
 }
 

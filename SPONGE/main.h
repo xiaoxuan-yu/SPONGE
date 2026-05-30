@@ -26,6 +26,7 @@
 #include "constrain/settle.h"
 #include "constrain/shake.h"
 #include "control.h"
+#include "Lennard_Jones_force/clustered_lj.h"
 #include "custom_force/listed_forces.h"
 #include "custom_force/pairwise_force.h"
 #include "dihedral/dihedral.h"

@@ -654,6 +654,7 @@ void MD_INFORMATION::Read_Rst7(const char* file_name, int irest,
 void MD_INFORMATION::MD_Reset_Atom_Energy_And_Virial_And_Force()
 {
     need_potential = 0;
+    need_pressure = 0;
     need_kinetic = 0;
     if ((output.print_zeroth_frame || sys.steps) &&
         sys.steps % output.write_mdout_interval == 0)

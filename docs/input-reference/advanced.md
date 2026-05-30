@@ -170,6 +170,40 @@ parameters:
 These keys are top-level in the current source, not nested under
 `[LJ_soft_core]`.
 
+## LJ Ordered Layout
+
+| Parameter | Scope | Type | Default | Description |
+|-----------|-------|------|---------|-------------|
+| `ordered_layout` | `LJ` | bool | `false` | Enable one-time residue-block layout reordering for the direct LJ kernel |
+| `ordered_layout_max_depth` | `LJ` | int | `6` | Maximum cornerstone-octree depth used to cluster residues |
+| `ordered_layout_leaf_size` | `LJ` | int | `32` | Maximum residues per cornerstone leaf before subdivision stops |
+| `ordered_layout_min_residue_numbers` | `LJ` | int | `256` | Skip reordering for smaller local systems |
+
+This experimental path builds a host-side cornerstone octree over residue
+anchor coordinates, sorts the leaves by a 3D Hilbert space-filling curve, then
+reorders the local residue blocks once during local-state initialization.
+Current source support is limited to single-rank local domains without ghosts.
+
+## Clustered Direct LJ
+
+| Parameter | Scope | Type | Default | Description |
+|-----------|-------|------|---------|-------------|
+| `direct_kernel` | `LJ` | string | `legacy` | Select the direct short-range LJ/Coulomb kernel: `legacy` or `clustered` |
+| `cluster_size` | `LJ` | int | `8` | Cluster width used by the clustered direct kernel |
+| `super_cluster_clusters` | `LJ` | int | `8` | Number of clusters grouped into one super-cluster |
+| `cornerstone_max_depth` | `LJ` | int | `6` | Hilbert key depth used while building clustered direct lists |
+| `cornerstone_leaf_size` | `LJ` | int | `32` | Target particle count per Hilbert-ordered leaf chunk |
+| `clustered_compression` | `LJ` | bool | `false` | Reserved flag for future compressed clustered lists; currently ignored |
+| `cpu_simd` | `LJ` | string | `auto` | CPU-only clustered builder policy; unsupported when clustered direct LJ runs on GPU |
+
+When `direct_kernel = "clustered"`, SPONGE builds clustered particle ordering
+and clustered pair lists on the active backend instead of using the legacy
+atom-centric half neighbor list for the plain LJ and soft-core direct kernels.
+The solvent shortcut is bypassed in this mode because solvent atoms are covered
+by the same clustered traversal. The clustered list is cached with a Verlet
+skin and only rebuilt when needed; it reuses the top-level `skin` value and
+`neighbor_list.skin_permit` as its rebuild threshold.
+
 ## Custom Forces
 
 | Parameter | Scope | Type | Description |
