@@ -1,5 +1,6 @@
 ﻿#include "main.h"
 
+#include <cstdlib>
 #include <sstream>
 
 #define SUBPACKAGE_HINT \
@@ -191,6 +192,241 @@ float Read_Output_Field_Float(const char* key, float fallback)
         return fallback;
     }
     return static_cast<float>(atof(iter->second.c_str()));
+}
+
+struct Main_Legacy_Neighbor_List_Need
+{
+    bool needed = false;
+    bool pbc_enabled = false;
+    bool selective_direct = false;
+    bool clustered_direct_active = false;
+    int direct_solvent_numbers = 0;
+    bool lj_direct_legacy = false;
+    bool lj_soft_direct_legacy = false;
+    bool solvent_lj_legacy = false;
+    bool pairwise_legacy = false;
+    bool reaxff_legacy = false;
+    bool full_legacy = false;
+};
+
+struct Main_Legacy_Neighbor_List_State
+{
+    bool valid = false;
+    bool stale = true;
+    int generation = 0;
+    int stale_generation = 0;
+};
+
+Main_Legacy_Neighbor_List_State main_legacy_neighbor_list_state;
+
+bool Main_Legacy_Neighbor_List_Trace_Enabled()
+{
+    const char* enabled = std::getenv("SPONGE_LEGACY_NEIGHBOR_LIST_TRACE");
+    return enabled != NULL && enabled[0] != '\0' && enabled[0] != '0';
+}
+
+const char* Main_Neighbor_List_Update_Name(int update)
+{
+    if (update == NEIGHBOR_LIST::FORCED_UPDATE)
+    {
+        return "forced";
+    }
+    if (update == NEIGHBOR_LIST::CONDITIONAL_UPDATE)
+    {
+        return "conditional";
+    }
+    return "none";
+}
+
+Main_Legacy_Neighbor_List_Need Main_Get_Legacy_Neighbor_List_Need()
+{
+    Main_Legacy_Neighbor_List_Need need;
+    need.pbc_enabled = md_info.pbc.pbc != 0;
+    if (!need.pbc_enabled || !neighbor_list.is_initialized)
+    {
+        return need;
+    }
+
+    need.selective_direct = selective_interaction.Has_Direct_LJ_Coulomb();
+    need.clustered_direct_active =
+        !need.selective_direct &&
+        (lj.Use_Clustered_Direct() || lj_soft.Use_Clustered_Direct());
+    need.direct_solvent_numbers = need.clustered_direct_active
+                                      ? 0
+                                      : solvent_lj.local_solvent_numbers;
+    need.lj_direct_legacy = !need.selective_direct && lj.is_initialized &&
+                            !lj.Use_Clustered_Direct();
+    need.lj_soft_direct_legacy = !need.selective_direct &&
+                                 lj_soft.is_initialized &&
+                                 !lj_soft.Use_Clustered_Direct();
+    need.solvent_lj_legacy = need.direct_solvent_numbers > 0;
+    need.pairwise_legacy = pairwise_force.is_initialized;
+    need.reaxff_legacy = reaxff.is_initialized != 0;
+    need.full_legacy = neighbor_list.is_needed_full;
+    need.needed = need.selective_direct || need.lj_direct_legacy ||
+                  need.lj_soft_direct_legacy || need.solvent_lj_legacy ||
+                  need.pairwise_legacy || need.reaxff_legacy ||
+                  need.full_legacy;
+    return need;
+}
+
+bool Main_Needs_Legacy_Neighbor_List()
+{
+    return Main_Get_Legacy_Neighbor_List_Need().needed;
+}
+
+void Main_Trace_Legacy_Neighbor_List(
+    const char* site, const char* action,
+    const Main_Legacy_Neighbor_List_Need& need, int requested_update,
+    int effective_update)
+{
+    if (!Main_Legacy_Neighbor_List_Trace_Enabled())
+    {
+        return;
+    }
+    controller.MPI_printf(
+        "[legacy neighbor-list gate] site=%s step=%d action=%s need=%d "
+        "valid=%d stale=%d generation=%d stale_generation=%d "
+        "requested_update=%s effective_update=%s pbc=%d "
+        "clustered_direct_active=%d direct_solvent_numbers=%d "
+        "selective_direct=%d lj_direct_legacy=%d "
+        "lj_soft_direct_legacy=%d solvent_lj_legacy=%d pairwise=%d "
+        "reaxff=%d full=%d legacy_deref=%s\n",
+        site, md_info.sys.steps, action, need.needed ? 1 : 0,
+        main_legacy_neighbor_list_state.valid ? 1 : 0,
+        main_legacy_neighbor_list_state.stale ? 1 : 0,
+        main_legacy_neighbor_list_state.generation,
+        main_legacy_neighbor_list_state.stale_generation,
+        Main_Neighbor_List_Update_Name(requested_update),
+        Main_Neighbor_List_Update_Name(effective_update),
+        need.pbc_enabled ? 1 : 0, need.clustered_direct_active ? 1 : 0,
+        need.direct_solvent_numbers, need.selective_direct ? 1 : 0,
+        need.lj_direct_legacy ? 1 : 0,
+        need.lj_soft_direct_legacy ? 1 : 0,
+        need.solvent_lj_legacy ? 1 : 0, need.pairwise_legacy ? 1 : 0,
+        need.reaxff_legacy ? 1 : 0, need.full_legacy ? 1 : 0,
+        need.needed ? "legacy-consumer" : "none");
+}
+
+void Main_Trace_Legacy_Neighbor_List_Adapter(
+    const char* site, const Main_Legacy_Neighbor_List_Need& need,
+    const char* outcome, const char* reason)
+{
+    if (!Main_Legacy_Neighbor_List_Trace_Enabled())
+    {
+        return;
+    }
+    controller.MPI_printf(
+        "[legacy neighbor-list adapter] site=%s step=%d outcome=%s "
+        "reason=%s clustered_direct_active=%d selective_direct=%d "
+        "lj_direct_legacy=%d lj_soft_direct_legacy=%d solvent_lj_legacy=%d "
+        "pairwise=%d reaxff=%d full=%d\n",
+        site, md_info.sys.steps, outcome != NULL ? outcome : "unknown",
+        reason != NULL ? reason : "none",
+        need.clustered_direct_active ? 1 : 0,
+        need.selective_direct ? 1 : 0, need.lj_direct_legacy ? 1 : 0,
+        need.lj_soft_direct_legacy ? 1 : 0,
+        need.solvent_lj_legacy ? 1 : 0, need.pairwise_legacy ? 1 : 0,
+        need.reaxff_legacy ? 1 : 0, need.full_legacy ? 1 : 0);
+}
+
+bool Main_Try_Derived_Legacy_Neighbor_View(
+    const char* site, const Main_Legacy_Neighbor_List_Need& need)
+{
+    if (!need.clustered_direct_active)
+    {
+        Main_Trace_Legacy_Neighbor_List_Adapter(
+            site, need, "fallback-grid", "clustered direct is inactive");
+        return false;
+    }
+
+    LJ_CLUSTERED_DIRECT_CACHE* clustered_cache = NULL;
+    if (lj.Use_Clustered_Direct())
+    {
+        clustered_cache = lj.clustered_direct_cache;
+    }
+    else if (lj_soft.Use_Clustered_Direct())
+    {
+        clustered_cache = lj_soft.clustered_direct_cache;
+    }
+
+    LJ_CLUSTERED_LEGACY_NEIGHBOR_VIEW_REQUEST request;
+    request.request_half = true;
+    request.request_full = need.full_legacy || need.reaxff_legacy;
+    request.contains_non_lj_consumer = need.pairwise_legacy;
+    request.require_all_local_atoms = true;
+    request.require_local_ghost_pairs = true;
+    request.require_exclusions = true;
+    request.local_atom_numbers = dd.atom_numbers;
+    request.ghost_numbers = dd.ghost_numbers;
+    request.cutoff = neighbor_list.cutoff;
+    request.skin = neighbor_list.skin;
+    request.d_atom_local = dd.atom_local;
+    request.d_excluded_list_start = md_info.nb.d_excluded_list_start;
+    request.d_excluded_list = md_info.nb.d_excluded_list;
+    request.d_excluded_numbers = md_info.nb.d_excluded_numbers;
+
+    const char* fallback_reason = NULL;
+    const bool ready = Ensure_Legacy_Neighbor_View_From_Clustered_Payload(
+        clustered_cache, request, neighbor_list.d_nl,
+        neighbor_list.max_neighbor_numbers,
+        neighbor_list.d_neighbor_list_overflow, &fallback_reason);
+    Main_Trace_Legacy_Neighbor_List_Adapter(
+        site, need, ready ? "derived-view" : "fallback-grid",
+        fallback_reason);
+    return ready;
+}
+
+void Main_Mark_Legacy_Neighbor_List_Stale(
+    const char* site, const Main_Legacy_Neighbor_List_Need& need,
+    int requested_update)
+{
+    if (!main_legacy_neighbor_list_state.stale)
+    {
+        main_legacy_neighbor_list_state.stale_generation += 1;
+    }
+    main_legacy_neighbor_list_state.valid = false;
+    main_legacy_neighbor_list_state.stale = true;
+    Main_Trace_Legacy_Neighbor_List(site, "skip-stale", need,
+                                    requested_update, -1);
+}
+
+void Main_Update_Legacy_Neighbor_List_If_Needed(const char* site,
+                                                int requested_update)
+{
+    const bool needs_legacy_neighbor_list =
+        Main_Needs_Legacy_Neighbor_List();
+    const Main_Legacy_Neighbor_List_Need need =
+        Main_Get_Legacy_Neighbor_List_Need();
+    if (!needs_legacy_neighbor_list)
+    {
+        Main_Mark_Legacy_Neighbor_List_Stale(site, need, requested_update);
+        return;
+    }
+
+    const int effective_update = main_legacy_neighbor_list_state.valid
+                                     ? requested_update
+                                     : NEIGHBOR_LIST::FORCED_UPDATE;
+    if (Main_Try_Derived_Legacy_Neighbor_View(site, need))
+    {
+        Main_Trace_Legacy_Neighbor_List(site, "derived-view", need,
+                                        requested_update, effective_update);
+        main_legacy_neighbor_list_state.valid = true;
+        main_legacy_neighbor_list_state.stale = false;
+        main_legacy_neighbor_list_state.generation += 1;
+        return;
+    }
+
+    Main_Trace_Legacy_Neighbor_List(site, "update-grid", need,
+                                    requested_update, effective_update);
+    neighbor_list.Update(
+        dd.atom_local, dd.atom_numbers, dd.ghost_numbers, dd.crd,
+        md_info.pbc.cell, md_info.pbc.rcell, md_info.sys.steps,
+        effective_update, md_info.nb.d_excluded_list_start,
+        md_info.nb.d_excluded_list, md_info.nb.d_excluded_numbers);
+    main_legacy_neighbor_list_state.valid = true;
+    main_legacy_neighbor_list_state.stale = false;
+    main_legacy_neighbor_list_state.generation += 1;
 }
 
 void Main_Populate_Core_Output_Content()
@@ -1021,11 +1257,8 @@ void Main_Calculate_Force()
             qc.Compute_Gradient(dd.frc, dd.crd, md_info.sys.box_length,
                                 md_info.need_pressure, dd.d_virial);
         dd.Update_Ghost(&controller);
-        neighbor_list.Update(
-            dd.atom_local, dd.atom_numbers, dd.ghost_numbers, dd.crd,
-            md_info.pbc.cell, md_info.pbc.rcell, md_info.sys.steps,
-            neighbor_list.CONDITIONAL_UPDATE, md_info.nb.d_excluded_list_start,
-            md_info.nb.d_excluded_list, md_info.nb.d_excluded_numbers);
+        Main_Update_Legacy_Neighbor_List_If_Needed(
+            "Main_Calculate_Force", neighbor_list.CONDITIONAL_UPDATE);
 
         reaxff.Calculate_Force(&dd, &md_info, &neighbor_list);
 
@@ -1072,12 +1305,17 @@ void Main_Calculate_Force()
                 md_info.need_pressure,
                 selective_interaction.Select_Atom_Virial_Tensor());
         }
+        const bool clustered_direct_active =
+            !selective_interaction.Has_Direct_LJ_Coulomb() &&
+            (lj.Use_Clustered_Direct() || lj_soft.Use_Clustered_Direct());
+        const int direct_solvent_numbers =
+            clustered_direct_active ? 0 : solvent_lj.local_solvent_numbers;
         if (selective_interaction.Has_Direct_LJ_Coulomb())
         {
             selective_interaction
                 .LJ_Direct_CF_Force_With_Atom_Energy_And_Virial(
                     md_info.atom_numbers, dd.atom_numbers,
-                    solvent_lj.local_solvent_numbers, dd.ghost_numbers, dd.crd,
+                    direct_solvent_numbers, dd.ghost_numbers, dd.crd,
                     dd.d_charge, &lj, dd.frc, md_info.pbc.cell,
                     md_info.pbc.rcell, neighbor_list.d_nl, md_info.nb.cutoff,
                     pm.beta, md_info.need_potential, dd.d_energy,
@@ -1086,7 +1324,7 @@ void Main_Calculate_Force()
             selective_interaction
                 .LJ_Soft_Core_Direct_CF_Force_With_Atom_Energy_And_Virial(
                     md_info.atom_numbers, dd.atom_numbers,
-                    solvent_lj.local_solvent_numbers, dd.ghost_numbers, dd.crd,
+                    direct_solvent_numbers, dd.ghost_numbers, dd.crd,
                     dd.d_charge, &lj_soft, dd.frc, md_info.pbc.cell,
                     md_info.pbc.rcell, neighbor_list.d_nl, md_info.nb.cutoff,
                     pm.beta, md_info.need_potential, dd.d_energy,
@@ -1097,25 +1335,29 @@ void Main_Calculate_Force()
         {
             lj.LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
                 md_info.atom_numbers, dd.atom_numbers,
-                solvent_lj.local_solvent_numbers, dd.ghost_numbers, dd.crd,
-                dd.d_charge, dd.frc, md_info.pbc.cell, md_info.pbc.rcell,
-                neighbor_list.d_nl, pm.beta, md_info.need_potential,
-                dd.d_energy, md_info.need_pressure, dd.d_virial,
+                direct_solvent_numbers, dd.ghost_numbers, dd.crd, dd.d_charge,
+                dd.frc, md_info.pbc.cell, md_info.pbc.rcell, neighbor_list.d_nl,
+                pm.beta, md_info.need_potential, dd.d_energy,
+                md_info.need_pressure, dd.d_virial,
                 pm.d_direct_atom_energy);
 
             lj_soft.LJ_Soft_Core_PME_Direct_Force_With_Atom_Energy_And_Virial(
                 md_info.atom_numbers, dd.atom_numbers,
-                solvent_lj.local_solvent_numbers, dd.ghost_numbers, dd.crd,
+                direct_solvent_numbers, dd.ghost_numbers, dd.crd, dd.d_charge,
+                dd.frc, md_info.pbc.cell, md_info.pbc.rcell, neighbor_list.d_nl,
+                pm.beta, md_info.need_potential, dd.d_energy,
+                md_info.need_pressure, dd.d_virial,
+                pm.d_direct_atom_energy);
+        }
+        if (direct_solvent_numbers > 0)
+        {
+            solvent_lj.LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
+                dd.atom_numbers, dd.res_numbers, dd.res_start, dd.crd,
                 dd.d_charge, dd.frc, md_info.pbc.cell, md_info.pbc.rcell,
                 neighbor_list.d_nl, pm.beta, md_info.need_potential,
                 dd.d_energy, md_info.need_pressure, dd.d_virial,
                 pm.d_direct_atom_energy);
         }
-        solvent_lj.LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
-            dd.atom_numbers, dd.res_numbers, dd.res_start, dd.crd, dd.d_charge,
-            dd.frc, md_info.pbc.cell, md_info.pbc.rcell, neighbor_list.d_nl,
-            pm.beta, md_info.need_potential, dd.d_energy, md_info.need_pressure,
-            dd.d_virial, pm.d_direct_atom_energy);
 
         lj.Long_Range_Correction(
             md_info.need_pressure, dd.d_virial, md_info.need_potential,
@@ -1293,13 +1535,9 @@ void Main_Refresh_Local_State(bool rebuild_dd)
         dd.Get_Atoms(&controller, &md_info);
     }
     dd.Get_Ghost(&controller, &md_info);
+    lj.Maybe_Apply_Ordered_Layout(&controller, &dd, md_info.pbc.cell,
+                                  md_info.pbc.rcell, md_info.sys.box_length);
     dd.Get_Excluded(&controller, &md_info);
-
-    neighbor_list.Update(
-        dd.atom_local, dd.atom_numbers, dd.ghost_numbers, dd.crd,
-        md_info.pbc.cell, md_info.pbc.rcell, md_info.sys.steps,
-        neighbor_list.FORCED_UPDATE, md_info.nb.d_excluded_list_start,
-        md_info.nb.d_excluded_list, md_info.nb.d_excluded_numbers);
 
     middle_langevin.Get_Local(dd.atom_local, dd.atom_numbers);
     ad_thermo.Get_Local(dd.atom_local, dd.atom_numbers);
@@ -1309,6 +1547,22 @@ void Main_Refresh_Local_State(bool rebuild_dd)
     lj_soft.Get_Local(dd.atom_local, dd.atom_numbers, dd.ghost_numbers);
     solvent_lj.Get_Local(dd.res_numbers, dd.res_len, dd.atom_numbers,
                          dd.d_mass);
+    Main_Update_Legacy_Neighbor_List_If_Needed(
+        "Main_Refresh_Local_State", neighbor_list.FORCED_UPDATE);
+    const int clustered_direct_solvent_numbers =
+        (lj.Use_Clustered_Direct() || lj_soft.Use_Clustered_Direct())
+            ? 0
+            : solvent_lj.local_solvent_numbers;
+    lj.Refresh_Clustered_Metadata(clustered_direct_solvent_numbers,
+                                  dd.atom_local,
+                                  dd.d_excluded_list_start,
+                                  dd.d_excluded_list,
+                                  dd.d_excluded_numbers);
+    lj_soft.Refresh_Clustered_Metadata(clustered_direct_solvent_numbers,
+                                       dd.atom_local,
+                                       dd.d_excluded_list_start,
+                                       dd.d_excluded_list,
+                                       dd.d_excluded_numbers);
     listed_forces.Get_Local(dd.atom_local, dd.atom_numbers, dd.ghost_numbers,
                             dd.atom_local_label, dd.atom_local_id);
     pairwise_force.Get_Local(dd.atom_local, dd.atom_numbers, dd.ghost_numbers,
@@ -1475,12 +1729,8 @@ void Main_Iteration()
             }
             else
             {
-                neighbor_list.Update(
-                    dd.atom_local, dd.atom_numbers, dd.ghost_numbers, dd.crd,
-                    md_info.pbc.cell, md_info.pbc.rcell, md_info.sys.steps,
-                    neighbor_list.FORCED_UPDATE,
-                    md_info.nb.d_excluded_list_start,
-                    md_info.nb.d_excluded_list, md_info.nb.d_excluded_numbers);
+                Main_Update_Legacy_Neighbor_List_If_Needed(
+                    "Main_Iteration_single_rank", neighbor_list.FORCED_UPDATE);
             }
         }
     }
@@ -1585,6 +1835,7 @@ void Main_Clear()
         md_info.sys.steps, md_info.sys.speed_time_factor,
         md_info.sys.speed_unit_name.c_str(), md_info.mode);
 
+    Release_Shared_LJ_Clustered_Direct_Cache();
     controller.Clear();
 }
 

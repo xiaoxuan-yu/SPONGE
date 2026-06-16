@@ -229,6 +229,7 @@ struct LJ_SOFT_CORE
     float* d_sigma_of_dH_dlambda_direct = NULL;
 
     float cutoff = 10.0;
+    LJ_CLUSTERED_DIRECT_CACHE* clustered_direct_cache = NULL;
     VECTOR_LJ_SOFT_TYPE* crd_with_parameters = NULL;
     float h_LJ_long_energy = 0.0;
     float long_range_factor = 0.0;
@@ -270,6 +271,17 @@ struct LJ_SOFT_CORE
     int ghost_numbers = 0;
     VECTOR_LJ_SOFT_TYPE* crd_with_LJ_parameters_local =
         NULL;  // 局域原子的坐标，电荷LJ_type打包
+    VECTOR_LJ_SOFT_TYPE* sorted_crd_with_LJ_parameters_local = NULL;
     void Get_Local(int* atom_local, int local_atom_numbers,
                    int ghost_numbers);  // 获取局域粒子信息
+    void Refresh_Clustered_Metadata(int solvent_numbers,
+                                    const int* d_atom_local,
+                                    const int* d_excluded_list_start,
+                                    const int* d_excluded_list,
+                                    const int* d_excluded_numbers);
+    bool Use_Clustered_Direct() const
+    {
+        return clustered_direct_cache != NULL &&
+               clustered_direct_cache->Use_Clustered_Direct();
+    }
 };

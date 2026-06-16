@@ -1,3 +1,12 @@
+set(SPONGE_CSTONE_SOURCES)
+if(PARALLEL_BACKEND STREQUAL "cuda" OR PARALLEL_BACKEND STREQUAL "hip")
+  list(APPEND SPONGE_CSTONE_SOURCES
+       ${PROJECT_ROOT_DIR}/SPONGE/third_party/cornerstone_octree/include/cstone/cuda/device_vector.cu
+       ${PROJECT_ROOT_DIR}/SPONGE/third_party/cornerstone_octree/include/cstone/primitives/primitives_gpu.cu
+       ${PROJECT_ROOT_DIR}/SPONGE/third_party/cornerstone_octree/include/cstone/tree/csarray_gpu.cu
+       ${PROJECT_ROOT_DIR}/SPONGE/third_party/cornerstone_octree/include/cstone/tree/octree_gpu.cu)
+endif()
+
 set(SPONGE_RUNTIME_SOURCES
     ${PROJECT_ROOT_DIR}/SPONGE/worker_protocol/message_protocol.cpp
     ${PROJECT_ROOT_DIR}/SPONGE/worker_protocol/runtime_state_codec.cpp
@@ -13,6 +22,7 @@ set(SPONGE_RUNTIME_SOURCES
     ${PROJECT_ROOT_DIR}/SPONGE/Domain_decomposition/Domain_decomposition.cpp
     ${PROJECT_ROOT_DIR}/SPONGE/neighbor_list/neighbor_list.cpp
     ${PROJECT_ROOT_DIR}/SPONGE/neighbor_list/full_neighbor_list.cpp
+    ${PROJECT_ROOT_DIR}/SPONGE/Lennard_Jones_force/clustered_lj.cpp
     ${PROJECT_ROOT_DIR}/SPONGE/Lennard_Jones_force/Lennard_Jones_force.cpp
     ${PROJECT_ROOT_DIR}/SPONGE/Lennard_Jones_force/LJ_soft_core.cpp
     ${PROJECT_ROOT_DIR}/SPONGE/Lennard_Jones_force/solvent_LJ.cpp
@@ -109,4 +119,5 @@ set(SPONGE_RUNTIME_SOURCES
     ${PROJECT_ROOT_DIR}/SPONGE/manybody/reaxff/valence_angle.cpp
     ${PROJECT_ROOT_DIR}/SPONGE/manybody/reaxff/torsion.cpp
     ${PROJECT_ROOT_DIR}/SPONGE/manybody/reaxff/hydrogen_bond.cpp
-    ${PROJECT_ROOT_DIR}/SPONGE/manybody/reaxff/reaxff.cpp)
+    ${PROJECT_ROOT_DIR}/SPONGE/manybody/reaxff/reaxff.cpp
+    ${SPONGE_CSTONE_SOURCES})

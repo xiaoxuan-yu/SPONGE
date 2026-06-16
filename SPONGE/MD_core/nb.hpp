@@ -3,6 +3,8 @@
 void MD_INFORMATION::non_bond_information::Initial(CONTROLLER* controller,
                                                    MD_INFORMATION* md_info)
 {
+    constexpr float kDefaultClusteredDirectSkin = 10.0f;
+
     if (controller[0].Command_Exist("skin"))
     {
         controller->Check_Float(
@@ -11,7 +13,10 @@ void MD_INFORMATION::non_bond_information::Initial(CONTROLLER* controller,
     }
     else
     {
-        skin = 2.0;
+        skin = controller[0].Command_Choice("LJ", "direct_kernel",
+                                            "clustered")
+                   ? kDefaultClusteredDirectSkin
+                   : 2.0f;
     }
     controller->printf("    skin set to %.2f Angstrom\n", skin);
 

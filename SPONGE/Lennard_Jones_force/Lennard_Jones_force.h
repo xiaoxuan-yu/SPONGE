@@ -1,6 +1,9 @@
 ﻿#pragma once
 #include "../common.h"
 #include "../control.h"
+#include "clustered_lj.h"
+
+struct DOMAIN_INFORMATION;
 
 // 用于计算LJ_Force时使用的坐标和记录的原子LJ种类序号与原子电荷
 #ifndef VECTOR_LJ_DEFINE
@@ -88,7 +91,7 @@ struct LENNARD_JONES_INFORMATION
     char module_name[CHAR_LENGTH_MAX];
     int is_initialized = 0;
     int is_controller_printf_initialized = 0;
-    int last_modify_date = 20260216;
+    int last_modify_date = 20260528;
 
     // a = LJ_A between atom[i] and atom[j]
     // b = LJ_B between atom[i] and atom[j]
@@ -105,6 +108,7 @@ struct LENNARD_JONES_INFORMATION
     float* h_LJ_B = NULL;  // LJ的B系数
     float* d_LJ_A = NULL;  // LJ的A系数
     float* d_LJ_B = NULL;  // LJ的B系数
+    float2* d_LJ_AB_packed = NULL;  // clustered record kernels use packed A/B
 
     float* h_LJ_energy_atom = NULL;  // 每个原子的LJ的能量
     float h_LJ_energy_sum = 0;       // 所有原子的LJ能量和
@@ -122,6 +126,12 @@ struct LENNARD_JONES_INFORMATION
     void Parameter_Host_To_Device();
 
     float cutoff = 10.0;
+    bool use_ordered_layout = false;
+    int ordered_layout_applied = 0;
+    int ordered_layout_max_depth = 6;
+    int ordered_layout_leaf_size = 32;
+    int ordered_layout_min_residue_numbers = 256;
+    LJ_CLUSTERED_DIRECT_CACHE* clustered_direct_cache = NULL;
     VECTOR_LJ* crd_with_LJ_parameters = NULL;
 
     /*
@@ -131,8 +141,26 @@ struct LENNARD_JONES_INFORMATION
     int ghost_numbers = 0;
     VECTOR_LJ* crd_with_LJ_parameters_local =
         NULL;  // 局域原子的坐标，电荷LJ_type打包
+    VECTOR_LJ* sorted_crd_with_LJ_parameters_local = NULL;
+    float4* clustered_sorted_xq_local = NULL;
+    int* clustered_sorted_lj_type_local = NULL;
+    int* clustered_sorted_atom_ids_local = NULL;
     void Get_Local(int* atom_local, int local_atom_numbers,
                    int ghost_numbers);  // 获取局域粒子信息
+    void Refresh_Clustered_Metadata(int solvent_numbers,
+                                    const int* d_atom_local,
+                                    const int* d_excluded_list_start,
+                                    const int* d_excluded_list,
+                                    const int* d_excluded_numbers);
+    bool Use_Clustered_Direct() const
+    {
+        return clustered_direct_cache != NULL &&
+               clustered_direct_cache->Use_Clustered_Direct();
+    }
+    void Maybe_Apply_Ordered_Layout(CONTROLLER* controller,
+                                    DOMAIN_INFORMATION* domain,
+                                    LTMatrix3 cell, LTMatrix3 rcell,
+                                    VECTOR box_length);
 
     // 可以根据外界传入的need_atom_energy和need_virial，选择性计算能量和维里。其中的维里对PME直接部分计算的原子能量，在和PME其他部分加和后即维里。
     void LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
