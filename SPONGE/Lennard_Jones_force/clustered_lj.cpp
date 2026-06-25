@@ -8719,14 +8719,22 @@ static bool Clustered_Gmxpacked_Record_Builder_Enabled()
 {
     const char* enabled =
         std::getenv("SPONGE_CLUSTERED_GMXPACKED_RECORD_BUILDER");
-    return enabled != NULL && enabled[0] != '\0' && enabled[0] != '0';
+    if (enabled != NULL && enabled[0] != '\0')
+    {
+        return enabled[0] != '0';
+    }
+    return Clustered_Gmxpacked_Active_View_Enabled();
 }
 
 static bool Clustered_Gmxpacked_Record_Builder_Route_Enabled()
 {
     const char* enabled =
         std::getenv("SPONGE_CLUSTERED_GMXPACKED_RECORD_BUILDER_ROUTE");
-    return enabled != NULL && enabled[0] != '\0' && enabled[0] != '0';
+    if (enabled != NULL && enabled[0] != '\0')
+    {
+        return enabled[0] != '0';
+    }
+    return Clustered_Gmxpacked_Active_View_Enabled();
 }
 
 static bool Clustered_Gmxpacked_Record_Builder_Native_Bypass_Enabled()
@@ -8740,7 +8748,11 @@ static bool Clustered_Gmxpacked_Primary_Builder_Enabled()
 {
     const char* enabled =
         std::getenv("SPONGE_CLUSTERED_GMXPACKED_PRIMARY_BUILDER");
-    return enabled != NULL && enabled[0] != '\0' && enabled[0] != '0';
+    if (enabled != NULL && enabled[0] != '\0')
+    {
+        return enabled[0] != '0';
+    }
+    return Clustered_Gmxpacked_Active_View_Enabled();
 }
 
 static bool Clustered_Gmxpacked_Incremental_Stats_Enabled()
