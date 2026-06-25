@@ -76,25 +76,60 @@ static bool Clustered_Fine_Timers_Enabled()
     return true;
 }
 
+static bool Clustered_Gmxpacked_Env_Flag_Enabled(const char* name)
+{
+    const char* enabled = std::getenv(name);
+    return enabled != NULL && enabled[0] != '\0' && enabled[0] != '0';
+}
+
+static bool Clustered_Gmxpacked_Env_Flag_Set(const char* name)
+{
+    const char* enabled = std::getenv(name);
+    return enabled != NULL && enabled[0] != '\0';
+}
+
+static bool Clustered_Gmxpacked_Active_View_Env_Enabled()
+{
+    return Clustered_Gmxpacked_Env_Flag_Enabled(
+        "SPONGE_CLUSTERED_GMXPACKED_ACTIVE_VIEW");
+}
+
 static bool Clustered_Gmxpacked_Sci_Shift_Split_Enabled()
 {
-    const char* enabled =
-        std::getenv("SPONGE_CLUSTERED_GMXPACKED_SCI_SHIFT_SPLIT");
-    return enabled != NULL && enabled[0] != '\0' && enabled[0] != '0';
+    const char* name = "SPONGE_CLUSTERED_GMXPACKED_SCI_SHIFT_SPLIT";
+    if (Clustered_Gmxpacked_Env_Flag_Set(name))
+    {
+        return Clustered_Gmxpacked_Env_Flag_Enabled(name);
+    }
+    if (!Clustered_Gmxpacked_Active_View_Env_Enabled() ||
+        (Clustered_Gmxpacked_Env_Flag_Set(
+             "SPONGE_CLUSTERED_GMXPACKED_USE_LJ_COMB_KERNEL") &&
+         !Clustered_Gmxpacked_Env_Flag_Enabled(
+             "SPONGE_CLUSTERED_GMXPACKED_USE_LJ_COMB_KERNEL")) ||
+        (Clustered_Gmxpacked_Env_Flag_Set(
+             "SPONGE_CLUSTERED_GMXPACKED_USE_FAST_KERNEL") &&
+         !Clustered_Gmxpacked_Env_Flag_Enabled(
+             "SPONGE_CLUSTERED_GMXPACKED_USE_FAST_KERNEL")) ||
+        Clustered_Gmxpacked_Env_Flag_Enabled(
+            "SPONGE_CLUSTERED_GMXPACKED_ASSUME_SCI_SHIFT") ||
+        Clustered_Gmxpacked_Env_Flag_Enabled(
+            "SPONGE_CLUSTERED_GMXPACKED_SCI_SHIFT_RUNTIME"))
+    {
+        return false;
+    }
+    return true;
 }
 
 static bool Clustered_Gmxpacked_Sci_Shift_Runtime_Enabled()
 {
-    const char* enabled =
-        std::getenv("SPONGE_CLUSTERED_GMXPACKED_SCI_SHIFT_RUNTIME");
-    return enabled != NULL && enabled[0] != '\0' && enabled[0] != '0';
+    return Clustered_Gmxpacked_Env_Flag_Enabled(
+        "SPONGE_CLUSTERED_GMXPACKED_SCI_SHIFT_RUNTIME");
 }
 
 static bool Clustered_Gmxpacked_Exact_Sci_Shift_Flags_Enabled()
 {
-    const char* enabled =
-        std::getenv("SPONGE_CLUSTERED_GMXPACKED_EXACT_SCI_SHIFT_FLAGS");
-    return enabled != NULL && enabled[0] != '\0' && enabled[0] != '0';
+    return Clustered_Gmxpacked_Env_Flag_Enabled(
+        "SPONGE_CLUSTERED_GMXPACKED_EXACT_SCI_SHIFT_FLAGS");
 }
 
 static bool Clustered_Gmxpacked_Pair_Shift_Metadata_Cache_Enabled()

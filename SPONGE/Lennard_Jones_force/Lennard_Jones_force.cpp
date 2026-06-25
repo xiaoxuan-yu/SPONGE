@@ -95,55 +95,76 @@ static VECTOR Wrap_To_Box_Fractional(VECTOR crd, LTMatrix3 rcell,
 // Default production path when none of the experimental flags are set:
 //   base native clustered direct kernel
 //   (Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb_Device)
+//
+// Active-view gmxpacked remains explicit opt-in, but once enabled it defaults
+// to the profiled dense LJ-comb fast path with SCI-shift split. Each flag can
+// still be disabled explicitly with its environment variable.
 // ---------------------------------------------------------------------------
+
+static bool Env_Flag_Enabled(const char* name)
+{
+    const char* enabled = std::getenv(name);
+    return enabled != NULL && enabled[0] != '\0' && enabled[0] != '0';
+}
+
+static bool Env_Flag_Set(const char* name)
+{
+    const char* enabled = std::getenv(name);
+    return enabled != NULL && enabled[0] != '\0';
+}
+
+static bool Env_Flag_Enabled_Or_Default(const char* name,
+                                        bool default_enabled)
+{
+    if (Env_Flag_Set(name))
+    {
+        return Env_Flag_Enabled(name);
+    }
+    return default_enabled;
+}
+
+static bool Clustered_Gmxpacked_Active_View_Enabled()
+{
+    return Env_Flag_Enabled("SPONGE_CLUSTERED_GMXPACKED_ACTIVE_VIEW");
+}
 
 static bool Clustered_Gmxpacked_Fallback_Native_Enabled()
 {
-    const char* enabled =
-        std::getenv("SPONGE_CLUSTERED_GMXPACKED_FALLBACK_NATIVE");
-    return enabled != NULL && enabled[0] != '\0' && enabled[0] != '0';
+    return Env_Flag_Enabled("SPONGE_CLUSTERED_GMXPACKED_FALLBACK_NATIVE");
 }
 
 static bool Clustered_Gmxpacked_Direct_Opt_In_Enabled()
 {
-    const char* enabled =
-        std::getenv("SPONGE_CLUSTERED_USE_GMXPACKED_DIRECT");
-    return enabled != NULL && enabled[0] != '\0' && enabled[0] != '0';
+    return Env_Flag_Enabled("SPONGE_CLUSTERED_USE_GMXPACKED_DIRECT");
 }
 
 static bool Clustered_Gmxpacked_Lj_Comb_Kernel_Enabled()
 {
-    const char* enabled =
-        std::getenv("SPONGE_CLUSTERED_GMXPACKED_USE_LJ_COMB_KERNEL");
-    return enabled != NULL && enabled[0] != '\0' && enabled[0] != '0';
+    return Env_Flag_Enabled_Or_Default(
+        "SPONGE_CLUSTERED_GMXPACKED_USE_LJ_COMB_KERNEL",
+        Clustered_Gmxpacked_Active_View_Enabled());
 }
 
 static bool Clustered_Gmxpacked_Fast_Kernel_Enabled()
 {
-    const char* enabled =
-        std::getenv("SPONGE_CLUSTERED_GMXPACKED_USE_FAST_KERNEL");
-    return enabled != NULL && enabled[0] != '\0' && enabled[0] != '0';
+    return Env_Flag_Enabled_Or_Default(
+        "SPONGE_CLUSTERED_GMXPACKED_USE_FAST_KERNEL",
+        Clustered_Gmxpacked_Active_View_Enabled());
 }
 
 static bool Clustered_Gmxpacked_Force_Sorted_Scratch_Enabled()
 {
-    const char* enabled =
-        std::getenv("SPONGE_CLUSTERED_GMXPACKED_FORCE_SORTED_SCRATCH");
-    return enabled != NULL && enabled[0] != '\0' && enabled[0] != '0';
+    return Env_Flag_Enabled("SPONGE_CLUSTERED_GMXPACKED_FORCE_SORTED_SCRATCH");
 }
 
 static bool Clustered_Gmxpacked_Fused_Sorted_Force_Enabled()
 {
-    const char* enabled =
-        std::getenv("SPONGE_CLUSTERED_GMXPACKED_FUSED_SORTED_FORCE");
-    return enabled != NULL && enabled[0] != '\0' && enabled[0] != '0';
+    return Env_Flag_Enabled("SPONGE_CLUSTERED_GMXPACKED_FUSED_SORTED_FORCE");
 }
 
 static bool Clustered_Gmxpacked_Float4_Sorted_Force_Enabled()
 {
-    const char* enabled =
-        std::getenv("SPONGE_CLUSTERED_GMXPACKED_FLOAT4_SORTED_FORCE");
-    return enabled != NULL && enabled[0] != '\0' && enabled[0] != '0';
+    return Env_Flag_Enabled("SPONGE_CLUSTERED_GMXPACKED_FLOAT4_SORTED_FORCE");
 }
 
 static bool Clustered_Gmxpacked_Shift_Analyze_Enabled()
@@ -197,23 +218,32 @@ static int Clustered_Gmxpacked_Shift_Analyze_Call_End(int call_begin)
 
 static bool Clustered_Gmxpacked_Assume_Sci_Shift_Enabled()
 {
-    const char* enabled =
-        std::getenv("SPONGE_CLUSTERED_GMXPACKED_ASSUME_SCI_SHIFT");
-    return enabled != NULL && enabled[0] != '\0' && enabled[0] != '0';
+    return Env_Flag_Enabled("SPONGE_CLUSTERED_GMXPACKED_ASSUME_SCI_SHIFT");
 }
+
+static bool Clustered_Gmxpacked_Sci_Shift_Runtime_Enabled();
 
 static bool Clustered_Gmxpacked_Sci_Shift_Split_Enabled()
 {
-    const char* enabled =
-        std::getenv("SPONGE_CLUSTERED_GMXPACKED_SCI_SHIFT_SPLIT");
-    return enabled != NULL && enabled[0] != '\0' && enabled[0] != '0';
+    const char* name = "SPONGE_CLUSTERED_GMXPACKED_SCI_SHIFT_SPLIT";
+    if (Env_Flag_Set(name))
+    {
+        return Env_Flag_Enabled(name);
+    }
+    if (!Clustered_Gmxpacked_Active_View_Enabled() ||
+        !Clustered_Gmxpacked_Lj_Comb_Kernel_Enabled() ||
+        !Clustered_Gmxpacked_Fast_Kernel_Enabled() ||
+        Clustered_Gmxpacked_Assume_Sci_Shift_Enabled() ||
+        Clustered_Gmxpacked_Sci_Shift_Runtime_Enabled())
+    {
+        return false;
+    }
+    return true;
 }
 
 static bool Clustered_Gmxpacked_Sci_Shift_Runtime_Enabled()
 {
-    const char* enabled =
-        std::getenv("SPONGE_CLUSTERED_GMXPACKED_SCI_SHIFT_RUNTIME");
-    return enabled != NULL && enabled[0] != '\0' && enabled[0] != '0';
+    return Env_Flag_Enabled("SPONGE_CLUSTERED_GMXPACKED_SCI_SHIFT_RUNTIME");
 }
 
 static bool LJ_Coordinate_Diagnostics_Enabled()
