@@ -8937,6 +8937,48 @@ static float Clustered_Gmxpacked_Active_View_Dirty_Source_Ratio_Limit()
     return value != NULL && value[0] != '\0' ? atof(value) : 0.25f;
 }
 
+static bool Clustered_Gmxpacked_Active_View_Source_Cache_Patch_Enabled()
+{
+    const char* enabled = std::getenv(
+        "SPONGE_CLUSTERED_GMXPACKED_ACTIVE_VIEW_SOURCE_CACHE_PATCH");
+    return enabled != NULL && enabled[0] != '\0' && enabled[0] != '0';
+}
+
+static float
+Clustered_Gmxpacked_Active_View_Source_Cache_Patch_Max_Dirty_Ratio()
+{
+    const char* value = std::getenv(
+        "SPONGE_CLUSTERED_GMXPACKED_ACTIVE_VIEW_SOURCE_CACHE_PATCH_MAX_DIRTY_RATIO");
+    return value != NULL && value[0] != '\0' ? atof(value) : 0.25f;
+}
+
+static bool Clustered_Gmxpacked_Active_View_Source_Cache_Patch_Verify_Enabled()
+{
+    const char* enabled = std::getenv(
+        "SPONGE_CLUSTERED_GMXPACKED_ACTIVE_VIEW_SOURCE_CACHE_PATCH_VERIFY");
+    if (enabled != NULL && enabled[0] != '\0')
+    {
+        return enabled[0] != '0';
+    }
+    return Clustered_Gmxpacked_Active_View_Source_Cache_Patch_Enabled();
+}
+
+static void Invalidate_Gmxpacked_Incremental_Source_Cache_State(
+    LJ_CLUSTER_LAYOUT* layout)
+{
+    if (layout == NULL)
+    {
+        return;
+    }
+    layout->gmxpacked_incremental_source_offsets_ready = false;
+    layout->gmxpacked_incremental_source_cache_ready = false;
+    layout->gmxpacked_incremental_candidate_sci_numbers = 0;
+    layout->gmxpacked_incremental_source_numbers = 0;
+    layout->gmxpacked_incremental_source_cutoff = -1.0f;
+    layout->gmxpacked_incremental_source_global_valid_cutoff = -1.0f;
+    layout->gmxpacked_outer_source_anchor_ready = false;
+}
+
 static bool Clustered_Gmxpacked_Active_View_Partial_Refresh_Enabled()
 {
     return Clustered_Gmxpacked_Active_View_Enabled();
@@ -21117,9 +21159,10 @@ void LJ_CLUSTER_LAYOUT::Initial(CONTROLLER* controller, const char* module_name,
     rebuild_dirty = true;
     cache_ready = false;
     cached_cutoff = -1.0f;
-    gmxpacked_incremental_source_cutoff = -1.0f;
-    gmxpacked_outer_source_anchor_ready = false;
+    Invalidate_Gmxpacked_Incremental_Source_Cache_State(this);
     stable_target_layout_anchor_ready = false;
+    gmxpacked_incremental_source_patch_successes = 0;
+    gmxpacked_incremental_source_patch_fallbacks = 0;
     gmxpacked_inner_active_append_attempts = 0;
     gmxpacked_inner_active_append_successes = 0;
     gmxpacked_inner_active_append_fallbacks = 0;
@@ -21307,12 +21350,7 @@ void LJ_CLUSTER_LAYOUT::Refresh_Metadata(int input_local_atom_numbers,
         previous_direct_local_atom_numbers != direct_local_atom_numbers ||
         previous_ghost_numbers != ghost_numbers)
     {
-        gmxpacked_incremental_source_offsets_ready = false;
-        gmxpacked_incremental_source_cache_ready = false;
-        gmxpacked_incremental_candidate_sci_numbers = 0;
-        gmxpacked_incremental_source_numbers = 0;
-        gmxpacked_incremental_source_cutoff = -1.0f;
-        gmxpacked_outer_source_anchor_ready = false;
+        Invalidate_Gmxpacked_Incremental_Source_Cache_State(this);
         stable_target_layout_anchor_ready = false;
     }
     rebuild_dirty = true;
@@ -21358,12 +21396,7 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
         cache_ready = false;
         cached_cutoff = -1.0f;
         runtime_aux_clustered_metadata_requested = false;
-        gmxpacked_incremental_source_offsets_ready = false;
-        gmxpacked_incremental_source_cache_ready = false;
-        gmxpacked_incremental_candidate_sci_numbers = 0;
-        gmxpacked_incremental_source_numbers = 0;
-        gmxpacked_incremental_source_cutoff = -1.0f;
-        gmxpacked_outer_source_anchor_ready = false;
+        Invalidate_Gmxpacked_Incremental_Source_Cache_State(this);
         stable_target_layout_anchor_ready = false;
         Invalidate_Clustered_Legacy_Neighbor_View(this);
         return;
@@ -23147,12 +23180,7 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
     }
     if (Clustered_Gmxpacked_Incremental_Cache_Enabled())
     {
-        gmxpacked_incremental_source_offsets_ready = false;
-        gmxpacked_incremental_source_cache_ready = false;
-        gmxpacked_incremental_candidate_sci_numbers = 0;
-        gmxpacked_incremental_source_numbers = 0;
-        gmxpacked_incremental_source_cutoff = -1.0f;
-        gmxpacked_outer_source_anchor_ready = false;
+        Invalidate_Gmxpacked_Incremental_Source_Cache_State(this);
     }
     ClusteredRecorderScope payload_build_scope(payload_build_time_recorder);
 
@@ -24895,6 +24923,8 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                     gmxpacked_record_stream_source_numbers;
                 gmxpacked_incremental_source_cutoff =
                     gmxpacked_record_stream_cutoff;
+                gmxpacked_incremental_source_global_valid_cutoff =
+                    gmxpacked_record_stream_cutoff;
                 gmxpacked_incremental_source_cache_ready = true;
                 if (use_gmxpacked_inner_active_payload &&
                     Clustered_Gmxpacked_Record_Builder_Inner_Active_Debug_Counts_Enabled() &&
@@ -24920,12 +24950,7 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
             }
             else
             {
-                gmxpacked_incremental_source_offsets_ready = false;
-                gmxpacked_incremental_source_cache_ready = false;
-                gmxpacked_incremental_candidate_sci_numbers = 0;
-                gmxpacked_incremental_source_numbers = 0;
-                gmxpacked_incremental_source_cutoff = -1.0f;
-                gmxpacked_outer_source_anchor_ready = false;
+                Invalidate_Gmxpacked_Incremental_Source_Cache_State(this);
             }
         }
     }
@@ -25309,6 +25334,8 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
         gmxpacked_incremental_source_numbers =
             gmxpacked_record_stream_source_numbers;
         gmxpacked_incremental_source_cutoff = gmxpacked_record_stream_cutoff;
+        gmxpacked_incremental_source_global_valid_cutoff =
+            gmxpacked_record_stream_cutoff;
         if (Clustered_Gmxpacked_Active_View_Rolling_Source_Cache_Enabled())
         {
             Refresh_Gmxpacked_Outer_Source_Anchor_Crd(
@@ -25993,6 +26020,8 @@ void LJ_CLUSTER_LAYOUT::Clear()
     Free_Single_Device_Pointer(
         (void**)&d_gmxpacked_incremental_source_offsets_by_candidate);
     Free_Single_Device_Pointer(
+        (void**)&d_gmxpacked_incremental_source_valid_cutoff_by_candidate);
+    Free_Single_Device_Pointer(
         (void**)&d_gmxpacked_incremental_record_stream_sources);
     Free_Single_Device_Pointer(
         (void**)&d_gmxpacked_incremental_replacement_source_counts_by_candidate);
@@ -26078,6 +26107,7 @@ void LJ_CLUSTER_LAYOUT::Clear()
     gmxpacked_record_stream_aggregate_capacity = 0;
     gmxpacked_incremental_source_offset_capacity = 0;
     gmxpacked_incremental_source_cache_capacity = 0;
+    gmxpacked_incremental_source_valid_cutoff_capacity = 0;
     gmxpacked_incremental_replacement_source_count_capacity = 0;
     gmxpacked_incremental_replacement_source_offset_capacity = 0;
     gmxpacked_incremental_replacement_source_capacity = 0;
@@ -26137,8 +26167,11 @@ void LJ_CLUSTER_LAYOUT::Clear()
     gmxpacked_record_stream_aggregate_numbers = 0;
     gmxpacked_inner_active_guard_cutoff = -1.0f;
     gmxpacked_incremental_source_cutoff = -1.0f;
+    gmxpacked_incremental_source_global_valid_cutoff = -1.0f;
     gmxpacked_incremental_source_numbers = 0;
     gmxpacked_incremental_candidate_sci_numbers = 0;
+    gmxpacked_incremental_source_patch_successes = 0;
+    gmxpacked_incremental_source_patch_fallbacks = 0;
     gmxpacked_pair_shift_sci_only_compatible = false;
     gmxpacked_pair_shift_metadata_ready = false;
     gmxpacked_pair_shift_metadata_sci_numbers = 0;

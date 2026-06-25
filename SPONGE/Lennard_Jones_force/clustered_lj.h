@@ -289,8 +289,11 @@ struct LJ_CLUSTER_LAYOUT
     int gmxpacked_record_stream_aggregate_numbers = 0;
     float gmxpacked_inner_active_guard_cutoff = -1.0f;
     float gmxpacked_incremental_source_cutoff = -1.0f;
+    float gmxpacked_incremental_source_global_valid_cutoff = -1.0f;
     int gmxpacked_incremental_source_numbers = 0;
     int gmxpacked_incremental_candidate_sci_numbers = 0;
+    int gmxpacked_incremental_source_patch_successes = 0;
+    int gmxpacked_incremental_source_patch_fallbacks = 0;
     bool gmxpacked_pair_shift_sci_only_compatible = false;
     bool gmxpacked_pair_shift_metadata_ready = false;
     int gmxpacked_pair_shift_metadata_sci_numbers = 0;
@@ -371,6 +374,7 @@ struct LJ_CLUSTER_LAYOUT
     int gmxpacked_record_stream_aggregate_capacity = 0;
     int gmxpacked_incremental_source_offset_capacity = 0;
     int gmxpacked_incremental_source_cache_capacity = 0;
+    int gmxpacked_incremental_source_valid_cutoff_capacity = 0;
     int gmxpacked_incremental_replacement_source_count_capacity = 0;
     int gmxpacked_incremental_replacement_source_offset_capacity = 0;
     int gmxpacked_incremental_replacement_source_capacity = 0;
@@ -469,6 +473,7 @@ struct LJ_CLUSTER_LAYOUT
     LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_AGGREGATE*
         d_gmxpacked_record_stream_aggregates = NULL;
     int* d_gmxpacked_incremental_source_offsets_by_candidate = NULL;
+    float* d_gmxpacked_incremental_source_valid_cutoff_by_candidate = NULL;
     LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE*
         d_gmxpacked_incremental_record_stream_sources = NULL;
     int* d_gmxpacked_incremental_replacement_source_counts_by_candidate = NULL;
