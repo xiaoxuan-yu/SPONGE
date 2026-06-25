@@ -8757,7 +8757,9 @@ static bool Clustered_Gmxpacked_Incremental_Device_Mask_Enabled()
 
 static bool Clustered_Gmxpacked_Incremental_Refill_Enabled()
 {
-    return false;
+    const char* enabled = std::getenv(
+        "SPONGE_CLUSTERED_GMXPACKED_INCREMENTAL_REFILL");
+    return enabled != NULL && enabled[0] != '\0' && enabled[0] != '0';
 }
 
 static bool Clustered_Gmxpacked_Incremental_Merge_Enabled()
