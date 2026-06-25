@@ -288,6 +288,7 @@ struct LJ_CLUSTER_LAYOUT
     int gmxpacked_record_stream_source_numbers = 0;
     int gmxpacked_record_stream_aggregate_numbers = 0;
     float gmxpacked_inner_active_guard_cutoff = -1.0f;
+    float gmxpacked_incremental_source_cutoff = -1.0f;
     int gmxpacked_incremental_source_numbers = 0;
     int gmxpacked_incremental_candidate_sci_numbers = 0;
     bool gmxpacked_pair_shift_sci_only_compatible = false;
@@ -302,6 +303,7 @@ struct LJ_CLUSTER_LAYOUT
     bool grouped_sci_ready = false;
     bool gmxpacked_incremental_source_offsets_ready = false;
     bool gmxpacked_incremental_source_cache_ready = false;
+    bool gmxpacked_outer_source_anchor_ready = false;
     bool stable_target_layout_anchor_ready = false;
     bool gmxpacked_inner_active_anchor_ready = false;
     bool gmxpacked_inner_active_source_imasks_ready = false;
@@ -398,6 +400,7 @@ struct LJ_CLUSTER_LAYOUT
     int cluster_molecule_id_capacity = 0;
     int cluster_to_supercluster_capacity = 0;
     int stable_target_layout_crd_capacity = 0;
+    int gmxpacked_outer_source_anchor_crd_capacity = 0;
     int gmxpacked_inner_active_anchor_crd_capacity = 0;
     int gmxpacked_inner_active_source_imask_capacity = 0;
     int gmxpacked_inner_active_compact_base_imask_capacity = 0;
@@ -407,6 +410,7 @@ struct LJ_CLUSTER_LAYOUT
     uint64_t* d_sort_keys = NULL;
     VECTOR* d_cached_crd = NULL;
     VECTOR* d_stable_target_layout_crd = NULL;
+    VECTOR* d_gmxpacked_outer_source_anchor_crd = NULL;
     VECTOR* d_gmxpacked_inner_active_anchor_crd = NULL;
     unsigned int* d_gmxpacked_inner_active_source_imasks = NULL;
     unsigned int* d_gmxpacked_inner_active_compact_base_imasks = NULL;

@@ -9007,6 +9007,27 @@ static bool Clustered_Gmxpacked_Active_View_Dirty_Index_Refresh_Enabled()
     return Clustered_Gmxpacked_Active_View_Enabled();
 }
 
+static bool Clustered_Gmxpacked_Active_View_Rolling_Source_Cache_Enabled()
+{
+    const char* enabled =
+        std::getenv("SPONGE_CLUSTERED_GMXPACKED_ACTIVE_VIEW_ROLLING_SOURCE_CACHE");
+    if (enabled != NULL && enabled[0] != '\0')
+    {
+        return enabled[0] != '0';
+    }
+    return Clustered_Gmxpacked_Active_View_Enabled();
+}
+
+static float Clustered_Gmxpacked_Active_View_Source_Cache_Skin(
+    const float rebuild_skin)
+{
+    const char* value =
+        std::getenv("SPONGE_CLUSTERED_GMXPACKED_ACTIVE_VIEW_SOURCE_CACHE_SKIN");
+    const float requested_skin =
+        value != NULL && value[0] != '\0' ? atof(value) : 1.4f * rebuild_skin;
+    return fmaxf(rebuild_skin, requested_skin);
+}
+
 static bool Clustered_Gmxpacked_Active_View_Compact_Patch_Enabled()
 {
     return false;
@@ -9144,6 +9165,20 @@ static float Clustered_Gmxpacked_Record_Builder_Inner_Active_Guard_Margin()
         return atof(value);
     }
     return Clustered_Gmxpacked_Active_View_Enabled() ? 2.0f : 0.0f;
+}
+
+static float Clustered_Gmxpacked_Record_Builder_Outer_Source_Cutoff(
+    const LJ_CLUSTER_LAYOUT* layout, const float cutoff, const float build_cutoff)
+{
+    if (layout == NULL ||
+        !Clustered_Gmxpacked_Active_View_Rolling_Source_Cache_Enabled() ||
+        !Clustered_Gmxpacked_Active_View_Enabled())
+    {
+        return build_cutoff;
+    }
+    const float source_skin =
+        Clustered_Gmxpacked_Active_View_Source_Cache_Skin(layout->rebuild_skin);
+    return fmaxf(build_cutoff, cutoff + source_skin);
 }
 
 static float Clustered_Gmxpacked_Experimental_Inner_Anchor_Limit()
@@ -10803,6 +10838,83 @@ static float Clustered_Max_Gmxpacked_Inner_Active_Anchor_Displacement(
                  deviceMemcpyDeviceToHost);
     return sqrtf(fmaxf(max_displacement_sq, 0.0f));
 #endif
+}
+
+static float Clustered_Max_Gmxpacked_Outer_Source_Anchor_Displacement(
+    LJ_CLUSTER_LAYOUT* layout, const VECTOR* crd, const LTMatrix3 cell,
+    const LTMatrix3 rcell)
+{
+    if (layout == NULL || crd == NULL ||
+        layout->d_gmxpacked_outer_source_anchor_crd == NULL ||
+        layout->total_atom_numbers <= 0)
+    {
+        return 0.0f;
+    }
+#ifdef USE_CPU
+    (void)cell;
+    (void)rcell;
+    return 0.0f;
+#else
+    Bind_Clustered_Working_Device(&layout->working_device);
+    Reserve_Device_Byte_Buffer(
+        sizeof(float) * static_cast<size_t>(layout->total_atom_numbers),
+        &layout->d_sort_key_buffer, &layout->sort_key_buffer_bytes);
+    Reserve_Device_Byte_Buffer(sizeof(float), &layout->d_sort_value_buffer,
+                               &layout->sort_value_buffer_bytes);
+    float* d_displacement_sq =
+        reinterpret_cast<float*>(layout->d_sort_key_buffer);
+    float* d_max_displacement_sq =
+        reinterpret_cast<float*>(layout->d_sort_value_buffer);
+    Launch_Device_Kernel(
+        Build_Clustered_Anchor_Displacement_Sq,
+        (layout->total_atom_numbers + CONTROLLER::device_max_thread - 1) /
+            CONTROLLER::device_max_thread,
+        CONTROLLER::device_max_thread, 0, NULL, layout->total_atom_numbers, crd,
+        layout->d_gmxpacked_outer_source_anchor_crd, cell, rcell,
+        d_displacement_sq);
+    size_t reduce_storage_bytes = 0;
+    const cudaError_t preexisting_err = cudaGetLastError();
+    (void)preexisting_err;
+    const cudaError_t query_err =
+        cub::DeviceReduce::Max(NULL, reduce_storage_bytes, d_displacement_sq,
+                               d_max_displacement_sq,
+                               layout->total_atom_numbers);
+    Reserve_Device_Opaque_Buffer(reduce_storage_bytes,
+                                 &layout->d_reduce_temp_storage,
+                                 &layout->reduce_temp_storage_bytes);
+    const cudaError_t reduce_err = cub::DeviceReduce::Max(
+        layout->d_reduce_temp_storage, reduce_storage_bytes, d_displacement_sq,
+        d_max_displacement_sq, layout->total_atom_numbers);
+    const cudaError_t sync_err = cudaDeviceSynchronize();
+    Clustered_Check_Cuda_Status(query_err,
+                                "clustered-source-anchor-displacement-max-query");
+    Clustered_Check_Cuda_Status(reduce_err,
+                                "clustered-source-anchor-displacement-max-run");
+    Clustered_Check_Cuda_Status(sync_err,
+                                "clustered-source-anchor-displacement-max-sync");
+    float max_displacement_sq = 0.0f;
+    deviceMemcpy(&max_displacement_sq, d_max_displacement_sq, sizeof(float),
+                 deviceMemcpyDeviceToHost);
+    return sqrtf(fmaxf(max_displacement_sq, 0.0f));
+#endif
+}
+
+static void Refresh_Gmxpacked_Outer_Source_Anchor_Crd(
+    LJ_CLUSTER_LAYOUT* layout, const VECTOR* crd)
+{
+    if (layout == NULL || crd == NULL || layout->total_atom_numbers <= 0)
+    {
+        return;
+    }
+#ifndef USE_CPU
+    Reserve_Device_Vector_Buffer(
+        layout->total_atom_numbers, &layout->d_gmxpacked_outer_source_anchor_crd,
+        &layout->gmxpacked_outer_source_anchor_crd_capacity);
+    deviceMemcpy(layout->d_gmxpacked_outer_source_anchor_crd, crd,
+                 sizeof(VECTOR) * layout->total_atom_numbers,
+                 deviceMemcpyDeviceToDevice);
+#endif
+    layout->gmxpacked_outer_source_anchor_ready = true;
 }
 
 static void Refresh_Gmxpacked_Inner_Active_Anchor_Crd(
@@ -21065,6 +21177,8 @@ void LJ_CLUSTER_LAYOUT::Initial(CONTROLLER* controller, const char* module_name,
     rebuild_dirty = true;
     cache_ready = false;
     cached_cutoff = -1.0f;
+    gmxpacked_incremental_source_cutoff = -1.0f;
+    gmxpacked_outer_source_anchor_ready = false;
     stable_target_layout_anchor_ready = false;
     gmxpacked_inner_active_append_attempts = 0;
     gmxpacked_inner_active_append_successes = 0;
@@ -21257,6 +21371,8 @@ void LJ_CLUSTER_LAYOUT::Refresh_Metadata(int input_local_atom_numbers,
         gmxpacked_incremental_source_cache_ready = false;
         gmxpacked_incremental_candidate_sci_numbers = 0;
         gmxpacked_incremental_source_numbers = 0;
+        gmxpacked_incremental_source_cutoff = -1.0f;
+        gmxpacked_outer_source_anchor_ready = false;
         stable_target_layout_anchor_ready = false;
     }
     rebuild_dirty = true;
@@ -21306,6 +21422,8 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
         gmxpacked_incremental_source_cache_ready = false;
         gmxpacked_incremental_candidate_sci_numbers = 0;
         gmxpacked_incremental_source_numbers = 0;
+        gmxpacked_incremental_source_cutoff = -1.0f;
+        gmxpacked_outer_source_anchor_ready = false;
         stable_target_layout_anchor_ready = false;
         Invalidate_Clustered_Legacy_Neighbor_View(this);
         return;
@@ -21354,6 +21472,8 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
         gmxpacked_incremental_candidate_sci_numbers;
     const int previous_gmxpacked_incremental_source_numbers =
         gmxpacked_incremental_source_numbers;
+    const float previous_gmxpacked_incremental_source_cutoff =
+        gmxpacked_incremental_source_cutoff;
     const int previous_gmxpacked_record_stream_aggregate_numbers =
         gmxpacked_record_stream_aggregate_numbers;
     const int previous_gmxpacked_sci_numbers = gmxpacked_sci_numbers;
@@ -21371,6 +21491,7 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
     const bool clustered_build_needed =
         Clustered_Build_Is_Needed(this, crd, cell, rcell, cutoff);
     bool active_view_force_outer_payload_this_build = false;
+    bool active_view_source_cache_coverage_miss = false;
     auto can_attempt_inner_active_from_cached_outer_source = [&]() -> bool
     {
         const bool active_view_cached_outer_source =
@@ -21382,6 +21503,11 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
             stable_target_layout_anchor_ready &&
             d_stable_target_layout_crd != NULL &&
             previous_gmxpacked_incremental_record_source_cache_ready;
+        const bool active_view_source_metadata_ready =
+            !Clustered_Gmxpacked_Active_View_Rolling_Source_Cache_Enabled() ||
+            (gmxpacked_outer_source_anchor_ready &&
+             d_gmxpacked_outer_source_anchor_crd != NULL &&
+             previous_gmxpacked_incremental_source_cutoff >= cutoff);
         return request_gmxpacked_primary_builder_for_cache &&
                !cached_native_payload_required &&
                need_gmxpacked_payload && runtime_gmxpacked_direct_requested &&
@@ -21389,6 +21515,7 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                Clustered_Gmxpacked_Record_Builder_Inner_Active_Payload_Enabled() &&
                Clustered_Gmxpacked_Incremental_Cache_Enabled() &&
                previous_gmxpacked_incremental_source_numbers > 0 &&
+               active_view_source_metadata_ready &&
                (active_view_cached_outer_source || stable_cached_outer_source) &&
                fabsf(cached_cutoff - cutoff) <= 1e-6f;
     };
@@ -21411,16 +21538,28 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
             Clustered_Gmxpacked_Active_View_Current_Mask_Enabled();
         const bool use_current_active_mask =
             use_current_inner_active || use_active_view_current_mask;
+        const bool track_active_view_source_anchor =
+            Clustered_Gmxpacked_Active_View_Rolling_Source_Cache_Enabled() &&
+            Clustered_Gmxpacked_Active_View_Enabled() &&
+            gmxpacked_outer_source_anchor_ready &&
+            d_gmxpacked_outer_source_anchor_crd != NULL &&
+            previous_gmxpacked_incremental_source_cutoff >= cutoff;
         float anchor_max_displacement = 0.0f;
         {
             ClusteredGmxpackedRecordBuilderStageTimer stage_timer(
                 allow_anchor_drift
-                    ? "rolling-inner-active-anchor-displacement-max"
-                    : "inner-active-anchor-displacement-max",
+                    ? (track_active_view_source_anchor
+                           ? "rolling-active-view-source-anchor-displacement-max"
+                           : "rolling-inner-active-anchor-displacement-max")
+                    : (track_active_view_source_anchor
+                           ? "active-view-source-anchor-displacement-max"
+                           : "inner-active-anchor-displacement-max"),
                 refresh_stage_timers);
-            anchor_max_displacement =
-                Clustered_Max_Stable_Target_Anchor_Displacement(
-                    this, crd, cell, rcell);
+            anchor_max_displacement = track_active_view_source_anchor
+                ? Clustered_Max_Gmxpacked_Outer_Source_Anchor_Displacement(
+                      this, crd, cell, rcell)
+                : Clustered_Max_Stable_Target_Anchor_Displacement(
+                      this, crd, cell, rcell);
         }
         if (Clustered_Gmxpacked_Anchor_Diagnostics_Enabled())
         {
@@ -21464,7 +21603,9 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
             stable_target_layout_anchor_ready = false;
             return false;
         }
-        const float outer_source_cutoff = cutoff + rebuild_skin;
+        const float outer_source_cutoff = track_active_view_source_anchor
+            ? previous_gmxpacked_incremental_source_cutoff
+            : cutoff + rebuild_skin;
         const float configured_guard_margin =
             Clustered_Gmxpacked_Record_Builder_Inner_Active_Guard_Margin();
         const float guard_margin =
@@ -21534,6 +21675,10 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
         if (!anchor_current && allow_anchor_drift &&
             !source_covers_requested_active_cutoff)
         {
+            if (track_active_view_source_anchor)
+            {
+                active_view_source_cache_coverage_miss = true;
+            }
             stable_target_layout_anchor_ready = false;
             if (refresh_summary_trace)
             {
@@ -22959,7 +23104,8 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
         {
             return;
         }
-        if (active_view_payload_requested_for_cache())
+        if (!active_view_source_cache_coverage_miss &&
+            active_view_payload_requested_for_cache())
         {
             bool can_reuse_active_payload =
                 previous_gmxpacked_compact_payload_ready &&
@@ -23025,6 +23171,14 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
         }
         return;
     }
+    if (clustered_build_needed && !cached_native_payload_missing &&
+        Clustered_Gmxpacked_Active_View_Rolling_Source_Cache_Enabled() &&
+        can_attempt_inner_active_from_cached_outer_source() &&
+        try_inner_active_payload_refresh_from_outer_cache(
+            "rebuild-due-source-cache", true, false))
+    {
+        return;
+    }
     if (Clustered_Trace_Warp_Records_Enabled())
     {
         Reserve_Device_Int_Buffer(1, &d_need_rebuild, &rebuild_flag_capacity);
@@ -23057,6 +23211,8 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
         gmxpacked_incremental_source_cache_ready = false;
         gmxpacked_incremental_candidate_sci_numbers = 0;
         gmxpacked_incremental_source_numbers = 0;
+        gmxpacked_incremental_source_cutoff = -1.0f;
+        gmxpacked_outer_source_anchor_ready = false;
     }
     ClusteredRecorderScope payload_build_scope(payload_build_time_recorder);
 
@@ -23076,9 +23232,17 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                                     Clustered_Build_Warp_Records_Enabled();
     const bool prefer_full_record_builder =
         need_virial && prefer_full_warp_record && build_warp_records;
-    const float build_cutoff =
+    float build_cutoff =
         Clustered_Outer_Inner_Prune_Enabled(this) ? cutoff + rebuild_skin
                                                   : cutoff;
+    if (need_gmxpacked_payload && runtime_gmxpacked_direct_requested &&
+        Clustered_Gmxpacked_Record_Builder_Outer_Source_Enabled() &&
+        Clustered_Gmxpacked_Record_Builder_Inner_Active_Payload_Enabled())
+    {
+        build_cutoff =
+            Clustered_Gmxpacked_Record_Builder_Outer_Source_Cutoff(
+                this, cutoff, build_cutoff);
+    }
     const bool record_builder_stage_timers =
         Clustered_Gmxpacked_Record_Builder_Stage_Timers_Enabled() &&
         need_gmxpacked_payload && runtime_gmxpacked_direct_requested &&
@@ -24014,7 +24178,10 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
         Clear_Gmxpacked_Record_Builder_Device_Source_Trace_Snapshot();
     }
     const float gmxpacked_record_stream_cutoff =
-        use_gmxpacked_record_stream_outer_source ? build_cutoff : cutoff;
+        use_gmxpacked_record_stream_outer_source
+            ? Clustered_Gmxpacked_Record_Builder_Outer_Source_Cutoff(
+                  this, cutoff, build_cutoff)
+            : cutoff;
     const VECTOR* gmxpacked_record_stream_prune_crd =
         use_stable_source_contract ? target_layout_crd : crd;
     int* d_gmxpacked_record_stream_source_rows = NULL;
@@ -24115,6 +24282,8 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
         gmxpacked_incremental_candidate_sci_numbers = candidate_sci_numbers;
         gmxpacked_incremental_source_numbers =
             gmxpacked_record_stream_source_numbers;
+        gmxpacked_incremental_source_cutoff =
+            previous_gmxpacked_incremental_source_cutoff;
         gmxpacked_incremental_source_offsets_ready = true;
         gmxpacked_incremental_source_cache_ready = true;
         if (record_builder_summary_trace)
@@ -24261,6 +24430,8 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                 candidate_sci_numbers;
             gmxpacked_incremental_source_numbers =
                 gmxpacked_record_stream_source_numbers;
+            gmxpacked_incremental_source_cutoff =
+                gmxpacked_record_stream_cutoff;
             gmxpacked_incremental_source_offsets_ready = true;
             gmxpacked_incremental_source_cache_ready = true;
         }
@@ -24495,6 +24666,8 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                 candidate_sci_numbers;
             gmxpacked_incremental_source_numbers =
                 gmxpacked_record_stream_source_numbers;
+            gmxpacked_incremental_source_cutoff =
+                gmxpacked_record_stream_cutoff;
             gmxpacked_incremental_source_offsets_ready = true;
             gmxpacked_incremental_source_cache_ready = true;
         }
@@ -25088,6 +25261,8 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                     candidate_sci_numbers;
                 gmxpacked_incremental_source_numbers =
                     gmxpacked_record_stream_source_numbers;
+                gmxpacked_incremental_source_cutoff =
+                    gmxpacked_record_stream_cutoff;
                 gmxpacked_incremental_source_cache_ready = true;
                 if (use_gmxpacked_inner_active_payload &&
                     Clustered_Gmxpacked_Record_Builder_Inner_Active_Debug_Counts_Enabled() &&
@@ -25117,6 +25292,8 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                 gmxpacked_incremental_source_cache_ready = false;
                 gmxpacked_incremental_candidate_sci_numbers = 0;
                 gmxpacked_incremental_source_numbers = 0;
+                gmxpacked_incremental_source_cutoff = -1.0f;
+                gmxpacked_outer_source_anchor_ready = false;
             }
         }
     }
@@ -25499,6 +25676,12 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
         gmxpacked_incremental_candidate_sci_numbers = candidate_sci_numbers;
         gmxpacked_incremental_source_numbers =
             gmxpacked_record_stream_source_numbers;
+        gmxpacked_incremental_source_cutoff = gmxpacked_record_stream_cutoff;
+        if (Clustered_Gmxpacked_Active_View_Rolling_Source_Cache_Enabled())
+        {
+            Refresh_Gmxpacked_Outer_Source_Anchor_Crd(
+                this, gmxpacked_record_stream_prune_crd);
+        }
         gmxpacked_incremental_source_cache_ready = true;
         gmxpacked_incremental_source_offsets_ready =
             gmxpacked_incremental_source_offsets_ready &&
@@ -26172,6 +26355,7 @@ void LJ_CLUSTER_LAYOUT::Clear()
     Free_Single_Device_Pointer((void**)&d_sort_keys);
     Free_Single_Device_Pointer((void**)&d_cached_crd);
     Free_Single_Device_Pointer((void**)&d_stable_target_layout_crd);
+    Free_Single_Device_Pointer((void**)&d_gmxpacked_outer_source_anchor_crd);
     Free_Single_Device_Pointer((void**)&d_need_rebuild);
     Free_Single_Device_Pointer((void**)&d_global_atom_to_molecule);
     Free_Single_Device_Pointer((void**)&d_local_atom_to_molecule);
@@ -26329,6 +26513,7 @@ void LJ_CLUSTER_LAYOUT::Clear()
     cluster_molecule_id_capacity = 0;
     cluster_to_supercluster_capacity = 0;
     stable_target_layout_crd_capacity = 0;
+    gmxpacked_outer_source_anchor_crd_capacity = 0;
     gmxpacked_inner_active_anchor_crd_capacity = 0;
     gmxpacked_inner_active_source_imask_capacity = 0;
     gmxpacked_inner_active_compact_base_imask_capacity = 0;
@@ -26357,6 +26542,7 @@ void LJ_CLUSTER_LAYOUT::Clear()
     gmxpacked_record_stream_source_numbers = 0;
     gmxpacked_record_stream_aggregate_numbers = 0;
     gmxpacked_inner_active_guard_cutoff = -1.0f;
+    gmxpacked_incremental_source_cutoff = -1.0f;
     gmxpacked_incremental_source_numbers = 0;
     gmxpacked_incremental_candidate_sci_numbers = 0;
     gmxpacked_pair_shift_sci_only_compatible = false;
@@ -26371,6 +26557,7 @@ void LJ_CLUSTER_LAYOUT::Clear()
     grouped_sci_ready = false;
     gmxpacked_incremental_source_offsets_ready = false;
     gmxpacked_incremental_source_cache_ready = false;
+    gmxpacked_outer_source_anchor_ready = false;
     stable_target_layout_anchor_ready = false;
     gmxpacked_inner_active_anchor_ready = false;
     gmxpacked_inner_active_source_imasks_ready = false;
