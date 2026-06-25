@@ -6202,56 +6202,6 @@ static __global__ void Gather_Gmxpacked_Record_Stream_Sources_By_Index(
     }
 }
 
-static __global__ void Build_Gmxpacked_Incremental_Mixed_Source_Counts(
-    const int candidate_sci_numbers, const int* dirty_candidate_sci,
-    const int* previous_offsets_by_candidate,
-    const int* replacement_offsets_by_candidate, int* mixed_counts_by_candidate)
-{
-    SIMPLE_DEVICE_FOR(candidate_sci, candidate_sci_numbers)
-    {
-        const int previous_rows =
-            previous_offsets_by_candidate[candidate_sci + 1] -
-            previous_offsets_by_candidate[candidate_sci];
-        const int replacement_rows =
-            replacement_offsets_by_candidate[candidate_sci + 1] -
-            replacement_offsets_by_candidate[candidate_sci];
-        mixed_counts_by_candidate[candidate_sci] =
-            dirty_candidate_sci[candidate_sci] != 0 ? replacement_rows
-                                                    : previous_rows;
-    }
-}
-
-static __global__ void Fill_Gmxpacked_Incremental_Mixed_Record_Stream_Sources(
-    const int candidate_sci_numbers, const int* dirty_candidate_sci,
-    const int* previous_offsets_by_candidate,
-    const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* previous_sources,
-    const int* replacement_offsets_by_candidate,
-    const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* replacement_sources,
-    const int* mixed_offsets_by_candidate,
-    LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* mixed_sources)
-{
-    SIMPLE_DEVICE_FOR(candidate_sci, candidate_sci_numbers)
-    {
-        const bool use_replacement = dirty_candidate_sci[candidate_sci] != 0;
-        const int src_begin =
-            use_replacement ? replacement_offsets_by_candidate[candidate_sci]
-                            : previous_offsets_by_candidate[candidate_sci];
-        const int src_end =
-            use_replacement ? replacement_offsets_by_candidate[candidate_sci + 1]
-                            : previous_offsets_by_candidate[candidate_sci + 1];
-        const int dst_begin = mixed_offsets_by_candidate[candidate_sci];
-        const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* src =
-            use_replacement ? replacement_sources : previous_sources;
-        for (int src_idx = src_begin; src_idx < src_end; src_idx += 1)
-        {
-            const int dst_idx = dst_begin + (src_idx - src_begin);
-            LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE source = src[src_idx];
-            source.source_order = dst_idx;
-            mixed_sources[dst_idx] = source;
-        }
-    }
-}
-
 static __global__ void Count_Gmxpacked_Dirty_Source_Rows_From_Offsets(
     const int candidate_sci_numbers, const int* dirty_candidate_sci,
     const int* source_offsets_by_candidate, int* dirty_source_rows)
@@ -8811,16 +8761,6 @@ static bool Clustered_Gmxpacked_Incremental_Refill_Enabled()
 }
 
 static bool Clustered_Gmxpacked_Incremental_Merge_Enabled()
-{
-    return false;
-}
-
-static bool Clustered_Gmxpacked_Incremental_Stable_Source_Reuse_Enabled()
-{
-    return false;
-}
-
-static bool Clustered_Gmxpacked_Incremental_Mixed_Source_Build_Enabled()
 {
     return false;
 }
@@ -24140,7 +24080,6 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
         current_layout_incremental_device_mask_ready &&
         !run_gmxpacked_record_builder_device_source_trace;
     bool gmxpacked_incremental_merge_used = false;
-    bool gmxpacked_incremental_stable_source_reuse_used = false;
     int gmxpacked_incremental_merge_dirty_source_rows = 0;
     int gmxpacked_incremental_merge_filled_dirty_rows = 0;
     int gmxpacked_incremental_merge_overflow_rows = 0;
@@ -24195,7 +24134,6 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
     int gmxpacked_record_stream_filled_aggregate_rows = 0;
     bool built_gmxpacked_record_stream_compact = false;
     bool route_gmxpacked_record_stream_compact = false;
-    bool reused_gmxpacked_record_stream_compact = false;
     ClusteredGmxpackedRecordStreamCompactSummary
         gmxpacked_record_stream_compact_summary = {};
     if (run_gmxpacked_record_builder &&
@@ -24220,96 +24158,6 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                                       &gmxpacked_record_stream_source_row_capacity);
             deviceMemset(d_gmxpacked_record_stream_source_rows, 0, sizeof(int));
         }
-    }
-
-    if (request_gmxpacked_incremental_merge &&
-        Clustered_Gmxpacked_Incremental_Stable_Source_Reuse_Enabled() &&
-        use_stable_source_contract &&
-        use_gmxpacked_record_stream_outer_source &&
-        previous_gmxpacked_incremental_source_cache_ready &&
-        previous_gmxpacked_incremental_candidate_sci_numbers ==
-            candidate_sci_numbers &&
-        previous_gmxpacked_incremental_source_numbers > 0 &&
-        use_gmxpacked_record_stream_source_offsets &&
-        d_gmxpacked_incremental_dirty_candidate_sci != NULL &&
-        d_gmxpacked_incremental_source_offsets_by_candidate != NULL &&
-        d_gmxpacked_incremental_record_stream_sources != NULL &&
-        d_gmxpacked_record_stream_source_offsets_by_candidate != NULL)
-    {
-        ClusteredGmxpackedRecordBuilderStageTimer stage_timer(
-            "incremental-stable-source-reuse", record_builder_stage_timers);
-        int* d_stable_reuse_expected_dirty_rows = NULL;
-        int stable_reuse_expected_dirty_capacity = 0;
-        Reserve_Device_Int_Buffer(1, &d_stable_reuse_expected_dirty_rows,
-                                  &stable_reuse_expected_dirty_capacity);
-        deviceMemset(d_stable_reuse_expected_dirty_rows, 0, sizeof(int));
-        Reserve_Device_Buffer(previous_gmxpacked_incremental_source_numbers,
-                              &d_gmxpacked_record_stream_sources,
-                              &gmxpacked_record_stream_source_capacity);
-        deviceMemcpy(
-            d_gmxpacked_record_stream_sources,
-            d_gmxpacked_incremental_record_stream_sources,
-            sizeof(LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE) *
-                static_cast<size_t>(
-                    previous_gmxpacked_incremental_source_numbers),
-            deviceMemcpyDeviceToDevice);
-        deviceMemcpy(
-            d_gmxpacked_record_stream_source_offsets_by_candidate,
-            d_gmxpacked_incremental_source_offsets_by_candidate,
-            sizeof(int) * (candidate_sci_numbers + 1),
-            deviceMemcpyDeviceToDevice);
-        Launch_Device_Kernel(
-            Count_Gmxpacked_Dirty_Source_Rows_From_Offsets,
-            (candidate_sci_numbers + CONTROLLER::device_max_thread - 1) /
-                CONTROLLER::device_max_thread,
-            CONTROLLER::device_max_thread, 0, NULL, candidate_sci_numbers,
-            d_gmxpacked_incremental_dirty_candidate_sci,
-            d_gmxpacked_incremental_source_offsets_by_candidate,
-            d_stable_reuse_expected_dirty_rows);
-        deviceMemcpy(&gmxpacked_incremental_merge_dirty_source_rows,
-                     d_stable_reuse_expected_dirty_rows, sizeof(int),
-                     deviceMemcpyDeviceToHost);
-        gmxpacked_incremental_merge_filled_dirty_rows =
-            gmxpacked_incremental_merge_dirty_source_rows;
-        gmxpacked_incremental_merge_overflow_rows = 0;
-        gmxpacked_record_stream_source_numbers =
-            previous_gmxpacked_incremental_source_numbers;
-        gmxpacked_record_stream_filled_rows =
-            gmxpacked_record_stream_source_numbers;
-        gmxpacked_record_stream_overflow_rows = 0;
-        gmxpacked_incremental_merge_used = true;
-        gmxpacked_incremental_stable_source_reuse_used = true;
-        gmxpacked_incremental_candidate_sci_numbers = candidate_sci_numbers;
-        gmxpacked_incremental_source_numbers =
-            gmxpacked_record_stream_source_numbers;
-        gmxpacked_incremental_source_cutoff =
-            previous_gmxpacked_incremental_source_cutoff;
-        gmxpacked_incremental_source_offsets_ready = true;
-        gmxpacked_incremental_source_cache_ready = true;
-        if (record_builder_summary_trace)
-        {
-            fprintf(stderr,
-                    "[clustered gmxpacked incremental merge] step=%d used=%d "
-                    "prev_source_rows=%d dirty_source_rows=%d "
-                    "mixed_source_rows=%d filled_dirty_rows=%d "
-                    "overflow_rows=%d current_mask=%d j_leaf_scope=%d "
-                    "stable_target_layout=%d stable_source_contract=%d "
-                    "mode=stable-reuse\n",
-                    md_info.sys.steps,
-                    gmxpacked_incremental_merge_used ? 1 : 0,
-                    previous_gmxpacked_incremental_source_numbers,
-                    gmxpacked_incremental_merge_dirty_source_rows,
-                    gmxpacked_record_stream_source_numbers,
-                    gmxpacked_incremental_merge_filled_dirty_rows,
-                    gmxpacked_incremental_merge_overflow_rows,
-                    current_layout_incremental_device_mask_ready ? 1 : 0,
-                    current_layout_incremental_j_leaf_scope_ready ? 1 : 0,
-                    use_stable_target_layout ? 1 : 0,
-                    use_stable_source_contract ? 1 : 0);
-            fflush(stderr);
-        }
-        Free_Single_Device_Pointer(
-            (void**)&d_stable_reuse_expected_dirty_rows);
     }
 
     if (!gmxpacked_incremental_merge_used &&
@@ -24461,222 +24309,6 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
         Free_Single_Device_Pointer((void**)&d_stable_overwrite_overflow_rows);
         Free_Single_Device_Pointer(
             (void**)&d_stable_overwrite_expected_dirty_rows);
-    }
-
-    if (!gmxpacked_incremental_merge_used &&
-        request_gmxpacked_incremental_merge &&
-        Clustered_Gmxpacked_Incremental_Mixed_Source_Build_Enabled() &&
-        previous_gmxpacked_incremental_source_cache_ready &&
-        previous_gmxpacked_incremental_candidate_sci_numbers ==
-            candidate_sci_numbers &&
-        use_gmxpacked_record_stream_source_offsets &&
-        d_gmxpacked_incremental_dirty_candidate_sci != NULL &&
-        d_gmxpacked_record_stream_source_counts_by_candidate != NULL &&
-        d_gmxpacked_record_stream_source_offsets_by_candidate != NULL)
-    {
-        ClusteredGmxpackedRecordBuilderStageTimer stage_timer(
-            "incremental-mixed-source-build", record_builder_stage_timers);
-        int* d_merge_sci_shift_flags = NULL;
-        int merge_sci_shift_flag_capacity = 0;
-        int* d_merge_cjpacked_counts = NULL;
-        int merge_cjpacked_count_capacity = 0;
-        int* d_merge_exclusion_counts = NULL;
-        int merge_exclusion_count_capacity = 0;
-        int* d_merge_source_fill_cursor = NULL;
-        int merge_source_fill_cursor_capacity = 0;
-        int* d_merge_source_overflow_rows = NULL;
-        int merge_source_overflow_capacity = 0;
-        Reserve_Device_Int_Buffer(sci_shift_numbers, &d_merge_sci_shift_flags,
-                                  &merge_sci_shift_flag_capacity);
-        Reserve_Device_Int_Buffer(sci_shift_numbers, &d_merge_cjpacked_counts,
-                                  &merge_cjpacked_count_capacity);
-        Reserve_Device_Int_Buffer(sci_shift_numbers, &d_merge_exclusion_counts,
-                                  &merge_exclusion_count_capacity);
-        Reserve_Device_Int_Buffer(
-            candidate_sci_numbers,
-            &d_gmxpacked_incremental_replacement_source_counts_by_candidate,
-            &gmxpacked_incremental_replacement_source_count_capacity);
-        Reserve_Device_Int_Buffer(
-            candidate_sci_numbers + 1,
-            &d_gmxpacked_incremental_replacement_source_offsets_by_candidate,
-            &gmxpacked_incremental_replacement_source_offset_capacity);
-        Reserve_Device_Int_Buffer(1, &d_merge_source_fill_cursor,
-                                  &merge_source_fill_cursor_capacity);
-        Reserve_Device_Int_Buffer(1, &d_merge_source_overflow_rows,
-                                  &merge_source_overflow_capacity);
-        deviceMemset(d_merge_sci_shift_flags, 0,
-                     sizeof(int) * sci_shift_numbers);
-        deviceMemset(d_merge_cjpacked_counts, 0,
-                     sizeof(int) * sci_shift_numbers);
-        deviceMemset(d_merge_exclusion_counts, 0,
-                     sizeof(int) * sci_shift_numbers);
-        deviceMemset(d_gmxpacked_incremental_replacement_source_counts_by_candidate,
-                     0, sizeof(int) * candidate_sci_numbers);
-
-        Launch_Device_Kernel(
-            Count_Nbnxm_Payload_From_Candidate_Leaves, candidate_sci_blocks,
-            kClusteredBuilderBlockSize, 0, NULL, candidate_sci_numbers,
-            sci_shift_numbers, cluster_size, super_cluster_clusters,
-            local_atom_numbers, build_cutoff, cell, rcell, d_sort_permutation,
-            d_cluster_offsets, d_leaf_cluster_starts, d_leaf_cluster_ends,
-            d_super_cluster_offsets, d_cluster_to_supercluster,
-            candidate_sci_supercluster_ids, d_super_cluster_centers,
-            candidate_shift_ids, d_sci_candidate_leaf_offsets,
-            d_sci_candidate_leaf_ids, candidate_leaf_cluster_stride,
-            fixed_shift_leaf_screening ? d_candidate_leaf_reach_masks : NULL,
-            d_cluster_valid_masks, d_cluster_local_masks, d_cluster_centers,
-            d_cluster_extents, d_cluster_radii, cluster_molecule_signatures,
-            cluster_molecule_ids, d_excluded_list_start, d_excluded_list,
-            d_excluded_numbers, fixed_shift_candidates,
-            gmxpacked_record_stream_cutoff, gmxpacked_record_stream_prune_crd,
-            d_merge_sci_shift_flags, d_merge_cjpacked_counts,
-            d_merge_exclusion_counts, NULL,
-            d_gmxpacked_incremental_replacement_source_counts_by_candidate,
-            false, d_gmxpacked_incremental_dirty_candidate_sci);
-        gmxpacked_incremental_merge_dirty_source_rows = Exclusive_Scan_Counts(
-            this, candidate_sci_numbers,
-            d_gmxpacked_incremental_replacement_source_counts_by_candidate,
-            d_gmxpacked_incremental_replacement_source_offsets_by_candidate);
-
-        if (gmxpacked_incremental_merge_dirty_source_rows > 0)
-        {
-            Reserve_Device_Buffer(
-                gmxpacked_incremental_merge_dirty_source_rows,
-                &d_gmxpacked_incremental_replacement_sources,
-                &gmxpacked_incremental_replacement_source_capacity);
-            deviceMemset(d_merge_source_fill_cursor, 0, sizeof(int));
-            deviceMemset(d_merge_source_overflow_rows, 0, sizeof(int));
-            Launch_Device_Kernel(
-                Fill_Gmxpacked_Record_Stream_Sources_From_Candidate_Leaves,
-                candidate_sci_blocks, kClusteredBuilderBlockSize, 0, NULL,
-                candidate_sci_numbers, cluster_size, local_atom_numbers,
-                build_cutoff, cell, rcell, d_sort_permutation,
-                d_cluster_offsets, d_leaf_cluster_starts, d_leaf_cluster_ends,
-                d_super_cluster_offsets, d_cluster_to_supercluster,
-                candidate_sci_supercluster_ids, candidate_shift_ids,
-                d_sci_candidate_leaf_offsets, d_sci_candidate_leaf_ids,
-                candidate_leaf_cluster_stride,
-                fixed_shift_leaf_screening ? d_candidate_leaf_reach_masks : NULL,
-                d_cluster_valid_masks, d_cluster_local_masks,
-                d_cluster_centers, d_cluster_extents, cluster_molecule_signatures,
-                cluster_molecule_ids, d_excluded_list_start, d_excluded_list,
-                d_excluded_numbers, fixed_shift_candidates,
-                gmxpacked_record_stream_cutoff,
-                gmxpacked_record_stream_prune_crd,
-                gmxpacked_incremental_merge_dirty_source_rows,
-                d_gmxpacked_incremental_replacement_source_offsets_by_candidate,
-                d_gmxpacked_incremental_replacement_sources,
-                d_merge_source_fill_cursor, d_merge_source_overflow_rows, 0,
-                NULL, 0, NULL, NULL, NULL,
-                d_gmxpacked_incremental_dirty_candidate_sci);
-            deviceMemcpy(&gmxpacked_incremental_merge_filled_dirty_rows,
-                         d_merge_source_fill_cursor, sizeof(int),
-                         deviceMemcpyDeviceToHost);
-            deviceMemcpy(&gmxpacked_incremental_merge_overflow_rows,
-                         d_merge_source_overflow_rows, sizeof(int),
-                         deviceMemcpyDeviceToHost);
-        }
-
-        if (gmxpacked_incremental_merge_dirty_source_rows ==
-                gmxpacked_incremental_merge_filled_dirty_rows &&
-            gmxpacked_incremental_merge_overflow_rows == 0)
-        {
-            Launch_Device_Kernel(
-                Build_Gmxpacked_Incremental_Mixed_Source_Counts,
-                (candidate_sci_numbers + CONTROLLER::device_max_thread - 1) /
-                    CONTROLLER::device_max_thread,
-                CONTROLLER::device_max_thread, 0, NULL, candidate_sci_numbers,
-                d_gmxpacked_incremental_dirty_candidate_sci,
-                d_gmxpacked_incremental_source_offsets_by_candidate,
-                d_gmxpacked_incremental_replacement_source_offsets_by_candidate,
-                d_gmxpacked_record_stream_source_counts_by_candidate);
-            gmxpacked_record_stream_source_numbers = Exclusive_Scan_Counts(
-                this, candidate_sci_numbers,
-                d_gmxpacked_record_stream_source_counts_by_candidate,
-                d_gmxpacked_record_stream_source_offsets_by_candidate);
-            if (gmxpacked_record_stream_source_numbers > 0)
-            {
-                Reserve_Device_Buffer(gmxpacked_record_stream_source_numbers,
-                                      &d_gmxpacked_record_stream_sources,
-                                      &gmxpacked_record_stream_source_capacity);
-                Launch_Device_Kernel(
-                    Fill_Gmxpacked_Incremental_Mixed_Record_Stream_Sources,
-                    (candidate_sci_numbers + CONTROLLER::device_max_thread - 1) /
-                        CONTROLLER::device_max_thread,
-                    CONTROLLER::device_max_thread, 0, NULL,
-                    candidate_sci_numbers,
-                    d_gmxpacked_incremental_dirty_candidate_sci,
-                    d_gmxpacked_incremental_source_offsets_by_candidate,
-                    d_gmxpacked_incremental_record_stream_sources,
-                    d_gmxpacked_incremental_replacement_source_offsets_by_candidate,
-                    d_gmxpacked_incremental_replacement_sources,
-                    d_gmxpacked_record_stream_source_offsets_by_candidate,
-                    d_gmxpacked_record_stream_sources);
-                gmxpacked_record_stream_filled_rows =
-                    gmxpacked_record_stream_source_numbers;
-                gmxpacked_record_stream_overflow_rows = 0;
-                gmxpacked_incremental_merge_used = true;
-            }
-        }
-
-        if (record_builder_summary_trace)
-        {
-            fprintf(stderr,
-                    "[clustered gmxpacked incremental merge] step=%d used=%d "
-                    "prev_source_rows=%d dirty_source_rows=%d "
-                    "mixed_source_rows=%d filled_dirty_rows=%d "
-                    "overflow_rows=%d current_mask=%d j_leaf_scope=%d "
-                    "stable_target_layout=%d stable_source_contract=%d\n",
-                    md_info.sys.steps,
-                    gmxpacked_incremental_merge_used ? 1 : 0,
-                    previous_gmxpacked_incremental_source_numbers,
-                    gmxpacked_incremental_merge_dirty_source_rows,
-                    gmxpacked_record_stream_source_numbers,
-                    gmxpacked_incremental_merge_filled_dirty_rows,
-                    gmxpacked_incremental_merge_overflow_rows,
-                    current_layout_incremental_device_mask_ready ? 1 : 0,
-                    current_layout_incremental_j_leaf_scope_ready ? 1 : 0,
-                    use_stable_target_layout ? 1 : 0,
-                    use_stable_source_contract ? 1 : 0);
-            fflush(stderr);
-        }
-
-        if (gmxpacked_incremental_merge_used)
-        {
-            Reserve_Device_Int_Buffer(
-                candidate_sci_numbers + 1,
-                &d_gmxpacked_incremental_source_offsets_by_candidate,
-                &gmxpacked_incremental_source_offset_capacity);
-            deviceMemcpy(
-                d_gmxpacked_incremental_source_offsets_by_candidate,
-                d_gmxpacked_record_stream_source_offsets_by_candidate,
-                sizeof(int) * (candidate_sci_numbers + 1),
-                deviceMemcpyDeviceToDevice);
-            Reserve_Device_Buffer(
-                gmxpacked_record_stream_source_numbers,
-                &d_gmxpacked_incremental_record_stream_sources,
-                &gmxpacked_incremental_source_cache_capacity);
-            deviceMemcpy(
-                d_gmxpacked_incremental_record_stream_sources,
-                d_gmxpacked_record_stream_sources,
-                sizeof(LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE) *
-                    static_cast<size_t>(gmxpacked_record_stream_source_numbers),
-                deviceMemcpyDeviceToDevice);
-            gmxpacked_incremental_candidate_sci_numbers =
-                candidate_sci_numbers;
-            gmxpacked_incremental_source_numbers =
-                gmxpacked_record_stream_source_numbers;
-            gmxpacked_incremental_source_cutoff =
-                gmxpacked_record_stream_cutoff;
-            gmxpacked_incremental_source_offsets_ready = true;
-            gmxpacked_incremental_source_cache_ready = true;
-        }
-
-        Free_Single_Device_Pointer((void**)&d_merge_sci_shift_flags);
-        Free_Single_Device_Pointer((void**)&d_merge_cjpacked_counts);
-        Free_Single_Device_Pointer((void**)&d_merge_exclusion_counts);
-        Free_Single_Device_Pointer((void**)&d_merge_source_fill_cursor);
-        Free_Single_Device_Pointer((void**)&d_merge_source_overflow_rows);
     }
 
     if (!gmxpacked_incremental_merge_used &&
@@ -25793,11 +25425,6 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
             record_stream_source_rows_match &&
             record_stream_source_overflow_free &&
             gmxpacked_record_stream_source_numbers > 0;
-        const bool reuse_record_stream_compact_payload =
-            build_record_stream_aggregates &&
-            gmxpacked_incremental_stable_source_reuse_used &&
-            !use_gmxpacked_inner_active_payload &&
-            previous_gmxpacked_compact_payload_ready;
         if (!record_stream_source_rows_match ||
             !record_stream_source_overflow_free)
         {
@@ -25810,38 +25437,7 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                     gmxpacked_record_stream_overflow_rows);
             fflush(stderr);
         }
-        if (reuse_record_stream_compact_payload)
-        {
-            ClusteredGmxpackedRecordBuilderStageTimer stage_timer(
-                "record-stream-compact-payload-reuse",
-                record_builder_stage_timers);
-            gmxpacked_record_stream_aggregate_numbers =
-                previous_gmxpacked_record_stream_aggregate_numbers;
-            gmxpacked_record_stream_filled_aggregate_rows =
-                previous_gmxpacked_record_stream_aggregate_numbers;
-            gmxpacked_sci_numbers = previous_gmxpacked_sci_numbers;
-            gmxpacked_cjpacked_numbers = previous_gmxpacked_cjpacked_numbers;
-            gmxpacked_exclusion_numbers = previous_gmxpacked_exclusion_numbers;
-            gmxpacked_split_exclusion_numbers =
-                previous_gmxpacked_split_exclusion_numbers;
-            gmxpacked_record_stream_compact_summary.source_rows =
-                gmxpacked_record_stream_source_numbers;
-            gmxpacked_record_stream_compact_summary.aggregate_rows =
-                previous_gmxpacked_record_stream_aggregate_numbers;
-            gmxpacked_record_stream_compact_summary.compact_entries =
-                previous_gmxpacked_record_stream_aggregate_numbers;
-            gmxpacked_record_stream_compact_summary.compact_sci =
-                previous_gmxpacked_sci_numbers;
-            gmxpacked_record_stream_compact_summary.compact_cj =
-                previous_gmxpacked_cjpacked_numbers;
-            gmxpacked_record_stream_compact_summary.split_excl =
-                previous_gmxpacked_split_exclusion_numbers;
-            gmxpacked_record_stream_compact_summary.compact_excl =
-                previous_gmxpacked_exclusion_numbers;
-            built_gmxpacked_record_stream_compact = true;
-            reused_gmxpacked_record_stream_compact = true;
-        }
-        else if (build_record_stream_aggregates)
+        if (build_record_stream_aggregates)
         {
             gmxpacked_record_stream_filled_aggregate_rows =
                 Build_Gmxpacked_Record_Stream_Aggregates(this);
@@ -25863,8 +25459,7 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                     gmxpacked_record_stream_filled_aggregate_rows);
             fflush(stderr);
         }
-        if (!reused_gmxpacked_record_stream_compact &&
-            build_record_stream_aggregates &&
+        if (build_record_stream_aggregates &&
             gmxpacked_record_stream_aggregate_numbers > 0 &&
             gmxpacked_record_stream_filled_aggregate_rows ==
                 gmxpacked_record_stream_aggregate_numbers)
@@ -25948,8 +25543,7 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                         gmxpacked_record_stream_compact_summary.compact_cj,
                         gmxpacked_record_stream_compact_summary.split_excl,
                         gmxpacked_record_stream_compact_summary.compact_excl,
-                        route_gmxpacked_record_stream_compact ? 1 : 0,
-                        reused_gmxpacked_record_stream_compact ? 1 : 0);
+                        route_gmxpacked_record_stream_compact ? 1 : 0, 0);
                 fflush(stderr);
             }
         }
