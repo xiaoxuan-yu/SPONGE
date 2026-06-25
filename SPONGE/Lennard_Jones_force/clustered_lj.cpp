@@ -8965,6 +8965,34 @@ static bool Clustered_Gmxpacked_Active_View_Source_Cache_Patch_Verify_Enabled()
     return Clustered_Gmxpacked_Active_View_Source_Cache_Patch_Enabled();
 }
 
+static bool Clustered_Gmxpacked_Source_Cache_Refresh_Probe_Enabled()
+{
+    const char* enabled = std::getenv(
+        "SPONGE_CLUSTERED_GMXPACKED_SOURCE_CACHE_REFRESH_PROBE");
+    return enabled != NULL && enabled[0] != '\0' && enabled[0] != '0';
+}
+
+static float Clustered_Gmxpacked_Source_Cache_Refresh_Probe_Fraction()
+{
+    const char* value = std::getenv(
+        "SPONGE_CLUSTERED_GMXPACKED_SOURCE_CACHE_REFRESH_PROBE_FRACTION");
+    return value != NULL && value[0] != '\0' ? atof(value) : 0.8f;
+}
+
+static float Clustered_Gmxpacked_Source_Cache_Refresh_Probe_Dirty_Margin()
+{
+    const char* value = std::getenv(
+        "SPONGE_CLUSTERED_GMXPACKED_SOURCE_CACHE_REFRESH_PROBE_DIRTY_MARGIN");
+    return value != NULL && value[0] != '\0' ? atof(value) : 2.0f;
+}
+
+static int Clustered_Gmxpacked_Source_Cache_Refresh_Probe_Interval()
+{
+    const char* value = std::getenv(
+        "SPONGE_CLUSTERED_GMXPACKED_SOURCE_CACHE_REFRESH_PROBE_INTERVAL");
+    return value != NULL && value[0] != '\0' ? atoi(value) : 100;
+}
+
 static void Invalidate_Gmxpacked_Incremental_Source_Cache_State(
     LJ_CLUSTER_LAYOUT* layout)
 {
@@ -11451,6 +11479,125 @@ static bool Build_Gmxpacked_Inner_Active_Dirty_Device_Mask(
         *j_leaf_scope_ready = has_j_leaf_scope;
     }
     return true;
+}
+
+static void Probe_Gmxpacked_Source_Cache_Refresh_Dirty_Rows(
+    LJ_CLUSTER_LAYOUT* layout, const char* phase, const VECTOR* crd,
+    const VECTOR* source_anchor_crd, const LTMatrix3 cell, const LTMatrix3 rcell,
+    const int* candidate_sci_supercluster_ids, const int* candidate_shift_ids,
+    const bool fixed_shift_candidates, const int source_rows,
+    const int* source_offsets_by_candidate, const float dirty_margin,
+    const float anchor_max_displacement, const float source_window,
+    const float required_source_cutoff, const float outer_source_cutoff,
+    const bool source_covers_required, const bool record_builder_stage_timers)
+{
+    if (layout == NULL || crd == NULL || source_anchor_crd == NULL ||
+        candidate_sci_supercluster_ids == NULL || source_rows <= 0 ||
+        source_offsets_by_candidate == NULL || dirty_margin <= 0.0f ||
+        layout->candidate_sci_numbers <= 0)
+    {
+        return;
+    }
+    ClusteredGmxpackedRecordBuilderStageTimer stage_timer(
+        "source-cache-refresh-probe-dirty-source-count",
+        record_builder_stage_timers);
+    bool j_leaf_scope_ready = false;
+    const bool dirty_mask_ready =
+        Build_Gmxpacked_Inner_Active_Dirty_Device_Mask(
+            layout, crd, source_anchor_crd, cell, rcell,
+            candidate_sci_supercluster_ids, candidate_shift_ids,
+            fixed_shift_candidates, dirty_margin, &j_leaf_scope_ready);
+    if (!dirty_mask_ready ||
+        layout->d_gmxpacked_incremental_dirty_candidate_sci == NULL)
+    {
+        fprintf(stderr,
+                "[clustered gmxpacked source cache refresh probe] "
+                "step=%d phase=%s status=dirty-mask-unavailable "
+                "candidate_sci=%d source_rows=%d dirty_margin=%.6f\n",
+                md_info.sys.steps, phase != NULL ? phase : "unknown",
+                layout->candidate_sci_numbers, source_rows, dirty_margin);
+        fflush(stderr);
+        return;
+    }
+
+    Reserve_Device_Int_Buffer(layout->candidate_sci_numbers + 1,
+                              &layout->d_jentry_counts,
+                              &layout->jentry_count_capacity);
+    Reserve_Device_Int_Buffer(layout->candidate_sci_numbers + 1,
+                              &layout->d_jentry_offsets,
+                              &layout->jentry_offset_capacity);
+    const int dirty_candidates =
+        Exclusive_Scan_Counts(layout, layout->candidate_sci_numbers,
+                              layout->d_gmxpacked_incremental_dirty_candidate_sci,
+                              layout->d_jentry_offsets);
+    Launch_Device_Kernel(
+        Count_Gmxpacked_Dirty_Source_Rows_By_Candidate,
+        (layout->candidate_sci_numbers + CONTROLLER::device_max_thread - 1) /
+            CONTROLLER::device_max_thread,
+        CONTROLLER::device_max_thread, 0, NULL, layout->candidate_sci_numbers,
+        layout->d_gmxpacked_incremental_dirty_candidate_sci,
+        source_offsets_by_candidate, layout->d_jentry_counts);
+    const int dirty_source_rows =
+        Exclusive_Scan_Counts(layout, layout->candidate_sci_numbers,
+                              layout->d_jentry_counts,
+                              layout->d_jentry_offsets);
+    int source_displacement_dirty_rows = -1;
+    if (layout->d_gmxpacked_incremental_dirty_i_candidate_sci != NULL &&
+        layout->d_gmxpacked_incremental_record_stream_sources != NULL)
+    {
+        Reserve_Device_Int_Buffer(1, &layout->d_need_rebuild,
+                                  &layout->rebuild_flag_capacity);
+        deviceMemset(layout->d_need_rebuild, 0, sizeof(int));
+        deviceMemset(layout->d_gmxpacked_incremental_dirty_i_candidate_sci, 0,
+                     sizeof(int) * layout->candidate_sci_numbers);
+        Launch_Device_Kernel(
+            Count_Gmxpacked_Active_View_Dirty_Source_Rows,
+            (source_rows + CONTROLLER::device_max_thread - 1) /
+                CONTROLLER::device_max_thread,
+            CONTROLLER::device_max_thread, 0, NULL, source_rows,
+            layout->d_gmxpacked_incremental_record_stream_sources,
+            layout->candidate_sci_numbers,
+            layout->d_gmxpacked_incremental_dirty_i_candidate_sci,
+            layout->d_sort_permutation, layout->d_cluster_offsets,
+            layout->d_super_cluster_offsets, layout->d_cluster_local_masks, crd,
+            source_anchor_crd, cell, rcell, dirty_margin,
+            layout->d_need_rebuild);
+        deviceMemcpy(&source_displacement_dirty_rows, layout->d_need_rebuild,
+                     sizeof(int), deviceMemcpyDeviceToHost);
+    }
+    const float dirty_candidate_ratio =
+        static_cast<float>(dirty_candidates) /
+        static_cast<float>(layout->candidate_sci_numbers);
+    const float dirty_source_ratio =
+        static_cast<float>(dirty_source_rows) / static_cast<float>(source_rows);
+    const float source_displacement_dirty_ratio =
+        source_displacement_dirty_rows >= 0
+            ? static_cast<float>(source_displacement_dirty_rows) /
+                  static_cast<float>(source_rows)
+            : -1.0f;
+    const float coverage_fraction =
+        source_window > 1e-6f
+            ? anchor_max_displacement / fmaxf(0.5f * source_window, 1e-6f)
+            : 1.0f;
+    fprintf(stderr,
+            "[clustered gmxpacked source cache refresh probe] "
+            "step=%d phase=%s source_rows=%d dirty_candidates=%d/%d "
+            "dirty_source_rows=%d source_displacement_dirty_rows=%d "
+            "dirty_candidate_ratio=%.6f dirty_source_ratio=%.6f "
+            "source_displacement_dirty_ratio=%.6f dirty_margin=%.6f "
+            "anchor_max_disp=%.6f source_window=%.6f "
+            "coverage_fraction=%.6f required_source_cutoff=%.6f "
+            "outer_source_cutoff=%.6f source_covers_required=%d "
+            "j_leaf_scope=%d\n",
+            md_info.sys.steps, phase != NULL ? phase : "unknown",
+            source_rows, dirty_candidates, layout->candidate_sci_numbers,
+            dirty_source_rows, source_displacement_dirty_rows,
+            dirty_candidate_ratio, dirty_source_ratio,
+            source_displacement_dirty_ratio, dirty_margin,
+            anchor_max_displacement, source_window,
+            coverage_fraction, required_source_cutoff, outer_source_cutoff,
+            source_covers_required ? 1 : 0, j_leaf_scope_ready ? 1 : 0);
+    fflush(stderr);
 }
 #endif
 
@@ -21647,6 +21794,60 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
             fminf(outer_source_cutoff, requested_active_cutoff + 1e-4f);
         const bool source_covers_requested_active_cutoff =
             source_coverage_cutoff <= outer_source_cutoff + 1e-5f;
+#ifndef USE_CPU
+        if (track_active_view_source_anchor &&
+            Clustered_Gmxpacked_Source_Cache_Refresh_Probe_Enabled() &&
+            previous_gmxpacked_incremental_source_cache_ready &&
+            previous_gmxpacked_incremental_candidate_sci_numbers ==
+                candidate_sci_numbers &&
+            d_gmxpacked_incremental_source_offsets_by_candidate != NULL &&
+            d_gmxpacked_incremental_record_stream_sources != NULL &&
+            d_gmxpacked_outer_source_anchor_crd != NULL)
+        {
+            const float source_window =
+                fmaxf(0.0f, outer_source_cutoff - cutoff);
+            const float coverage_fraction =
+                source_window > 1e-6f
+                    ? anchor_max_displacement /
+                          fmaxf(0.5f * source_window, 1e-6f)
+                    : 1.0f;
+            const float probe_fraction =
+                Clustered_Gmxpacked_Source_Cache_Refresh_Probe_Fraction();
+            const int probe_interval =
+                Clustered_Gmxpacked_Source_Cache_Refresh_Probe_Interval();
+            const bool probe_step_due =
+                probe_interval <= 0 ||
+                (md_info.sys.steps > 0 &&
+                 md_info.sys.steps % probe_interval == 0);
+            if (!source_covers_requested_active_cutoff ||
+                (coverage_fraction >= probe_fraction && probe_step_due))
+            {
+                const bool cached_sparse_shift_candidates =
+                    Clustered_Use_Sparse_Shift_Candidate_Builder();
+                const bool cached_dense_shift_candidates =
+                    Clustered_Use_Shift_Partitioned_Builder();
+                const bool cached_fixed_shift_candidates =
+                    cached_dense_shift_candidates ||
+                    cached_sparse_shift_candidates;
+                const int* cached_candidate_sci_supercluster_ids =
+                    cached_sparse_shift_candidates ? d_candidate_sci_offsets
+                                                   : d_sci_supercluster_ids;
+                const int* cached_candidate_shift_ids =
+                    cached_sparse_shift_candidates ? d_candidate_shift_ids
+                                                   : NULL;
+                Probe_Gmxpacked_Source_Cache_Refresh_Dirty_Rows(
+                    this, refresh_label, crd, d_gmxpacked_outer_source_anchor_crd,
+                    cell, rcell, cached_candidate_sci_supercluster_ids,
+                    cached_candidate_shift_ids, cached_fixed_shift_candidates,
+                    previous_gmxpacked_incremental_source_numbers,
+                    d_gmxpacked_incremental_source_offsets_by_candidate,
+                    Clustered_Gmxpacked_Source_Cache_Refresh_Probe_Dirty_Margin(),
+                    anchor_max_displacement, source_window,
+                    source_coverage_cutoff, outer_source_cutoff,
+                    source_covers_requested_active_cutoff, refresh_stage_timers);
+            }
+        }
+#endif
         if (!anchor_current && allow_anchor_drift &&
             !source_covers_requested_active_cutoff)
         {
