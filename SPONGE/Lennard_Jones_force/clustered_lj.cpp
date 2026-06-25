@@ -8698,10 +8698,9 @@ static bool Clustered_Gmxpacked_Early_Record_Analyze_Enabled()
 
 static bool Clustered_Gmxpacked_Active_View_Enabled()
 {
-    // Retired from the clean gmxpacked baseline. Keep the symbol so older
-    // experimental code remains easy to remove without preserving the runtime
-    // entry point.
-    return false;
+    const char* enabled =
+        std::getenv("SPONGE_CLUSTERED_GMXPACKED_ACTIVE_VIEW");
+    return enabled != NULL && enabled[0] != '\0' && enabled[0] != '0';
 }
 
 static bool Clustered_Gmxpacked_Active_View_Experimental_Inner_Enabled()
@@ -8744,12 +8743,12 @@ static bool Clustered_Gmxpacked_Incremental_Stats_Enabled()
 
 static bool Clustered_Gmxpacked_Incremental_Cache_Enabled()
 {
-    return false;
+    return Clustered_Gmxpacked_Active_View_Enabled();
 }
 
 static bool Clustered_Gmxpacked_Incremental_Device_Mask_Enabled()
 {
-    return false;
+    return Clustered_Gmxpacked_Active_View_Enabled();
 }
 
 static bool Clustered_Gmxpacked_Incremental_Refill_Enabled()
@@ -8852,7 +8851,7 @@ static bool Clustered_Gmxpacked_Active_View_Active_Compact_Enabled();
 
 static bool Clustered_Gmxpacked_Record_Builder_Inner_Active_Payload_Enabled()
 {
-    return false;
+    return Clustered_Gmxpacked_Active_View_Enabled();
 }
 
 static bool Clustered_Gmxpacked_Record_Builder_One_Pass_Source_Cache_Enabled()
@@ -8879,7 +8878,7 @@ static bool Clustered_Gmxpacked_Current_Inner_Active_Enabled()
 
 static bool Clustered_Gmxpacked_Active_View_Current_Mask_Enabled()
 {
-    return false;
+    return Clustered_Gmxpacked_Active_View_Enabled();
 }
 
 static bool Clustered_Gmxpacked_Active_View_Active_Compact_Enabled()
@@ -8939,17 +8938,19 @@ static float Clustered_Gmxpacked_Inner_Active_Append_Max_Growth_Ratio()
 
 static float Clustered_Gmxpacked_Active_View_Dirty_Source_Ratio_Limit()
 {
-    return 0.0f;
+    const char* value = std::getenv(
+        "SPONGE_CLUSTERED_GMXPACKED_ACTIVE_VIEW_DIRTY_SOURCE_RATIO_LIMIT");
+    return value != NULL && value[0] != '\0' ? atof(value) : 0.25f;
 }
 
 static bool Clustered_Gmxpacked_Active_View_Partial_Refresh_Enabled()
 {
-    return false;
+    return Clustered_Gmxpacked_Active_View_Enabled();
 }
 
 static bool Clustered_Gmxpacked_Active_View_Dirty_Index_Refresh_Enabled()
 {
-    return false;
+    return Clustered_Gmxpacked_Active_View_Enabled();
 }
 
 static bool Clustered_Gmxpacked_Active_View_Compact_Patch_Enabled()
@@ -8979,12 +8980,45 @@ static bool Clustered_Gmxpacked_Active_View_Union_Mask_Enabled()
 
 static float Clustered_Gmxpacked_Active_View_Anchor_Reuse_Limit()
 {
-    return 0.0f;
+    const char* value =
+        std::getenv("SPONGE_CLUSTERED_GMXPACKED_ACTIVE_VIEW_ANCHOR_REUSE_LIMIT");
+    return value != NULL && value[0] != '\0' ? atof(value) : INFINITY;
 }
 
 static float Clustered_Gmxpacked_Active_View_Refresh_Fraction()
 {
-    return 0.0f;
+    const char* value =
+        std::getenv("SPONGE_CLUSTERED_GMXPACKED_ACTIVE_VIEW_REFRESH_FRACTION");
+    return value != NULL && value[0] != '\0' ? atof(value) : 0.4f;
+}
+
+static float Clustered_Gmxpacked_Active_View_Payload_Safety_Margin()
+{
+    const char* value = std::getenv(
+        "SPONGE_CLUSTERED_GMXPACKED_ACTIVE_VIEW_PAYLOAD_SAFETY_MARGIN");
+    return value != NULL && value[0] != '\0' ? atof(value) : 0.25f;
+}
+
+static float Clustered_Gmxpacked_Active_View_Payload_Guard_Margin(
+    const float guard_margin)
+{
+    const char* value =
+        std::getenv("SPONGE_CLUSTERED_GMXPACKED_ACTIVE_VIEW_PAYLOAD_GUARD_MARGIN");
+    if (value != NULL && value[0] != '\0')
+    {
+        return fmaxf(0.0f, fminf(guard_margin, atof(value)));
+    }
+    if (guard_margin <= 0.0f)
+    {
+        return 0.0f;
+    }
+    const float refresh_fraction =
+        fmaxf(0.0f, Clustered_Gmxpacked_Active_View_Refresh_Fraction());
+    const float safety_margin =
+        fmaxf(0.0f, Clustered_Gmxpacked_Active_View_Payload_Safety_Margin());
+    return fmaxf(0.0f,
+                 fminf(guard_margin,
+                       2.0f * guard_margin * refresh_fraction + safety_margin));
 }
 
 static bool Clustered_Gmxpacked_Active_View_Verify_Coverage_Enabled()
@@ -9004,7 +9038,7 @@ static bool Clustered_Gmxpacked_Active_View_Coverage_Repair_Delta_Append_Enabled
 
 static bool Clustered_Gmxpacked_Active_View_Refresh_Anchor_On_Partial_Enabled()
 {
-    return false;
+    return Clustered_Gmxpacked_Active_View_Enabled();
 }
 
 static float Clustered_Gmxpacked_Active_View_Coverage_Repair_Max_Missing_Ratio()
@@ -9024,7 +9058,7 @@ static bool Clustered_Gmxpacked_Active_View_Cutoff_Drift_Refresh_Enabled()
 
 static bool Clustered_Gmxpacked_Active_View_Fixed_Cutoff_Enabled()
 {
-    return false;
+    return Clustered_Gmxpacked_Active_View_Enabled();
 }
 
 static bool Clustered_Gmxpacked_Active_View_Verify_Reuse_Enabled()
@@ -9044,7 +9078,18 @@ static bool Clustered_Gmxpacked_Active_View_Source_Dirty_Undercover_Enabled()
 
 static float Clustered_Gmxpacked_Record_Builder_Inner_Active_Guard_Margin()
 {
-    return 0.0f;
+    const char* value =
+        std::getenv("SPONGE_CLUSTERED_GMXPACKED_ACTIVE_VIEW_GUARD_MARGIN");
+    if (value == NULL || value[0] == '\0')
+    {
+        value = std::getenv(
+            "SPONGE_CLUSTERED_GMXPACKED_RECORD_BUILDER_INNER_ACTIVE_GUARD_MARGIN");
+    }
+    if (value != NULL && value[0] != '\0')
+    {
+        return atof(value);
+    }
+    return Clustered_Gmxpacked_Active_View_Enabled() ? 2.0f : 0.0f;
 }
 
 static float Clustered_Gmxpacked_Experimental_Inner_Anchor_Limit()
@@ -21274,18 +21319,23 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
     bool active_view_force_outer_payload_this_build = false;
     auto can_attempt_inner_active_from_cached_outer_source = [&]() -> bool
     {
+        const bool active_view_cached_outer_source =
+            Clustered_Gmxpacked_Active_View_Enabled() &&
+            previous_gmxpacked_incremental_source_cache_ready;
+        const bool stable_cached_outer_source =
+            Clustered_Gmxpacked_Stable_Target_Layout_Enabled() &&
+            Clustered_Gmxpacked_Stable_Source_Contract_Enabled() &&
+            stable_target_layout_anchor_ready &&
+            d_stable_target_layout_crd != NULL &&
+            previous_gmxpacked_incremental_record_source_cache_ready;
         return request_gmxpacked_primary_builder_for_cache &&
                !cached_native_payload_required &&
                need_gmxpacked_payload && runtime_gmxpacked_direct_requested &&
                Clustered_Gmxpacked_Record_Builder_Outer_Source_Enabled() &&
                Clustered_Gmxpacked_Record_Builder_Inner_Active_Payload_Enabled() &&
                Clustered_Gmxpacked_Incremental_Cache_Enabled() &&
-               Clustered_Gmxpacked_Stable_Target_Layout_Enabled() &&
-               Clustered_Gmxpacked_Stable_Source_Contract_Enabled() &&
-               previous_gmxpacked_incremental_record_source_cache_ready &&
                previous_gmxpacked_incremental_source_numbers > 0 &&
-               stable_target_layout_anchor_ready &&
-               d_stable_target_layout_crd != NULL &&
+               (active_view_cached_outer_source || stable_cached_outer_source) &&
                fabsf(cached_cutoff - cutoff) <= 1e-6f;
     };
     auto try_inner_active_payload_refresh_from_outer_cache =
@@ -21367,6 +21417,11 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
             use_current_inner_active
                 ? fminf(configured_guard_margin, 1.0f)
                 : configured_guard_margin;
+        const float active_view_payload_guard_margin =
+            (!use_current_inner_active && use_active_view_current_mask)
+                ? Clustered_Gmxpacked_Active_View_Payload_Guard_Margin(
+                      guard_margin)
+                : guard_margin;
         const bool use_current_inner_adaptive_lease =
             use_current_inner_active &&
             Clustered_Gmxpacked_Current_Inner_Adaptive_Lease_Enabled();
@@ -21460,7 +21515,8 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
         if (active_view_fixed_cutoff)
         {
             target_guard_cutoff =
-                fminf(outer_source_cutoff, cutoff + guard_margin);
+                fminf(outer_source_cutoff,
+                      cutoff + active_view_payload_guard_margin);
         }
         if (!active_view_fixed_cutoff && use_current_active_mask &&
             gmxpacked_inner_active_guard_cutoff > cutoff)
@@ -21530,7 +21586,9 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
             }
         }
         const float active_view_refresh_margin =
-            fmaxf(0.0f, target_guard_cutoff - cutoff);
+            use_active_view_current_mask
+                ? fmaxf(0.0f, guard_margin)
+                : fmaxf(0.0f, target_guard_cutoff - cutoff);
         const float active_view_refresh_threshold =
             active_view_refresh_margin *
             Clustered_Gmxpacked_Active_View_Refresh_Fraction();
@@ -22141,9 +22199,7 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                         fmaxf(0.0f, target_guard_cutoff - cutoff),
                         refresh_stage_timers, &active_view_dirty_source_rows,
                         &active_view_changed_source_rows,
-                        Clustered_Gmxpacked_Active_View_Compact_Patch_Enabled()
-                            ? gmxpacked_record_stream_source_numbers
-                            : 0);
+                        gmxpacked_record_stream_source_numbers);
                 used_active_view_refresh = active_source_rows >= 0;
                 if (used_active_view_refresh &&
                     Clustered_Gmxpacked_Active_View_Verify_Coverage_Enabled())
@@ -22443,7 +22499,6 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
         int filled_aggregate_rows = 0;
         const bool reused_compact_payload =
             used_active_view_refresh &&
-            Clustered_Gmxpacked_Active_View_Compact_Patch_Enabled() &&
             active_view_changed_source_rows == 0 &&
             active_source_rows == previous_active_source_rows &&
             can_reuse_previous_compact_payload &&
@@ -22734,8 +22789,173 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
         }
         return true;
     };
+    auto active_view_payload_requested_for_cache = [&]() -> bool
+    {
+        return request_gmxpacked_primary_builder_for_cache &&
+               !cached_native_payload_required && need_gmxpacked_payload &&
+               runtime_gmxpacked_direct_requested &&
+               Clustered_Gmxpacked_Record_Builder_Outer_Source_Enabled() &&
+               Clustered_Gmxpacked_Active_View_Enabled();
+    };
+    auto refresh_active_view_payload_from_outer_cache =
+        [&](const char* phase) -> bool
+    {
+        if (!active_view_payload_requested_for_cache() ||
+            !previous_gmxpacked_incremental_record_source_cache_ready ||
+            previous_gmxpacked_incremental_source_numbers <= 0 ||
+            d_gmxpacked_incremental_record_stream_sources == NULL)
+        {
+            return false;
+        }
+#ifdef USE_CPU
+        (void)phase;
+        return false;
+#else
+        ClusteredRecorderScope payload_build_scope(payload_build_time_recorder);
+        const bool refresh_stage_timers =
+            Clustered_Gmxpacked_Record_Builder_Stage_Timers_Enabled();
+        const bool refresh_summary_trace =
+            Clustered_Trace_Warp_Records_Enabled() || refresh_stage_timers;
+        const int outer_source_rows = previous_gmxpacked_incremental_source_numbers;
+        const float outer_source_cutoff = cutoff + rebuild_skin;
+        const float guard_margin =
+            Clustered_Gmxpacked_Record_Builder_Inner_Active_Guard_Margin();
+        const float active_payload_guard_margin =
+            Clustered_Gmxpacked_Active_View_Payload_Guard_Margin(guard_margin);
+        const float active_cutoff =
+            fminf(outer_source_cutoff,
+                  cutoff + fmaxf(0.0f, active_payload_guard_margin));
+        {
+            ClusteredGmxpackedRecordBuilderStageTimer stage_timer(
+                "active-view-outer-source-cache-copy", refresh_stage_timers);
+            Reserve_Device_Buffer(outer_source_rows, &d_gmxpacked_record_stream_sources,
+                                  &gmxpacked_record_stream_source_capacity);
+            deviceMemcpy(
+                d_gmxpacked_record_stream_sources,
+                d_gmxpacked_incremental_record_stream_sources,
+                sizeof(LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE) *
+                    static_cast<size_t>(outer_source_rows),
+                deviceMemcpyDeviceToDevice);
+        }
+        gmxpacked_record_stream_source_numbers = outer_source_rows;
+        gmxpacked_record_stream_aggregate_numbers = 0;
+        const int active_source_rows =
+            Prune_Gmxpacked_Record_Stream_To_Inner_Active_Sources(
+                this, crd, cell, rcell, active_cutoff, refresh_stage_timers, true);
+        if (active_source_rows <= 0)
+        {
+            return false;
+        }
+        gmxpacked_record_stream_source_numbers = active_source_rows;
+        const int filled_aggregate_rows =
+            Build_Gmxpacked_Record_Stream_Aggregates(this);
+        if (gmxpacked_record_stream_aggregate_numbers <= 0 ||
+            filled_aggregate_rows != gmxpacked_record_stream_aggregate_numbers)
+        {
+            return false;
+        }
+        gmxpacked_delta_sci_numbers = 0;
+        gmxpacked_delta_cjpacked_numbers = 0;
+        gmxpacked_delta_exclusion_numbers = 0;
+        gmxpacked_delta_split_exclusion_numbers = 0;
+        const ClusteredGmxpackedRecordStreamCompactSummary compact_summary =
+            Build_Gmxpacked_Record_Stream_Compact_Payload(this);
+        if (compact_summary.compact_sci <= 0 || compact_summary.compact_cj <= 0 ||
+            compact_summary.compact_excl <= 0)
+        {
+            return false;
+        }
+        Refresh_Gmxpacked_Active_View_Compact_Base_Imasks(this);
+        Refresh_Gmxpacked_Inner_Active_Anchor_Crd(this, crd);
+        gmxpacked_inner_active_guard_cutoff = active_cutoff;
+        {
+            ClusteredGmxpackedRecordBuilderStageTimer stage_timer(
+                "active-view-pair-shift-refresh", refresh_stage_timers);
+            if (Clustered_Gmxpacked_Should_Refresh_Pair_Shift_Metadata(this, rcell))
+            {
+                Reserve_Device_U64_Buffer(
+                    gmxpacked_cjpacked_numbers * kClusteredJGroupSize,
+                    &d_pair_shift_bits, &pair_shift_capacity);
+                Refresh_Gmxpacked_Pair_Shift_Metadata(this, rcell);
+            }
+        }
+        if (refresh_summary_trace)
+        {
+            fprintf(stderr,
+                    "[clustered gmxpacked active view refresh] step=%d "
+                    "cached_step=%d phase=%s outer_source_rows=%d "
+                    "active_source_rows=%d aggregate_rows=%d compact_sci=%d "
+                    "compact_cj=%d compact_excl=%d active_cutoff=%.6f "
+                    "guard_margin=%.6f source=outer-cache\n",
+                    md_info.sys.steps, cached_build_step,
+                    phase != NULL ? phase : "cache-refresh", outer_source_rows,
+                    active_source_rows, gmxpacked_record_stream_aggregate_numbers,
+                    gmxpacked_sci_numbers, gmxpacked_cjpacked_numbers,
+                    gmxpacked_exclusion_numbers, active_cutoff, guard_margin);
+            fflush(stderr);
+        }
+        return true;
+#endif
+    };
     if (!clustered_build_needed && !cached_native_payload_missing)
     {
+        if (can_attempt_inner_active_from_cached_outer_source() &&
+            try_inner_active_payload_refresh_from_outer_cache(
+                "cache-hit", true, false))
+        {
+            return;
+        }
+        if (active_view_payload_requested_for_cache())
+        {
+            bool can_reuse_active_payload =
+                previous_gmxpacked_compact_payload_ready &&
+                gmxpacked_inner_active_anchor_ready &&
+                d_gmxpacked_inner_active_anchor_crd != NULL &&
+                gmxpacked_inner_active_source_imasks_ready &&
+                gmxpacked_inner_active_source_imask_numbers ==
+                    previous_gmxpacked_incremental_source_numbers;
+            float active_anchor_max_displacement = 0.0f;
+            const float guard_margin =
+                Clustered_Gmxpacked_Record_Builder_Inner_Active_Guard_Margin();
+            const float reuse_limit = fmaxf(0.0f, 0.5f * guard_margin);
+            if (can_reuse_active_payload)
+            {
+                active_anchor_max_displacement =
+                    Clustered_Max_Gmxpacked_Inner_Active_Anchor_Displacement(
+                        this, crd, cell, rcell);
+                can_reuse_active_payload =
+                    active_anchor_max_displacement <= reuse_limit + 1.0e-5f;
+            }
+            if (can_reuse_active_payload)
+            {
+                if (Clustered_Gmxpacked_Should_Refresh_Pair_Shift_Metadata(this,
+                                                                           rcell))
+                {
+                    Reserve_Device_U64_Buffer(
+                        gmxpacked_cjpacked_numbers * kClusteredJGroupSize,
+                        &d_pair_shift_bits, &pair_shift_capacity);
+                    Refresh_Gmxpacked_Pair_Shift_Metadata(this, rcell);
+                }
+                if (Clustered_Trace_Warp_Records_Enabled())
+                {
+                    fprintf(stderr,
+                            "[clustered gmxpacked active view reuse] step=%d "
+                            "cached_step=%d compact_sci=%d compact_cj=%d "
+                            "compact_excl=%d active_anchor_max_disp=%.6f "
+                            "reuse_limit=%.6f\n",
+                            md_info.sys.steps, cached_build_step,
+                            gmxpacked_sci_numbers, gmxpacked_cjpacked_numbers,
+                            gmxpacked_exclusion_numbers,
+                            active_anchor_max_displacement, reuse_limit);
+                    fflush(stderr);
+                }
+                return;
+            }
+            if (refresh_active_view_payload_from_outer_cache("cache-hit"))
+            {
+                return;
+            }
+        }
         if (Clustered_Trace_Warp_Records_Enabled())
         {
             const int builds_this_step =
@@ -25210,6 +25430,33 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
         gmxpacked_record_stream_overflow_rows == 0 &&
         d_gmxpacked_record_stream_sources != NULL)
     {
+        ClusteredGmxpackedRecordBuilderStageTimer stage_timer(
+            "record-stream-outer-source-cache-copy",
+            record_builder_stage_timers);
+        Reserve_Device_Buffer(gmxpacked_record_stream_source_numbers,
+                              &d_gmxpacked_incremental_record_stream_sources,
+                              &gmxpacked_incremental_source_cache_capacity);
+        deviceMemcpy(
+            d_gmxpacked_incremental_record_stream_sources,
+            d_gmxpacked_record_stream_sources,
+            sizeof(LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE) *
+                static_cast<size_t>(gmxpacked_record_stream_source_numbers),
+            deviceMemcpyDeviceToDevice);
+        gmxpacked_incremental_candidate_sci_numbers = candidate_sci_numbers;
+        gmxpacked_incremental_source_numbers =
+            gmxpacked_record_stream_source_numbers;
+        gmxpacked_incremental_source_cache_ready = true;
+        gmxpacked_incremental_source_offsets_ready =
+            gmxpacked_incremental_source_offsets_ready &&
+            d_gmxpacked_incremental_source_offsets_by_candidate != NULL;
+    }
+    if (run_gmxpacked_record_builder && use_gmxpacked_inner_active_payload &&
+        gmxpacked_record_stream_source_numbers > 0 &&
+        gmxpacked_record_stream_filled_rows ==
+            gmxpacked_record_stream_source_numbers &&
+        gmxpacked_record_stream_overflow_rows == 0 &&
+        d_gmxpacked_record_stream_sources != NULL)
+    {
         const int outer_source_rows = gmxpacked_record_stream_source_numbers;
         const bool use_current_inner_active =
             Clustered_Gmxpacked_Current_Inner_Active_Enabled();
@@ -25222,8 +25469,14 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
             use_current_inner_active
                 ? fminf(configured_guard_margin, 1.0f)
                 : configured_guard_margin;
+        const float active_payload_guard_margin =
+            (!use_current_inner_active && use_current_active_mask)
+                ? Clustered_Gmxpacked_Active_View_Payload_Guard_Margin(
+                      guard_margin)
+                : guard_margin;
         float initial_active_cutoff =
-            fminf(gmxpacked_record_stream_cutoff, cutoff + guard_margin);
+            fminf(gmxpacked_record_stream_cutoff,
+                  cutoff + active_payload_guard_margin);
         const VECTOR* initial_active_prune_crd =
             use_current_active_mask
                 ? crd
