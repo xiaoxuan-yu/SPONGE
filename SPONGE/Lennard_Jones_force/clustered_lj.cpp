@@ -101,7 +101,14 @@ static bool Clustered_Gmxpacked_Pair_Shift_Metadata_Cache_Enabled()
 {
     const char* enabled =
         std::getenv("SPONGE_CLUSTERED_GMXPACKED_PAIR_SHIFT_METADATA_CACHE");
-    return enabled != NULL && enabled[0] != '\0' && enabled[0] != '0';
+    if (enabled != NULL && enabled[0] != '\0')
+    {
+        return enabled[0] != '0';
+    }
+    const char* active_view =
+        std::getenv("SPONGE_CLUSTERED_GMXPACKED_ACTIVE_VIEW");
+    return active_view != NULL && active_view[0] != '\0' &&
+           active_view[0] != '0';
 }
 
 #ifdef USE_CPU
