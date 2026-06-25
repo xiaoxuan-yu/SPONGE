@@ -2,9 +2,11 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstdint>
+#include <cstring>
 #include <numeric>
 #include <span>
 #include <type_traits>
@@ -59,6 +61,49 @@ constexpr int kClusteredMaxJGroupSize = kClusteredJGroupSize;
 constexpr int kClusteredForceonlyLocalSortCapacity = 2048;
 constexpr unsigned int kClusteredForceonlyInvalidSortKey = 0xffffffffu;
 
+static bool Clustered_Fine_Timers_Enabled()
+{
+    const char* disabled = std::getenv("SPONGE_CLUSTERED_DISABLE_FINE_TIMERS");
+    if (disabled != NULL && disabled[0] != '\0' && disabled[0] != '0')
+    {
+        return false;
+    }
+    const char* enabled = std::getenv("SPONGE_CLUSTERED_FINE_TIMERS");
+    if (enabled != NULL && enabled[0] != '\0')
+    {
+        return enabled[0] != '0';
+    }
+    return true;
+}
+
+static bool Clustered_Gmxpacked_Sci_Shift_Split_Enabled()
+{
+    const char* enabled =
+        std::getenv("SPONGE_CLUSTERED_GMXPACKED_SCI_SHIFT_SPLIT");
+    return enabled != NULL && enabled[0] != '\0' && enabled[0] != '0';
+}
+
+static bool Clustered_Gmxpacked_Sci_Shift_Runtime_Enabled()
+{
+    const char* enabled =
+        std::getenv("SPONGE_CLUSTERED_GMXPACKED_SCI_SHIFT_RUNTIME");
+    return enabled != NULL && enabled[0] != '\0' && enabled[0] != '0';
+}
+
+static bool Clustered_Gmxpacked_Exact_Sci_Shift_Flags_Enabled()
+{
+    const char* enabled =
+        std::getenv("SPONGE_CLUSTERED_GMXPACKED_EXACT_SCI_SHIFT_FLAGS");
+    return enabled != NULL && enabled[0] != '\0' && enabled[0] != '0';
+}
+
+static bool Clustered_Gmxpacked_Pair_Shift_Metadata_Cache_Enabled()
+{
+    const char* enabled =
+        std::getenv("SPONGE_CLUSTERED_GMXPACKED_PAIR_SHIFT_METADATA_CACHE");
+    return enabled != NULL && enabled[0] != '\0' && enabled[0] != '0';
+}
+
 #ifdef USE_CPU
 struct HostClusteredJRecord
 {
@@ -83,6 +128,7 @@ struct HostClusteredBuildInput
 
     std::vector<int> permutation;
     std::vector<int> cluster_offsets;
+    std::vector<int> super_cluster_offsets;
     std::vector<unsigned int> cluster_valid_masks;
     std::vector<unsigned int> cluster_local_masks;
     std::vector<VECTOR> cluster_centers;
@@ -705,6 +751,16 @@ static __host__ __device__ __forceinline__ int Determine_Cluster_Pair_Shift_Id(
     return Determine_Shift_Id(frac_i, frac_j);
 }
 
+static __host__ __device__ __forceinline__ VECTOR
+Shift_Clustered_Atom_Into_Sorted_XQ_Frame(const VECTOR atom_crd,
+                                          const VECTOR cluster_center,
+                                          const LTMatrix3 cell,
+                                          const LTMatrix3 rcell)
+{
+    return cluster_center +
+           Get_Periodic_Displacement(atom_crd, cluster_center, cell, rcell);
+}
+
 static __host__ __device__ __forceinline__ bool Cluster_Reach_Overlaps_Shifted(
     VECTOR center_i, VECTOR center_j, float radius_i, float radius_j,
     float cutoff, VECTOR shift_vec)
@@ -1013,11 +1069,277 @@ Append_Record_To_Gmxpacked_CjPacked(
     }
 }
 
+static __host__ __device__ __forceinline__ void
+Fill_Gmxpacked_Record_Stream_Source_Pair_Words(
+    LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* source,
+    const int cluster_i_start, const int cluster_j, const int shift_id,
+    const int split_id, const unsigned int valid_mask_j,
+    const unsigned int local_mask_j, const unsigned int record_imask,
+    const unsigned int* shared_i_local_masks,
+    const unsigned long long* exclusion_masks)
+{
+#pragma unroll
+    for (int pair_idx = 0; pair_idx < kClusteredGmxpackedExclusionPairCount;
+         pair_idx += 1)
+    {
+        source->pair_exclusion_words[pair_idx] = 0u;
+    }
+
+#pragma unroll
+    for (int i_local = 0; i_local < kClusteredMaxSuperClusterClusters;
+         i_local += 1)
+    {
+        const unsigned int source_imask_bit =
+            1u << static_cast<unsigned int>(i_local);
+        if ((record_imask & source_imask_bit) == 0u)
+        {
+            continue;
+        }
+
+        const int cluster_i = cluster_i_start + i_local;
+        const unsigned int local_mask_i = shared_i_local_masks[i_local];
+        const unsigned long long exclusion_mask = exclusion_masks[i_local];
+
+#pragma unroll
+        for (int split_j_lane = 0; split_j_lane < kClusteredSplitJClusterSize;
+             split_j_lane += 1)
+        {
+            const int j_lane =
+                split_id * kClusteredSplitJClusterSize + split_j_lane;
+            const bool valid_j =
+                (valid_mask_j & (1u << static_cast<unsigned int>(j_lane))) != 0u;
+            const bool local_j =
+                (local_mask_j & (1u << static_cast<unsigned int>(j_lane))) != 0u;
+#pragma unroll
+            for (int i_lane = 0; i_lane < kClusteredClusterSize; i_lane += 1)
+            {
+                const bool local_i =
+                    (local_mask_i &
+                     (1u << static_cast<unsigned int>(i_lane))) != 0u;
+                bool allow_pair = valid_j && local_i;
+                if (allow_pair && shift_id == kClusteredCentralShiftId &&
+                    cluster_i == cluster_j && local_j && j_lane <= i_lane)
+                {
+                    allow_pair = false;
+                }
+                if (allow_pair &&
+                    (exclusion_mask &
+                     (1ull << static_cast<unsigned int>(
+                          i_lane * kClusteredClusterSize + j_lane))) != 0ull)
+                {
+                    allow_pair = false;
+                }
+                if (allow_pair)
+                {
+                    source->pair_exclusion_words
+                        [split_j_lane * kClusteredClusterSize + i_lane] |=
+                        source_imask_bit;
+                }
+            }
+        }
+    }
+}
+
+static __device__ __forceinline__ unsigned int
+Prune_Gmxpacked_Record_Stream_Source_Imask(
+    const int split_id, const unsigned int record_imask,
+    const unsigned int valid_mask_j, const int shift_id, const LTMatrix3 cell,
+    const LTMatrix3 rcell, const VECTOR* crd,
+    const float* shared_i_center_x, const float* shared_i_center_y,
+    const float* shared_i_center_z, const VECTOR center_j,
+    const int shared_i_atom_ids[kClusteredMaxSuperClusterClusters]
+                               [kClusteredClusterSize],
+    const int* shared_j_atom_ids, const unsigned int* shared_i_local_masks,
+    const float cutoff_sq)
+{
+    if (record_imask == 0u || crd == NULL)
+    {
+        return 0u;
+    }
+    if (cutoff_sq <= 0.0f)
+    {
+        return record_imask;
+    }
+
+    const VECTOR pair_shift = Shift_Vector_From_Id(shift_id, cell);
+    const int j_lane_base = split_id * kClusteredSplitJClusterSize;
+    unsigned int pruned_imask = 0u;
+#pragma unroll
+    for (int i_local = 0; i_local < kClusteredMaxSuperClusterClusters;
+         i_local += 1)
+    {
+        const unsigned int i_local_bit = 1u << static_cast<unsigned int>(i_local);
+        if ((record_imask & i_local_bit) == 0u)
+        {
+            continue;
+        }
+        const unsigned int local_mask_i = shared_i_local_masks[i_local];
+        if (local_mask_i == 0u)
+        {
+            continue;
+        }
+
+        bool any_in_range = false;
+#pragma unroll
+        for (int i_lane = 0; i_lane < kClusteredClusterSize; i_lane += 1)
+        {
+            if ((local_mask_i & (1u << static_cast<unsigned int>(i_lane))) == 0u)
+            {
+                continue;
+            }
+            const int atom_i = shared_i_atom_ids[i_local][i_lane];
+            if (atom_i < 0)
+            {
+                continue;
+            }
+            const VECTOR r_i = crd[atom_i];
+            const VECTOR center_i = {shared_i_center_x[i_local],
+                                     shared_i_center_y[i_local],
+                                     shared_i_center_z[i_local]};
+            const VECTOR shifted_i =
+                Shift_Clustered_Atom_Into_Sorted_XQ_Frame(r_i, center_i, cell,
+                                                          rcell);
+#pragma unroll
+            for (int split_j_lane = 0;
+                 split_j_lane < kClusteredSplitJClusterSize; split_j_lane += 1)
+            {
+                const int j_lane = j_lane_base + split_j_lane;
+                if ((valid_mask_j & (1u << static_cast<unsigned int>(j_lane))) ==
+                    0u)
+                {
+                    continue;
+                }
+                const int atom_j = shared_j_atom_ids[j_lane];
+                if (atom_j < 0)
+                {
+                    continue;
+                }
+                const VECTOR shifted_j =
+                    Shift_Clustered_Atom_Into_Sorted_XQ_Frame(crd[atom_j],
+                                                              center_j, cell,
+                                                              rcell);
+                const float dr_x = shifted_j.x - shifted_i.x - pair_shift.x;
+                const float dr_y = shifted_j.y - shifted_i.y - pair_shift.y;
+                const float dr_z = shifted_j.z - shifted_i.z - pair_shift.z;
+                const float dr2 = dr_x * dr_x + dr_y * dr_y + dr_z * dr_z;
+                if (dr2 < cutoff_sq && dr2 != 0.0f)
+                {
+                    any_in_range = true;
+                    break;
+                }
+            }
+            if (any_in_range)
+            {
+                break;
+            }
+        }
+        if (any_in_range)
+        {
+            pruned_imask |= i_local_bit;
+        }
+    }
+    return pruned_imask;
+}
+
+static __device__ __forceinline__ bool
+Gmxpacked_Device_Source_Trace_Contains_Focus_Atom(const int* focus_atoms,
+                                                  const int focus_atom_count,
+                                                  const int atom_id)
+{
+    if (focus_atoms == NULL || focus_atom_count <= 0 || atom_id < 0)
+    {
+        return false;
+    }
+    for (int focus_idx = 0; focus_idx < focus_atom_count; focus_idx += 1)
+    {
+        if (focus_atoms[focus_idx] == atom_id)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+static __device__ __forceinline__ unsigned int
+Build_Gmxpacked_Device_Source_Trace_Focus_I_Local_Mask(
+    const unsigned int group_record_imask, const int* focus_atoms,
+    const int focus_atom_count,
+    const int shared_i_atom_ids[kClusteredMaxSuperClusterClusters]
+                               [kClusteredClusterSize],
+    const unsigned int* shared_i_local_masks)
+{
+    if (group_record_imask == 0u || focus_atoms == NULL || focus_atom_count <= 0)
+    {
+        return 0u;
+    }
+
+    unsigned int focus_i_local_mask = 0u;
+    for (int i_local = 0; i_local < kClusteredMaxSuperClusterClusters;
+         i_local += 1)
+    {
+        const unsigned int i_local_bit = 1u << static_cast<unsigned int>(i_local);
+        if ((group_record_imask & i_local_bit) == 0u)
+        {
+            continue;
+        }
+        const unsigned int local_mask_i = shared_i_local_masks[i_local];
+        if (local_mask_i == 0u)
+        {
+            continue;
+        }
+        for (int i_lane = 0; i_lane < kClusteredClusterSize; i_lane += 1)
+        {
+            if ((local_mask_i & (1u << static_cast<unsigned int>(i_lane))) == 0u)
+            {
+                continue;
+            }
+            if (Gmxpacked_Device_Source_Trace_Contains_Focus_Atom(
+                    focus_atoms, focus_atom_count,
+                    shared_i_atom_ids[i_local][i_lane]))
+            {
+                focus_i_local_mask |= i_local_bit;
+                break;
+            }
+        }
+    }
+    return focus_i_local_mask;
+}
+
+static __device__ __forceinline__ bool
+Gmxpacked_Device_Source_Trace_Split_Has_Focus_J_Atom(
+    const int split_id, const unsigned int valid_mask_j,
+    const int* shared_j_atom_ids, const int* focus_atoms,
+    const int focus_atom_count)
+{
+    if (focus_atoms == NULL || focus_atom_count <= 0)
+    {
+        return false;
+    }
+
+    const int j_lane_base = split_id * kClusteredSplitJClusterSize;
+    for (int split_j_lane = 0; split_j_lane < kClusteredSplitJClusterSize;
+         split_j_lane += 1)
+    {
+        const int j_lane = j_lane_base + split_j_lane;
+        if ((valid_mask_j & (1u << static_cast<unsigned int>(j_lane))) == 0u)
+        {
+            continue;
+        }
+        if (Gmxpacked_Device_Source_Trace_Contains_Focus_Atom(
+                focus_atoms, focus_atom_count, shared_j_atom_ids[j_lane]))
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
 static __global__ void Gather_Sorted_LJ_Direct_Scratch(
     const int atom_numbers, const int cluster_numbers, const int* permutation,
     const int* cluster_offsets, const VECTOR* cluster_centers,
     const LTMatrix3 cell, const LTMatrix3 rcell, const VECTOR_LJ* src,
-    int* sorted_atom_ids, float4* sorted_xq, int* sorted_lj_type)
+    int* sorted_atom_ids, float4* sorted_xq, int* sorted_lj_type,
+    const float2* lj_ab_packed, float2* sorted_lj_comb)
 {
     SIMPLE_DEVICE_FOR(sorted_i, atom_numbers)
     {
@@ -1044,6 +1366,18 @@ static __global__ void Gather_Sorted_LJ_Direct_Scratch(
         sorted_xq[sorted_i] = {shifted_crd.x, shifted_crd.y, shifted_crd.z,
                                atom.charge};
         sorted_lj_type[sorted_i] = atom.LJ_type;
+        if (sorted_lj_comb != NULL)
+        {
+            float2 comb = {0.0f, 0.0f};
+            if (lj_ab_packed != NULL)
+            {
+                const float2 self_ab =
+                    lj_ab_packed[Get_LJ_Type(atom.LJ_type, atom.LJ_type)];
+                comb.x = sqrtf(fmaxf(self_ab.y, 0.0f));
+                comb.y = sqrtf(fmaxf(self_ab.x, 0.0f));
+            }
+            sorted_lj_comb[sorted_i] = comb;
+        }
     }
 }
 
@@ -1079,7 +1413,8 @@ static __global__ void Gather_Sorted_LJ_Direct_Scratch_From_Plain(
     const int* cluster_offsets, const VECTOR* cluster_centers,
     const LTMatrix3 cell, const LTMatrix3 rcell, const VECTOR* crd,
     const float* charge, const VECTOR_LJ* lj_type_src, int* sorted_atom_ids,
-    float4* sorted_xq, int* sorted_lj_type)
+    float4* sorted_xq, int* sorted_lj_type, const float2* lj_ab_packed,
+    float2* sorted_lj_comb)
 {
     SIMPLE_DEVICE_FOR(sorted_i, atom_numbers)
     {
@@ -1105,7 +1440,19 @@ static __global__ void Gather_Sorted_LJ_Direct_Scratch_From_Plain(
         sorted_atom_ids[sorted_i] = atom_i;
         sorted_xq[sorted_i] = {shifted_crd.x, shifted_crd.y, shifted_crd.z,
                                charge[atom_i]};
-        sorted_lj_type[sorted_i] = lj_type_src[atom_i].LJ_type;
+        const int lj_type = lj_type_src[atom_i].LJ_type;
+        sorted_lj_type[sorted_i] = lj_type;
+        if (sorted_lj_comb != NULL)
+        {
+            float2 comb = {0.0f, 0.0f};
+            if (lj_ab_packed != NULL)
+            {
+                const float2 self_ab = lj_ab_packed[Get_LJ_Type(lj_type, lj_type)];
+                comb.x = sqrtf(fmaxf(self_ab.y, 0.0f));
+                comb.y = sqrtf(fmaxf(self_ab.x, 0.0f));
+            }
+            sorted_lj_comb[sorted_i] = comb;
+        }
     }
 }
 
@@ -1196,15 +1543,25 @@ static __global__ void Refresh_Nbnxm_Pair_Shift_Bits(
 
 static __global__ void Refresh_Gmxpacked_Pair_Shift_Bits(
     const int sci_numbers, const int* super_cluster_offsets,
-    const VECTOR* cluster_centers, const LJ_CLUSTERED_GMXPACKED_SCI* gmxpacked_sci,
+    const VECTOR* cluster_centers, const unsigned int* cluster_valid_masks,
+    const unsigned int* cluster_local_masks,
+    const LJ_CLUSTERED_GMXPACKED_SCI* gmxpacked_sci,
     const LJ_CLUSTERED_GMXPACKED_CJ* gmxpacked_cjpacked,
-    const LTMatrix3 rcell, uint64_t* pair_shift_bits)
+    const LJ_CLUSTERED_GMXPACKED_EXCLUSION* exclusion_entries,
+    const LTMatrix3 rcell, uint64_t* pair_shift_bits,
+    int* sci_shift_only_safe, int* sci_shift_safe_flags,
+    const bool exact_sci_shift_flags)
 {
     const int sci = blockIdx.x;
     if (sci >= sci_numbers)
     {
         return;
     }
+    if (threadIdx.x == 0 && sci_shift_safe_flags != NULL)
+    {
+        sci_shift_safe_flags[sci] = 1;
+    }
+    __syncthreads();
 
     const LJ_CLUSTERED_GMXPACKED_SCI sci_entry = gmxpacked_sci[sci];
     const int cluster_i_start =
@@ -1240,6 +1597,88 @@ static __global__ void Refresh_Gmxpacked_Pair_Shift_Bits(
                     shift_id = Determine_Clustered_Pair_Shift_Id(
                         cluster_centers[cluster_i_start + i_local], center_j,
                         rcell);
+                    if ((sci_shift_only_safe != NULL ||
+                         sci_shift_safe_flags != NULL) &&
+                        shift_id != sci_entry.shift_id)
+                    {
+                        bool effective_pair = !exact_sci_shift_flags;
+                        const int cluster_i = cluster_i_start + i_local;
+                        const unsigned int packed_bit =
+                            1u << static_cast<unsigned int>(
+                                Clustered_Jm_Imask_Shift(jm) + i_local);
+                        for (int split = 0;
+                             split < kClusteredWarpSplitCount && !effective_pair;
+                             split += 1)
+                        {
+                            const LJ_CLUSTERED_GMXPACKED_SPLIT split_entry =
+                                packed.split[split];
+                            if ((split_entry.imask & packed_bit) == 0u)
+                            {
+                                continue;
+                            }
+                            for (int split_j_lane = 0;
+                                 split_j_lane < kClusteredSplitJClusterSize &&
+                                 !effective_pair;
+                                 split_j_lane += 1)
+                            {
+                                const int j_lane =
+                                    split * kClusteredSplitJClusterSize +
+                                    split_j_lane;
+                                if (cluster_valid_masks != NULL &&
+                                    (cluster_valid_masks[cluster_j] &
+                                     (1u << static_cast<unsigned int>(j_lane))) ==
+                                        0u)
+                                {
+                                    continue;
+                                }
+                                for (int i_lane = 0;
+                                     i_lane < kClusteredClusterSize; i_lane += 1)
+                                {
+                                    if (cluster_valid_masks != NULL &&
+                                        (cluster_valid_masks[cluster_i] &
+                                         (1u << static_cast<unsigned int>(
+                                              i_lane))) == 0u)
+                                    {
+                                        continue;
+                                    }
+                                    if (cluster_local_masks != NULL &&
+                                        (cluster_local_masks[cluster_i] &
+                                         (1u << static_cast<unsigned int>(
+                                              i_lane))) == 0u)
+                                    {
+                                        continue;
+                                    }
+                                    unsigned int pair_bits = 0xffffffffu;
+                                    if (split_entry.exclusion_index != 0 &&
+                                        exclusion_entries != NULL)
+                                    {
+                                        pair_bits =
+                                            exclusion_entries
+                                                [split_entry.exclusion_index]
+                                                    .pair[split_j_lane *
+                                                              kClusteredClusterSize +
+                                                          i_lane];
+                                    }
+                                    if ((pair_bits & packed_bit) != 0u)
+                                    {
+                                        effective_pair = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        if (effective_pair)
+                        {
+                            if (sci_shift_only_safe != NULL)
+                            {
+                                atomicExch(sci_shift_only_safe, 0);
+                            }
+                            if (sci_shift_safe_flags != NULL)
+                            {
+                                atomicExch(sci_shift_safe_flags + sci, 0);
+                            }
+                        }
+                    }
                 }
                 Clustered_Set_Pair_Shift_Id(&shift_bits, i_local, shift_id);
             }
@@ -2065,6 +2504,49 @@ static __global__ void Check_Clustered_Finite_Coordinates(
     }
 }
 
+static __global__ void Diagnose_Clustered_Coordinate_State(
+    const int atom_numbers, const VECTOR* crd, const VECTOR* anchor_crd,
+    const LTMatrix3 cell, const LTMatrix3 rcell, const float permit_square,
+    int* diag)
+{
+    SIMPLE_DEVICE_FOR(atom_i, atom_numbers)
+    {
+        const VECTOR current = crd[atom_i];
+        const bool current_finite =
+            isfinite(current.x) && isfinite(current.y) && isfinite(current.z);
+        if (!current_finite)
+        {
+            atomicCAS(diag, -1, atom_i);
+            return;
+        }
+        if (anchor_crd == NULL)
+        {
+            return;
+        }
+        const VECTOR anchor = anchor_crd[atom_i];
+        const bool anchor_finite =
+            isfinite(anchor.x) && isfinite(anchor.y) && isfinite(anchor.z);
+        if (!anchor_finite)
+        {
+            atomicCAS(diag + 1, -1, atom_i);
+            return;
+        }
+        const VECTOR dr =
+            Get_Periodic_Displacement(current, anchor, cell, rcell);
+        const float displacement_square = dr * dr;
+        if (!isfinite(displacement_square))
+        {
+            atomicCAS(diag, -1, atom_i);
+            return;
+        }
+        if (displacement_square > permit_square)
+        {
+            atomicCAS(diag + 2, -1, atom_i);
+        }
+        atomicMax(diag + 3, __float_as_int(displacement_square));
+    }
+}
+
 static __host__ __device__ __forceinline__ int IntMin(int a, int b)
 {
     return a < b ? a : b;
@@ -2699,6 +3181,151 @@ static __global__ void Check_Clustered_Rebuild(
         if (dr * dr > permit_square)
         {
             need_rebuild[0] = 1;
+        }
+    }
+}
+
+static __global__ void Build_Clustered_Anchor_Displacement_Sq(
+    const int atom_numbers, const VECTOR* crd, const VECTOR* anchor_crd,
+    const LTMatrix3 cell, const LTMatrix3 rcell, float* displacement_sq)
+{
+    SIMPLE_DEVICE_FOR(atom_i, atom_numbers)
+    {
+        const VECTOR dr =
+            Get_Periodic_Displacement(crd[atom_i], anchor_crd[atom_i], cell,
+                                      rcell);
+        displacement_sq[atom_i] = dr * dr;
+    }
+}
+
+static __global__ void Atomic_Max_Clustered_Anchor_Displacement_Sq(
+    const int atom_numbers, const VECTOR* crd, const VECTOR* anchor_crd,
+    const LTMatrix3 cell, const LTMatrix3 rcell, int* max_displacement_sq_bits)
+{
+    SIMPLE_DEVICE_FOR(atom_i, atom_numbers)
+    {
+        const VECTOR current = crd[atom_i];
+        const VECTOR anchor = anchor_crd[atom_i];
+        if (!isfinite(current.x) || !isfinite(current.y) ||
+            !isfinite(current.z) || !isfinite(anchor.x) ||
+            !isfinite(anchor.y) || !isfinite(anchor.z))
+        {
+            return;
+        }
+        const VECTOR dr = Get_Periodic_Displacement(current, anchor, cell,
+                                                    rcell);
+        const float displacement_square = dr * dr;
+        if (isfinite(displacement_square) && displacement_square >= 0.0f)
+        {
+            atomicMax(max_displacement_sq_bits,
+                      __float_as_int(displacement_square));
+        }
+    }
+}
+
+static __global__ void Mark_Clustered_Incremental_Dirty_Clusters(
+    const int atom_numbers, const int cluster_size, const int cluster_numbers,
+    const int super_cluster_numbers, const VECTOR* crd,
+    const VECTOR* cached_crd, const LTMatrix3 cell, const LTMatrix3 rcell,
+    const int* permutation, const int* cluster_to_supercluster,
+    const float permit_square, int* dirty_atoms, int* dirty_clusters,
+    int* dirty_superclusters)
+{
+    SIMPLE_DEVICE_FOR(sorted_idx, atom_numbers)
+    {
+        const int atom = permutation[sorted_idx];
+        if (atom >= 0 && atom < atom_numbers)
+        {
+            const VECTOR dr = Get_Periodic_Displacement(
+                crd[atom], cached_crd[atom], cell, rcell);
+            if (dr * dr > permit_square)
+            {
+                dirty_atoms[atom] = 1;
+                const int cluster = sorted_idx / cluster_size;
+                if (cluster >= 0 && cluster < cluster_numbers)
+                {
+                    dirty_clusters[cluster] = 1;
+                    const int supercluster = cluster_to_supercluster[cluster];
+                    if (supercluster >= 0 &&
+                        supercluster < super_cluster_numbers)
+                    {
+                        dirty_superclusters[supercluster] = 1;
+                    }
+                }
+            }
+        }
+    }
+}
+
+static __global__ void Mark_Gmxpacked_Incremental_Dirty_I_Candidates(
+    const int candidate_sci_numbers, const int candidate_super_id_numbers,
+    const int super_cluster_numbers, const bool fixed_shift_without_sparse_ids,
+    const int* candidate_sci_supercluster_ids, const int* dirty_superclusters,
+    int* dirty_i_candidate_sci, int* dirty_candidate_sci)
+{
+    SIMPLE_DEVICE_FOR(candidate_sci, candidate_sci_numbers)
+    {
+        const int sci_base = fixed_shift_without_sparse_ids
+                                 ? candidate_sci / kClusteredShiftCount
+                                 : candidate_sci;
+        int dirty = 0;
+        if (sci_base >= 0 && sci_base < candidate_super_id_numbers)
+        {
+            const int super_i = candidate_sci_supercluster_ids[sci_base];
+            dirty = (super_i >= 0 && super_i < super_cluster_numbers &&
+                     dirty_superclusters[super_i] != 0)
+                        ? 1
+                        : 0;
+        }
+        dirty_i_candidate_sci[candidate_sci] = dirty;
+        dirty_candidate_sci[candidate_sci] = dirty;
+    }
+}
+
+static __global__ void Mark_Gmxpacked_Incremental_Dirty_J_Candidates(
+    const int candidate_sci_numbers, const int candidate_leaf_numbers,
+    const int cluster_numbers, const int* candidate_leaf_offsets,
+    const int* candidate_leaf_ids, const int* leaf_cluster_starts,
+    const int* leaf_cluster_ends, const int* dirty_clusters,
+    int* dirty_candidate_sci)
+{
+    SIMPLE_DEVICE_FOR(candidate_sci, candidate_sci_numbers)
+    {
+        if (dirty_candidate_sci[candidate_sci] == 0)
+        {
+            const int candidate_begin = candidate_leaf_offsets[candidate_sci];
+            const int candidate_end = candidate_leaf_offsets[candidate_sci + 1];
+            bool dirty = false;
+            for (int candidate_idx = candidate_begin;
+                 candidate_idx < candidate_end && !dirty; candidate_idx += 1)
+            {
+                if (candidate_idx < 0 ||
+                    candidate_idx >= candidate_leaf_numbers)
+                {
+                    continue;
+                }
+                const int leaf = candidate_leaf_ids[candidate_idx];
+                if (leaf < 0)
+                {
+                    continue;
+                }
+                const int cluster_begin = leaf_cluster_starts[leaf];
+                const int cluster_end = leaf_cluster_ends[leaf];
+                for (int cluster = cluster_begin; cluster < cluster_end;
+                     cluster += 1)
+                {
+                    if (cluster >= 0 && cluster < cluster_numbers &&
+                        dirty_clusters[cluster] != 0)
+                    {
+                        dirty = true;
+                        break;
+                    }
+                }
+            }
+            if (dirty)
+            {
+                dirty_candidate_sci[candidate_sci] = 1;
+            }
         }
     }
 }
@@ -3578,14 +4205,24 @@ static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves(
     const int* cluster_molecule_ids,
     const int* excluded_list_start, const int* excluded_list,
     const int* excluded_numbers,
-    const bool fixed_shift_candidates,
-    int* sci_shift_flags, int* cjpacked_group_counts, int* exclusion_counts)
+    const bool fixed_shift_candidates, const float record_stream_cutoff,
+    const VECTOR* crd,
+    int* sci_shift_flags, int* cjpacked_group_counts, int* exclusion_counts,
+    int* record_stream_source_rows,
+    int* record_stream_source_counts_by_candidate,
+    const bool accumulate_record_stream_source_rows_by_candidate,
+    const int* active_candidate_sci_mask)
 {
     const int lane_id = threadIdx.x & (warpSize - 1);
     const int warp_id = threadIdx.x / warpSize;
     const int warps_per_block = blockDim.x / warpSize;
     const int candidate_sci = blockIdx.x * warps_per_block + warp_id;
     if (candidate_sci >= candidate_sci_numbers)
+    {
+        return;
+    }
+    if (active_candidate_sci_mask != NULL &&
+        active_candidate_sci_mask[candidate_sci] == 0)
     {
         return;
     }
@@ -3657,8 +4294,18 @@ static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves(
         shared_shift_exclusion_counts[kClusteredBuilderBlockSize /
                                       kClusteredBuilderWarpSize]
                                      [kClusteredShiftCount];
+    __shared__ int
+        shared_record_stream_source_counts[kClusteredBuilderBlockSize /
+                                          kClusteredBuilderWarpSize];
     const bool has_molecule_metadata =
         cluster_molecule_signatures != NULL && cluster_molecule_ids != NULL;
+    const bool use_candidate_record_stream_source_count =
+        record_stream_source_counts_by_candidate != NULL ||
+        (accumulate_record_stream_source_rows_by_candidate &&
+         record_stream_source_rows != NULL);
+    const bool count_record_stream_source_rows =
+        record_stream_source_rows != NULL ||
+        record_stream_source_counts_by_candidate != NULL;
     if (lane_id < kClusteredMaxSuperClusterClusters)
     {
         const int cluster_i = cluster_i_start + lane_id;
@@ -3722,10 +4369,11 @@ static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves(
         shared_shift_record_counts[warp_id][lane_id] = 0;
         shared_shift_exclusion_counts[warp_id][lane_id] = 0;
     }
+    if (lane_id == 0)
+    {
+        shared_record_stream_source_counts[warp_id] = 0;
+    }
     __syncwarp();
-    // Candidate leaves arrive in leaf/SFC order, so a monotonic end marker
-    // removes duplicate cluster visits when a globally packed cluster straddles
-    // multiple leaves.
     int processed_cluster_end = 0;
     const int active_cluster_count = cluster_i_end - cluster_i_start;
     const unsigned int active_i_lane_mask =
@@ -3903,7 +4551,8 @@ static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves(
                                   exclusion_candidate);
 
             const bool need_j_cached_atoms =
-                exclusion_candidate_lane_mask != 0u;
+                exclusion_candidate_lane_mask != 0u ||
+                count_record_stream_source_rows;
             if (need_j_cached_atoms)
             {
                 if (lane_id < kClusteredClusterSize)
@@ -3941,17 +4590,59 @@ static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves(
                     __ballot_sync(FULL_MASK,
                                   lane_id < active_cluster_count &&
                                       pair_shift_id == group_shift_id);
+                const unsigned int group_record_imask =
+                    group_lane_mask & active_i_lane_mask;
                 remaining_lane_mask &= ~group_lane_mask;
                 if (lane_id == leader_lane)
                 {
                     const int output_shift_idx =
                         fixed_shift_candidates ? 0 : group_shift_id;
+                    if (count_record_stream_source_rows && group_record_imask != 0u)
+                    {
+                        int source_rows_for_group = 0;
+#pragma unroll
+                        for (int split = 0; split < kClusteredWarpSplitCount;
+                             split += 1)
+                        {
+                            const unsigned int split_local_imask =
+                                Prune_Gmxpacked_Record_Stream_Source_Imask(
+                                    split, group_record_imask, valid_mask_j,
+                                    fixed_shift_candidates ? fixed_shift_id
+                                                            : group_shift_id,
+                                    cell, rcell, crd,
+                                    shared_i_center_x[warp_id],
+                                    shared_i_center_y[warp_id],
+                                    shared_i_center_z[warp_id], center_j,
+                                    shared_i_atom_ids[warp_id],
+                                    shared_j_atom_ids[warp_id],
+                                    shared_i_local_masks[warp_id],
+                                    record_stream_cutoff * record_stream_cutoff);
+                            if (Clustered_Split_Has_Atoms(valid_mask_j, split) &&
+                                split_local_imask != 0u)
+                            {
+                                source_rows_for_group += 1;
+                            }
+                        }
+                        if (source_rows_for_group > 0)
+                        {
+                            if (use_candidate_record_stream_source_count)
+                            {
+                                shared_record_stream_source_counts[warp_id] +=
+                                    source_rows_for_group;
+                            }
+                            else if (record_stream_source_rows != NULL)
+                            {
+                                atomicAdd(record_stream_source_rows,
+                                          source_rows_for_group);
+                            }
+                        }
+                    }
                     shared_shift_record_counts[warp_id][output_shift_idx] += 1;
                     if (need_j_cached_atoms)
                     {
                         const unsigned int group_exclusion_imask =
                             exclusion_candidate_lane_mask &
-                            (group_lane_mask & active_i_lane_mask);
+                            group_record_imask;
                         int exclusion_count_for_group = 0;
                         unsigned int remaining_i = group_exclusion_imask;
                         while (remaining_i != 0u)
@@ -3987,6 +4678,23 @@ static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves(
     }
 
     __syncwarp();
+    if (lane_id == 0)
+    {
+        const int candidate_record_stream_source_count =
+            shared_record_stream_source_counts[warp_id];
+        if (record_stream_source_counts_by_candidate != NULL)
+        {
+            record_stream_source_counts_by_candidate[candidate_sci] =
+                candidate_record_stream_source_count;
+        }
+        if (use_candidate_record_stream_source_count &&
+            record_stream_source_rows != NULL &&
+            candidate_record_stream_source_count > 0)
+        {
+            atomicAdd(record_stream_source_rows,
+                      candidate_record_stream_source_count);
+        }
+    }
     if (fixed_shift_candidates)
     {
         if (lane_id == 0)
@@ -4015,6 +4723,1696 @@ static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves(
 
 static __device__ __forceinline__ LJ_CLUSTERED_GMXPACKED_CJ
 Make_Empty_Gmxpacked_CjPacked();
+
+enum ClusteredGmxpackedDeviceSourceTraceFlags : unsigned int
+{
+    kClusteredGmxpackedDeviceSourceTraceSplitHasAtoms = 1u << 0,
+    kClusteredGmxpackedDeviceSourceTraceWriteInRange = 1u << 1,
+    kClusteredGmxpackedDeviceSourceTraceFocusJPresent = 1u << 2,
+    kClusteredGmxpackedDeviceSourceTraceDedupActive = 1u << 3,
+};
+
+struct ClusteredGmxpackedDeviceSourceRowTrace
+{
+    int candidate_sci = -1;
+    int candidate_idx = -1;
+    int leaf_j = -1;
+    int cluster_j_start = -1;
+    int deduped_cluster_j_start = -1;
+    int shift_id = kClusteredCentralShiftId;
+    int supercluster_id = -1;
+    int cluster_j = -1;
+    int split_id = 0;
+    int write_idx = -1;
+    unsigned int valid_mask_j = 0u;
+    unsigned int local_mask_j = 0u;
+    unsigned int focus_i_local_mask = 0u;
+    unsigned int group_imask = 0u;
+    unsigned int split_imask = 0u;
+    unsigned int source_imask = 0u;
+    unsigned int flags = 0u;
+};
+
+static __global__ void Fill_Gmxpacked_Record_Stream_Sources_From_Candidate_Leaves(
+    const int candidate_sci_numbers, const int cluster_size,
+    const int local_atom_numbers, const float cutoff, const LTMatrix3 cell,
+    const LTMatrix3 rcell, const int* permutation, const int* cluster_offsets,
+    const int* leaf_cluster_starts, const int* leaf_cluster_ends,
+    const int* super_cluster_offsets,
+    const int* cluster_to_supercluster,
+    const int* sci_supercluster_ids, const int* candidate_shift_ids,
+    const int* candidate_leaf_offsets, const int* candidate_leaf_ids,
+    const int candidate_leaf_cluster_stride,
+    const unsigned int* candidate_leaf_reach_masks,
+    const unsigned int* cluster_valid_masks,
+    const unsigned int* cluster_local_masks, const VECTOR* cluster_centers,
+    const VECTOR* cluster_extents,
+    const uint64_t* cluster_molecule_signatures,
+    const int* cluster_molecule_ids,
+    const int* excluded_list_start, const int* excluded_list,
+    const int* excluded_numbers,
+    const bool fixed_shift_candidates, const float record_stream_cutoff,
+    const VECTOR* crd,
+    const int record_stream_source_capacity,
+    const int* record_stream_source_offsets_by_candidate,
+    LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* record_stream_sources,
+    int* record_stream_fill_cursor, int* record_stream_overflow_rows,
+    const int focus_atom_count, const int* focus_atoms,
+    const int device_source_trace_capacity,
+    ClusteredGmxpackedDeviceSourceRowTrace* device_source_trace_rows,
+    int* device_source_trace_cursor, int* device_source_trace_overflow_rows,
+    const int* active_candidate_sci_mask)
+{
+    const int lane_id = threadIdx.x & (warpSize - 1);
+    const int warp_id = threadIdx.x / warpSize;
+    const int warps_per_block = blockDim.x / warpSize;
+    const int candidate_sci = blockIdx.x * warps_per_block + warp_id;
+    if (candidate_sci >= candidate_sci_numbers ||
+        record_stream_source_capacity <= 0 || record_stream_sources == NULL ||
+        record_stream_fill_cursor == NULL || record_stream_overflow_rows == NULL)
+    {
+        return;
+    }
+    if (active_candidate_sci_mask != NULL &&
+        active_candidate_sci_mask[candidate_sci] == 0)
+    {
+        return;
+    }
+
+    const int sci_base =
+        (fixed_shift_candidates && candidate_shift_ids == NULL)
+            ? candidate_sci / kClusteredShiftCount
+            : candidate_sci;
+    const int fixed_shift_id =
+        !fixed_shift_candidates
+            ? -1
+            : (candidate_shift_ids != NULL ? candidate_shift_ids[candidate_sci]
+                                           : (candidate_sci % kClusteredShiftCount));
+    const VECTOR fixed_shift_vec =
+        fixed_shift_candidates
+            ? Shift_Vector_From_Id(fixed_shift_id, cell)
+            : VECTOR{0.0f, 0.0f, 0.0f};
+    const int super_i = sci_supercluster_ids[sci_base];
+    const int cluster_i_start = super_cluster_offsets[super_i];
+    const int cluster_i_end = super_cluster_offsets[super_i + 1];
+    __shared__ unsigned int
+        shared_i_local_masks[kClusteredBuilderBlockSize / kClusteredBuilderWarpSize]
+                            [kClusteredMaxSuperClusterClusters];
+    __shared__ int
+        shared_i_atom_ids[kClusteredBuilderBlockSize / kClusteredBuilderWarpSize]
+                         [kClusteredMaxSuperClusterClusters][kClusteredClusterSize];
+    __shared__ uint64_t
+        shared_i_signatures[kClusteredBuilderBlockSize / kClusteredBuilderWarpSize]
+                           [kClusteredMaxSuperClusterClusters];
+    __shared__ int
+        shared_i_molecule_ids[kClusteredBuilderBlockSize / kClusteredBuilderWarpSize]
+                             [kClusteredMaxSuperClusterClusters]
+                             [kClusteredClusterSize];
+    __shared__ float
+        shared_i_center_x[kClusteredBuilderBlockSize / kClusteredBuilderWarpSize]
+                         [kClusteredMaxSuperClusterClusters];
+    __shared__ float
+        shared_i_center_y[kClusteredBuilderBlockSize / kClusteredBuilderWarpSize]
+                         [kClusteredMaxSuperClusterClusters];
+    __shared__ float
+        shared_i_center_z[kClusteredBuilderBlockSize / kClusteredBuilderWarpSize]
+                         [kClusteredMaxSuperClusterClusters];
+    __shared__ float
+        shared_i_extent_x[kClusteredBuilderBlockSize / kClusteredBuilderWarpSize]
+                         [kClusteredMaxSuperClusterClusters];
+    __shared__ float
+        shared_i_extent_y[kClusteredBuilderBlockSize / kClusteredBuilderWarpSize]
+                         [kClusteredMaxSuperClusterClusters];
+    __shared__ float
+        shared_i_extent_z[kClusteredBuilderBlockSize / kClusteredBuilderWarpSize]
+                         [kClusteredMaxSuperClusterClusters];
+    __shared__ int
+        shared_j_atom_ids[kClusteredBuilderBlockSize / kClusteredBuilderWarpSize]
+                         [kClusteredClusterSize];
+    __shared__ uint64_t
+        shared_j_signature[kClusteredBuilderBlockSize / kClusteredBuilderWarpSize];
+    __shared__ int
+        shared_j_molecule_ids[kClusteredBuilderBlockSize / kClusteredBuilderWarpSize]
+                             [kClusteredClusterSize];
+    __shared__ int
+        shared_record_stream_source_write_cursor[kClusteredBuilderBlockSize /
+                                                kClusteredBuilderWarpSize];
+    __shared__ int
+        shared_record_stream_source_write_end[kClusteredBuilderBlockSize /
+                                             kClusteredBuilderWarpSize];
+    __shared__ int
+        shared_record_stream_source_written_rows[kClusteredBuilderBlockSize /
+                                                kClusteredBuilderWarpSize];
+    const bool has_molecule_metadata =
+        cluster_molecule_signatures != NULL && cluster_molecule_ids != NULL;
+    const bool use_candidate_source_offsets =
+        record_stream_source_offsets_by_candidate != NULL;
+    if (lane_id < kClusteredMaxSuperClusterClusters)
+    {
+        const int cluster_i = cluster_i_start + lane_id;
+        if (cluster_i < cluster_i_end)
+        {
+            const VECTOR center_i = cluster_centers[cluster_i];
+            const VECTOR extent_i = cluster_extents[cluster_i];
+            shared_i_local_masks[warp_id][lane_id] = cluster_local_masks[cluster_i];
+            shared_i_center_x[warp_id][lane_id] = center_i.x;
+            shared_i_center_y[warp_id][lane_id] = center_i.y;
+            shared_i_center_z[warp_id][lane_id] = center_i.z;
+            shared_i_extent_x[warp_id][lane_id] = extent_i.x;
+            shared_i_extent_y[warp_id][lane_id] = extent_i.y;
+            shared_i_extent_z[warp_id][lane_id] = extent_i.z;
+            shared_i_signatures[warp_id][lane_id] =
+                has_molecule_metadata ? cluster_molecule_signatures[cluster_i]
+                                      : 0ull;
+        }
+        else
+        {
+            shared_i_local_masks[warp_id][lane_id] = 0u;
+            shared_i_center_x[warp_id][lane_id] = 0.0f;
+            shared_i_center_y[warp_id][lane_id] = 0.0f;
+            shared_i_center_z[warp_id][lane_id] = 0.0f;
+            shared_i_extent_x[warp_id][lane_id] = 0.0f;
+            shared_i_extent_y[warp_id][lane_id] = 0.0f;
+            shared_i_extent_z[warp_id][lane_id] = 0.0f;
+            shared_i_signatures[warp_id][lane_id] = 0ull;
+        }
+    }
+    for (int atom_slot = lane_id;
+         atom_slot < kClusteredMaxSuperClusterClusters * kClusteredClusterSize;
+         atom_slot += warpSize)
+    {
+        const int i_local = atom_slot / kClusteredClusterSize;
+        const int atom_lane = atom_slot % kClusteredClusterSize;
+        const int cluster_i = cluster_i_start + i_local;
+        if (cluster_i < cluster_i_end)
+        {
+            const int sorted_atom_i = cluster_offsets[cluster_i] + atom_lane;
+            shared_i_atom_ids[warp_id][i_local][atom_lane] =
+                permutation[sorted_atom_i];
+            shared_i_molecule_ids[warp_id][i_local][atom_lane] =
+                has_molecule_metadata
+                    ? cluster_molecule_ids[cluster_i * kClusteredClusterSize +
+                                           atom_lane]
+                    : -1;
+        }
+        else
+        {
+            shared_i_atom_ids[warp_id][i_local][atom_lane] = -1;
+            shared_i_molecule_ids[warp_id][i_local][atom_lane] = -1;
+        }
+    }
+    if (lane_id == 0)
+    {
+        if (use_candidate_source_offsets)
+        {
+            shared_record_stream_source_write_cursor[warp_id] =
+                record_stream_source_offsets_by_candidate[candidate_sci];
+            shared_record_stream_source_write_end[warp_id] =
+                record_stream_source_offsets_by_candidate[candidate_sci + 1];
+        }
+        else
+        {
+            shared_record_stream_source_write_cursor[warp_id] = 0;
+            shared_record_stream_source_write_end[warp_id] = 0;
+        }
+        shared_record_stream_source_written_rows[warp_id] = 0;
+    }
+    __syncwarp();
+
+    int processed_cluster_end = 0;
+    const int active_cluster_count = cluster_i_end - cluster_i_start;
+    const unsigned int active_i_lane_mask =
+        active_cluster_count > 0
+            ? ((1u << static_cast<unsigned int>(active_cluster_count)) - 1u)
+            : 0u;
+
+    for (int candidate_idx = candidate_leaf_offsets[candidate_sci];
+         candidate_idx < candidate_leaf_offsets[candidate_sci + 1];
+         candidate_idx += 1)
+    {
+        int leaf_j = 0;
+        int cluster_j_start = 0;
+        int cluster_j_end = 0;
+        if (lane_id == 0)
+        {
+            leaf_j = candidate_leaf_ids[candidate_idx];
+            cluster_j_start = leaf_cluster_starts[leaf_j];
+            cluster_j_end = leaf_cluster_ends[leaf_j];
+        }
+        leaf_j = deviceShfl(FULL_MASK, leaf_j, 0, warpSize);
+        cluster_j_start = deviceShfl(FULL_MASK, cluster_j_start, 0, warpSize);
+        cluster_j_end = deviceShfl(FULL_MASK, cluster_j_end, 0, warpSize);
+        const int leaf_mask_base =
+            candidate_leaf_reach_masks != NULL
+                ? candidate_idx * candidate_leaf_cluster_stride
+                : 0;
+
+        const int deduped_cluster_j_start =
+            IntMax(cluster_j_start, processed_cluster_end);
+        for (int cluster_j = deduped_cluster_j_start; cluster_j < cluster_j_end;
+             cluster_j += 1)
+        {
+            unsigned int precomputed_i_mask = 0u;
+            if (candidate_leaf_reach_masks != NULL)
+            {
+                if (lane_id == 0)
+                {
+                    precomputed_i_mask =
+                        candidate_leaf_reach_masks[leaf_mask_base +
+                                                   (cluster_j -
+                                                    cluster_j_start)];
+                }
+                precomputed_i_mask =
+                    deviceShfl(FULL_MASK, precomputed_i_mask, 0, warpSize) &
+                    active_i_lane_mask;
+                if (precomputed_i_mask == 0u)
+                {
+                    continue;
+                }
+            }
+            unsigned int valid_mask_j = 0u;
+            unsigned int local_mask_j = 0u;
+            VECTOR center_j = {0.0f, 0.0f, 0.0f};
+            VECTOR extent_j = {0.0f, 0.0f, 0.0f};
+            int super_j = 0;
+            uint64_t signature_j = 0ull;
+            if (lane_id == 0)
+            {
+                valid_mask_j = cluster_valid_masks[cluster_j];
+                local_mask_j = cluster_local_masks[cluster_j];
+                if (valid_mask_j != 0u)
+                {
+                    super_j = cluster_to_supercluster[cluster_j];
+                    if (!(local_mask_j != 0u && super_j < super_i))
+                    {
+                        center_j = cluster_centers[cluster_j];
+                        extent_j = cluster_extents[cluster_j];
+                    }
+                    if (has_molecule_metadata)
+                    {
+                        signature_j = cluster_molecule_signatures[cluster_j];
+                    }
+                }
+            }
+            valid_mask_j = deviceShfl(FULL_MASK, valid_mask_j, 0, warpSize);
+            local_mask_j = deviceShfl(FULL_MASK, local_mask_j, 0, warpSize);
+            super_j = deviceShfl(FULL_MASK, super_j, 0, warpSize);
+            center_j = Clustered_Warp_Broadcast_Vector(center_j, 0);
+            extent_j = Clustered_Warp_Broadcast_Vector(extent_j, 0);
+            signature_j = Broadcast_Clustered_Warp_U64(signature_j, 0);
+
+            if (valid_mask_j == 0u)
+            {
+                continue;
+            }
+            if (local_mask_j != 0u && super_j < super_i)
+            {
+                continue;
+            }
+            if (lane_id == 0)
+            {
+                shared_j_signature[warp_id] = signature_j;
+            }
+            int pair_shift_id = -1;
+            bool exclusion_candidate = false;
+            if (lane_id < active_cluster_count)
+            {
+                const int i_local = lane_id;
+                if (candidate_leaf_reach_masks != NULL)
+                {
+                    if ((precomputed_i_mask &
+                         (1u << static_cast<unsigned int>(i_local))) != 0u)
+                    {
+                        pair_shift_id = fixed_shift_id;
+                        exclusion_candidate =
+                            !has_molecule_metadata ||
+                            (shared_i_signatures[warp_id][i_local] &
+                             signature_j) != 0ull;
+                    }
+                }
+                else
+                {
+                    const unsigned int local_mask_i =
+                        shared_i_local_masks[warp_id][i_local];
+                    if (local_mask_i != 0u)
+                    {
+                        const VECTOR center_i = {
+                            shared_i_center_x[warp_id][i_local],
+                            shared_i_center_y[warp_id][i_local],
+                            shared_i_center_z[warp_id][i_local]};
+                        const VECTOR extent_i = {
+                            shared_i_extent_x[warp_id][i_local],
+                            shared_i_extent_y[warp_id][i_local],
+                            shared_i_extent_z[warp_id][i_local]};
+                        if (fixed_shift_candidates)
+                        {
+                            pair_shift_id = fixed_shift_id;
+                        }
+                        else
+                        {
+                            pair_shift_id = Determine_Cluster_Pair_Shift_Id(
+                                center_i, center_j, rcell);
+                        }
+                        if (pair_shift_id == kClusteredCentralShiftId &&
+                            cluster_j >= cluster_i_start &&
+                            cluster_j < cluster_i_end &&
+                            (cluster_i_start + i_local) > cluster_j)
+                        {
+                            pair_shift_id = -1;
+                        }
+                        else if (pair_shift_id >= 0 &&
+                                 !Cluster_Aabb_Overlaps_Shifted(
+                                     center_i, extent_i, center_j, extent_j,
+                                     cutoff,
+                                     fixed_shift_candidates
+                                         ? fixed_shift_vec
+                                         : Shift_Vector_From_Id(pair_shift_id,
+                                                                cell)))
+                        {
+                            pair_shift_id = -1;
+                        }
+                        exclusion_candidate =
+                            pair_shift_id >= 0 &&
+                            (!has_molecule_metadata ||
+                             (shared_i_signatures[warp_id][i_local] &
+                              signature_j) != 0ull);
+                    }
+                }
+            }
+
+            const unsigned int active_pair_lane_mask =
+                candidate_leaf_reach_masks != NULL
+                    ? precomputed_i_mask
+                    : __ballot_sync(FULL_MASK,
+                                    lane_id < active_cluster_count &&
+                                        pair_shift_id >= 0);
+            if (active_pair_lane_mask == 0u)
+            {
+                continue;
+            }
+            const unsigned int exclusion_candidate_lane_mask =
+                __ballot_sync(FULL_MASK,
+                              lane_id < active_cluster_count &&
+                                  exclusion_candidate);
+
+            const bool need_j_cached_atoms =
+                exclusion_candidate_lane_mask != 0u || crd != NULL;
+            if (need_j_cached_atoms)
+            {
+                if (lane_id < kClusteredClusterSize)
+                {
+                    if ((valid_mask_j & (1u << lane_id)) != 0u)
+                    {
+                        const int sorted_atom_j =
+                            cluster_offsets[cluster_j] + lane_id;
+                        shared_j_atom_ids[warp_id][lane_id] =
+                            permutation[sorted_atom_j];
+                        shared_j_molecule_ids[warp_id][lane_id] =
+                            has_molecule_metadata
+                                ? cluster_molecule_ids[cluster_j *
+                                                           kClusteredClusterSize +
+                                                       lane_id]
+                                : -1;
+                    }
+                    else
+                    {
+                        shared_j_atom_ids[warp_id][lane_id] = -1;
+                        shared_j_molecule_ids[warp_id][lane_id] = -1;
+                    }
+                }
+                __syncwarp();
+            }
+
+            unsigned int remaining_lane_mask = active_pair_lane_mask;
+            while (remaining_lane_mask != 0u)
+            {
+                const int leader_lane =
+                    __ffs(static_cast<int>(remaining_lane_mask)) - 1;
+                const int group_shift_id =
+                    deviceShfl(FULL_MASK, pair_shift_id, leader_lane, warpSize);
+                const unsigned int group_lane_mask =
+                    __ballot_sync(FULL_MASK,
+                                  lane_id < active_cluster_count &&
+                                      pair_shift_id == group_shift_id);
+                const unsigned int group_record_imask =
+                    group_lane_mask & active_i_lane_mask;
+                remaining_lane_mask &= ~group_lane_mask;
+                if (lane_id == leader_lane && group_record_imask != 0u)
+                {
+                    unsigned long long
+                        exclusion_masks[kClusteredMaxSuperClusterClusters] = {};
+                    unsigned int remaining_i =
+                        exclusion_candidate_lane_mask & group_record_imask;
+                    while (remaining_i != 0u)
+                    {
+                        const int i_local =
+                            __ffs(static_cast<int>(remaining_i)) - 1;
+                        remaining_i &= (remaining_i - 1u);
+                        const unsigned int local_mask_i =
+                            shared_i_local_masks[warp_id][i_local];
+                        exclusion_masks[i_local] =
+                            Build_Exclusion_Mask_From_Cached_Atoms(
+                                shared_i_atom_ids[warp_id][i_local],
+                                shared_j_atom_ids[warp_id],
+                                shared_i_molecule_ids[warp_id][i_local],
+                                shared_j_molecule_ids[warp_id],
+                                shared_i_signatures[warp_id][i_local],
+                                shared_j_signature[warp_id],
+                                has_molecule_metadata, local_mask_i,
+                                valid_mask_j, cluster_size,
+                                local_atom_numbers, excluded_list_start,
+                                excluded_list, excluded_numbers);
+                    }
+
+                    const int source_shift_id =
+                        fixed_shift_candidates ? fixed_shift_id : group_shift_id;
+#pragma unroll
+                    for (int split = 0; split < kClusteredWarpSplitCount;
+                         split += 1)
+                    {
+                        const unsigned int split_local_imask =
+                            Prune_Gmxpacked_Record_Stream_Source_Imask(
+                                split, group_record_imask, valid_mask_j,
+                                source_shift_id, cell, rcell, crd,
+                                shared_i_center_x[warp_id],
+                                shared_i_center_y[warp_id],
+                                shared_i_center_z[warp_id], center_j,
+                                shared_i_atom_ids[warp_id],
+                                shared_j_atom_ids[warp_id],
+                                shared_i_local_masks[warp_id],
+                                record_stream_cutoff * record_stream_cutoff);
+                        const bool split_has_atoms =
+                            Clustered_Split_Has_Atoms(valid_mask_j, split);
+                        const unsigned int focus_i_local_mask =
+                            Build_Gmxpacked_Device_Source_Trace_Focus_I_Local_Mask(
+                                group_record_imask, focus_atoms,
+                                focus_atom_count, shared_i_atom_ids[warp_id],
+                                shared_i_local_masks[warp_id]);
+                        const bool split_has_focus_j_atom =
+                            Gmxpacked_Device_Source_Trace_Split_Has_Focus_J_Atom(
+                                split, valid_mask_j, shared_j_atom_ids[warp_id],
+                                focus_atoms, focus_atom_count);
+                        const bool focus_trace_row_relevant =
+                            focus_i_local_mask != 0u || split_has_focus_j_atom;
+
+                        int write_idx = -1;
+                        unsigned int source_imask = 0u;
+                        unsigned int trace_flags = 0u;
+                        if (split_has_atoms)
+                        {
+                            trace_flags |=
+                                kClusteredGmxpackedDeviceSourceTraceSplitHasAtoms;
+                        }
+                        if (split_has_focus_j_atom)
+                        {
+                            trace_flags |=
+                                kClusteredGmxpackedDeviceSourceTraceFocusJPresent;
+                        }
+                        if (deduped_cluster_j_start > cluster_j_start)
+                        {
+                            trace_flags |=
+                                kClusteredGmxpackedDeviceSourceTraceDedupActive;
+                        }
+
+                        if (split_has_atoms && split_local_imask != 0u)
+                        {
+                            if (use_candidate_source_offsets)
+                            {
+                                const int candidate_write_idx =
+                                    shared_record_stream_source_write_cursor[warp_id];
+                                const int candidate_write_end =
+                                    shared_record_stream_source_write_end[warp_id];
+                                if (candidate_write_idx < candidate_write_end)
+                                {
+                                    write_idx = candidate_write_idx;
+                                    shared_record_stream_source_write_cursor[warp_id] =
+                                        candidate_write_idx + 1;
+                                }
+                                else
+                                {
+                                    atomicAdd(record_stream_overflow_rows, 1);
+                                }
+                            }
+                            else
+                            {
+                                write_idx = atomicAdd(record_stream_fill_cursor, 1);
+                            }
+                        }
+                        if (write_idx >= 0 &&
+                            write_idx < record_stream_source_capacity)
+                        {
+                            LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE source = {};
+                            source.sci_id = candidate_sci;
+                            source.shift_id = source_shift_id;
+                            source.supercluster_id = super_i;
+                            source.cluster_j = cluster_j;
+                            source.split_id = split;
+                            source.imask = split_local_imask;
+                            source.valid_mask_j = valid_mask_j;
+                            source.local_mask_j = local_mask_j;
+                            source.source_order = write_idx;
+                            Fill_Gmxpacked_Record_Stream_Source_Pair_Words(
+                                &source, cluster_i_start, cluster_j,
+                                source_shift_id, split, valid_mask_j,
+                                local_mask_j, split_local_imask,
+                                shared_i_local_masks[warp_id], exclusion_masks);
+                            source_imask = source.imask;
+                            record_stream_sources[write_idx] = source;
+                            if (use_candidate_source_offsets)
+                            {
+                                shared_record_stream_source_written_rows[warp_id] +=
+                                    1;
+                            }
+                            trace_flags |=
+                                kClusteredGmxpackedDeviceSourceTraceWriteInRange;
+                        }
+                        else if (write_idx >= 0)
+                        {
+                            atomicAdd(record_stream_overflow_rows, 1);
+                        }
+
+                        if (focus_trace_row_relevant &&
+                            device_source_trace_capacity > 0 &&
+                            device_source_trace_rows != NULL &&
+                            device_source_trace_cursor != NULL &&
+                            device_source_trace_overflow_rows != NULL)
+                        {
+                            const int trace_idx =
+                                atomicAdd(device_source_trace_cursor, 1);
+                            if (trace_idx < device_source_trace_capacity)
+                            {
+                                ClusteredGmxpackedDeviceSourceRowTrace trace = {};
+                                trace.candidate_sci = candidate_sci;
+                                trace.candidate_idx = candidate_idx;
+                                trace.leaf_j = leaf_j;
+                                trace.cluster_j_start = cluster_j_start;
+                                trace.deduped_cluster_j_start =
+                                    deduped_cluster_j_start;
+                                trace.shift_id = source_shift_id;
+                                trace.supercluster_id = super_i;
+                                trace.cluster_j = cluster_j;
+                                trace.split_id = split;
+                                trace.write_idx = write_idx;
+                                trace.valid_mask_j = valid_mask_j;
+                                trace.local_mask_j = local_mask_j;
+                                trace.focus_i_local_mask = focus_i_local_mask;
+                                trace.group_imask = group_record_imask;
+                                trace.split_imask = split_local_imask;
+                                trace.source_imask = source_imask;
+                                trace.flags = trace_flags;
+                                device_source_trace_rows[trace_idx] = trace;
+                            }
+                            else
+                            {
+                                atomicAdd(device_source_trace_overflow_rows, 1);
+                            }
+                        }
+                    }
+                }
+                __syncwarp();
+            }
+        }
+        processed_cluster_end = IntMax(processed_cluster_end, cluster_j_end);
+    }
+
+    __syncwarp();
+    if (use_candidate_source_offsets && lane_id == 0 &&
+        record_stream_fill_cursor != NULL &&
+        shared_record_stream_source_written_rows[warp_id] > 0)
+    {
+        atomicAdd(record_stream_fill_cursor,
+                  shared_record_stream_source_written_rows[warp_id]);
+    }
+}
+
+#ifndef USE_CPU
+static __device__ __forceinline__ unsigned int
+Prune_Gmxpacked_Record_Stream_Source_Imask_From_Layout(
+    const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE& source,
+    const int* permutation, const int* cluster_offsets,
+    const int* super_cluster_offsets, const unsigned int* cluster_local_masks,
+    const VECTOR* cluster_centers, const VECTOR* crd, const LTMatrix3 cell,
+    const LTMatrix3 rcell, const float cutoff_sq)
+{
+    if (source.imask == 0u || permutation == NULL || cluster_offsets == NULL ||
+        super_cluster_offsets == NULL || cluster_local_masks == NULL ||
+        cluster_centers == NULL || crd == NULL)
+    {
+        return 0u;
+    }
+    if (cutoff_sq <= 0.0f)
+    {
+        return source.imask;
+    }
+
+    const int cluster_i_start =
+        super_cluster_offsets[source.supercluster_id];
+    const int cluster_j = source.cluster_j;
+    const VECTOR center_j = cluster_centers[cluster_j];
+    const VECTOR pair_shift = Shift_Vector_From_Id(source.shift_id, cell);
+    const int j_lane_base = source.split_id * kClusteredSplitJClusterSize;
+    unsigned int pruned_imask = 0u;
+#pragma unroll
+    for (int i_local = 0; i_local < kClusteredMaxSuperClusterClusters;
+         i_local += 1)
+    {
+        const unsigned int i_local_bit = 1u << static_cast<unsigned int>(i_local);
+        if ((source.imask & i_local_bit) == 0u)
+        {
+            continue;
+        }
+        const int cluster_i = cluster_i_start + i_local;
+        const unsigned int local_mask_i = cluster_local_masks[cluster_i];
+        if (local_mask_i == 0u)
+        {
+            continue;
+        }
+
+        bool any_in_range = false;
+        const VECTOR center_i = cluster_centers[cluster_i];
+#pragma unroll
+        for (int i_lane = 0; i_lane < kClusteredClusterSize; i_lane += 1)
+        {
+            if ((local_mask_i & (1u << static_cast<unsigned int>(i_lane))) ==
+                0u)
+            {
+                continue;
+            }
+            const int atom_i = permutation[cluster_offsets[cluster_i] + i_lane];
+            const VECTOR shifted_i = Shift_Clustered_Atom_Into_Sorted_XQ_Frame(
+                crd[atom_i], center_i, cell, rcell);
+#pragma unroll
+            for (int split_j_lane = 0;
+                 split_j_lane < kClusteredSplitJClusterSize; split_j_lane += 1)
+            {
+                const int j_lane = j_lane_base + split_j_lane;
+                if ((source.valid_mask_j &
+                     (1u << static_cast<unsigned int>(j_lane))) == 0u)
+                {
+                    continue;
+                }
+                const int atom_j =
+                    permutation[cluster_offsets[cluster_j] + j_lane];
+                const VECTOR shifted_j =
+                    Shift_Clustered_Atom_Into_Sorted_XQ_Frame(
+                        crd[atom_j], center_j, cell, rcell);
+                const float dr_x = shifted_j.x - shifted_i.x - pair_shift.x;
+                const float dr_y = shifted_j.y - shifted_i.y - pair_shift.y;
+                const float dr_z = shifted_j.z - shifted_i.z - pair_shift.z;
+                const float dr2 = dr_x * dr_x + dr_y * dr_y + dr_z * dr_z;
+                if (dr2 < cutoff_sq && dr2 != 0.0f)
+                {
+                    any_in_range = true;
+                    break;
+                }
+            }
+            if (any_in_range)
+            {
+                break;
+            }
+        }
+        if (any_in_range)
+        {
+            pruned_imask |= i_local_bit;
+        }
+    }
+    return pruned_imask;
+}
+
+static __device__ __forceinline__ float
+Gmxpacked_Record_Stream_Source_Atom_Anchor_Displacement(
+    const int atom_id, const VECTOR* crd, const VECTOR* anchor_crd,
+    const LTMatrix3 cell, const LTMatrix3 rcell)
+{
+    if (atom_id < 0 || crd == NULL || anchor_crd == NULL)
+    {
+        return INFINITY;
+    }
+    const VECTOR dr =
+        Get_Periodic_Displacement(crd[atom_id], anchor_crd[atom_id], cell,
+                                  rcell);
+    const float dr2 = dr * dr;
+    return isfinite(dr2) && dr2 >= 0.0f ? sqrtf(dr2) : INFINITY;
+}
+
+static __device__ __forceinline__ bool
+Gmxpacked_Record_Stream_Source_Active_Anchor_Dirty(
+    const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE& source,
+    const int* permutation, const int* cluster_offsets,
+    const int* super_cluster_offsets, const unsigned int* cluster_local_masks,
+    const VECTOR* crd, const VECTOR* active_anchor_crd, const LTMatrix3 cell,
+    const LTMatrix3 rcell, const float reuse_margin)
+{
+    if (active_anchor_crd == NULL)
+    {
+        return false;
+    }
+    if (source.imask == 0u || permutation == NULL || cluster_offsets == NULL ||
+        super_cluster_offsets == NULL || cluster_local_masks == NULL ||
+        crd == NULL || reuse_margin <= 0.0f)
+    {
+        return true;
+    }
+
+    const int cluster_i_start =
+        super_cluster_offsets[source.supercluster_id];
+    const int cluster_j = source.cluster_j;
+    const int j_lane_base = source.split_id * kClusteredSplitJClusterSize;
+    float max_i_displacement = 0.0f;
+    float max_j_displacement = 0.0f;
+
+#pragma unroll
+    for (int i_local = 0; i_local < kClusteredMaxSuperClusterClusters;
+         i_local += 1)
+    {
+        const unsigned int i_local_bit = 1u << static_cast<unsigned int>(i_local);
+        if ((source.imask & i_local_bit) == 0u)
+        {
+            continue;
+        }
+        const int cluster_i = cluster_i_start + i_local;
+        const unsigned int local_mask_i = cluster_local_masks[cluster_i];
+#pragma unroll
+        for (int i_lane = 0; i_lane < kClusteredClusterSize; i_lane += 1)
+        {
+            if ((local_mask_i & (1u << static_cast<unsigned int>(i_lane))) ==
+                0u)
+            {
+                continue;
+            }
+            const int atom_i = permutation[cluster_offsets[cluster_i] + i_lane];
+            max_i_displacement = fmaxf(
+                max_i_displacement,
+                Gmxpacked_Record_Stream_Source_Atom_Anchor_Displacement(
+                    atom_i, crd, active_anchor_crd, cell, rcell));
+        }
+    }
+
+#pragma unroll
+    for (int split_j_lane = 0;
+         split_j_lane < kClusteredSplitJClusterSize; split_j_lane += 1)
+    {
+        const int j_lane = j_lane_base + split_j_lane;
+        if ((source.valid_mask_j & (1u << static_cast<unsigned int>(j_lane))) ==
+            0u)
+        {
+            continue;
+        }
+        const int atom_j = permutation[cluster_offsets[cluster_j] + j_lane];
+        max_j_displacement = fmaxf(
+            max_j_displacement,
+            Gmxpacked_Record_Stream_Source_Atom_Anchor_Displacement(
+                atom_j, crd, active_anchor_crd, cell, rcell));
+    }
+
+    return max_i_displacement + max_j_displacement > reuse_margin + 1e-6f;
+}
+
+static __global__ void Count_Gmxpacked_Record_Stream_Inner_Active_Sources(
+    const int source_rows,
+    const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* sources,
+    const int* permutation, const int* cluster_offsets,
+    const int* super_cluster_offsets, const unsigned int* cluster_local_masks,
+    const VECTOR* cluster_centers, const VECTOR* crd, const LTMatrix3 cell,
+    const LTMatrix3 rcell, const float cutoff_sq, int* active_flags,
+    unsigned int* active_imasks_by_source)
+{
+    SIMPLE_DEVICE_FOR(source_idx, source_rows)
+    {
+        const unsigned int pruned_imask =
+            Prune_Gmxpacked_Record_Stream_Source_Imask_From_Layout(
+                sources[source_idx], permutation, cluster_offsets,
+                super_cluster_offsets, cluster_local_masks, cluster_centers,
+                crd, cell, rcell, cutoff_sq);
+        active_flags[source_idx] = pruned_imask != 0u ? 1 : 0;
+        if (active_imasks_by_source != NULL)
+        {
+            active_imasks_by_source[source_idx] = pruned_imask;
+        }
+    }
+}
+
+static __global__ void
+Check_Gmxpacked_Record_Stream_Inner_Active_Coverage(
+    const int source_rows,
+    const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* sources,
+    const unsigned int* cached_active_imasks_by_source,
+    const int* permutation, const int* cluster_offsets,
+    const int* super_cluster_offsets, const unsigned int* cluster_local_masks,
+    const VECTOR* cluster_centers, const VECTOR* crd, const LTMatrix3 cell,
+    const LTMatrix3 rcell, const float cutoff_sq, int* missing_source_rows)
+{
+    SIMPLE_DEVICE_FOR(source_idx, source_rows)
+    {
+        const unsigned int current_imask =
+            Prune_Gmxpacked_Record_Stream_Source_Imask_From_Layout(
+                sources[source_idx], permutation, cluster_offsets,
+                super_cluster_offsets, cluster_local_masks, cluster_centers,
+                crd, cell, rcell, cutoff_sq);
+        const unsigned int cached_imask =
+            cached_active_imasks_by_source != NULL
+                ? cached_active_imasks_by_source[source_idx]
+                : 0u;
+        if ((current_imask & ~cached_imask) != 0u)
+        {
+            atomicAdd(missing_source_rows, 1);
+        }
+    }
+}
+
+static __global__ void
+Fill_Gmxpacked_Record_Stream_Inner_Active_Missing_Sources(
+    const int source_rows,
+    const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* sources,
+    unsigned int* cached_active_imasks_by_source,
+    const int* permutation, const int* cluster_offsets,
+    const int* super_cluster_offsets, const unsigned int* cluster_local_masks,
+    const VECTOR* cluster_centers, const VECTOR* crd, const LTMatrix3 cell,
+    const LTMatrix3 rcell, const float cutoff_sq,
+    const int missing_source_capacity, const int source_order_base,
+    LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* missing_sources,
+    int* missing_source_fill_cursor, int* missing_source_overflow_rows)
+{
+    SIMPLE_DEVICE_FOR(source_idx, source_rows)
+    {
+        const unsigned int current_imask =
+            Prune_Gmxpacked_Record_Stream_Source_Imask_From_Layout(
+                sources[source_idx], permutation, cluster_offsets,
+                super_cluster_offsets, cluster_local_masks, cluster_centers,
+                crd, cell, rcell, cutoff_sq);
+        const unsigned int cached_imask =
+            cached_active_imasks_by_source != NULL
+                ? cached_active_imasks_by_source[source_idx]
+                : 0u;
+        const unsigned int missing_imask = current_imask & ~cached_imask;
+        if (missing_imask == 0u)
+        {
+            return;
+        }
+        const int write_idx = atomicAdd(missing_source_fill_cursor, 1);
+        if (write_idx < missing_source_capacity && missing_sources != NULL)
+        {
+            LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE source =
+                sources[source_idx];
+            source.imask = missing_imask;
+            source.source_order = source_order_base + write_idx;
+#pragma unroll
+            for (int pair_idx = 0;
+                 pair_idx < kClusteredGmxpackedExclusionPairCount;
+                 pair_idx += 1)
+            {
+                source.pair_exclusion_words[pair_idx] &= missing_imask;
+            }
+            missing_sources[write_idx] = source;
+            if (cached_active_imasks_by_source != NULL)
+            {
+                cached_active_imasks_by_source[source_idx] =
+                    cached_imask | missing_imask;
+            }
+        }
+        else
+        {
+            atomicAdd(missing_source_overflow_rows, 1);
+        }
+    }
+}
+
+static __global__ void Count_Gmxpacked_Dirty_Source_Rows_By_Candidate(
+    const int candidate_sci_numbers, const int* dirty_candidate_sci,
+    const int* source_offsets_by_candidate, int* dirty_source_counts)
+{
+    SIMPLE_DEVICE_FOR(candidate_sci, candidate_sci_numbers)
+    {
+        int source_rows = 0;
+        if (dirty_candidate_sci != NULL &&
+            dirty_candidate_sci[candidate_sci] != 0)
+        {
+            source_rows = source_offsets_by_candidate[candidate_sci + 1] -
+                          source_offsets_by_candidate[candidate_sci];
+            source_rows = source_rows > 0 ? source_rows : 0;
+        }
+        dirty_source_counts[candidate_sci] = source_rows;
+    }
+}
+
+static __global__ void Fill_Gmxpacked_Dirty_Source_Indices_By_Candidate(
+    const int candidate_sci_numbers, const int* dirty_candidate_sci,
+    const int* source_offsets_by_candidate, const int* dirty_source_offsets,
+    int* dirty_source_indices)
+{
+    SIMPLE_DEVICE_FOR(candidate_sci, candidate_sci_numbers)
+    {
+        if (dirty_candidate_sci == NULL ||
+            dirty_candidate_sci[candidate_sci] == 0)
+        {
+            return;
+        }
+        const int src_begin = source_offsets_by_candidate[candidate_sci];
+        const int src_end = source_offsets_by_candidate[candidate_sci + 1];
+        const int dst_begin = dirty_source_offsets[candidate_sci];
+        for (int src_idx = src_begin; src_idx < src_end; src_idx += 1)
+        {
+            dirty_source_indices[dst_begin + (src_idx - src_begin)] = src_idx;
+        }
+    }
+}
+
+static __global__ void
+Fill_Gmxpacked_Record_Stream_Inner_Active_Missing_Sources_From_Source_Indices(
+    const int dirty_source_rows, const int* dirty_source_indices,
+    const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* sources,
+    unsigned int* cached_active_imasks_by_source,
+    const int* permutation, const int* cluster_offsets,
+    const int* super_cluster_offsets, const unsigned int* cluster_local_masks,
+    const VECTOR* cluster_centers, const VECTOR* crd, const LTMatrix3 cell,
+    const LTMatrix3 rcell, const float cutoff_sq,
+    const int missing_source_capacity, const int source_order_base,
+    LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* missing_sources,
+    int* missing_source_fill_cursor, int* missing_source_overflow_rows)
+{
+    SIMPLE_DEVICE_FOR(dirty_idx, dirty_source_rows)
+    {
+        const int source_idx = dirty_source_indices[dirty_idx];
+        const unsigned int current_imask =
+            Prune_Gmxpacked_Record_Stream_Source_Imask_From_Layout(
+                sources[source_idx], permutation, cluster_offsets,
+                super_cluster_offsets, cluster_local_masks, cluster_centers,
+                crd, cell, rcell, cutoff_sq);
+        const unsigned int cached_imask =
+            cached_active_imasks_by_source != NULL
+                ? cached_active_imasks_by_source[source_idx]
+                : 0u;
+        const unsigned int missing_imask = current_imask & ~cached_imask;
+        if (missing_imask == 0u)
+        {
+            return;
+        }
+        const int write_idx = atomicAdd(missing_source_fill_cursor, 1);
+        if (write_idx < missing_source_capacity && missing_sources != NULL)
+        {
+            LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE source =
+                sources[source_idx];
+            source.imask = missing_imask;
+            source.source_order = source_order_base + write_idx;
+#pragma unroll
+            for (int pair_idx = 0;
+                 pair_idx < kClusteredGmxpackedExclusionPairCount;
+                 pair_idx += 1)
+            {
+                source.pair_exclusion_words[pair_idx] &= missing_imask;
+            }
+            missing_sources[write_idx] = source;
+            if (cached_active_imasks_by_source != NULL)
+            {
+                cached_active_imasks_by_source[source_idx] =
+                    cached_imask | missing_imask;
+            }
+        }
+        else
+        {
+            atomicAdd(missing_source_overflow_rows, 1);
+        }
+    }
+}
+
+static __global__ void Fill_Gmxpacked_Record_Stream_Inner_Active_Sources(
+    const int source_rows,
+    const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* sources,
+    const int* permutation, const int* cluster_offsets,
+    const int* super_cluster_offsets, const unsigned int* cluster_local_masks,
+    const VECTOR* cluster_centers, const VECTOR* crd, const LTMatrix3 cell,
+    const LTMatrix3 rcell, const float cutoff_sq, const int* active_offsets,
+    LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* active_sources)
+{
+    SIMPLE_DEVICE_FOR(source_idx, source_rows)
+    {
+        const unsigned int pruned_imask =
+            Prune_Gmxpacked_Record_Stream_Source_Imask_From_Layout(
+                sources[source_idx], permutation, cluster_offsets,
+                super_cluster_offsets, cluster_local_masks, cluster_centers,
+                crd, cell, rcell, cutoff_sq);
+        if (pruned_imask == 0u)
+        {
+            return;
+        }
+        const int write_idx = active_offsets[source_idx];
+        LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE source = sources[source_idx];
+        source.imask = pruned_imask;
+        source.source_order = write_idx;
+#pragma unroll
+        for (int pair_idx = 0; pair_idx < kClusteredGmxpackedExclusionPairCount;
+             pair_idx += 1)
+        {
+            source.pair_exclusion_words[pair_idx] &= pruned_imask;
+        }
+        active_sources[write_idx] = source;
+    }
+}
+
+static __global__ void Refresh_Gmxpacked_Record_Stream_Active_View_Flags(
+    const int source_rows,
+    const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* outer_sources,
+    const int candidate_sci_numbers, const int* dirty_candidate_sci,
+    const int* permutation, const int* cluster_offsets,
+    const int* super_cluster_offsets, const unsigned int* cluster_local_masks,
+    const VECTOR* cluster_centers, const VECTOR* crd,
+    const VECTOR* active_anchor_crd, const LTMatrix3 cell,
+    const LTMatrix3 rcell, const float cutoff_sq, const float reuse_margin,
+    unsigned int* active_imasks_by_source, int* active_flags,
+    int* fallback_flag, int* changed_active_source_rows,
+    int union_active_imask)
+{
+    SIMPLE_DEVICE_FOR(source_idx, source_rows)
+    {
+        const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE& source =
+            outer_sources[source_idx];
+        const int candidate_sci = source.sci_id;
+        if (candidate_sci < 0 || candidate_sci >= candidate_sci_numbers)
+        {
+            if (fallback_flag != NULL)
+            {
+                atomicExch(fallback_flag, 1);
+            }
+            active_flags[source_idx] = 0;
+            return;
+        }
+        const bool dirty =
+            dirty_candidate_sci == NULL ||
+            dirty_candidate_sci[candidate_sci] != 0 ||
+            Gmxpacked_Record_Stream_Source_Active_Anchor_Dirty(
+                source, permutation, cluster_offsets, super_cluster_offsets,
+                cluster_local_masks, crd, active_anchor_crd, cell, rcell,
+                reuse_margin);
+        unsigned int active_imask =
+            active_imasks_by_source != NULL
+                ? active_imasks_by_source[source_idx]
+                : 0u;
+        const unsigned int old_active_imask = active_imask;
+        if (dirty)
+        {
+            const unsigned int refreshed_imask =
+                Prune_Gmxpacked_Record_Stream_Source_Imask_From_Layout(
+                    source, permutation, cluster_offsets, super_cluster_offsets,
+                    cluster_local_masks, cluster_centers, crd, cell, rcell,
+                    cutoff_sq);
+            active_imask = union_active_imask != 0
+                               ? (old_active_imask | refreshed_imask)
+                               : refreshed_imask;
+            if (active_imasks_by_source != NULL)
+            {
+                active_imasks_by_source[source_idx] = active_imask;
+            }
+        }
+        if (dirty && active_imask != old_active_imask &&
+            changed_active_source_rows != NULL)
+        {
+            atomicAdd(changed_active_source_rows, 1);
+        }
+        active_flags[source_idx] = active_imask != 0u ? 1 : 0;
+    }
+}
+
+static __global__ void Fill_Gmxpacked_Record_Stream_Active_View_Cached_Flags(
+    const int source_rows, const unsigned int* active_imasks_by_source,
+    int* active_flags)
+{
+    SIMPLE_DEVICE_FOR(source_idx, source_rows)
+    {
+        const unsigned int active_imask =
+            active_imasks_by_source != NULL
+                ? active_imasks_by_source[source_idx]
+                : 0u;
+        active_flags[source_idx] = active_imask != 0u ? 1 : 0;
+    }
+}
+
+static __global__ void
+Refresh_Gmxpacked_Record_Stream_Active_View_Flags_From_Source_Indices(
+    const int dirty_source_rows, const int* dirty_source_indices,
+    const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* outer_sources,
+    const int candidate_sci_numbers, const int* dirty_candidate_sci,
+    const int* permutation, const int* cluster_offsets,
+    const int* super_cluster_offsets, const unsigned int* cluster_local_masks,
+    const VECTOR* cluster_centers, const VECTOR* crd,
+    const VECTOR* active_anchor_crd, const LTMatrix3 cell,
+    const LTMatrix3 rcell, const float cutoff_sq, const float reuse_margin,
+    unsigned int* active_imasks_by_source, int* active_flags,
+    int* fallback_flag, int* changed_active_source_rows,
+    int union_active_imask)
+{
+    SIMPLE_DEVICE_FOR(dirty_idx, dirty_source_rows)
+    {
+        const int source_idx = dirty_source_indices[dirty_idx];
+        const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE& source =
+            outer_sources[source_idx];
+        const int candidate_sci = source.sci_id;
+        if (candidate_sci < 0 || candidate_sci >= candidate_sci_numbers)
+        {
+            if (fallback_flag != NULL)
+            {
+                atomicExch(fallback_flag, 1);
+            }
+            active_flags[source_idx] = 0;
+            return;
+        }
+        const bool dirty =
+            dirty_candidate_sci == NULL ||
+            dirty_candidate_sci[candidate_sci] != 0 ||
+            Gmxpacked_Record_Stream_Source_Active_Anchor_Dirty(
+                source, permutation, cluster_offsets, super_cluster_offsets,
+                cluster_local_masks, crd, active_anchor_crd, cell, rcell,
+                reuse_margin);
+        unsigned int active_imask =
+            active_imasks_by_source != NULL
+                ? active_imasks_by_source[source_idx]
+                : 0u;
+        const unsigned int old_active_imask = active_imask;
+        if (dirty)
+        {
+            const unsigned int refreshed_imask =
+                Prune_Gmxpacked_Record_Stream_Source_Imask_From_Layout(
+                    source, permutation, cluster_offsets, super_cluster_offsets,
+                    cluster_local_masks, cluster_centers, crd, cell, rcell,
+                    cutoff_sq);
+            active_imask = union_active_imask != 0
+                               ? (old_active_imask | refreshed_imask)
+                               : refreshed_imask;
+            if (active_imasks_by_source != NULL)
+            {
+                active_imasks_by_source[source_idx] = active_imask;
+            }
+        }
+        if (dirty && active_imask != old_active_imask &&
+            changed_active_source_rows != NULL)
+        {
+            atomicAdd(changed_active_source_rows, 1);
+        }
+        active_flags[source_idx] = active_imask != 0u ? 1 : 0;
+    }
+}
+
+static __global__ void Fill_Gmxpacked_Record_Stream_Active_View_Sources(
+    const int source_rows,
+    const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* outer_sources,
+    const unsigned int* active_imasks_by_source, const int* active_offsets,
+    LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* active_sources)
+{
+    SIMPLE_DEVICE_FOR(source_idx, source_rows)
+    {
+        const unsigned int active_imask =
+            active_imasks_by_source != NULL
+                ? active_imasks_by_source[source_idx]
+                : 0u;
+        if (active_imask == 0u)
+        {
+            return;
+        }
+        const int write_idx = active_offsets[source_idx];
+        LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE source =
+            outer_sources[source_idx];
+        source.imask = active_imask;
+        source.source_order = write_idx;
+#pragma unroll
+        for (int pair_idx = 0; pair_idx < kClusteredGmxpackedExclusionPairCount;
+             pair_idx += 1)
+        {
+            source.pair_exclusion_words[pair_idx] &= active_imask;
+        }
+        active_sources[write_idx] = source;
+    }
+}
+
+static __global__ void Count_Gmxpacked_Active_View_Compact_Delta_Sources(
+    const int dirty_source_rows, const int* dirty_source_indices,
+    const unsigned int* active_imasks_by_source,
+    const unsigned int* compact_base_imasks_by_source, int* delta_counts,
+    int* removal_flag)
+{
+    SIMPLE_DEVICE_FOR(dirty_idx, dirty_source_rows)
+    {
+        const int source_idx = dirty_source_indices[dirty_idx];
+        const unsigned int active_imask =
+            active_imasks_by_source != NULL
+                ? active_imasks_by_source[source_idx]
+                : 0u;
+        const unsigned int base_imask =
+            compact_base_imasks_by_source != NULL
+                ? compact_base_imasks_by_source[source_idx]
+                : 0u;
+        const unsigned int removed_imask = base_imask & ~active_imask;
+        const unsigned int added_imask = active_imask & ~base_imask;
+        if (removed_imask != 0u && removal_flag != NULL)
+        {
+            atomicExch(removal_flag, 1);
+        }
+        delta_counts[dirty_idx] = added_imask != 0u ? 1 : 0;
+    }
+}
+
+static __global__ void Fill_Gmxpacked_Active_View_Compact_Delta_Sources(
+    const int dirty_source_rows, const int* dirty_source_indices,
+    const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* outer_sources,
+    const unsigned int* active_imasks_by_source,
+    const unsigned int* compact_base_imasks_by_source,
+    const int* delta_offsets,
+    LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* delta_sources)
+{
+    SIMPLE_DEVICE_FOR(dirty_idx, dirty_source_rows)
+    {
+        const int source_idx = dirty_source_indices[dirty_idx];
+        const unsigned int active_imask =
+            active_imasks_by_source != NULL
+                ? active_imasks_by_source[source_idx]
+                : 0u;
+        const unsigned int base_imask =
+            compact_base_imasks_by_source != NULL
+                ? compact_base_imasks_by_source[source_idx]
+                : 0u;
+        const unsigned int added_imask = active_imask & ~base_imask;
+        if (added_imask == 0u)
+        {
+            return;
+        }
+        const int write_idx = delta_offsets[dirty_idx];
+        LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE source =
+            outer_sources[source_idx];
+        source.imask = added_imask;
+        source.source_order = write_idx;
+#pragma unroll
+        for (int pair_idx = 0; pair_idx < kClusteredGmxpackedExclusionPairCount;
+             pair_idx += 1)
+        {
+            source.pair_exclusion_words[pair_idx] &= added_imask;
+        }
+        delta_sources[write_idx] = source;
+    }
+}
+
+static __global__ void Mark_Gmxpacked_Active_View_Compact_Delta_Source_Flags(
+    const int dirty_source_rows, const int* dirty_source_indices,
+    const unsigned int* active_imasks_by_source,
+    const unsigned int* compact_base_imasks_by_source,
+    int* delta_source_flags, int* removal_flag)
+{
+    SIMPLE_DEVICE_FOR(dirty_idx, dirty_source_rows)
+    {
+        const int source_idx = dirty_source_indices[dirty_idx];
+        const unsigned int active_imask =
+            active_imasks_by_source != NULL
+                ? active_imasks_by_source[source_idx]
+                : 0u;
+        const unsigned int base_imask =
+            compact_base_imasks_by_source != NULL
+                ? compact_base_imasks_by_source[source_idx]
+                : 0u;
+        const unsigned int removed_imask = base_imask & ~active_imask;
+        const unsigned int added_imask = active_imask & ~base_imask;
+        if (removed_imask != 0u && removal_flag != NULL)
+        {
+            atomicExch(removal_flag, 1);
+        }
+        if (added_imask != 0u && delta_source_flags != NULL)
+        {
+            delta_source_flags[source_idx] = 1;
+        }
+    }
+}
+
+static __global__ void Count_Gmxpacked_Flagged_Active_View_Delta_Sources(
+    const int source_rows, const int* delta_source_flags,
+    const unsigned int* active_imasks_by_source,
+    const unsigned int* compact_base_imasks_by_source, int* delta_counts,
+    int* removal_flag)
+{
+    SIMPLE_DEVICE_FOR(source_idx, source_rows)
+    {
+        if (delta_source_flags == NULL || delta_source_flags[source_idx] == 0)
+        {
+            delta_counts[source_idx] = 0;
+            return;
+        }
+        const unsigned int active_imask =
+            active_imasks_by_source != NULL
+                ? active_imasks_by_source[source_idx]
+                : 0u;
+        const unsigned int base_imask =
+            compact_base_imasks_by_source != NULL
+                ? compact_base_imasks_by_source[source_idx]
+                : 0u;
+        const unsigned int removed_imask = base_imask & ~active_imask;
+        const unsigned int added_imask = active_imask & ~base_imask;
+        if (removed_imask != 0u && removal_flag != NULL)
+        {
+            atomicExch(removal_flag, 1);
+        }
+        delta_counts[source_idx] = added_imask != 0u ? 1 : 0;
+    }
+}
+
+static __global__ void Fill_Gmxpacked_Flagged_Active_View_Delta_Sources(
+    const int source_rows,
+    const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* outer_sources,
+    const int* delta_source_flags,
+    const unsigned int* active_imasks_by_source,
+    const unsigned int* compact_base_imasks_by_source,
+    const int* delta_offsets,
+    LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* delta_sources)
+{
+    SIMPLE_DEVICE_FOR(source_idx, source_rows)
+    {
+        if (delta_source_flags == NULL || delta_source_flags[source_idx] == 0)
+        {
+            return;
+        }
+        const unsigned int active_imask =
+            active_imasks_by_source != NULL
+                ? active_imasks_by_source[source_idx]
+                : 0u;
+        const unsigned int base_imask =
+            compact_base_imasks_by_source != NULL
+                ? compact_base_imasks_by_source[source_idx]
+                : 0u;
+        const unsigned int added_imask = active_imask & ~base_imask;
+        if (added_imask == 0u)
+        {
+            return;
+        }
+        const int write_idx = delta_offsets[source_idx];
+        LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE source =
+            outer_sources[source_idx];
+        source.imask = added_imask;
+        source.source_order = write_idx;
+#pragma unroll
+        for (int pair_idx = 0; pair_idx < kClusteredGmxpackedExclusionPairCount;
+             pair_idx += 1)
+        {
+            source.pair_exclusion_words[pair_idx] &= added_imask;
+        }
+        delta_sources[write_idx] = source;
+    }
+}
+
+static __global__ void Build_Gmxpacked_Record_Stream_Source_Low_Sort_Keys(
+    const int source_rows,
+    const int* source_indices,
+    const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* sources,
+    uint64_t* sort_keys)
+{
+    SIMPLE_DEVICE_FOR(source_idx, source_rows)
+    {
+        const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE& source =
+            sources[source_indices != NULL ? source_indices[source_idx]
+                                           : source_idx];
+        sort_keys[source_idx] =
+            (static_cast<uint64_t>(
+                 static_cast<unsigned int>(source.supercluster_id))
+             << 32) |
+            static_cast<uint64_t>(static_cast<unsigned int>(source.cluster_j));
+    }
+}
+
+static __global__ void Build_Gmxpacked_Record_Stream_Source_High_Sort_Keys(
+    const int source_rows,
+    const int* source_indices,
+    const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* sources,
+    uint64_t* sort_keys)
+{
+    SIMPLE_DEVICE_FOR(source_idx, source_rows)
+    {
+        const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE& source =
+            sources[source_indices != NULL ? source_indices[source_idx]
+                                           : source_idx];
+        sort_keys[source_idx] =
+            (static_cast<uint64_t>(static_cast<unsigned int>(source.sci_id))
+             << 32) |
+            static_cast<uint64_t>(static_cast<unsigned int>(source.shift_id));
+    }
+}
+
+static __global__ void Gather_Gmxpacked_Record_Stream_Sources_By_Index(
+    const int source_rows, const int* source_indices,
+    const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* src_sources,
+    LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* dst_sources)
+{
+    SIMPLE_DEVICE_FOR(source_idx, source_rows)
+    {
+        dst_sources[source_idx] = src_sources[source_indices[source_idx]];
+    }
+}
+
+static __global__ void Build_Gmxpacked_Incremental_Mixed_Source_Counts(
+    const int candidate_sci_numbers, const int* dirty_candidate_sci,
+    const int* previous_offsets_by_candidate,
+    const int* replacement_offsets_by_candidate, int* mixed_counts_by_candidate)
+{
+    SIMPLE_DEVICE_FOR(candidate_sci, candidate_sci_numbers)
+    {
+        const int previous_rows =
+            previous_offsets_by_candidate[candidate_sci + 1] -
+            previous_offsets_by_candidate[candidate_sci];
+        const int replacement_rows =
+            replacement_offsets_by_candidate[candidate_sci + 1] -
+            replacement_offsets_by_candidate[candidate_sci];
+        mixed_counts_by_candidate[candidate_sci] =
+            dirty_candidate_sci[candidate_sci] != 0 ? replacement_rows
+                                                    : previous_rows;
+    }
+}
+
+static __global__ void Fill_Gmxpacked_Incremental_Mixed_Record_Stream_Sources(
+    const int candidate_sci_numbers, const int* dirty_candidate_sci,
+    const int* previous_offsets_by_candidate,
+    const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* previous_sources,
+    const int* replacement_offsets_by_candidate,
+    const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* replacement_sources,
+    const int* mixed_offsets_by_candidate,
+    LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* mixed_sources)
+{
+    SIMPLE_DEVICE_FOR(candidate_sci, candidate_sci_numbers)
+    {
+        const bool use_replacement = dirty_candidate_sci[candidate_sci] != 0;
+        const int src_begin =
+            use_replacement ? replacement_offsets_by_candidate[candidate_sci]
+                            : previous_offsets_by_candidate[candidate_sci];
+        const int src_end =
+            use_replacement ? replacement_offsets_by_candidate[candidate_sci + 1]
+                            : previous_offsets_by_candidate[candidate_sci + 1];
+        const int dst_begin = mixed_offsets_by_candidate[candidate_sci];
+        const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* src =
+            use_replacement ? replacement_sources : previous_sources;
+        for (int src_idx = src_begin; src_idx < src_end; src_idx += 1)
+        {
+            const int dst_idx = dst_begin + (src_idx - src_begin);
+            LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE source = src[src_idx];
+            source.source_order = dst_idx;
+            mixed_sources[dst_idx] = source;
+        }
+    }
+}
+
+static __global__ void Count_Gmxpacked_Dirty_Source_Rows_From_Offsets(
+    const int candidate_sci_numbers, const int* dirty_candidate_sci,
+    const int* source_offsets_by_candidate, int* dirty_source_rows)
+{
+    SIMPLE_DEVICE_FOR(candidate_sci, candidate_sci_numbers)
+    {
+        if (dirty_candidate_sci[candidate_sci] == 0)
+        {
+            return;
+        }
+        const int row_count =
+            source_offsets_by_candidate[candidate_sci + 1] -
+            source_offsets_by_candidate[candidate_sci];
+        if (row_count > 0)
+        {
+            atomicAdd(dirty_source_rows, row_count);
+        }
+    }
+}
+
+static __global__ void Count_Gmxpacked_Active_View_Dirty_Source_Rows(
+    const int source_rows,
+    const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* outer_sources,
+    const int candidate_sci_numbers, const int* dirty_candidate_sci,
+    const int* permutation, const int* cluster_offsets,
+    const int* super_cluster_offsets, const unsigned int* cluster_local_masks,
+    const VECTOR* crd, const VECTOR* active_anchor_crd, const LTMatrix3 cell,
+    const LTMatrix3 rcell, const float reuse_margin, int* dirty_source_rows)
+{
+    SIMPLE_DEVICE_FOR(source_idx, source_rows)
+    {
+        const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE& source =
+            outer_sources[source_idx];
+        const int candidate_sci = source.sci_id;
+        bool dirty = candidate_sci < 0 || candidate_sci >= candidate_sci_numbers;
+        if (!dirty)
+        {
+            dirty = dirty_candidate_sci == NULL ||
+                    dirty_candidate_sci[candidate_sci] != 0 ||
+                    Gmxpacked_Record_Stream_Source_Active_Anchor_Dirty(
+                        source, permutation, cluster_offsets,
+                        super_cluster_offsets, cluster_local_masks, crd,
+                        active_anchor_crd, cell, rcell, reuse_margin);
+        }
+        if (dirty)
+        {
+            atomicAdd(dirty_source_rows, 1);
+        }
+    }
+}
+
+#endif
+
+static uint64_t Clustered_Splitmix64(uint64_t value)
+{
+    value += 0x9e3779b97f4a7c15ull;
+    value = (value ^ (value >> 30)) * 0xbf58476d1ce4e5b9ull;
+    value = (value ^ (value >> 27)) * 0x94d049bb133111ebull;
+    return value ^ (value >> 31);
+}
+
+static uint64_t Clustered_Hash_Combine_U64(uint64_t hash, uint64_t value)
+{
+    return hash ^ (Clustered_Splitmix64(value) + 0x9e3779b97f4a7c15ull +
+                   (hash << 6) + (hash >> 2));
+}
+
+static uint64_t Hash_Gmxpacked_Record_Stream_Source_For_Layout_Probe(
+    const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE& source)
+{
+    uint64_t hash = 0xcbf29ce484222325ull;
+    hash = Clustered_Hash_Combine_U64(
+        hash, static_cast<uint32_t>(source.shift_id));
+    hash = Clustered_Hash_Combine_U64(
+        hash, static_cast<uint32_t>(source.supercluster_id));
+    hash = Clustered_Hash_Combine_U64(
+        hash, static_cast<uint32_t>(source.cluster_j));
+    hash = Clustered_Hash_Combine_U64(
+        hash, static_cast<uint32_t>(source.split_id));
+    hash = Clustered_Hash_Combine_U64(hash, source.imask);
+    hash = Clustered_Hash_Combine_U64(hash, source.valid_mask_j);
+    hash = Clustered_Hash_Combine_U64(hash, source.local_mask_j);
+    for (int pair_idx = 0; pair_idx < kClusteredGmxpackedExclusionPairCount;
+         pair_idx += 1)
+    {
+        hash = Clustered_Hash_Combine_U64(
+            hash, source.pair_exclusion_words[pair_idx]);
+    }
+    return hash;
+}
+
+static uint64_t Hash_Gmxpacked_Record_Stream_Source_Range_For_Layout_Probe(
+    const std::vector<LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE>& sources,
+    int begin, int end)
+{
+    begin = IntMax(0, begin);
+    end = IntMax(begin, IntMin(end, static_cast<int>(sources.size())));
+    uint64_t hash = Clustered_Hash_Combine_U64(
+        0x84222325cbf29ce4ull, static_cast<uint64_t>(end - begin));
+    for (int source_idx = begin; source_idx < end; source_idx += 1)
+    {
+        hash = Clustered_Hash_Combine_U64(
+            hash,
+            Hash_Gmxpacked_Record_Stream_Source_For_Layout_Probe(
+                sources[static_cast<size_t>(source_idx)]));
+    }
+    return hash;
+}
+
+static __host__ __device__ __forceinline__ bool
+Gmxpacked_Record_Stream_Source_Same_Aggregate_Key(
+    const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE& lhs,
+    const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE& rhs)
+{
+    return lhs.sci_id == rhs.sci_id && lhs.shift_id == rhs.shift_id &&
+           lhs.supercluster_id == rhs.supercluster_id &&
+           lhs.cluster_j == rhs.cluster_j;
+}
+
+static __global__ void Build_Gmxpacked_Record_Stream_Aggregate_Flags(
+    const int source_rows,
+    const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* sorted_sources,
+    int* aggregate_flags)
+{
+    SIMPLE_DEVICE_FOR(source_idx, source_rows)
+    {
+        int aggregate_start = 0;
+        if (source_idx == 0)
+        {
+            aggregate_start = 1;
+        }
+        else
+        {
+            aggregate_start =
+                Gmxpacked_Record_Stream_Source_Same_Aggregate_Key(
+                    sorted_sources[source_idx], sorted_sources[source_idx - 1])
+                    ? 0
+                    : 1;
+        }
+        aggregate_flags[source_idx] = aggregate_start;
+    }
+}
+
+static __global__ void Fill_Gmxpacked_Record_Stream_Aggregates_From_Sources(
+    const int aggregate_rows, const int* aggregate_starts,
+    const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* sorted_sources,
+    LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_AGGREGATE* aggregates,
+    int* aggregate_fill_cursor)
+{
+    SIMPLE_DEVICE_FOR(aggregate_idx, aggregate_rows)
+    {
+        const int source_begin = aggregate_starts[aggregate_idx];
+        const int source_end = aggregate_starts[aggregate_idx + 1];
+        if (source_begin >= source_end)
+        {
+            return;
+        }
+
+        const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE& first_source =
+            sorted_sources[source_begin];
+        LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_AGGREGATE aggregate = {};
+        aggregate.sci_id = first_source.sci_id;
+        aggregate.shift_id = first_source.shift_id;
+        aggregate.supercluster_id = first_source.supercluster_id;
+        aggregate.cluster_j = first_source.cluster_j;
+        aggregate.valid_mask_j = first_source.valid_mask_j;
+        aggregate.local_mask_j = first_source.local_mask_j;
+        aggregate.source_order_begin = first_source.source_order;
+        aggregate.source_order_end = first_source.source_order + 1;
+
+        for (int source_idx = source_begin; source_idx < source_end;
+             source_idx += 1)
+        {
+            const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE& source =
+                sorted_sources[source_idx];
+            const int split = source.split_id;
+            aggregate.valid_mask_j |= source.valid_mask_j;
+            aggregate.local_mask_j |= source.local_mask_j;
+            aggregate.source_order_begin =
+                IntMin(aggregate.source_order_begin, source.source_order);
+            aggregate.source_order_end =
+                IntMax(aggregate.source_order_end, source.source_order + 1);
+            if (split < 0 || split >= kClusteredWarpSplitCount)
+            {
+                continue;
+            }
+            aggregate.split_imask[split] |= source.imask;
+#pragma unroll
+            for (int pair_idx = 0; pair_idx < kClusteredGmxpackedExclusionPairCount;
+                 pair_idx += 1)
+            {
+                aggregate.pair_exclusion_words[split][pair_idx] |=
+                    source.pair_exclusion_words[pair_idx];
+            }
+        }
+
+        aggregates[aggregate_idx] = aggregate;
+        if (aggregate_fill_cursor != NULL)
+        {
+            atomicAdd(aggregate_fill_cursor, 1);
+        }
+    }
+}
 
 static __global__ void Fill_Nbnxm_Payload_From_Candidate_Leaves(
     const int candidate_sci_numbers, const int sci_shift_numbers,
@@ -6030,6 +8428,115 @@ static bool Clustered_Trace_Warp_Records_Enabled()
     return enabled != NULL && enabled[0] != '\0' && enabled[0] != '0';
 }
 
+static bool Clustered_Gmxpacked_Record_Builder_Stage_Timers_Enabled()
+{
+    const char* enabled = std::getenv(
+        "SPONGE_CLUSTERED_GMXPACKED_RECORD_BUILDER_STAGE_TIMERS");
+    return enabled != NULL && enabled[0] != '\0' && enabled[0] != '0';
+}
+
+static bool Clustered_Coordinate_Diagnostics_Enabled()
+{
+    const char* enabled = std::getenv("SPONGE_CLUSTERED_COORD_DIAG");
+    return enabled != NULL && enabled[0] != '\0' && enabled[0] != '0';
+}
+
+static bool Clustered_Gmxpacked_Anchor_Diagnostics_Enabled()
+{
+    const char* enabled =
+        std::getenv("SPONGE_CLUSTERED_GMXPACKED_ANCHOR_DIAG");
+    return enabled != NULL && enabled[0] != '\0' && enabled[0] != '0';
+}
+
+static double Clustered_Steady_Time_Seconds()
+{
+    using ClusteredSteadyClock = std::chrono::steady_clock;
+    return std::chrono::duration<double>(
+               ClusteredSteadyClock::now().time_since_epoch())
+        .count();
+}
+
+#ifndef USE_CPU
+static void Clustered_Gmxpacked_Record_Builder_Timer_Sync(const char* stage,
+                                                          const char* point)
+{
+    if (!Clustered_Gmxpacked_Record_Builder_Stage_Timers_Enabled())
+    {
+        return;
+    }
+    const cudaError_t err = cudaDeviceSynchronize();
+    if (err != cudaSuccess)
+    {
+        fprintf(stderr,
+                "[clustered gmxpacked record builder timer sync] step=%d "
+                "stage=%s point=%s error=%s\n",
+                md_info.sys.steps, stage != NULL ? stage : "unknown",
+                point != NULL ? point : "sync", cudaGetErrorString(err));
+        fflush(stderr);
+    }
+}
+#endif
+
+struct ClusteredGmxpackedRecordBuilderStageTimer
+{
+    const char* stage = NULL;
+    bool enabled = false;
+#ifndef USE_CPU
+    bool sync_device = false;
+#endif
+    double start_seconds = 0.0;
+
+    explicit ClusteredGmxpackedRecordBuilderStageTimer(
+        const char* stage_name, bool enable = true,
+        bool synchronize_device = true)
+        : stage(stage_name), enabled(enable && stage_name != NULL)
+#ifndef USE_CPU
+          , sync_device(enable && stage_name != NULL && synchronize_device)
+#endif
+    {
+        if (!enabled)
+        {
+            return;
+        }
+#ifndef USE_CPU
+        if (sync_device)
+        {
+            Clustered_Gmxpacked_Record_Builder_Timer_Sync(stage, "start");
+        }
+#else
+        (void)synchronize_device;
+#endif
+        start_seconds = Clustered_Steady_Time_Seconds();
+    }
+
+    ~ClusteredGmxpackedRecordBuilderStageTimer()
+    {
+        if (!enabled)
+        {
+            return;
+        }
+#ifndef USE_CPU
+        if (sync_device)
+        {
+            Clustered_Gmxpacked_Record_Builder_Timer_Sync(stage, "stop");
+        }
+#endif
+        const double elapsed_seconds =
+            Clustered_Steady_Time_Seconds() - start_seconds;
+        fprintf(stderr,
+                "[clustered gmxpacked record builder timer] step=%d "
+                "stage=%s seconds=%.6f\n",
+                md_info.sys.steps, stage, elapsed_seconds);
+        fflush(stderr);
+    }
+};
+
+static bool Clustered_Microbench_Dump_Requested()
+{
+    const char* prefix = std::getenv("SPONGE_CLUSTERED_DUMP_MICROBENCH");
+    return prefix != NULL && prefix[0] != '\0';
+}
+
 static void Invalidate_Clustered_Legacy_Neighbor_View(
     LJ_CLUSTER_LAYOUT* layout)
 {
@@ -6189,6 +8696,593 @@ static bool Clustered_Gmxpacked_Early_Record_Analyze_Enabled()
     return enabled != NULL && enabled[0] != '\0' && enabled[0] != '0';
 }
 
+static bool Clustered_Gmxpacked_Active_View_Enabled()
+{
+    // Retired from the clean gmxpacked baseline. Keep the symbol so older
+    // experimental code remains easy to remove without preserving the runtime
+    // entry point.
+    return false;
+}
+
+static bool Clustered_Gmxpacked_Active_View_Experimental_Inner_Enabled()
+{
+    return false;
+}
+
+static bool Clustered_Gmxpacked_Record_Builder_Enabled()
+{
+    const char* enabled =
+        std::getenv("SPONGE_CLUSTERED_GMXPACKED_RECORD_BUILDER");
+    return enabled != NULL && enabled[0] != '\0' && enabled[0] != '0';
+}
+
+static bool Clustered_Gmxpacked_Record_Builder_Route_Enabled()
+{
+    const char* enabled =
+        std::getenv("SPONGE_CLUSTERED_GMXPACKED_RECORD_BUILDER_ROUTE");
+    return enabled != NULL && enabled[0] != '\0' && enabled[0] != '0';
+}
+
+static bool Clustered_Gmxpacked_Record_Builder_Native_Bypass_Enabled()
+{
+    const char* enabled = std::getenv(
+        "SPONGE_CLUSTERED_GMXPACKED_RECORD_BUILDER_NATIVE_BYPASS");
+    return enabled != NULL && enabled[0] != '\0' && enabled[0] != '0';
+}
+
+static bool Clustered_Gmxpacked_Primary_Builder_Enabled()
+{
+    const char* enabled =
+        std::getenv("SPONGE_CLUSTERED_GMXPACKED_PRIMARY_BUILDER");
+    return enabled != NULL && enabled[0] != '\0' && enabled[0] != '0';
+}
+
+static bool Clustered_Gmxpacked_Incremental_Stats_Enabled()
+{
+    return false;
+}
+
+static bool Clustered_Gmxpacked_Incremental_Cache_Enabled()
+{
+    return false;
+}
+
+static bool Clustered_Gmxpacked_Incremental_Device_Mask_Enabled()
+{
+    return false;
+}
+
+static bool Clustered_Gmxpacked_Incremental_Refill_Enabled()
+{
+    return false;
+}
+
+static bool Clustered_Gmxpacked_Incremental_Merge_Enabled()
+{
+    return false;
+}
+
+static bool Clustered_Gmxpacked_Incremental_Stable_Source_Reuse_Enabled()
+{
+    return false;
+}
+
+static bool Clustered_Gmxpacked_Incremental_Mixed_Source_Build_Enabled()
+{
+    return false;
+}
+
+static bool Clustered_Gmxpacked_Incremental_Fast_Revalidate_Enabled()
+{
+    return false;
+}
+
+static bool Clustered_Gmxpacked_Record_Builder_Defer_Source_Count_Enabled()
+{
+    const char* enabled = std::getenv(
+        "SPONGE_CLUSTERED_GMXPACKED_RECORD_BUILDER_DEFER_SOURCE_COUNT");
+    return enabled != NULL && enabled[0] != '\0' && enabled[0] != '0';
+}
+
+static bool Clustered_Gmxpacked_Record_Builder_Count_Accum_Enabled()
+{
+    const char* enabled = std::getenv(
+        "SPONGE_CLUSTERED_GMXPACKED_RECORD_BUILDER_COUNT_ACCUM");
+    return enabled != NULL && enabled[0] != '\0' && enabled[0] != '0';
+}
+
+static bool Clustered_Gmxpacked_Record_Builder_Source_Offsets_Enabled()
+{
+    const char* enabled = std::getenv(
+        "SPONGE_CLUSTERED_GMXPACKED_RECORD_BUILDER_SOURCE_OFFSETS");
+    return enabled != NULL && enabled[0] != '\0' && enabled[0] != '0';
+}
+
+static bool Clustered_Gmxpacked_Lifecycle_Policy_Outer_Source();
+
+static bool Clustered_Gmxpacked_Record_Builder_Outer_Source_Enabled()
+{
+    const char* enabled = std::getenv(
+        "SPONGE_CLUSTERED_GMXPACKED_RECORD_BUILDER_OUTER_SOURCE");
+    return (enabled != NULL && enabled[0] != '\0' && enabled[0] != '0') ||
+           Clustered_Gmxpacked_Lifecycle_Policy_Outer_Source();
+}
+
+static const char* Clustered_Gmxpacked_Lifecycle_Policy()
+{
+    const char* policy =
+        std::getenv("SPONGE_CLUSTERED_GMXPACKED_LIFECYCLE_POLICY");
+    return policy != NULL && policy[0] != '\0' ? policy : NULL;
+}
+
+static bool Clustered_Gmxpacked_Lifecycle_Policy_Is(const char* expected)
+{
+    const char* policy = Clustered_Gmxpacked_Lifecycle_Policy();
+    return policy != NULL && std::strcmp(policy, expected) == 0;
+}
+
+static bool Clustered_Gmxpacked_Lifecycle_Current_Inner_Experimental_Allowed()
+{
+    return false;
+}
+
+static bool Clustered_Gmxpacked_Lifecycle_Policy_Outer_Source()
+{
+    return Clustered_Gmxpacked_Lifecycle_Policy_Is("outer") ||
+           Clustered_Gmxpacked_Lifecycle_Policy_Is("outer-source");
+}
+
+static bool Clustered_Gmxpacked_Lifecycle_Policy_Stable_Inner()
+{
+    return Clustered_Gmxpacked_Lifecycle_Policy_Is("inner") ||
+           Clustered_Gmxpacked_Lifecycle_Policy_Is("stable-inner");
+}
+
+static bool Clustered_Gmxpacked_Lifecycle_Policy_Current_Inner()
+{
+    return false;
+}
+
+static bool Clustered_Gmxpacked_Lifecycle_Policy_Adaptive_Current_Inner()
+{
+    return false;
+}
+
+static bool Clustered_Gmxpacked_Active_View_Active_Compact_Enabled();
+
+static bool Clustered_Gmxpacked_Record_Builder_Inner_Active_Payload_Enabled()
+{
+    return false;
+}
+
+static bool Clustered_Gmxpacked_Record_Builder_One_Pass_Source_Cache_Enabled()
+{
+    return false;
+}
+
+static bool
+Clustered_Gmxpacked_Record_Builder_Rolling_Outer_Source_Reuse_Enabled()
+{
+    return false;
+}
+
+static bool
+Clustered_Gmxpacked_Record_Builder_Inner_Active_Debug_Counts_Enabled()
+{
+    return false;
+}
+
+static bool Clustered_Gmxpacked_Current_Inner_Active_Enabled()
+{
+    return false;
+}
+
+static bool Clustered_Gmxpacked_Active_View_Current_Mask_Enabled()
+{
+    return false;
+}
+
+static bool Clustered_Gmxpacked_Active_View_Active_Compact_Enabled()
+{
+    return false;
+}
+
+#ifndef USE_CPU
+static void Clustered_Gmxpacked_Active_View_Payload_Boundary_Sync(
+    const char* phase)
+{
+    (void)phase;
+}
+#endif
+
+static bool Clustered_Gmxpacked_Current_Inner_Adaptive_Lease_Enabled()
+{
+    return false;
+}
+
+static float Clustered_Gmxpacked_Current_Inner_Lease_Factor()
+{
+    return 1.0f;
+}
+
+static bool Clustered_Gmxpacked_Inner_Active_Coverage_Reuse_Enabled()
+{
+    return false;
+}
+
+static bool Clustered_Gmxpacked_Inner_Active_Incremental_Append_Enabled()
+{
+    return false;
+}
+
+static bool
+Clustered_Gmxpacked_Inner_Active_Dirty_Candidate_Append_Enabled()
+{
+    return false;
+}
+
+static bool
+Clustered_Gmxpacked_Inner_Active_Append_Refresh_Anchor_Enabled()
+{
+    return false;
+}
+
+static bool Clustered_Gmxpacked_Inner_Active_Append_Summary_Enabled()
+{
+    return false;
+}
+
+static float Clustered_Gmxpacked_Inner_Active_Append_Max_Growth_Ratio()
+{
+    return 1.0f;
+}
+
+static float Clustered_Gmxpacked_Active_View_Dirty_Source_Ratio_Limit()
+{
+    return 0.0f;
+}
+
+static bool Clustered_Gmxpacked_Active_View_Partial_Refresh_Enabled()
+{
+    return false;
+}
+
+static bool Clustered_Gmxpacked_Active_View_Dirty_Index_Refresh_Enabled()
+{
+    return false;
+}
+
+static bool Clustered_Gmxpacked_Active_View_Compact_Patch_Enabled()
+{
+    return false;
+}
+
+static bool Clustered_Gmxpacked_Active_View_Compact_Delta_Enabled()
+{
+    return false;
+}
+
+static bool Clustered_Gmxpacked_Active_View_Full_Dirty_Refresh_Enabled()
+{
+    return false;
+}
+
+static float Clustered_Gmxpacked_Active_View_Delta_Rebase_Source_Ratio()
+{
+    return -1.0f;
+}
+
+static bool Clustered_Gmxpacked_Active_View_Union_Mask_Enabled()
+{
+    return false;
+}
+
+static float Clustered_Gmxpacked_Active_View_Anchor_Reuse_Limit()
+{
+    return 0.0f;
+}
+
+static float Clustered_Gmxpacked_Active_View_Refresh_Fraction()
+{
+    return 0.0f;
+}
+
+static bool Clustered_Gmxpacked_Active_View_Verify_Coverage_Enabled()
+{
+    return false;
+}
+
+static bool Clustered_Gmxpacked_Active_View_Coverage_Repair_Enabled()
+{
+    return false;
+}
+
+static bool Clustered_Gmxpacked_Active_View_Coverage_Repair_Delta_Append_Enabled()
+{
+    return false;
+}
+
+static bool Clustered_Gmxpacked_Active_View_Refresh_Anchor_On_Partial_Enabled()
+{
+    return false;
+}
+
+static float Clustered_Gmxpacked_Active_View_Coverage_Repair_Max_Missing_Ratio()
+{
+    return 0.0f;
+}
+
+static bool Clustered_Gmxpacked_Active_View_Verify_True_Cutoff_Enabled()
+{
+    return false;
+}
+
+static bool Clustered_Gmxpacked_Active_View_Cutoff_Drift_Refresh_Enabled()
+{
+    return false;
+}
+
+static bool Clustered_Gmxpacked_Active_View_Fixed_Cutoff_Enabled()
+{
+    return false;
+}
+
+static bool Clustered_Gmxpacked_Active_View_Verify_Reuse_Enabled()
+{
+    return false;
+}
+
+static bool Clustered_Gmxpacked_Active_View_Dirty_Index_Undercover_Enabled()
+{
+    return false;
+}
+
+static bool Clustered_Gmxpacked_Active_View_Source_Dirty_Undercover_Enabled()
+{
+    return false;
+}
+
+static float Clustered_Gmxpacked_Record_Builder_Inner_Active_Guard_Margin()
+{
+    return 0.0f;
+}
+
+static float Clustered_Gmxpacked_Experimental_Inner_Anchor_Limit()
+{
+    return -1.0f;
+}
+
+static float Clustered_Gmxpacked_Experimental_Inner_Max_Source_Ratio()
+{
+    return -1.0f;
+}
+
+static float Clustered_Gmxpacked_Experimental_Inner_Max_Cutoff_Fraction()
+{
+    return -1.0f;
+}
+
+static bool Clustered_Gmxpacked_Stable_Target_Layout_Enabled()
+{
+    return false;
+}
+
+static bool Clustered_Gmxpacked_Stable_Source_Contract_Enabled()
+{
+    return false;
+}
+
+static int Clustered_Gmxpacked_Record_Builder_Live_Bench_Iters()
+{
+    return 0;
+}
+
+static int Estimate_Gmxpacked_Record_Stream_Source_Capacity(int cjpacked_numbers)
+{
+    if (cjpacked_numbers <= 0)
+    {
+        return 0;
+    }
+    const long long estimate = static_cast<long long>(cjpacked_numbers) +
+                               (static_cast<long long>(cjpacked_numbers) + 3) /
+                                   4 +
+                               4096;
+    const long long max_int = 0x7fffffffll;
+    return static_cast<int>(estimate > max_int ? max_int : estimate);
+}
+
+static int Estimate_Gmxpacked_Primary_Record_Stream_Source_Capacity(
+    int candidate_sci_numbers, int candidate_leaf_numbers)
+{
+    if (candidate_sci_numbers <= 0 || candidate_leaf_numbers <= 0)
+    {
+        return 0;
+    }
+    const long long estimate =
+        static_cast<long long>(candidate_leaf_numbers) / 8ll +
+        static_cast<long long>(candidate_sci_numbers) * 16ll + 65536ll;
+    const long long max_int = 0x7fffffffll;
+    return static_cast<int>(estimate > max_int ? max_int : estimate);
+}
+
+static int Estimate_Gmxpacked_Primary_One_Pass_Source_Capacity(
+    int candidate_sci_numbers, int candidate_leaf_numbers)
+{
+    if (candidate_sci_numbers <= 0 || candidate_leaf_numbers <= 0)
+    {
+        return 0;
+    }
+    const long long estimate =
+        static_cast<long long>(candidate_leaf_numbers) +
+        static_cast<long long>(candidate_sci_numbers) * 32ll + 65536ll;
+    const long long max_int = 0x7fffffffll;
+    return static_cast<int>(estimate > max_int ? max_int : estimate);
+}
+
+static bool Clustered_Gmxpacked_Record_Builder_Compare_Enabled()
+{
+    const char* enabled =
+        std::getenv("SPONGE_CLUSTERED_GMXPACKED_RECORD_BUILDER_COMPARE");
+    return enabled != NULL && enabled[0] != '\0' && enabled[0] != '0';
+}
+
+static bool Clustered_Gmxpacked_Record_Builder_Compare_Stage_Trace_Enabled()
+{
+    const char* enabled = std::getenv(
+        "SPONGE_CLUSTERED_GMXPACKED_RECORD_BUILDER_COMPARE_STAGE_TRACE");
+    return enabled != NULL && enabled[0] != '\0' && enabled[0] != '0';
+}
+
+static bool Clustered_Gmxpacked_Record_Builder_Host_Compact_Fallback_Enabled()
+{
+    const char* enabled = std::getenv(
+        "SPONGE_CLUSTERED_GMXPACKED_RECORD_BUILDER_HOST_COMPACT_FALLBACK");
+    return enabled != NULL && enabled[0] != '\0' && enabled[0] != '0';
+}
+
+static bool Clustered_Gmxpacked_Record_Builder_Compare_Source_Trace_Enabled()
+{
+    const char* enabled = std::getenv(
+        "SPONGE_CLUSTERED_GMXPACKED_RECORD_BUILDER_COMPARE_SOURCE_TRACE");
+    return enabled != NULL && enabled[0] != '\0' && enabled[0] != '0';
+}
+
+static bool
+Clustered_Gmxpacked_Record_Builder_Compare_Device_Source_Trace_Enabled()
+{
+    const char* enabled = std::getenv(
+        "SPONGE_CLUSTERED_GMXPACKED_RECORD_BUILDER_COMPARE_DEVICE_SOURCE_TRACE");
+    return enabled != NULL && enabled[0] != '\0' && enabled[0] != '0';
+}
+
+static bool
+Clustered_Gmxpacked_Record_Builder_Compare_Prune_Input_Trace_Enabled()
+{
+    const char* enabled = std::getenv(
+        "SPONGE_CLUSTERED_GMXPACKED_RECORD_BUILDER_COMPARE_PRUNE_INPUT_TRACE");
+    return enabled != NULL && enabled[0] != '\0' && enabled[0] != '0';
+}
+
+static bool
+Clustered_Gmxpacked_Record_Builder_Compare_Prune_Contract_Trace_Enabled()
+{
+    const char* enabled = std::getenv(
+        "SPONGE_CLUSTERED_GMXPACKED_RECORD_BUILDER_COMPARE_PRUNE_CONTRACT_TRACE");
+    return enabled != NULL && enabled[0] != '\0' && enabled[0] != '0';
+}
+
+static bool
+Clustered_Gmxpacked_Record_Builder_Compare_Raw_Coord_Pair_Context_Enabled()
+{
+    const char* enabled = std::getenv(
+        "SPONGE_CLUSTERED_GMXPACKED_RECORD_BUILDER_COMPARE_RAW_COORD_PAIR_CONTEXT");
+    return enabled != NULL && enabled[0] != '\0' && enabled[0] != '0';
+}
+
+static bool
+Clustered_Gmxpacked_Record_Builder_Compare_Raw_Coord_Force_Context_Enabled()
+{
+    const char* enabled = std::getenv(
+        "SPONGE_CLUSTERED_GMXPACKED_RECORD_BUILDER_COMPARE_RAW_COORD_FORCE_CONTEXT");
+    return enabled != NULL && enabled[0] != '\0' && enabled[0] != '0';
+}
+
+static bool
+Clustered_Gmxpacked_Record_Builder_Compare_Geometry_Route_Shift_Enabled()
+{
+    const char* enabled = std::getenv(
+        "SPONGE_CLUSTERED_GMXPACKED_RECORD_BUILDER_COMPARE_GEOMETRY_ROUTE_SHIFT");
+    return enabled != NULL && enabled[0] != '\0' && enabled[0] != '0';
+}
+
+static bool Clustered_Gmxpacked_Assume_Sci_Shift_Enabled()
+{
+    const char* enabled =
+        std::getenv("SPONGE_CLUSTERED_GMXPACKED_ASSUME_SCI_SHIFT");
+    return enabled != NULL && enabled[0] != '\0' && enabled[0] != '0';
+}
+
+static bool Clustered_Gmxpacked_Full_Local_Dense_Compatible(
+    const LJ_CLUSTER_LAYOUT* layout)
+{
+    return layout != NULL &&
+           layout->cluster_size == kClusteredClusterSize &&
+           layout->super_cluster_clusters == kClusteredSuperClusterClusters &&
+           layout->ghost_numbers == 0 &&
+           layout->local_atom_numbers == layout->total_atom_numbers &&
+           layout->direct_local_atom_numbers == layout->total_atom_numbers &&
+           layout->cluster_numbers > 0 &&
+           layout->total_atom_numbers ==
+               layout->cluster_numbers * kClusteredClusterSize &&
+           layout->cluster_numbers % kClusteredSuperClusterClusters == 0;
+}
+
+static bool Clustered_LtMatrix3_Exact_Equals(LTMatrix3 a, LTMatrix3 b)
+{
+    return a.a11 == b.a11 && a.a21 == b.a21 && a.a22 == b.a22 &&
+           a.a31 == b.a31 && a.a32 == b.a32 && a.a33 == b.a33;
+}
+
+static void Invalidate_Gmxpacked_Pair_Shift_Metadata(
+    LJ_CLUSTER_LAYOUT* layout)
+{
+    if (layout == NULL)
+    {
+        return;
+    }
+    layout->gmxpacked_pair_shift_metadata_ready = false;
+    layout->gmxpacked_pair_shift_metadata_sci_numbers = 0;
+    layout->gmxpacked_pair_shift_metadata_cjpacked_numbers = 0;
+    layout->gmxpacked_pair_shift_metadata_exclusion_numbers = 0;
+    layout->gmxpacked_pair_shift_metadata_rcell = {};
+    layout->gmxpacked_pair_shift_sci_only_compatible = false;
+}
+
+static bool Clustered_Gmxpacked_Should_Refresh_Pair_Shift_Metadata(
+    const LJ_CLUSTER_LAYOUT* layout, LTMatrix3 rcell)
+{
+    if (!Clustered_Gmxpacked_Pair_Shift_Metadata_Cache_Enabled())
+    {
+        return true;
+    }
+    if (layout == NULL || layout->d_pair_shift_bits == NULL ||
+        !layout->gmxpacked_pair_shift_metadata_ready ||
+        layout->gmxpacked_sci_numbers <= 0 ||
+        layout->gmxpacked_cjpacked_numbers <= 0 ||
+        layout->gmxpacked_exclusion_numbers <= 0)
+    {
+        return true;
+    }
+    if (layout->gmxpacked_pair_shift_metadata_sci_numbers !=
+            layout->gmxpacked_sci_numbers ||
+        layout->gmxpacked_pair_shift_metadata_cjpacked_numbers !=
+            layout->gmxpacked_cjpacked_numbers ||
+        layout->gmxpacked_pair_shift_metadata_exclusion_numbers !=
+            layout->gmxpacked_exclusion_numbers)
+    {
+        return true;
+    }
+    if (!Clustered_LtMatrix3_Exact_Equals(
+            layout->gmxpacked_pair_shift_metadata_rcell, rcell))
+    {
+        return true;
+    }
+    if ((Clustered_Gmxpacked_Sci_Shift_Split_Enabled() ||
+         Clustered_Gmxpacked_Sci_Shift_Runtime_Enabled()) &&
+        layout->d_gmxpacked_pair_shift_sci_safe_flags == NULL)
+    {
+        return true;
+    }
+    if (Clustered_Gmxpacked_Assume_Sci_Shift_Enabled() &&
+        !Clustered_Gmxpacked_Sci_Shift_Split_Enabled() &&
+        !Clustered_Gmxpacked_Sci_Shift_Runtime_Enabled() &&
+        layout->d_gmxpacked_pair_shift_sci_only_flag == NULL)
+    {
+        return true;
+    }
+    return false;
+}
+
 static const char* Clustered_Gmxpacked_Reduced_Staged_Trace_Source()
 {
     return "source=reduced-staged";
@@ -6201,6 +9295,78 @@ struct ClusteredReducedStagedCountSummary
     int reduced_sci_numbers = 0;
     int predicted_compact_cj_numbers = 0;
 };
+
+struct ClusteredGmxpackedRecordBuilderStageTraceSnapshot
+{
+    int step = -1;
+    std::vector<LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE> sources;
+    std::vector<LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_AGGREGATE> aggregates;
+};
+
+struct ClusteredGmxpackedRecordBuilderDeviceSourceTraceSnapshot
+{
+    int step = -1;
+    int trace_capacity = 0;
+    int trace_overflow = 0;
+    std::vector<ClusteredGmxpackedDeviceSourceRowTrace> rows;
+};
+
+static ClusteredGmxpackedRecordBuilderStageTraceSnapshot&
+Gmxpacked_Record_Builder_Stage_Trace_Snapshot()
+{
+    static ClusteredGmxpackedRecordBuilderStageTraceSnapshot snapshot;
+    return snapshot;
+}
+
+static ClusteredGmxpackedRecordBuilderDeviceSourceTraceSnapshot&
+Gmxpacked_Record_Builder_Device_Source_Trace_Snapshot()
+{
+    static ClusteredGmxpackedRecordBuilderDeviceSourceTraceSnapshot snapshot;
+    return snapshot;
+}
+
+static void Clear_Gmxpacked_Record_Builder_Stage_Trace_Snapshot()
+{
+    ClusteredGmxpackedRecordBuilderStageTraceSnapshot& snapshot =
+        Gmxpacked_Record_Builder_Stage_Trace_Snapshot();
+    snapshot.step = -1;
+    snapshot.sources.clear();
+    snapshot.aggregates.clear();
+}
+
+static void Clear_Gmxpacked_Record_Builder_Device_Source_Trace_Snapshot()
+{
+    ClusteredGmxpackedRecordBuilderDeviceSourceTraceSnapshot& snapshot =
+        Gmxpacked_Record_Builder_Device_Source_Trace_Snapshot();
+    snapshot.step = -1;
+    snapshot.trace_capacity = 0;
+    snapshot.trace_overflow = 0;
+    snapshot.rows.clear();
+}
+
+static void Capture_Gmxpacked_Record_Builder_Stage_Trace_Snapshot(
+    const std::vector<LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE>& sources,
+    const std::vector<LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_AGGREGATE>&
+        aggregates)
+{
+    ClusteredGmxpackedRecordBuilderStageTraceSnapshot& snapshot =
+        Gmxpacked_Record_Builder_Stage_Trace_Snapshot();
+    snapshot.step = md_info.sys.steps;
+    snapshot.sources = sources;
+    snapshot.aggregates = aggregates;
+}
+
+static void Capture_Gmxpacked_Record_Builder_Device_Source_Trace_Snapshot(
+    const int trace_capacity, const int trace_overflow,
+    const std::vector<ClusteredGmxpackedDeviceSourceRowTrace>& rows)
+{
+    ClusteredGmxpackedRecordBuilderDeviceSourceTraceSnapshot& snapshot =
+        Gmxpacked_Record_Builder_Device_Source_Trace_Snapshot();
+    snapshot.step = md_info.sys.steps;
+    snapshot.trace_capacity = trace_capacity;
+    snapshot.trace_overflow = trace_overflow;
+    snapshot.rows = rows;
+}
 
 struct ClusteredEarlyRecordAnalyzeSummary
 {
@@ -7039,16 +10205,120 @@ static void Refresh_Gmxpacked_Pair_Shift_Metadata(LJ_CLUSTER_LAYOUT* layout,
         layout->d_pair_shift_bits == NULL || layout->d_gmxpacked_sci == NULL ||
         layout->d_gmxpacked_cjpacked == NULL)
     {
+        if (layout != NULL)
+        {
+            layout->gmxpacked_pair_shift_sci_only_compatible = false;
+        }
         return;
+    }
+    const bool need_device_sci_shift_flags =
+        Clustered_Gmxpacked_Sci_Shift_Split_Enabled() ||
+        Clustered_Gmxpacked_Sci_Shift_Runtime_Enabled();
+    const bool need_host_sci_shift_only_flag =
+        Clustered_Gmxpacked_Assume_Sci_Shift_Enabled() &&
+        !need_device_sci_shift_flags;
+    int* d_sci_shift_only_flag = NULL;
+    int* d_sci_shift_safe_flags = NULL;
+    if (need_host_sci_shift_only_flag)
+    {
+        if (layout->d_gmxpacked_pair_shift_sci_only_flag == NULL)
+        {
+            Device_Malloc_Safely(
+                (void**)&layout->d_gmxpacked_pair_shift_sci_only_flag,
+                sizeof(int));
+        }
+        d_sci_shift_only_flag = layout->d_gmxpacked_pair_shift_sci_only_flag;
+    }
+    if (need_device_sci_shift_flags)
+    {
+        Reserve_Device_Int_Buffer(
+            layout->gmxpacked_sci_numbers,
+            &layout->d_gmxpacked_pair_shift_sci_safe_flags,
+            &layout->gmxpacked_pair_shift_sci_safe_flag_capacity);
+        d_sci_shift_safe_flags =
+            layout->d_gmxpacked_pair_shift_sci_safe_flags;
+    }
+    const bool exact_sci_shift_flags =
+        Clustered_Gmxpacked_Exact_Sci_Shift_Flags_Enabled();
+    int sci_shift_only_safe = 1;
+    if (d_sci_shift_only_flag != NULL)
+    {
+        deviceMemcpy(d_sci_shift_only_flag, &sci_shift_only_safe, sizeof(int),
+                     deviceMemcpyHostToDevice);
     }
     Launch_Device_Kernel(Refresh_Gmxpacked_Pair_Shift_Bits,
                          layout->gmxpacked_sci_numbers,
                          CONTROLLER::device_max_thread, 0, NULL,
                          layout->gmxpacked_sci_numbers,
                          layout->d_super_cluster_offsets,
-                         layout->d_cluster_centers, layout->d_gmxpacked_sci,
-                         layout->d_gmxpacked_cjpacked, rcell,
-                         layout->d_pair_shift_bits);
+                         layout->d_cluster_centers,
+                         layout->d_cluster_valid_masks,
+                         layout->d_cluster_local_masks,
+                         layout->d_gmxpacked_sci,
+                         layout->d_gmxpacked_cjpacked,
+                         layout->d_gmxpacked_exclusions, rcell,
+                         layout->d_pair_shift_bits,
+                         d_sci_shift_only_flag, d_sci_shift_safe_flags,
+                         exact_sci_shift_flags);
+    if (d_sci_shift_only_flag != NULL)
+    {
+        deviceMemcpy(&sci_shift_only_safe, d_sci_shift_only_flag, sizeof(int),
+                     deviceMemcpyDeviceToHost);
+        layout->gmxpacked_pair_shift_sci_only_compatible =
+            sci_shift_only_safe != 0;
+    }
+    else
+    {
+        layout->gmxpacked_pair_shift_sci_only_compatible = false;
+    }
+    layout->gmxpacked_pair_shift_metadata_ready = true;
+    layout->gmxpacked_pair_shift_metadata_sci_numbers =
+        layout->gmxpacked_sci_numbers;
+    layout->gmxpacked_pair_shift_metadata_cjpacked_numbers =
+        layout->gmxpacked_cjpacked_numbers;
+    layout->gmxpacked_pair_shift_metadata_exclusion_numbers =
+        layout->gmxpacked_exclusion_numbers;
+    layout->gmxpacked_pair_shift_metadata_rcell = rcell;
+#endif
+}
+
+static bool Refresh_Gmxpacked_Delta_Pair_Shift_Bits(LJ_CLUSTER_LAYOUT* layout,
+                                                    LTMatrix3 rcell)
+{
+#ifdef USE_CPU
+    (void)layout;
+    (void)rcell;
+    return false;
+#else
+    if (layout == NULL || layout->gmxpacked_delta_sci_numbers <= 0 ||
+        layout->gmxpacked_delta_cjpacked_numbers <= 0 ||
+        layout->gmxpacked_delta_exclusion_numbers <= 0 ||
+        layout->d_gmxpacked_delta_sci == NULL ||
+        layout->d_gmxpacked_delta_cjpacked == NULL ||
+        layout->d_gmxpacked_delta_exclusions == NULL)
+    {
+        return false;
+    }
+    Reserve_Device_U64_Buffer(
+        layout->gmxpacked_delta_cjpacked_numbers * kClusteredJGroupSize,
+        &layout->d_gmxpacked_delta_pair_shift_bits,
+        &layout->gmxpacked_delta_pair_shift_capacity);
+    const bool exact_sci_shift_flags =
+        Clustered_Gmxpacked_Exact_Sci_Shift_Flags_Enabled();
+    Launch_Device_Kernel(Refresh_Gmxpacked_Pair_Shift_Bits,
+                         layout->gmxpacked_delta_sci_numbers,
+                         CONTROLLER::device_max_thread, 0, NULL,
+                         layout->gmxpacked_delta_sci_numbers,
+                         layout->d_super_cluster_offsets,
+                         layout->d_cluster_centers,
+                         layout->d_cluster_valid_masks,
+                         layout->d_cluster_local_masks,
+                         layout->d_gmxpacked_delta_sci,
+                         layout->d_gmxpacked_delta_cjpacked,
+                         layout->d_gmxpacked_delta_exclusions, rcell,
+                         layout->d_gmxpacked_delta_pair_shift_bits,
+                         NULL, NULL, exact_sci_shift_flags);
+    return layout->d_gmxpacked_delta_pair_shift_bits != NULL;
 #endif
 }
 
@@ -7248,6 +10518,319 @@ static bool Clustered_Build_Is_Needed(LJ_CLUSTER_LAYOUT* layout,
     deviceMemcpy(&h_need_rebuild, layout->d_need_rebuild, sizeof(int),
                  deviceMemcpyDeviceToHost);
     return h_need_rebuild != 0;
+}
+
+static bool Clustered_Stable_Target_Anchor_Is_Current(
+    LJ_CLUSTER_LAYOUT* layout, const VECTOR* crd, const LTMatrix3 cell,
+    const LTMatrix3 rcell)
+{
+    if (layout == NULL || crd == NULL ||
+        layout->d_stable_target_layout_crd == NULL ||
+        layout->total_atom_numbers <= 0 || layout->rebuild_skin <= 0.0f ||
+        layout->rebuild_skin_permit <= 0.0f)
+    {
+        return false;
+    }
+    Reserve_Device_Int_Buffer(1, &layout->d_need_rebuild,
+                              &layout->rebuild_flag_capacity);
+    int h_need_rebuild = 0;
+    deviceMemcpy(layout->d_need_rebuild, &h_need_rebuild, sizeof(int),
+                 deviceMemcpyHostToDevice);
+    const float permit = layout->rebuild_skin * layout->rebuild_skin_permit;
+    Launch_Device_Kernel(Check_Clustered_Rebuild,
+                         (layout->total_atom_numbers +
+                          CONTROLLER::device_max_thread - 1) /
+                             CONTROLLER::device_max_thread,
+                         CONTROLLER::device_max_thread, 0, NULL,
+                         layout->total_atom_numbers, crd,
+                         layout->d_stable_target_layout_crd, cell, rcell,
+                         layout->d_need_rebuild, permit * permit);
+    deviceMemcpy(&h_need_rebuild, layout->d_need_rebuild, sizeof(int),
+                 deviceMemcpyDeviceToHost);
+    return h_need_rebuild == 0;
+}
+
+static float Clustered_Max_Stable_Target_Anchor_Displacement(
+    LJ_CLUSTER_LAYOUT* layout, const VECTOR* crd, const LTMatrix3 cell,
+    const LTMatrix3 rcell)
+{
+    if (layout == NULL || crd == NULL ||
+        layout->d_stable_target_layout_crd == NULL ||
+        layout->total_atom_numbers <= 0)
+    {
+        return 0.0f;
+    }
+#ifdef USE_CPU
+    (void)cell;
+    (void)rcell;
+    return 0.0f;
+#else
+    Bind_Clustered_Working_Device(&layout->working_device);
+    Reserve_Device_Byte_Buffer(
+        sizeof(float) * static_cast<size_t>(layout->total_atom_numbers),
+        &layout->d_sort_key_buffer, &layout->sort_key_buffer_bytes);
+    Reserve_Device_Byte_Buffer(sizeof(float), &layout->d_sort_value_buffer,
+                               &layout->sort_value_buffer_bytes);
+    float* d_displacement_sq =
+        reinterpret_cast<float*>(layout->d_sort_key_buffer);
+    float* d_max_displacement_sq =
+        reinterpret_cast<float*>(layout->d_sort_value_buffer);
+    Launch_Device_Kernel(
+        Build_Clustered_Anchor_Displacement_Sq,
+        (layout->total_atom_numbers + CONTROLLER::device_max_thread - 1) /
+            CONTROLLER::device_max_thread,
+        CONTROLLER::device_max_thread, 0, NULL, layout->total_atom_numbers, crd,
+        layout->d_stable_target_layout_crd, cell, rcell, d_displacement_sq);
+    size_t reduce_storage_bytes = 0;
+    const cudaError_t preexisting_err = cudaGetLastError();
+    (void)preexisting_err;
+    const cudaError_t query_err =
+        cub::DeviceReduce::Max(NULL, reduce_storage_bytes, d_displacement_sq,
+                               d_max_displacement_sq,
+                               layout->total_atom_numbers);
+    Reserve_Device_Opaque_Buffer(reduce_storage_bytes,
+                                 &layout->d_reduce_temp_storage,
+                                 &layout->reduce_temp_storage_bytes);
+    const cudaError_t reduce_err = cub::DeviceReduce::Max(
+        layout->d_reduce_temp_storage, reduce_storage_bytes, d_displacement_sq,
+        d_max_displacement_sq, layout->total_atom_numbers);
+    const cudaError_t sync_err = cudaDeviceSynchronize();
+    Clustered_Check_Cuda_Status(query_err,
+                                "clustered-anchor-displacement-max-query");
+    Clustered_Check_Cuda_Status(reduce_err,
+                                "clustered-anchor-displacement-max-run");
+    Clustered_Check_Cuda_Status(sync_err,
+                                "clustered-anchor-displacement-max-sync");
+    float max_displacement_sq = 0.0f;
+    deviceMemcpy(&max_displacement_sq, d_max_displacement_sq, sizeof(float),
+                 deviceMemcpyDeviceToHost);
+    return sqrtf(fmaxf(max_displacement_sq, 0.0f));
+#endif
+}
+
+static float Clustered_Max_Stable_Target_Anchor_Displacement_Atomic_Diagnostic(
+    LJ_CLUSTER_LAYOUT* layout, const VECTOR* crd, const LTMatrix3 cell,
+    const LTMatrix3 rcell)
+{
+    if (layout == NULL || crd == NULL ||
+        layout->d_stable_target_layout_crd == NULL ||
+        layout->total_atom_numbers <= 0)
+    {
+        return 0.0f;
+    }
+#ifdef USE_CPU
+    (void)cell;
+    (void)rcell;
+    return 0.0f;
+#else
+    Bind_Clustered_Working_Device(&layout->working_device);
+    Reserve_Device_Int_Buffer(1, &layout->d_need_rebuild,
+                              &layout->rebuild_flag_capacity);
+    int max_displacement_sq_bits = 0;
+    deviceMemcpy(layout->d_need_rebuild, &max_displacement_sq_bits,
+                 sizeof(int), deviceMemcpyHostToDevice);
+    Launch_Device_Kernel(
+        Atomic_Max_Clustered_Anchor_Displacement_Sq,
+        (layout->total_atom_numbers + CONTROLLER::device_max_thread - 1) /
+            CONTROLLER::device_max_thread,
+        CONTROLLER::device_max_thread, 0, NULL, layout->total_atom_numbers, crd,
+        layout->d_stable_target_layout_crd, cell, rcell,
+        layout->d_need_rebuild);
+    deviceMemcpy(&max_displacement_sq_bits, layout->d_need_rebuild,
+                 sizeof(int), deviceMemcpyDeviceToHost);
+    union
+    {
+        int bits;
+        float value;
+    } max_displacement_square = {max_displacement_sq_bits};
+    return sqrtf(fmaxf(max_displacement_square.value, 0.0f));
+#endif
+}
+
+static float Clustered_Max_Gmxpacked_Inner_Active_Anchor_Displacement(
+    LJ_CLUSTER_LAYOUT* layout, const VECTOR* crd, const LTMatrix3 cell,
+    const LTMatrix3 rcell)
+{
+    if (layout == NULL || crd == NULL ||
+        layout->d_gmxpacked_inner_active_anchor_crd == NULL ||
+        layout->total_atom_numbers <= 0)
+    {
+        return 0.0f;
+    }
+#ifdef USE_CPU
+    (void)cell;
+    (void)rcell;
+    return 0.0f;
+#else
+    Bind_Clustered_Working_Device(&layout->working_device);
+    Reserve_Device_Byte_Buffer(
+        sizeof(float) * static_cast<size_t>(layout->total_atom_numbers),
+        &layout->d_sort_key_buffer, &layout->sort_key_buffer_bytes);
+    Reserve_Device_Byte_Buffer(sizeof(float), &layout->d_sort_value_buffer,
+                               &layout->sort_value_buffer_bytes);
+    float* d_displacement_sq =
+        reinterpret_cast<float*>(layout->d_sort_key_buffer);
+    float* d_max_displacement_sq =
+        reinterpret_cast<float*>(layout->d_sort_value_buffer);
+    Launch_Device_Kernel(
+        Build_Clustered_Anchor_Displacement_Sq,
+        (layout->total_atom_numbers + CONTROLLER::device_max_thread - 1) /
+            CONTROLLER::device_max_thread,
+        CONTROLLER::device_max_thread, 0, NULL, layout->total_atom_numbers, crd,
+        layout->d_gmxpacked_inner_active_anchor_crd, cell, rcell,
+        d_displacement_sq);
+    size_t reduce_storage_bytes = 0;
+    const cudaError_t preexisting_err = cudaGetLastError();
+    (void)preexisting_err;
+    const cudaError_t query_err =
+        cub::DeviceReduce::Max(NULL, reduce_storage_bytes, d_displacement_sq,
+                               d_max_displacement_sq,
+                               layout->total_atom_numbers);
+    Reserve_Device_Opaque_Buffer(reduce_storage_bytes,
+                                 &layout->d_reduce_temp_storage,
+                                 &layout->reduce_temp_storage_bytes);
+    const cudaError_t reduce_err = cub::DeviceReduce::Max(
+        layout->d_reduce_temp_storage, reduce_storage_bytes, d_displacement_sq,
+        d_max_displacement_sq, layout->total_atom_numbers);
+    const cudaError_t sync_err = cudaDeviceSynchronize();
+    Clustered_Check_Cuda_Status(query_err,
+                                "clustered-inner-active-displacement-max-query");
+    Clustered_Check_Cuda_Status(reduce_err,
+                                "clustered-inner-active-displacement-max-run");
+    Clustered_Check_Cuda_Status(sync_err,
+                                "clustered-inner-active-displacement-max-sync");
+    float max_displacement_sq = 0.0f;
+    deviceMemcpy(&max_displacement_sq, d_max_displacement_sq, sizeof(float),
+                 deviceMemcpyDeviceToHost);
+    return sqrtf(fmaxf(max_displacement_sq, 0.0f));
+#endif
+}
+
+static void Refresh_Gmxpacked_Inner_Active_Anchor_Crd(
+    LJ_CLUSTER_LAYOUT* layout, const VECTOR* crd)
+{
+    if (layout == NULL || crd == NULL || layout->total_atom_numbers <= 0)
+    {
+        return;
+    }
+#ifndef USE_CPU
+    Reserve_Device_Vector_Buffer(layout->total_atom_numbers,
+                                 &layout->d_gmxpacked_inner_active_anchor_crd,
+                                 &layout
+                                      ->gmxpacked_inner_active_anchor_crd_capacity);
+    deviceMemcpy(layout->d_gmxpacked_inner_active_anchor_crd, crd,
+                 sizeof(VECTOR) * layout->total_atom_numbers,
+                 deviceMemcpyDeviceToDevice);
+#endif
+    layout->gmxpacked_inner_active_anchor_ready = true;
+}
+
+static int Copy_Clustered_Global_Atom_Id(const LJ_CLUSTER_LAYOUT* layout,
+                                         int local_atom)
+{
+    if (layout == NULL || local_atom < 0 ||
+        local_atom >= layout->total_atom_numbers || layout->d_atom_local == NULL)
+    {
+        return local_atom;
+    }
+    int global_atom = local_atom;
+    deviceMemcpy(&global_atom, layout->d_atom_local + local_atom, sizeof(int),
+                 deviceMemcpyDeviceToHost);
+    return global_atom;
+}
+
+static VECTOR Copy_Clustered_Device_Vector(const VECTOR* ptr, int index)
+{
+    VECTOR value = {0.0f, 0.0f, 0.0f};
+    if (ptr != NULL && index >= 0)
+    {
+        deviceMemcpy(&value, ptr + index, sizeof(VECTOR),
+                     deviceMemcpyDeviceToHost);
+    }
+    return value;
+}
+
+static void Trace_Clustered_Coordinate_Diagnostics(
+    LJ_CLUSTER_LAYOUT* layout, const VECTOR* crd, const LTMatrix3 cell,
+    const LTMatrix3 rcell, const char* reason)
+{
+    if (!Clustered_Coordinate_Diagnostics_Enabled() || layout == NULL ||
+        crd == NULL || layout->total_atom_numbers <= 0)
+    {
+        return;
+    }
+#ifdef USE_CPU
+    (void)cell;
+    (void)rcell;
+    (void)reason;
+#else
+    const float permit = layout->rebuild_skin * layout->rebuild_skin_permit;
+    const int h_init_diag[4] = {-1, -1, -1, 0};
+    Reserve_Device_Int_Buffer(4, &layout->d_need_rebuild,
+                              &layout->rebuild_flag_capacity);
+    deviceMemcpy(layout->d_need_rebuild, h_init_diag, sizeof(h_init_diag),
+                 deviceMemcpyHostToDevice);
+    Launch_Device_Kernel(
+        Diagnose_Clustered_Coordinate_State,
+        (layout->total_atom_numbers + CONTROLLER::device_max_thread - 1) /
+            CONTROLLER::device_max_thread,
+        CONTROLLER::device_max_thread, 0, NULL, layout->total_atom_numbers, crd,
+        layout->d_stable_target_layout_crd, cell, rcell, permit * permit,
+        layout->d_need_rebuild);
+    int h_diag[4] = {-1, -1, -1, 0};
+    deviceMemcpy(h_diag, layout->d_need_rebuild, sizeof(h_diag),
+                 deviceMemcpyDeviceToHost);
+    union
+    {
+        int bits;
+        float value;
+    } max_displacement_square = {h_diag[3]};
+    const float max_displacement =
+        sqrtf(fmaxf(max_displacement_square.value, 0.0f));
+
+    const int bad_current = h_diag[0];
+    const int bad_anchor = h_diag[1];
+    const int drift_atom = h_diag[2];
+    const int bad_current_global =
+        Copy_Clustered_Global_Atom_Id(layout, bad_current);
+    const int bad_anchor_global =
+        Copy_Clustered_Global_Atom_Id(layout, bad_anchor);
+    const int drift_global = Copy_Clustered_Global_Atom_Id(layout, drift_atom);
+    const VECTOR bad_current_crd =
+        Copy_Clustered_Device_Vector(crd, bad_current);
+    const VECTOR bad_anchor_crd =
+        Copy_Clustered_Device_Vector(layout->d_stable_target_layout_crd,
+                                     bad_anchor);
+    const VECTOR drift_current = Copy_Clustered_Device_Vector(crd, drift_atom);
+    const VECTOR drift_anchor =
+        Copy_Clustered_Device_Vector(layout->d_stable_target_layout_crd,
+                                     drift_atom);
+    VECTOR drift = {0.0f, 0.0f, 0.0f};
+    float drift_norm = 0.0f;
+    if (drift_atom >= 0)
+    {
+        drift = Get_Periodic_Displacement(drift_current, drift_anchor, cell,
+                                          rcell);
+        drift_norm = sqrtf(fmaxf(drift * drift, 0.0f));
+    }
+    fprintf(stderr,
+            "[clustered coord diag] step=%d reason=%s cached_step=%d "
+            "permit=%.6f bad_current_local=%d bad_current_global=%d "
+            "bad_current_crd=(%.9g,%.9g,%.9g) bad_anchor_local=%d "
+            "bad_anchor_global=%d bad_anchor_crd=(%.9g,%.9g,%.9g) "
+            "drift_local=%d drift_global=%d drift_current=(%.9g,%.9g,%.9g) "
+            "drift_anchor=(%.9g,%.9g,%.9g) drift=(%.9g,%.9g,%.9g) "
+            "drift_norm=%.9g max_displacement=%.9g\n",
+            md_info.sys.steps, reason != NULL ? reason : "unknown",
+            layout->cached_build_step, permit, bad_current, bad_current_global,
+            bad_current_crd.x, bad_current_crd.y, bad_current_crd.z, bad_anchor,
+            bad_anchor_global, bad_anchor_crd.x, bad_anchor_crd.y,
+            bad_anchor_crd.z, drift_atom, drift_global, drift_current.x,
+            drift_current.y, drift_current.z, drift_anchor.x, drift_anchor.y,
+            drift_anchor.z, drift.x, drift.y, drift.z, drift_norm,
+            max_displacement);
+    fflush(stderr);
+#endif
 }
 
 static void Initialize_Cornerstone_State(LJ_CLUSTER_LAYOUT* layout)
@@ -7453,6 +11036,666 @@ static int Exclusive_Scan_Counts(LJ_CLUSTER_LAYOUT* layout, int count_numbers,
 }
 
 #ifndef USE_CPU
+static bool Build_Gmxpacked_Incremental_Dirty_Device_Mask(
+    LJ_CLUSTER_LAYOUT* layout, const VECTOR* crd, const LTMatrix3 cell,
+    const LTMatrix3 rcell, const int* candidate_sci_supercluster_ids,
+    const int* candidate_shift_ids, const bool fixed_shift_candidates,
+    bool* j_leaf_scope_ready)
+{
+    if (j_leaf_scope_ready != NULL)
+    {
+        *j_leaf_scope_ready = false;
+    }
+    if (layout == NULL || crd == NULL || layout->d_cached_crd == NULL ||
+        layout->d_sort_permutation == NULL ||
+        layout->d_cluster_to_supercluster == NULL ||
+        candidate_sci_supercluster_ids == NULL ||
+        layout->total_atom_numbers <= 0 || layout->cluster_numbers <= 0 ||
+        layout->super_cluster_numbers <= 0 ||
+        layout->candidate_sci_numbers <= 0)
+    {
+        return false;
+    }
+    Bind_Clustered_Working_Device(&layout->working_device);
+    Reserve_Device_Int_Buffer(
+        layout->total_atom_numbers, &layout->d_gmxpacked_incremental_dirty_atoms,
+        &layout->gmxpacked_incremental_dirty_atom_capacity);
+    Reserve_Device_Int_Buffer(
+        layout->cluster_numbers,
+        &layout->d_gmxpacked_incremental_dirty_clusters,
+        &layout->gmxpacked_incremental_dirty_cluster_capacity);
+    Reserve_Device_Int_Buffer(
+        layout->super_cluster_numbers,
+        &layout->d_gmxpacked_incremental_dirty_superclusters,
+        &layout->gmxpacked_incremental_dirty_supercluster_capacity);
+    Reserve_Device_Int_Buffer(
+        layout->candidate_sci_numbers,
+        &layout->d_gmxpacked_incremental_dirty_i_candidate_sci,
+        &layout->gmxpacked_incremental_dirty_i_candidate_capacity);
+    Reserve_Device_Int_Buffer(
+        layout->candidate_sci_numbers,
+        &layout->d_gmxpacked_incremental_dirty_candidate_sci,
+        &layout->gmxpacked_incremental_dirty_candidate_capacity);
+
+    deviceMemset(layout->d_gmxpacked_incremental_dirty_atoms, 0,
+                 sizeof(int) * layout->total_atom_numbers);
+    deviceMemset(layout->d_gmxpacked_incremental_dirty_clusters, 0,
+                 sizeof(int) * layout->cluster_numbers);
+    deviceMemset(layout->d_gmxpacked_incremental_dirty_superclusters, 0,
+                 sizeof(int) * layout->super_cluster_numbers);
+    deviceMemset(layout->d_gmxpacked_incremental_dirty_i_candidate_sci, 0,
+                 sizeof(int) * layout->candidate_sci_numbers);
+    deviceMemset(layout->d_gmxpacked_incremental_dirty_candidate_sci, 0,
+                 sizeof(int) * layout->candidate_sci_numbers);
+
+    const float permit = layout->rebuild_skin * layout->rebuild_skin_permit;
+    Launch_Device_Kernel(
+        Mark_Clustered_Incremental_Dirty_Clusters,
+        (layout->total_atom_numbers + CONTROLLER::device_max_thread - 1) /
+            CONTROLLER::device_max_thread,
+        CONTROLLER::device_max_thread, 0, NULL, layout->total_atom_numbers,
+        layout->cluster_size, layout->cluster_numbers,
+        layout->super_cluster_numbers, crd, layout->d_cached_crd, cell, rcell,
+        layout->d_sort_permutation, layout->d_cluster_to_supercluster,
+        permit * permit, layout->d_gmxpacked_incremental_dirty_atoms,
+        layout->d_gmxpacked_incremental_dirty_clusters,
+        layout->d_gmxpacked_incremental_dirty_superclusters);
+
+    const bool fixed_shift_without_sparse_ids =
+        fixed_shift_candidates && candidate_shift_ids == NULL;
+    const int candidate_super_id_numbers =
+        fixed_shift_without_sparse_ids
+            ? (layout->candidate_sci_numbers + kClusteredShiftCount - 1) /
+                  kClusteredShiftCount
+            : layout->candidate_sci_numbers;
+    Launch_Device_Kernel(
+        Mark_Gmxpacked_Incremental_Dirty_I_Candidates,
+        (layout->candidate_sci_numbers + CONTROLLER::device_max_thread - 1) /
+            CONTROLLER::device_max_thread,
+        CONTROLLER::device_max_thread, 0, NULL, layout->candidate_sci_numbers,
+        candidate_super_id_numbers, layout->super_cluster_numbers,
+        fixed_shift_without_sparse_ids, candidate_sci_supercluster_ids,
+        layout->d_gmxpacked_incremental_dirty_superclusters,
+        layout->d_gmxpacked_incremental_dirty_i_candidate_sci,
+        layout->d_gmxpacked_incremental_dirty_candidate_sci);
+
+    const bool has_j_leaf_scope =
+        layout->candidate_leaf_numbers > 0 &&
+        layout->d_sci_candidate_leaf_offsets != NULL &&
+        layout->d_sci_candidate_leaf_ids != NULL &&
+        layout->d_leaf_cluster_starts != NULL &&
+        layout->d_leaf_cluster_ends != NULL;
+    if (has_j_leaf_scope)
+    {
+        Launch_Device_Kernel(
+            Mark_Gmxpacked_Incremental_Dirty_J_Candidates,
+            (layout->candidate_sci_numbers + CONTROLLER::device_max_thread - 1) /
+                CONTROLLER::device_max_thread,
+            CONTROLLER::device_max_thread, 0, NULL,
+            layout->candidate_sci_numbers, layout->candidate_leaf_numbers,
+            layout->cluster_numbers, layout->d_sci_candidate_leaf_offsets,
+            layout->d_sci_candidate_leaf_ids, layout->d_leaf_cluster_starts,
+            layout->d_leaf_cluster_ends,
+            layout->d_gmxpacked_incremental_dirty_clusters,
+            layout->d_gmxpacked_incremental_dirty_candidate_sci);
+    }
+    if (j_leaf_scope_ready != NULL)
+    {
+        *j_leaf_scope_ready = has_j_leaf_scope;
+    }
+    return true;
+}
+
+static bool Build_Gmxpacked_Inner_Active_Dirty_Device_Mask(
+    LJ_CLUSTER_LAYOUT* layout, const VECTOR* crd, const VECTOR* active_anchor_crd,
+    const LTMatrix3 cell, const LTMatrix3 rcell,
+    const int* candidate_sci_supercluster_ids, const int* candidate_shift_ids,
+    const bool fixed_shift_candidates, const float reuse_margin,
+    bool* j_leaf_scope_ready)
+{
+    if (j_leaf_scope_ready != NULL)
+    {
+        *j_leaf_scope_ready = false;
+    }
+    if (layout == NULL || crd == NULL || active_anchor_crd == NULL ||
+        reuse_margin <= 0.0f || layout->d_sort_permutation == NULL ||
+        layout->d_cluster_to_supercluster == NULL ||
+        candidate_sci_supercluster_ids == NULL ||
+        layout->total_atom_numbers <= 0 || layout->cluster_numbers <= 0 ||
+        layout->super_cluster_numbers <= 0 ||
+        layout->candidate_sci_numbers <= 0)
+    {
+        return false;
+    }
+    Bind_Clustered_Working_Device(&layout->working_device);
+    Reserve_Device_Int_Buffer(
+        layout->total_atom_numbers, &layout->d_gmxpacked_incremental_dirty_atoms,
+        &layout->gmxpacked_incremental_dirty_atom_capacity);
+    Reserve_Device_Int_Buffer(
+        layout->cluster_numbers,
+        &layout->d_gmxpacked_incremental_dirty_clusters,
+        &layout->gmxpacked_incremental_dirty_cluster_capacity);
+    Reserve_Device_Int_Buffer(
+        layout->super_cluster_numbers,
+        &layout->d_gmxpacked_incremental_dirty_superclusters,
+        &layout->gmxpacked_incremental_dirty_supercluster_capacity);
+    Reserve_Device_Int_Buffer(
+        layout->candidate_sci_numbers,
+        &layout->d_gmxpacked_incremental_dirty_i_candidate_sci,
+        &layout->gmxpacked_incremental_dirty_i_candidate_capacity);
+    Reserve_Device_Int_Buffer(
+        layout->candidate_sci_numbers,
+        &layout->d_gmxpacked_incremental_dirty_candidate_sci,
+        &layout->gmxpacked_incremental_dirty_candidate_capacity);
+
+    deviceMemset(layout->d_gmxpacked_incremental_dirty_atoms, 0,
+                 sizeof(int) * layout->total_atom_numbers);
+    deviceMemset(layout->d_gmxpacked_incremental_dirty_clusters, 0,
+                 sizeof(int) * layout->cluster_numbers);
+    deviceMemset(layout->d_gmxpacked_incremental_dirty_superclusters, 0,
+                 sizeof(int) * layout->super_cluster_numbers);
+    deviceMemset(layout->d_gmxpacked_incremental_dirty_i_candidate_sci, 0,
+                 sizeof(int) * layout->candidate_sci_numbers);
+    deviceMemset(layout->d_gmxpacked_incremental_dirty_candidate_sci, 0,
+                 sizeof(int) * layout->candidate_sci_numbers);
+
+    const float endpoint_permit = 0.5f * reuse_margin;
+    Launch_Device_Kernel(
+        Mark_Clustered_Incremental_Dirty_Clusters,
+        (layout->total_atom_numbers + CONTROLLER::device_max_thread - 1) /
+            CONTROLLER::device_max_thread,
+        CONTROLLER::device_max_thread, 0, NULL, layout->total_atom_numbers,
+        layout->cluster_size, layout->cluster_numbers,
+        layout->super_cluster_numbers, crd, active_anchor_crd, cell, rcell,
+        layout->d_sort_permutation, layout->d_cluster_to_supercluster,
+        endpoint_permit * endpoint_permit,
+        layout->d_gmxpacked_incremental_dirty_atoms,
+        layout->d_gmxpacked_incremental_dirty_clusters,
+        layout->d_gmxpacked_incremental_dirty_superclusters);
+
+    const bool fixed_shift_without_sparse_ids =
+        fixed_shift_candidates && candidate_shift_ids == NULL;
+    const int candidate_super_id_numbers =
+        fixed_shift_without_sparse_ids
+            ? (layout->candidate_sci_numbers + kClusteredShiftCount - 1) /
+                  kClusteredShiftCount
+            : layout->candidate_sci_numbers;
+    Launch_Device_Kernel(
+        Mark_Gmxpacked_Incremental_Dirty_I_Candidates,
+        (layout->candidate_sci_numbers + CONTROLLER::device_max_thread - 1) /
+            CONTROLLER::device_max_thread,
+        CONTROLLER::device_max_thread, 0, NULL, layout->candidate_sci_numbers,
+        candidate_super_id_numbers, layout->super_cluster_numbers,
+        fixed_shift_without_sparse_ids, candidate_sci_supercluster_ids,
+        layout->d_gmxpacked_incremental_dirty_superclusters,
+        layout->d_gmxpacked_incremental_dirty_i_candidate_sci,
+        layout->d_gmxpacked_incremental_dirty_candidate_sci);
+
+    const bool has_j_leaf_scope =
+        layout->candidate_leaf_numbers > 0 &&
+        layout->d_sci_candidate_leaf_offsets != NULL &&
+        layout->d_sci_candidate_leaf_ids != NULL &&
+        layout->d_leaf_cluster_starts != NULL &&
+        layout->d_leaf_cluster_ends != NULL;
+    if (has_j_leaf_scope)
+    {
+        Launch_Device_Kernel(
+            Mark_Gmxpacked_Incremental_Dirty_J_Candidates,
+            (layout->candidate_sci_numbers + CONTROLLER::device_max_thread - 1) /
+                CONTROLLER::device_max_thread,
+            CONTROLLER::device_max_thread, 0, NULL,
+            layout->candidate_sci_numbers, layout->candidate_leaf_numbers,
+            layout->cluster_numbers, layout->d_sci_candidate_leaf_offsets,
+            layout->d_sci_candidate_leaf_ids, layout->d_leaf_cluster_starts,
+            layout->d_leaf_cluster_ends,
+            layout->d_gmxpacked_incremental_dirty_clusters,
+            layout->d_gmxpacked_incremental_dirty_candidate_sci);
+    }
+    if (j_leaf_scope_ready != NULL)
+    {
+        *j_leaf_scope_ready = has_j_leaf_scope;
+    }
+    return true;
+}
+#endif
+
+static void Trace_Incremental_Dirty_Stats(LJ_CLUSTER_LAYOUT* layout,
+                                          const VECTOR* crd,
+                                          const LTMatrix3 cell,
+                                          const LTMatrix3 rcell)
+{
+#ifdef USE_CPU
+    (void)layout;
+    (void)crd;
+    (void)cell;
+    (void)rcell;
+#else
+    const bool dense_shift_partitioned_candidates =
+        Clustered_Use_Shift_Partitioned_Builder();
+    const bool sparse_shift_candidates =
+        !dense_shift_partitioned_candidates &&
+        Clustered_Use_Sparse_Shift_Candidate_Builder();
+    const bool fixed_shift_candidates =
+        dense_shift_partitioned_candidates || sparse_shift_candidates;
+    const int* candidate_sci_supercluster_ids = NULL;
+    const int* candidate_shift_ids = NULL;
+    if (layout != NULL)
+    {
+        candidate_sci_supercluster_ids =
+            sparse_shift_candidates ? layout->d_candidate_sci_offsets
+                                    : layout->d_sci_supercluster_ids;
+        candidate_shift_ids =
+            sparse_shift_candidates ? layout->d_candidate_shift_ids : NULL;
+    }
+    if (layout == NULL || crd == NULL || layout->d_cached_crd == NULL ||
+        !layout->cache_ready || layout->d_sort_permutation == NULL ||
+        layout->d_cluster_to_supercluster == NULL ||
+        candidate_sci_supercluster_ids == NULL ||
+        (sparse_shift_candidates && candidate_shift_ids == NULL) ||
+        layout->total_atom_numbers <= 0 || layout->cluster_numbers <= 0 ||
+        layout->super_cluster_numbers <= 0 ||
+        layout->candidate_sci_numbers <= 0)
+    {
+        if (layout != NULL)
+        {
+            fprintf(stderr,
+                    "[clustered incremental stats] step=%d status=unavailable "
+                    "cache=%d sorted_layout=%d atoms=%d clusters=%d "
+                    "superclusters=%d candidate_sci=%d sparse=%d\n",
+                    md_info.sys.steps, layout->cache_ready ? 1 : 0,
+                    (layout->d_sort_permutation != NULL &&
+                     layout->d_cluster_to_supercluster != NULL)
+                        ? 1
+                        : 0,
+                    layout->total_atom_numbers, layout->cluster_numbers,
+                    layout->super_cluster_numbers,
+                    layout->candidate_sci_numbers,
+                    sparse_shift_candidates ? 1 : 0);
+            fflush(stderr);
+        }
+        return;
+    }
+    Bind_Clustered_Working_Device(&layout->working_device);
+    const float permit = layout->rebuild_skin * layout->rebuild_skin_permit;
+    const float permit_square = permit * permit;
+    const int total_atom_numbers = layout->total_atom_numbers;
+    const int cluster_numbers = layout->cluster_numbers;
+    const int super_cluster_numbers = layout->super_cluster_numbers;
+    const int candidate_sci_numbers = layout->candidate_sci_numbers;
+    const int candidate_super_id_numbers =
+        (fixed_shift_candidates && candidate_shift_ids == NULL)
+            ? (candidate_sci_numbers + kClusteredShiftCount - 1) /
+                  kClusteredShiftCount
+            : candidate_sci_numbers;
+
+    std::vector<VECTOR> h_crd(static_cast<size_t>(total_atom_numbers));
+    std::vector<VECTOR> h_cached_crd(static_cast<size_t>(total_atom_numbers));
+    std::vector<int> h_permutation(static_cast<size_t>(total_atom_numbers));
+    std::vector<int> h_cluster_to_supercluster(
+        static_cast<size_t>(cluster_numbers));
+    std::vector<int> h_candidate_sci_supercluster_ids(
+        static_cast<size_t>(candidate_super_id_numbers));
+    deviceMemcpy(h_crd.data(), crd, sizeof(VECTOR) * total_atom_numbers,
+                 deviceMemcpyDeviceToHost);
+    deviceMemcpy(h_cached_crd.data(), layout->d_cached_crd,
+                 sizeof(VECTOR) * total_atom_numbers, deviceMemcpyDeviceToHost);
+    deviceMemcpy(h_permutation.data(), layout->d_sort_permutation,
+                 sizeof(int) * total_atom_numbers, deviceMemcpyDeviceToHost);
+    deviceMemcpy(h_cluster_to_supercluster.data(),
+                 layout->d_cluster_to_supercluster,
+                 sizeof(int) * cluster_numbers, deviceMemcpyDeviceToHost);
+    deviceMemcpy(h_candidate_sci_supercluster_ids.data(),
+                 candidate_sci_supercluster_ids,
+                 sizeof(int) * candidate_super_id_numbers,
+                 deviceMemcpyDeviceToHost);
+
+    std::vector<int> h_dirty_atoms(static_cast<size_t>(total_atom_numbers), 0);
+    std::vector<int> h_dirty_clusters(static_cast<size_t>(cluster_numbers), 0);
+    std::vector<int> h_dirty_superclusters(
+        static_cast<size_t>(super_cluster_numbers), 0);
+    std::vector<int> h_dirty_i_candidate_sci(
+        static_cast<size_t>(candidate_sci_numbers), 0);
+    std::vector<int> h_dirty_any_candidate_sci(
+        static_cast<size_t>(candidate_sci_numbers), 0);
+    for (int sorted_idx = 0; sorted_idx < total_atom_numbers; sorted_idx += 1)
+    {
+        const int atom = h_permutation[static_cast<size_t>(sorted_idx)];
+        if (atom < 0 || atom >= total_atom_numbers)
+        {
+            continue;
+        }
+        const VECTOR dr = Get_Periodic_Displacement(
+            h_crd[static_cast<size_t>(atom)],
+            h_cached_crd[static_cast<size_t>(atom)], cell, rcell);
+        if (dr * dr <= permit_square)
+        {
+            continue;
+        }
+        h_dirty_atoms[static_cast<size_t>(atom)] = 1;
+        const int cluster_i = sorted_idx / layout->cluster_size;
+        if (cluster_i < 0 || cluster_i >= cluster_numbers)
+        {
+            continue;
+        }
+        h_dirty_clusters[static_cast<size_t>(cluster_i)] = 1;
+        const int super_i =
+            h_cluster_to_supercluster[static_cast<size_t>(cluster_i)];
+        if (super_i >= 0 && super_i < super_cluster_numbers)
+        {
+            h_dirty_superclusters[static_cast<size_t>(super_i)] = 1;
+        }
+    }
+    for (int candidate_sci = 0; candidate_sci < candidate_sci_numbers;
+         candidate_sci += 1)
+    {
+        const int sci_base =
+            (fixed_shift_candidates && candidate_shift_ids == NULL)
+                ? candidate_sci / kClusteredShiftCount
+                : candidate_sci;
+        if (sci_base < 0 || sci_base >= candidate_super_id_numbers)
+        {
+            continue;
+        }
+        const int super_i =
+            h_candidate_sci_supercluster_ids[static_cast<size_t>(sci_base)];
+        const int dirty_i_candidate =
+            (super_i >= 0 && super_i < super_cluster_numbers)
+                ? h_dirty_superclusters[static_cast<size_t>(super_i)]
+                : 0;
+        h_dirty_i_candidate_sci[static_cast<size_t>(candidate_sci)] =
+            dirty_i_candidate;
+        h_dirty_any_candidate_sci[static_cast<size_t>(candidate_sci)] =
+            dirty_i_candidate;
+    }
+
+    bool j_leaf_scope_ready = false;
+    if (layout->candidate_leaf_numbers > 0 &&
+        layout->d_sci_candidate_leaf_offsets != NULL &&
+        layout->d_sci_candidate_leaf_ids != NULL &&
+        layout->d_leaf_cluster_starts != NULL &&
+        layout->d_leaf_cluster_ends != NULL)
+    {
+        std::vector<int> h_candidate_leaf_offsets(
+            static_cast<size_t>(candidate_sci_numbers) + 1);
+        std::vector<int> h_candidate_leaf_ids(
+            static_cast<size_t>(layout->candidate_leaf_numbers));
+        deviceMemcpy(h_candidate_leaf_offsets.data(),
+                     layout->d_sci_candidate_leaf_offsets,
+                     sizeof(int) * (candidate_sci_numbers + 1),
+                     deviceMemcpyDeviceToHost);
+        deviceMemcpy(h_candidate_leaf_ids.data(), layout->d_sci_candidate_leaf_ids,
+                     sizeof(int) * layout->candidate_leaf_numbers,
+                     deviceMemcpyDeviceToHost);
+        int max_leaf_id = -1;
+        for (const int leaf_id : h_candidate_leaf_ids)
+        {
+            max_leaf_id = IntMax(max_leaf_id, leaf_id);
+        }
+        if (max_leaf_id >= 0)
+        {
+            std::vector<int> h_leaf_cluster_starts(
+                static_cast<size_t>(max_leaf_id) + 1);
+            std::vector<int> h_leaf_cluster_ends(
+                static_cast<size_t>(max_leaf_id) + 1);
+            deviceMemcpy(h_leaf_cluster_starts.data(),
+                         layout->d_leaf_cluster_starts,
+                         sizeof(int) * (max_leaf_id + 1),
+                         deviceMemcpyDeviceToHost);
+            deviceMemcpy(h_leaf_cluster_ends.data(), layout->d_leaf_cluster_ends,
+                         sizeof(int) * (max_leaf_id + 1),
+                         deviceMemcpyDeviceToHost);
+            std::vector<int> h_dirty_leaf(static_cast<size_t>(max_leaf_id) + 1,
+                                          0);
+            for (int leaf_id = 0; leaf_id <= max_leaf_id; leaf_id += 1)
+            {
+                const int cluster_begin =
+                    h_leaf_cluster_starts[static_cast<size_t>(leaf_id)];
+                const int cluster_end =
+                    h_leaf_cluster_ends[static_cast<size_t>(leaf_id)];
+                for (int cluster = cluster_begin; cluster < cluster_end;
+                     cluster += 1)
+                {
+                    if (cluster >= 0 && cluster < cluster_numbers &&
+                        h_dirty_clusters[static_cast<size_t>(cluster)] != 0)
+                    {
+                        h_dirty_leaf[static_cast<size_t>(leaf_id)] = 1;
+                        break;
+                    }
+                }
+            }
+            for (int candidate_sci = 0; candidate_sci < candidate_sci_numbers;
+                 candidate_sci += 1)
+            {
+                if (h_dirty_any_candidate_sci
+                        [static_cast<size_t>(candidate_sci)] != 0)
+                {
+                    continue;
+                }
+                const int candidate_begin =
+                    h_candidate_leaf_offsets[static_cast<size_t>(candidate_sci)];
+                const int candidate_end =
+                    h_candidate_leaf_offsets[static_cast<size_t>(candidate_sci) +
+                                             1];
+                for (int candidate_idx = candidate_begin;
+                     candidate_idx < candidate_end; candidate_idx += 1)
+                {
+                    if (candidate_idx < 0 ||
+                        candidate_idx >= layout->candidate_leaf_numbers)
+                    {
+                        continue;
+                    }
+                    const int leaf_id =
+                        h_candidate_leaf_ids[static_cast<size_t>(candidate_idx)];
+                    if (leaf_id >= 0 && leaf_id <= max_leaf_id &&
+                        h_dirty_leaf[static_cast<size_t>(leaf_id)] != 0)
+                    {
+                        h_dirty_any_candidate_sci
+                            [static_cast<size_t>(candidate_sci)] = 1;
+                        break;
+                    }
+                }
+            }
+            j_leaf_scope_ready = true;
+        }
+    }
+
+    bool device_mask_ready = false;
+    bool device_j_leaf_scope_ready = false;
+    std::vector<int> h_device_dirty_i_candidate_sci;
+    std::vector<int> h_device_dirty_candidate_sci;
+    if (Clustered_Gmxpacked_Incremental_Device_Mask_Enabled())
+    {
+        device_mask_ready = Build_Gmxpacked_Incremental_Dirty_Device_Mask(
+            layout, crd, cell, rcell, candidate_sci_supercluster_ids,
+            candidate_shift_ids, fixed_shift_candidates,
+            &device_j_leaf_scope_ready);
+        if (device_mask_ready)
+        {
+            h_device_dirty_i_candidate_sci.resize(
+                static_cast<size_t>(candidate_sci_numbers));
+            h_device_dirty_candidate_sci.resize(
+                static_cast<size_t>(candidate_sci_numbers));
+            deviceMemcpy(h_device_dirty_i_candidate_sci.data(),
+                         layout->d_gmxpacked_incremental_dirty_i_candidate_sci,
+                         sizeof(int) * candidate_sci_numbers,
+                         deviceMemcpyDeviceToHost);
+            deviceMemcpy(h_device_dirty_candidate_sci.data(),
+                         layout->d_gmxpacked_incremental_dirty_candidate_sci,
+                         sizeof(int) * candidate_sci_numbers,
+                         deviceMemcpyDeviceToHost);
+        }
+    }
+
+    auto count_flags = [](const std::vector<int>& flags)
+    {
+        int total = 0;
+        for (const int flag : flags)
+        {
+            total += flag != 0 ? 1 : 0;
+        }
+        return total;
+    };
+    const int dirty_atoms = count_flags(h_dirty_atoms);
+    const int dirty_clusters = count_flags(h_dirty_clusters);
+    const int dirty_superclusters = count_flags(h_dirty_superclusters);
+    const int dirty_i_candidate_sci = count_flags(h_dirty_i_candidate_sci);
+    const int dirty_candidate_sci = count_flags(h_dirty_any_candidate_sci);
+    int device_dirty_i_candidate_sci = -1;
+    int device_dirty_candidate_sci = -1;
+    int device_dirty_i_candidate_mismatches = -1;
+    int device_dirty_candidate_mismatches = -1;
+    if (device_mask_ready)
+    {
+        device_dirty_i_candidate_sci =
+            count_flags(h_device_dirty_i_candidate_sci);
+        device_dirty_candidate_sci = count_flags(h_device_dirty_candidate_sci);
+        device_dirty_i_candidate_mismatches = 0;
+        device_dirty_candidate_mismatches = 0;
+        for (int candidate_sci = 0; candidate_sci < candidate_sci_numbers;
+             candidate_sci += 1)
+        {
+            const size_t idx = static_cast<size_t>(candidate_sci);
+            device_dirty_i_candidate_mismatches +=
+                ((h_device_dirty_i_candidate_sci[idx] != 0) !=
+                 (h_dirty_i_candidate_sci[idx] != 0))
+                    ? 1
+                    : 0;
+            device_dirty_candidate_mismatches +=
+                ((h_device_dirty_candidate_sci[idx] != 0) !=
+                 (h_dirty_any_candidate_sci[idx] != 0))
+                    ? 1
+                    : 0;
+        }
+    }
+    long long dirty_i_source_rows = -1;
+    long long dirty_source_rows = -1;
+    long long device_dirty_i_source_rows = -1;
+    long long device_dirty_source_rows = -1;
+    int cached_source_rows = 0;
+    const bool source_offsets_ready =
+        layout->gmxpacked_incremental_source_offsets_ready &&
+        layout->d_gmxpacked_incremental_source_offsets_by_candidate != NULL &&
+        layout->gmxpacked_incremental_candidate_sci_numbers ==
+            candidate_sci_numbers &&
+        layout->gmxpacked_incremental_source_numbers >= 0;
+    if (source_offsets_ready)
+    {
+        std::vector<int> h_source_offsets(
+            static_cast<size_t>(candidate_sci_numbers) + 1);
+        deviceMemcpy(h_source_offsets.data(),
+                     layout->d_gmxpacked_incremental_source_offsets_by_candidate,
+                     sizeof(int) * (candidate_sci_numbers + 1),
+                     deviceMemcpyDeviceToHost);
+        dirty_i_source_rows = 0;
+        dirty_source_rows = 0;
+        if (device_mask_ready)
+        {
+            device_dirty_i_source_rows = 0;
+            device_dirty_source_rows = 0;
+        }
+        cached_source_rows = layout->gmxpacked_incremental_source_numbers;
+        for (int candidate_sci = 0; candidate_sci < candidate_sci_numbers;
+             candidate_sci += 1)
+        {
+            const int begin =
+                h_source_offsets[static_cast<size_t>(candidate_sci)];
+            const int end =
+                h_source_offsets[static_cast<size_t>(candidate_sci) + 1];
+            const int source_rows = IntMax(0, end - begin);
+            if (h_dirty_i_candidate_sci[static_cast<size_t>(candidate_sci)] != 0)
+            {
+                dirty_i_source_rows += source_rows;
+            }
+            if (h_dirty_any_candidate_sci[static_cast<size_t>(candidate_sci)] !=
+                0)
+            {
+                dirty_source_rows += source_rows;
+            }
+            if (device_mask_ready &&
+                h_device_dirty_i_candidate_sci
+                        [static_cast<size_t>(candidate_sci)] != 0)
+            {
+                device_dirty_i_source_rows += source_rows;
+            }
+            if (device_mask_ready &&
+                h_device_dirty_candidate_sci
+                        [static_cast<size_t>(candidate_sci)] != 0)
+            {
+                device_dirty_source_rows += source_rows;
+            }
+        }
+    }
+    const double atom_ratio =
+        layout->total_atom_numbers > 0
+            ? static_cast<double>(dirty_atoms) /
+                  static_cast<double>(layout->total_atom_numbers)
+            : 0.0;
+    const double cluster_ratio =
+        layout->cluster_numbers > 0
+            ? static_cast<double>(dirty_clusters) /
+                  static_cast<double>(layout->cluster_numbers)
+            : 0.0;
+    const double super_ratio =
+        layout->super_cluster_numbers > 0
+            ? static_cast<double>(dirty_superclusters) /
+                  static_cast<double>(layout->super_cluster_numbers)
+            : 0.0;
+    const double candidate_ratio =
+        layout->candidate_sci_numbers > 0
+            ? static_cast<double>(dirty_candidate_sci) /
+                  static_cast<double>(layout->candidate_sci_numbers)
+            : 0.0;
+    const double i_candidate_ratio =
+        layout->candidate_sci_numbers > 0
+            ? static_cast<double>(dirty_i_candidate_sci) /
+                  static_cast<double>(layout->candidate_sci_numbers)
+            : 0.0;
+    const double dirty_i_source_ratio =
+        cached_source_rows > 0 && dirty_i_source_rows >= 0
+            ? static_cast<double>(dirty_i_source_rows) /
+                  static_cast<double>(cached_source_rows)
+            : 0.0;
+    const double dirty_source_ratio =
+        cached_source_rows > 0 && dirty_source_rows >= 0
+            ? static_cast<double>(dirty_source_rows) /
+                  static_cast<double>(cached_source_rows)
+            : 0.0;
+    const bool source_cache_ready =
+        source_offsets_ready && layout->gmxpacked_incremental_source_cache_ready &&
+        layout->d_gmxpacked_incremental_record_stream_sources != NULL;
+    fprintf(stderr,
+            "[clustered incremental stats] step=%d cached_step=%d "
+            "permit=%.4f dirty_atoms=%d/%d(%.6f) "
+            "dirty_clusters=%d/%d(%.6f) dirty_superclusters=%d/%d(%.6f) "
+            "dirty_i_candidate_sci=%d/%d(%.6f) "
+            "dirty_candidate_sci=%d/%d(%.6f) dirty_source_rows=%lld/%d(%.6f) "
+            "dirty_i_source_rows=%lld/%d(%.6f) source_offsets=%d "
+            "source_cache=%d j_leaf_scope=%d device_mask=%d "
+            "device_j_leaf_scope=%d device_i_candidate_sci=%d "
+            "device_candidate_sci=%d device_source_rows=%lld "
+            "device_i_source_rows=%lld device_mismatch=%d/%d "
+            "cluster_atom_bound=%d\n",
+            md_info.sys.steps, layout->cached_build_step, permit, dirty_atoms,
+            layout->total_atom_numbers, atom_ratio, dirty_clusters,
+            layout->cluster_numbers, cluster_ratio, dirty_superclusters,
+            layout->super_cluster_numbers, super_ratio, dirty_i_candidate_sci,
+            layout->candidate_sci_numbers, i_candidate_ratio,
+            dirty_candidate_sci, layout->candidate_sci_numbers,
+            candidate_ratio, dirty_source_rows, cached_source_rows,
+            dirty_source_ratio, dirty_i_source_rows, cached_source_rows,
+            dirty_i_source_ratio, source_offsets_ready ? 1 : 0,
+            source_cache_ready ? 1 : 0, j_leaf_scope_ready ? 1 : 0,
+            device_mask_ready ? 1 : 0, device_j_leaf_scope_ready ? 1 : 0,
+            device_dirty_i_candidate_sci, device_dirty_candidate_sci,
+            device_dirty_source_rows, device_dirty_i_source_rows,
+            device_dirty_i_candidate_mismatches,
+            device_dirty_candidate_mismatches,
+            dirty_clusters * layout->cluster_size);
+    fflush(stderr);
+#endif
+}
+
+#ifndef USE_CPU
 static void Stable_Sort_Sci_By_Workload(int sci_numbers,
                                         LJ_CLUSTERED_SCI* d_sci_entries,
                                         int* d_sci_sort_keys,
@@ -7472,6 +11715,1751 @@ static void Stable_Sort_Sci_By_Workload(int sci_numbers,
 }
 #endif
 
+static int Count_Gmxpacked_Record_Stream_Inner_Active_Source_Rows(
+    LJ_CLUSTER_LAYOUT* layout, int source_rows,
+    const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* sources,
+    const VECTOR* crd, LTMatrix3 cell, LTMatrix3 rcell, float cutoff,
+    bool record_builder_stage_timers, const char* stage_name,
+    bool record_active_imasks)
+{
+    if (layout == NULL || source_rows <= 0 || sources == NULL || crd == NULL)
+    {
+        return 0;
+    }
+#ifdef USE_CPU
+    (void)cell;
+    (void)rcell;
+    (void)cutoff;
+    (void)record_builder_stage_timers;
+    (void)stage_name;
+    return source_rows;
+#else
+    ClusteredGmxpackedRecordBuilderStageTimer stage_timer(
+        stage_name != NULL ? stage_name : "record-stream-inner-active-flag-scan",
+        record_builder_stage_timers);
+    Reserve_Device_Int_Buffer(source_rows + 1, &layout->d_jentry_counts,
+                              &layout->jentry_count_capacity);
+    Reserve_Device_Int_Buffer(source_rows + 1, &layout->d_jentry_offsets,
+                              &layout->jentry_offset_capacity);
+    unsigned int* active_imasks_by_source = NULL;
+    if (record_active_imasks)
+    {
+        Reserve_Device_UInt_Buffer(
+            source_rows, &layout->d_gmxpacked_inner_active_source_imasks,
+            &layout->gmxpacked_inner_active_source_imask_capacity);
+        active_imasks_by_source =
+            layout->d_gmxpacked_inner_active_source_imasks;
+    }
+    Launch_Device_Kernel(
+        Count_Gmxpacked_Record_Stream_Inner_Active_Sources,
+        (source_rows + CONTROLLER::device_max_thread - 1) /
+            CONTROLLER::device_max_thread,
+        CONTROLLER::device_max_thread, 0, NULL, source_rows, sources,
+        layout->d_sort_permutation, layout->d_cluster_offsets,
+        layout->d_super_cluster_offsets, layout->d_cluster_local_masks,
+        layout->d_cluster_centers, crd, cell, rcell, cutoff * cutoff,
+        layout->d_jentry_counts, active_imasks_by_source);
+    if (record_active_imasks)
+    {
+        layout->gmxpacked_inner_active_source_imasks_ready = true;
+        layout->gmxpacked_inner_active_source_imask_numbers = source_rows;
+    }
+    return Exclusive_Scan_Counts(layout, source_rows, layout->d_jentry_counts,
+                                 layout->d_jentry_offsets);
+#endif
+}
+
+static bool Gmxpacked_Inner_Active_Source_Coverage_Covers(
+    LJ_CLUSTER_LAYOUT* layout, int source_rows,
+    const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* sources,
+    const VECTOR* crd, LTMatrix3 cell, LTMatrix3 rcell, float cutoff,
+    bool record_builder_stage_timers, const char* stage_name,
+    int* missing_source_rows)
+{
+    if (missing_source_rows != NULL)
+    {
+        *missing_source_rows = -1;
+    }
+    if (layout == NULL || source_rows <= 0 || sources == NULL || crd == NULL ||
+        !layout->gmxpacked_inner_active_source_imasks_ready ||
+        layout->gmxpacked_inner_active_source_imask_numbers != source_rows ||
+        layout->d_gmxpacked_inner_active_source_imasks == NULL)
+    {
+        return false;
+    }
+#ifdef USE_CPU
+    (void)cell;
+    (void)rcell;
+    (void)cutoff;
+    (void)record_builder_stage_timers;
+    (void)stage_name;
+    if (missing_source_rows != NULL)
+    {
+        *missing_source_rows = 0;
+    }
+    return true;
+#else
+    ClusteredGmxpackedRecordBuilderStageTimer stage_timer(
+        stage_name != NULL ? stage_name
+                           : "rolling-inner-active-coverage-check",
+        record_builder_stage_timers);
+    Reserve_Device_Int_Buffer(1, &layout->d_need_rebuild,
+                              &layout->rebuild_flag_capacity);
+    int missing_rows = 0;
+    deviceMemcpy(layout->d_need_rebuild, &missing_rows, sizeof(int),
+                 deviceMemcpyHostToDevice);
+    Launch_Device_Kernel(
+        Check_Gmxpacked_Record_Stream_Inner_Active_Coverage,
+        (source_rows + CONTROLLER::device_max_thread - 1) /
+            CONTROLLER::device_max_thread,
+        CONTROLLER::device_max_thread, 0, NULL, source_rows, sources,
+        layout->d_gmxpacked_inner_active_source_imasks,
+        layout->d_sort_permutation, layout->d_cluster_offsets,
+        layout->d_super_cluster_offsets, layout->d_cluster_local_masks,
+        layout->d_cluster_centers, crd, cell, rcell, cutoff * cutoff,
+        layout->d_need_rebuild);
+    deviceMemcpy(&missing_rows, layout->d_need_rebuild, sizeof(int),
+                 deviceMemcpyDeviceToHost);
+    if (missing_source_rows != NULL)
+    {
+        *missing_source_rows = missing_rows;
+    }
+    return missing_rows == 0;
+#endif
+}
+
+static bool Append_Gmxpacked_Inner_Active_Missing_Sources(
+    LJ_CLUSTER_LAYOUT* layout, int outer_source_rows,
+    const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* outer_sources,
+    const VECTOR* crd, LTMatrix3 cell, LTMatrix3 rcell, float cutoff,
+    int previous_active_source_rows, int max_combined_source_rows,
+    bool record_builder_stage_timers, const char* stage_name,
+    int* appended_source_rows, int* overflow_rows)
+{
+    if (appended_source_rows != NULL)
+    {
+        *appended_source_rows = 0;
+    }
+    if (overflow_rows != NULL)
+    {
+        *overflow_rows = 0;
+    }
+    if (layout == NULL || outer_source_rows <= 0 || outer_sources == NULL ||
+        crd == NULL || previous_active_source_rows <= 0 ||
+        max_combined_source_rows <= previous_active_source_rows ||
+        layout->d_gmxpacked_record_stream_sources == NULL ||
+        !layout->gmxpacked_inner_active_source_imasks_ready ||
+        layout->gmxpacked_inner_active_source_imask_numbers !=
+            outer_source_rows ||
+        layout->d_gmxpacked_inner_active_source_imasks == NULL)
+    {
+        return false;
+    }
+#ifdef USE_CPU
+    (void)cell;
+    (void)rcell;
+    (void)cutoff;
+    (void)record_builder_stage_timers;
+    (void)stage_name;
+    return false;
+#else
+    ClusteredGmxpackedRecordBuilderStageTimer stage_timer(
+        stage_name != NULL ? stage_name
+                           : "rolling-inner-active-incremental-append",
+        record_builder_stage_timers);
+    const int missing_source_capacity =
+        max_combined_source_rows - previous_active_source_rows;
+    int* d_missing_source_fill_cursor = NULL;
+    int missing_source_fill_cursor_capacity = 0;
+    int* d_missing_source_overflow_rows = NULL;
+    int missing_source_overflow_capacity = 0;
+    Reserve_Device_Int_Buffer(1, &d_missing_source_fill_cursor,
+                              &missing_source_fill_cursor_capacity);
+    Reserve_Device_Int_Buffer(1, &d_missing_source_overflow_rows,
+                              &missing_source_overflow_capacity);
+    Reserve_Device_Buffer(missing_source_capacity,
+                          &layout->d_gmxpacked_incremental_replacement_sources,
+                          &layout->gmxpacked_incremental_replacement_source_capacity);
+    int zero = 0;
+    deviceMemcpy(d_missing_source_fill_cursor, &zero, sizeof(int),
+                 deviceMemcpyHostToDevice);
+    deviceMemcpy(d_missing_source_overflow_rows, &zero, sizeof(int),
+                 deviceMemcpyHostToDevice);
+    Launch_Device_Kernel(
+        Fill_Gmxpacked_Record_Stream_Inner_Active_Missing_Sources,
+        (outer_source_rows + CONTROLLER::device_max_thread - 1) /
+            CONTROLLER::device_max_thread,
+        CONTROLLER::device_max_thread, 0, NULL, outer_source_rows,
+        outer_sources, layout->d_gmxpacked_inner_active_source_imasks,
+        layout->d_sort_permutation, layout->d_cluster_offsets,
+        layout->d_super_cluster_offsets, layout->d_cluster_local_masks,
+        layout->d_cluster_centers, crd, cell, rcell, cutoff * cutoff,
+        missing_source_capacity, previous_active_source_rows,
+        layout->d_gmxpacked_incremental_replacement_sources,
+        d_missing_source_fill_cursor, d_missing_source_overflow_rows);
+    int filled_rows = 0;
+    int overflow = 0;
+    deviceMemcpy(&filled_rows, d_missing_source_fill_cursor, sizeof(int),
+                 deviceMemcpyDeviceToHost);
+    deviceMemcpy(&overflow, d_missing_source_overflow_rows, sizeof(int),
+                 deviceMemcpyDeviceToHost);
+    Free_Single_Device_Pointer((void**)&d_missing_source_fill_cursor);
+    Free_Single_Device_Pointer((void**)&d_missing_source_overflow_rows);
+    if (appended_source_rows != NULL)
+    {
+        *appended_source_rows = filled_rows;
+    }
+    if (overflow_rows != NULL)
+    {
+        *overflow_rows = overflow;
+    }
+    if (overflow != 0 || filled_rows < 0 ||
+        filled_rows > missing_source_capacity)
+    {
+        return false;
+    }
+    if (filled_rows == 0)
+    {
+        return true;
+    }
+    const int combined_source_rows = previous_active_source_rows + filled_rows;
+    Reserve_Device_Byte_Buffer(
+        sizeof(LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE) *
+            static_cast<size_t>(combined_source_rows),
+        &layout->d_sort_value_buffer, &layout->sort_value_buffer_bytes);
+    LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* combined_sources =
+        reinterpret_cast<LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE*>(
+            layout->d_sort_value_buffer);
+    deviceMemcpy(
+        combined_sources, layout->d_gmxpacked_record_stream_sources,
+        sizeof(LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE) *
+            static_cast<size_t>(previous_active_source_rows),
+        deviceMemcpyDeviceToDevice);
+    deviceMemcpy(
+        combined_sources + previous_active_source_rows,
+        layout->d_gmxpacked_incremental_replacement_sources,
+        sizeof(LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE) *
+            static_cast<size_t>(filled_rows),
+        deviceMemcpyDeviceToDevice);
+    Reserve_Device_Buffer(combined_source_rows,
+                          &layout->d_gmxpacked_record_stream_sources,
+                          &layout->gmxpacked_record_stream_source_capacity);
+    deviceMemcpy(
+        layout->d_gmxpacked_record_stream_sources, combined_sources,
+        sizeof(LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE) *
+            static_cast<size_t>(combined_source_rows),
+        deviceMemcpyDeviceToDevice);
+    layout->gmxpacked_record_stream_source_numbers = combined_source_rows;
+    layout->gmxpacked_record_stream_aggregate_numbers = 0;
+    return true;
+#endif
+}
+
+static bool Append_Gmxpacked_Inner_Active_Missing_Sources_From_Dirty_Candidates(
+    LJ_CLUSTER_LAYOUT* layout, int outer_source_rows,
+    const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* outer_sources,
+    int candidate_sci_numbers, const int* dirty_candidate_sci,
+    const int* source_offsets_by_candidate, const VECTOR* crd, LTMatrix3 cell,
+    LTMatrix3 rcell, float cutoff, int previous_active_source_rows,
+    int max_combined_source_rows, bool record_builder_stage_timers,
+    const char* stage_name, int* appended_source_rows, int* overflow_rows,
+    int* dirty_source_rows_out)
+{
+    if (appended_source_rows != NULL)
+    {
+        *appended_source_rows = 0;
+    }
+    if (overflow_rows != NULL)
+    {
+        *overflow_rows = 0;
+    }
+    if (dirty_source_rows_out != NULL)
+    {
+        *dirty_source_rows_out = -1;
+    }
+    if (layout == NULL || outer_source_rows <= 0 || outer_sources == NULL ||
+        candidate_sci_numbers <= 0 || dirty_candidate_sci == NULL ||
+        source_offsets_by_candidate == NULL || crd == NULL ||
+        previous_active_source_rows <= 0 ||
+        max_combined_source_rows <= previous_active_source_rows ||
+        layout->d_gmxpacked_record_stream_sources == NULL ||
+        !layout->gmxpacked_inner_active_source_imasks_ready ||
+        layout->gmxpacked_inner_active_source_imask_numbers !=
+            outer_source_rows ||
+        layout->d_gmxpacked_inner_active_source_imasks == NULL)
+    {
+        return false;
+    }
+#ifdef USE_CPU
+    (void)cell;
+    (void)rcell;
+    (void)cutoff;
+    (void)record_builder_stage_timers;
+    (void)stage_name;
+    return false;
+#else
+    ClusteredGmxpackedRecordBuilderStageTimer stage_timer(
+        stage_name != NULL ? stage_name
+                           : "rolling-inner-active-dirty-candidate-append",
+        record_builder_stage_timers);
+    Reserve_Device_Int_Buffer(candidate_sci_numbers + 1, &layout->d_jentry_counts,
+                              &layout->jentry_count_capacity);
+    Reserve_Device_Int_Buffer(candidate_sci_numbers + 1, &layout->d_jentry_offsets,
+                              &layout->jentry_offset_capacity);
+    Launch_Device_Kernel(
+        Count_Gmxpacked_Dirty_Source_Rows_By_Candidate,
+        (candidate_sci_numbers + CONTROLLER::device_max_thread - 1) /
+            CONTROLLER::device_max_thread,
+        CONTROLLER::device_max_thread, 0, NULL, candidate_sci_numbers,
+        dirty_candidate_sci, source_offsets_by_candidate,
+        layout->d_jentry_counts);
+    const int dirty_source_rows =
+        Exclusive_Scan_Counts(layout, candidate_sci_numbers,
+                              layout->d_jentry_counts,
+                              layout->d_jentry_offsets);
+    if (dirty_source_rows_out != NULL)
+    {
+        *dirty_source_rows_out = dirty_source_rows;
+    }
+    if (dirty_source_rows <= 0)
+    {
+        return true;
+    }
+    const float dirty_ratio =
+        static_cast<float>(dirty_source_rows) /
+        static_cast<float>(outer_source_rows);
+    if (dirty_ratio >
+        Clustered_Gmxpacked_Active_View_Dirty_Source_Ratio_Limit())
+    {
+        return false;
+    }
+
+    const int missing_source_capacity =
+        max_combined_source_rows - previous_active_source_rows;
+    int* d_missing_source_fill_cursor = NULL;
+    int missing_source_fill_cursor_capacity = 0;
+    int* d_missing_source_overflow_rows = NULL;
+    int missing_source_overflow_capacity = 0;
+    Reserve_Device_Int_Buffer(1, &d_missing_source_fill_cursor,
+                              &missing_source_fill_cursor_capacity);
+    Reserve_Device_Int_Buffer(1, &d_missing_source_overflow_rows,
+                              &missing_source_overflow_capacity);
+    Reserve_Device_Int_Buffer(dirty_source_rows, &layout->d_jentry_indices,
+                              &layout->jentry_index_capacity);
+    Reserve_Device_Buffer(missing_source_capacity,
+                          &layout->d_gmxpacked_incremental_replacement_sources,
+                          &layout->gmxpacked_incremental_replacement_source_capacity);
+
+    int zero = 0;
+    deviceMemcpy(d_missing_source_fill_cursor, &zero, sizeof(int),
+                 deviceMemcpyHostToDevice);
+    deviceMemcpy(d_missing_source_overflow_rows, &zero, sizeof(int),
+                 deviceMemcpyHostToDevice);
+    Launch_Device_Kernel(
+        Fill_Gmxpacked_Dirty_Source_Indices_By_Candidate,
+        (candidate_sci_numbers + CONTROLLER::device_max_thread - 1) /
+            CONTROLLER::device_max_thread,
+        CONTROLLER::device_max_thread, 0, NULL, candidate_sci_numbers,
+        dirty_candidate_sci, source_offsets_by_candidate, layout->d_jentry_offsets,
+        layout->d_jentry_indices);
+    Launch_Device_Kernel(
+        Fill_Gmxpacked_Record_Stream_Inner_Active_Missing_Sources_From_Source_Indices,
+        (dirty_source_rows + CONTROLLER::device_max_thread - 1) /
+            CONTROLLER::device_max_thread,
+        CONTROLLER::device_max_thread, 0, NULL, dirty_source_rows,
+        layout->d_jentry_indices, outer_sources,
+        layout->d_gmxpacked_inner_active_source_imasks,
+        layout->d_sort_permutation, layout->d_cluster_offsets,
+        layout->d_super_cluster_offsets, layout->d_cluster_local_masks,
+        layout->d_cluster_centers, crd, cell, rcell, cutoff * cutoff,
+        missing_source_capacity, previous_active_source_rows,
+        layout->d_gmxpacked_incremental_replacement_sources,
+        d_missing_source_fill_cursor, d_missing_source_overflow_rows);
+
+    int filled_rows = 0;
+    int overflow = 0;
+    deviceMemcpy(&filled_rows, d_missing_source_fill_cursor, sizeof(int),
+                 deviceMemcpyDeviceToHost);
+    deviceMemcpy(&overflow, d_missing_source_overflow_rows, sizeof(int),
+                 deviceMemcpyDeviceToHost);
+    Free_Single_Device_Pointer((void**)&d_missing_source_fill_cursor);
+    Free_Single_Device_Pointer((void**)&d_missing_source_overflow_rows);
+    if (appended_source_rows != NULL)
+    {
+        *appended_source_rows = filled_rows;
+    }
+    if (overflow_rows != NULL)
+    {
+        *overflow_rows = overflow;
+    }
+    if (overflow != 0 || filled_rows < 0 ||
+        filled_rows > missing_source_capacity)
+    {
+        return false;
+    }
+    if (filled_rows == 0)
+    {
+        return true;
+    }
+    const int combined_source_rows = previous_active_source_rows + filled_rows;
+    Reserve_Device_Byte_Buffer(
+        sizeof(LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE) *
+            static_cast<size_t>(combined_source_rows),
+        &layout->d_sort_value_buffer, &layout->sort_value_buffer_bytes);
+    LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* combined_sources =
+        reinterpret_cast<LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE*>(
+            layout->d_sort_value_buffer);
+    deviceMemcpy(
+        combined_sources, layout->d_gmxpacked_record_stream_sources,
+        sizeof(LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE) *
+            static_cast<size_t>(previous_active_source_rows),
+        deviceMemcpyDeviceToDevice);
+    deviceMemcpy(
+        combined_sources + previous_active_source_rows,
+        layout->d_gmxpacked_incremental_replacement_sources,
+        sizeof(LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE) *
+            static_cast<size_t>(filled_rows),
+        deviceMemcpyDeviceToDevice);
+    Reserve_Device_Buffer(combined_source_rows,
+                          &layout->d_gmxpacked_record_stream_sources,
+                          &layout->gmxpacked_record_stream_source_capacity);
+    deviceMemcpy(
+        layout->d_gmxpacked_record_stream_sources, combined_sources,
+        sizeof(LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE) *
+            static_cast<size_t>(combined_source_rows),
+        deviceMemcpyDeviceToDevice);
+    layout->gmxpacked_record_stream_source_numbers = combined_source_rows;
+    layout->gmxpacked_record_stream_aggregate_numbers = 0;
+    return true;
+#endif
+}
+
+static int Prune_Gmxpacked_Record_Stream_To_Inner_Active_Sources(
+    LJ_CLUSTER_LAYOUT* layout, const VECTOR* crd, LTMatrix3 cell,
+    LTMatrix3 rcell, float cutoff, bool record_builder_stage_timers,
+    bool record_active_imasks = false)
+{
+    if (layout == NULL || layout->gmxpacked_record_stream_source_numbers <= 0 ||
+        layout->d_gmxpacked_record_stream_sources == NULL || crd == NULL)
+    {
+        return layout != NULL ? layout->gmxpacked_record_stream_source_numbers
+                              : 0;
+    }
+#ifdef USE_CPU
+    (void)cell;
+    (void)rcell;
+    (void)cutoff;
+    (void)record_builder_stage_timers;
+    return layout->gmxpacked_record_stream_source_numbers;
+#else
+    const int source_rows = layout->gmxpacked_record_stream_source_numbers;
+    const float cutoff_sq = cutoff * cutoff;
+    const int active_source_rows =
+        Count_Gmxpacked_Record_Stream_Inner_Active_Source_Rows(
+            layout, source_rows, layout->d_gmxpacked_record_stream_sources, crd,
+            cell, rcell, cutoff, record_builder_stage_timers,
+            "record-stream-inner-active-flag-scan", record_active_imasks);
+    layout->gmxpacked_record_stream_source_numbers = active_source_rows;
+    layout->gmxpacked_record_stream_aggregate_numbers = 0;
+    if (record_active_imasks)
+    {
+        layout->gmxpacked_inner_active_source_rows_baseline =
+            active_source_rows;
+    }
+    if (active_source_rows <= 0)
+    {
+        return 0;
+    }
+
+    {
+        ClusteredGmxpackedRecordBuilderStageTimer stage_timer(
+            "record-stream-inner-active-fill", record_builder_stage_timers);
+        Reserve_Device_Byte_Buffer(
+            sizeof(LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE) *
+                static_cast<size_t>(active_source_rows),
+            &layout->d_sort_value_buffer, &layout->sort_value_buffer_bytes);
+        LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* active_sources =
+            reinterpret_cast<LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE*>(
+                layout->d_sort_value_buffer);
+        Launch_Device_Kernel(
+            Fill_Gmxpacked_Record_Stream_Inner_Active_Sources,
+            (source_rows + CONTROLLER::device_max_thread - 1) /
+                CONTROLLER::device_max_thread,
+            CONTROLLER::device_max_thread, 0, NULL, source_rows,
+            layout->d_gmxpacked_record_stream_sources, layout->d_sort_permutation,
+            layout->d_cluster_offsets, layout->d_super_cluster_offsets,
+            layout->d_cluster_local_masks, layout->d_cluster_centers, crd, cell,
+            rcell, cutoff_sq, layout->d_jentry_offsets, active_sources);
+        deviceMemcpy(
+            layout->d_gmxpacked_record_stream_sources, active_sources,
+            sizeof(LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE) *
+                static_cast<size_t>(active_source_rows),
+            deviceMemcpyDeviceToDevice);
+    }
+    return active_source_rows;
+#endif
+}
+
+static int Refresh_Gmxpacked_Record_Stream_Active_View_Sources(
+    LJ_CLUSTER_LAYOUT* layout, int outer_source_rows,
+    const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* outer_sources,
+    int candidate_sci_numbers, const int* dirty_candidate_sci,
+    const int* source_offsets_by_candidate, const VECTOR* crd, LTMatrix3 cell,
+    LTMatrix3 rcell, float cutoff, const VECTOR* active_anchor_crd,
+    float active_reuse_margin, bool record_builder_stage_timers,
+    int* dirty_source_rows_out, int* changed_source_rows_out,
+    int zero_dirty_reuse_source_rows = 0, bool allow_full_dirty_refresh = false)
+{
+    if (dirty_source_rows_out != NULL)
+    {
+        *dirty_source_rows_out = -1;
+    }
+    if (changed_source_rows_out != NULL)
+    {
+        *changed_source_rows_out = -1;
+    }
+    if (layout == NULL || outer_source_rows <= 0 || outer_sources == NULL ||
+        candidate_sci_numbers <= 0 ||
+        (dirty_candidate_sci == NULL && !allow_full_dirty_refresh) ||
+        source_offsets_by_candidate == NULL || crd == NULL ||
+        !layout->gmxpacked_inner_active_source_imasks_ready ||
+        layout->gmxpacked_inner_active_source_imask_numbers !=
+            outer_source_rows ||
+        layout->d_gmxpacked_inner_active_source_imasks == NULL)
+    {
+        return -1;
+    }
+#ifdef USE_CPU
+    (void)cell;
+    (void)rcell;
+    (void)cutoff;
+    (void)active_anchor_crd;
+    (void)active_reuse_margin;
+    (void)record_builder_stage_timers;
+    return -1;
+#else
+    int dirty_source_rows = 0;
+    const bool use_dirty_index_refresh =
+        Clustered_Gmxpacked_Active_View_Dirty_Index_Refresh_Enabled() &&
+        dirty_candidate_sci != NULL && !allow_full_dirty_refresh;
+    const int union_active_imask =
+        use_dirty_index_refresh &&
+                Clustered_Gmxpacked_Active_View_Union_Mask_Enabled()
+            ? 1
+            : 0;
+    {
+        ClusteredGmxpackedRecordBuilderStageTimer stage_timer(
+            "active-view-dirty-source-count", record_builder_stage_timers);
+        if (use_dirty_index_refresh)
+        {
+            Reserve_Device_Int_Buffer(candidate_sci_numbers + 1,
+                                      &layout->d_jentry_counts,
+                                      &layout->jentry_count_capacity);
+            Reserve_Device_Int_Buffer(candidate_sci_numbers + 1,
+                                      &layout->d_gmxpacked_incremental_replacement_source_offsets_by_candidate,
+                                      &layout->gmxpacked_incremental_replacement_source_offset_capacity);
+            Launch_Device_Kernel(
+                Count_Gmxpacked_Dirty_Source_Rows_By_Candidate,
+                (candidate_sci_numbers + CONTROLLER::device_max_thread - 1) /
+                    CONTROLLER::device_max_thread,
+                CONTROLLER::device_max_thread, 0, NULL, candidate_sci_numbers,
+                dirty_candidate_sci, source_offsets_by_candidate,
+                layout->d_jentry_counts);
+            dirty_source_rows =
+                Exclusive_Scan_Counts(layout, candidate_sci_numbers,
+                                      layout->d_jentry_counts,
+                                      layout->d_gmxpacked_incremental_replacement_source_offsets_by_candidate);
+        }
+        else
+        {
+            Reserve_Device_Int_Buffer(1, &layout->d_need_rebuild,
+                                      &layout->rebuild_flag_capacity);
+            deviceMemset(layout->d_need_rebuild, 0, sizeof(int));
+            Launch_Device_Kernel(
+                Count_Gmxpacked_Active_View_Dirty_Source_Rows,
+                (outer_source_rows + CONTROLLER::device_max_thread - 1) /
+                    CONTROLLER::device_max_thread,
+                CONTROLLER::device_max_thread, 0, NULL, outer_source_rows,
+                outer_sources, candidate_sci_numbers, dirty_candidate_sci,
+                layout->d_sort_permutation, layout->d_cluster_offsets,
+                layout->d_super_cluster_offsets, layout->d_cluster_local_masks,
+                crd, active_anchor_crd, cell, rcell, active_reuse_margin,
+                layout->d_need_rebuild);
+            deviceMemcpy(&dirty_source_rows, layout->d_need_rebuild, sizeof(int),
+                         deviceMemcpyDeviceToHost);
+        }
+    }
+    if (dirty_source_rows_out != NULL)
+    {
+        *dirty_source_rows_out = dirty_source_rows;
+    }
+    int changed_source_rows = -1;
+    const float dirty_ratio =
+        outer_source_rows > 0
+            ? static_cast<float>(dirty_source_rows) /
+                  static_cast<float>(outer_source_rows)
+            : 1.0f;
+    const bool full_dirty_refresh =
+        allow_full_dirty_refresh && dirty_candidate_sci == NULL;
+    const bool allow_partial_refresh =
+        Clustered_Gmxpacked_Active_View_Partial_Refresh_Enabled();
+    const float dirty_ratio_limit =
+        allow_partial_refresh
+            ? Clustered_Gmxpacked_Active_View_Dirty_Source_Ratio_Limit()
+            : 0.0f;
+    if (dirty_source_rows < 0 || dirty_source_rows > outer_source_rows ||
+        (!full_dirty_refresh && dirty_ratio > dirty_ratio_limit))
+    {
+        if (Clustered_Trace_Warp_Records_Enabled() ||
+            Clustered_Gmxpacked_Incremental_Stats_Enabled() ||
+            record_builder_stage_timers)
+        {
+            fprintf(stderr,
+                    "[clustered gmxpacked active view fallback] step=%d "
+                    "reason=dirty-ratio dirty_source_rows=%d "
+                    "outer_source_rows=%d ratio=%.6f limit=%.6f\n",
+                    md_info.sys.steps, dirty_source_rows, outer_source_rows,
+                    dirty_ratio, dirty_ratio_limit);
+            fflush(stderr);
+        }
+        return -1;
+    }
+    if (dirty_source_rows == 0 && zero_dirty_reuse_source_rows > 0)
+    {
+        layout->gmxpacked_record_stream_source_numbers =
+            zero_dirty_reuse_source_rows;
+        changed_source_rows = 0;
+        if (changed_source_rows_out != NULL)
+        {
+            *changed_source_rows_out = changed_source_rows;
+        }
+        if (Clustered_Trace_Warp_Records_Enabled() ||
+            Clustered_Gmxpacked_Incremental_Stats_Enabled() ||
+            record_builder_stage_timers)
+        {
+            fprintf(stderr,
+                    "[clustered gmxpacked active view refresh] step=%d "
+                    "outer_source_rows=%d dirty_source_rows=%d "
+                    "changed_source_rows=%d dirty_ratio=%.6f "
+                    "active_source_rows=%d "
+                    "zero_dirty_reuse=1 union_mask=%d\n",
+                    md_info.sys.steps, outer_source_rows, dirty_source_rows,
+                    changed_source_rows, dirty_ratio,
+                    zero_dirty_reuse_source_rows, union_active_imask);
+            fflush(stderr);
+        }
+        return zero_dirty_reuse_source_rows;
+    }
+
+    int active_view_fallback = 0;
+    int active_source_rows = 0;
+    {
+        ClusteredGmxpackedRecordBuilderStageTimer stage_timer(
+            "active-view-dirty-imask-refresh", record_builder_stage_timers);
+        Reserve_Device_Int_Buffer(outer_source_rows + 1,
+                                  &layout->d_jentry_counts,
+                                  &layout->jentry_count_capacity);
+        Reserve_Device_Int_Buffer(outer_source_rows + 1,
+                                  &layout->d_jentry_offsets,
+                                  &layout->jentry_offset_capacity);
+        Reserve_Device_Int_Buffer(1, &layout->d_need_rebuild,
+                                  &layout->rebuild_flag_capacity);
+        Reserve_Device_Int_Buffer(
+            1, &layout->d_gmxpacked_incremental_replacement_source_counts_by_candidate,
+            &layout->gmxpacked_incremental_replacement_source_count_capacity);
+        deviceMemset(layout->d_need_rebuild, 0, sizeof(int));
+        deviceMemset(
+            layout->d_gmxpacked_incremental_replacement_source_counts_by_candidate,
+            0, sizeof(int));
+        if (use_dirty_index_refresh)
+        {
+            Launch_Device_Kernel(
+                Fill_Gmxpacked_Record_Stream_Active_View_Cached_Flags,
+                (outer_source_rows + CONTROLLER::device_max_thread - 1) /
+                    CONTROLLER::device_max_thread,
+                CONTROLLER::device_max_thread, 0, NULL, outer_source_rows,
+                layout->d_gmxpacked_inner_active_source_imasks,
+                layout->d_jentry_counts);
+            if (dirty_source_rows > 0)
+            {
+                Reserve_Device_Int_Buffer(dirty_source_rows,
+                                          &layout->d_jentry_indices,
+                                          &layout->jentry_index_capacity);
+                Launch_Device_Kernel(
+                    Fill_Gmxpacked_Dirty_Source_Indices_By_Candidate,
+                    (candidate_sci_numbers + CONTROLLER::device_max_thread - 1) /
+                        CONTROLLER::device_max_thread,
+                    CONTROLLER::device_max_thread, 0, NULL,
+                    candidate_sci_numbers, dirty_candidate_sci,
+                    source_offsets_by_candidate,
+                    layout->d_gmxpacked_incremental_replacement_source_offsets_by_candidate,
+                    layout->d_jentry_indices);
+                Launch_Device_Kernel(
+                    Refresh_Gmxpacked_Record_Stream_Active_View_Flags_From_Source_Indices,
+                    (dirty_source_rows + CONTROLLER::device_max_thread - 1) /
+                        CONTROLLER::device_max_thread,
+                    CONTROLLER::device_max_thread, 0, NULL, dirty_source_rows,
+                    layout->d_jentry_indices, outer_sources,
+                    candidate_sci_numbers, dirty_candidate_sci,
+                    layout->d_sort_permutation, layout->d_cluster_offsets,
+                    layout->d_super_cluster_offsets,
+                    layout->d_cluster_local_masks, layout->d_cluster_centers,
+                    crd, active_anchor_crd, cell, rcell, cutoff * cutoff,
+                    active_reuse_margin,
+                    layout->d_gmxpacked_inner_active_source_imasks,
+                    layout->d_jentry_counts, layout->d_need_rebuild,
+                    layout->d_gmxpacked_incremental_replacement_source_counts_by_candidate,
+                    union_active_imask);
+            }
+        }
+        else
+        {
+            Launch_Device_Kernel(
+                Refresh_Gmxpacked_Record_Stream_Active_View_Flags,
+                (outer_source_rows + CONTROLLER::device_max_thread - 1) /
+                    CONTROLLER::device_max_thread,
+                CONTROLLER::device_max_thread, 0, NULL, outer_source_rows,
+                outer_sources, candidate_sci_numbers, dirty_candidate_sci,
+                layout->d_sort_permutation, layout->d_cluster_offsets,
+                layout->d_super_cluster_offsets, layout->d_cluster_local_masks,
+                layout->d_cluster_centers, crd, active_anchor_crd, cell, rcell,
+                cutoff * cutoff, active_reuse_margin,
+                layout->d_gmxpacked_inner_active_source_imasks,
+                layout->d_jentry_counts, layout->d_need_rebuild,
+                layout->d_gmxpacked_incremental_replacement_source_counts_by_candidate,
+                union_active_imask);
+        }
+        deviceMemcpy(&active_view_fallback, layout->d_need_rebuild,
+                     sizeof(int), deviceMemcpyDeviceToHost);
+        deviceMemcpy(
+            &changed_source_rows,
+            layout->d_gmxpacked_incremental_replacement_source_counts_by_candidate,
+            sizeof(int), deviceMemcpyDeviceToHost);
+        active_source_rows =
+            Exclusive_Scan_Counts(layout, outer_source_rows,
+                                  layout->d_jentry_counts,
+                                  layout->d_jentry_offsets);
+    }
+    if (changed_source_rows_out != NULL)
+    {
+        *changed_source_rows_out = changed_source_rows;
+    }
+    if (active_view_fallback != 0)
+    {
+        if (Clustered_Trace_Warp_Records_Enabled() ||
+            Clustered_Gmxpacked_Incremental_Stats_Enabled() ||
+            record_builder_stage_timers)
+        {
+            fprintf(stderr,
+                    "[clustered gmxpacked active view fallback] step=%d "
+                    "reason=source-map outer_source_rows=%d "
+                    "dirty_source_rows=%d\n",
+                    md_info.sys.steps, outer_source_rows, dirty_source_rows);
+            fflush(stderr);
+        }
+        return -1;
+    }
+
+    layout->gmxpacked_record_stream_source_numbers = active_source_rows;
+    layout->gmxpacked_record_stream_aggregate_numbers = 0;
+    if (active_source_rows <= 0)
+    {
+        return 0;
+    }
+    {
+        ClusteredGmxpackedRecordBuilderStageTimer stage_timer(
+            "active-view-source-fill", record_builder_stage_timers);
+        Reserve_Device_Byte_Buffer(
+            sizeof(LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE) *
+                static_cast<size_t>(active_source_rows),
+            &layout->d_sort_value_buffer, &layout->sort_value_buffer_bytes);
+        LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* active_sources =
+            reinterpret_cast<LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE*>(
+                layout->d_sort_value_buffer);
+        Launch_Device_Kernel(
+            Fill_Gmxpacked_Record_Stream_Active_View_Sources,
+            (outer_source_rows + CONTROLLER::device_max_thread - 1) /
+                CONTROLLER::device_max_thread,
+            CONTROLLER::device_max_thread, 0, NULL, outer_source_rows,
+            outer_sources, layout->d_gmxpacked_inner_active_source_imasks,
+            layout->d_jentry_offsets, active_sources);
+        Reserve_Device_Buffer(active_source_rows,
+                              &layout->d_gmxpacked_record_stream_sources,
+                              &layout->gmxpacked_record_stream_source_capacity);
+        deviceMemcpy(
+            layout->d_gmxpacked_record_stream_sources, active_sources,
+            sizeof(LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE) *
+                static_cast<size_t>(active_source_rows),
+            deviceMemcpyDeviceToDevice);
+    }
+    if (Clustered_Trace_Warp_Records_Enabled() ||
+        Clustered_Gmxpacked_Incremental_Stats_Enabled() ||
+        record_builder_stage_timers)
+    {
+        fprintf(stderr,
+                "[clustered gmxpacked active view refresh] step=%d "
+                "outer_source_rows=%d dirty_source_rows=%d "
+                "changed_source_rows=%d dirty_ratio=%.6f "
+                "active_source_rows=%d "
+                "full_dirty_refresh=%d union_mask=%d\n",
+                md_info.sys.steps, outer_source_rows, dirty_source_rows,
+                changed_source_rows, dirty_ratio, active_source_rows,
+                full_dirty_refresh ? 1 : 0, union_active_imask);
+        fflush(stderr);
+    }
+    return active_source_rows;
+#endif
+}
+
+static void Sort_Gmxpacked_Record_Stream_Sources_For_Aggregate(
+    LJ_CLUSTER_LAYOUT* layout, int source_rows, bool record_builder_stage_timers,
+    const char* low_sort_stage, const char* high_sort_stage,
+    const char* gather_stage)
+{
+    if (layout == NULL || source_rows <= 1 ||
+        layout->d_gmxpacked_record_stream_sources == NULL)
+    {
+        return;
+    }
+#ifdef USE_CPU
+    (void)record_builder_stage_timers;
+    (void)low_sort_stage;
+    (void)high_sort_stage;
+    (void)gather_stage;
+    return;
+#else
+    Reserve_Device_U64_Buffer(source_rows, &layout->d_sort_keys,
+                              &layout->sort_key_capacity);
+    Reserve_Device_Int_Buffer(source_rows, &layout->d_jentry_indices,
+                              &layout->jentry_index_capacity);
+    Launch_Device_Kernel(Build_Linear_Indices,
+                         (source_rows + CONTROLLER::device_max_thread - 1) /
+                             CONTROLLER::device_max_thread,
+                         CONTROLLER::device_max_thread, 0, NULL, source_rows,
+                         layout->d_jentry_indices);
+    {
+        ClusteredGmxpackedRecordBuilderStageTimer low_sort_timer(
+            low_sort_stage, record_builder_stage_timers);
+        Launch_Device_Kernel(
+            Build_Gmxpacked_Record_Stream_Source_Low_Sort_Keys,
+            (source_rows + CONTROLLER::device_max_thread - 1) /
+                CONTROLLER::device_max_thread,
+            CONTROLLER::device_max_thread, 0, NULL, source_rows,
+            layout->d_jentry_indices, layout->d_gmxpacked_record_stream_sources,
+            layout->d_sort_keys);
+        Stable_Sort_Device_By_Key(layout, source_rows, layout->d_sort_keys,
+                                  layout->d_jentry_indices);
+    }
+    {
+        ClusteredGmxpackedRecordBuilderStageTimer high_sort_timer(
+            high_sort_stage, record_builder_stage_timers);
+        Launch_Device_Kernel(
+            Build_Gmxpacked_Record_Stream_Source_High_Sort_Keys,
+            (source_rows + CONTROLLER::device_max_thread - 1) /
+                CONTROLLER::device_max_thread,
+            CONTROLLER::device_max_thread, 0, NULL, source_rows,
+            layout->d_jentry_indices, layout->d_gmxpacked_record_stream_sources,
+            layout->d_sort_keys);
+        Stable_Sort_Device_By_Key(layout, source_rows, layout->d_sort_keys,
+                                  layout->d_jentry_indices);
+    }
+    {
+        ClusteredGmxpackedRecordBuilderStageTimer gather_timer(
+            gather_stage, record_builder_stage_timers);
+        Reserve_Device_Byte_Buffer(
+            sizeof(LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE) *
+                static_cast<size_t>(source_rows),
+            &layout->d_sort_value_buffer, &layout->sort_value_buffer_bytes);
+        LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* d_sorted_sources =
+            reinterpret_cast<LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE*>(
+                layout->d_sort_value_buffer);
+        Launch_Device_Kernel(
+            Gather_Gmxpacked_Record_Stream_Sources_By_Index,
+            (source_rows + CONTROLLER::device_max_thread - 1) /
+                CONTROLLER::device_max_thread,
+            CONTROLLER::device_max_thread, 0, NULL, source_rows,
+            layout->d_jentry_indices, layout->d_gmxpacked_record_stream_sources,
+            d_sorted_sources);
+        deviceMemcpy(layout->d_gmxpacked_record_stream_sources, d_sorted_sources,
+                     sizeof(LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE) *
+                         static_cast<size_t>(source_rows),
+                     deviceMemcpyDeviceToDevice);
+    }
+#endif
+}
+
+static int Build_Gmxpacked_Record_Stream_Aggregates(LJ_CLUSTER_LAYOUT* layout)
+{
+    if (layout == NULL || layout->gmxpacked_record_stream_source_numbers <= 0 ||
+        layout->d_gmxpacked_record_stream_sources == NULL)
+    {
+        if (layout != NULL)
+        {
+            layout->gmxpacked_record_stream_aggregate_numbers = 0;
+        }
+        return 0;
+    }
+#ifdef USE_CPU
+    layout->gmxpacked_record_stream_aggregate_numbers = 0;
+    return 0;
+#else
+    ClusteredGmxpackedRecordBuilderStageTimer stage_timer(
+        "record-stream-aggregate-build-sort",
+        Clustered_Gmxpacked_Record_Builder_Stage_Timers_Enabled());
+    const bool record_builder_stage_timers =
+        Clustered_Gmxpacked_Record_Builder_Stage_Timers_Enabled();
+    const int source_rows = layout->gmxpacked_record_stream_source_numbers;
+    layout->gmxpacked_record_stream_aggregate_numbers = 0;
+
+    Reserve_Device_U64_Buffer(source_rows, &layout->d_sort_keys,
+                              &layout->sort_key_capacity);
+    if (source_rows > 1)
+    {
+        Reserve_Device_Int_Buffer(source_rows, &layout->d_jentry_indices,
+                                  &layout->jentry_index_capacity);
+        Launch_Device_Kernel(
+            Build_Linear_Indices,
+            (source_rows + CONTROLLER::device_max_thread - 1) /
+                CONTROLLER::device_max_thread,
+            CONTROLLER::device_max_thread, 0, NULL, source_rows,
+            layout->d_jentry_indices);
+        {
+            ClusteredGmxpackedRecordBuilderStageTimer low_sort_timer(
+                "record-stream-aggregate-source-low-sort",
+                record_builder_stage_timers);
+            Launch_Device_Kernel(
+                Build_Gmxpacked_Record_Stream_Source_Low_Sort_Keys,
+                (source_rows + CONTROLLER::device_max_thread - 1) /
+                    CONTROLLER::device_max_thread,
+                CONTROLLER::device_max_thread, 0, NULL, source_rows,
+                layout->d_jentry_indices,
+                layout->d_gmxpacked_record_stream_sources,
+                layout->d_sort_keys);
+            Stable_Sort_Device_By_Key(layout, source_rows, layout->d_sort_keys,
+                                      layout->d_jentry_indices);
+        }
+        {
+            ClusteredGmxpackedRecordBuilderStageTimer high_sort_timer(
+                "record-stream-aggregate-source-high-sort",
+                record_builder_stage_timers);
+            Launch_Device_Kernel(
+                Build_Gmxpacked_Record_Stream_Source_High_Sort_Keys,
+                (source_rows + CONTROLLER::device_max_thread - 1) /
+                    CONTROLLER::device_max_thread,
+                CONTROLLER::device_max_thread, 0, NULL, source_rows,
+                layout->d_jentry_indices,
+                layout->d_gmxpacked_record_stream_sources,
+                layout->d_sort_keys);
+            Stable_Sort_Device_By_Key(layout, source_rows, layout->d_sort_keys,
+                                      layout->d_jentry_indices);
+        }
+        {
+            ClusteredGmxpackedRecordBuilderStageTimer gather_timer(
+                "record-stream-aggregate-source-gather",
+                record_builder_stage_timers);
+            Reserve_Device_Byte_Buffer(
+                sizeof(LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE) *
+                    static_cast<size_t>(source_rows),
+                &layout->d_sort_value_buffer, &layout->sort_value_buffer_bytes);
+            LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* d_sorted_sources =
+                reinterpret_cast<LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE*>(
+                    layout->d_sort_value_buffer);
+            Launch_Device_Kernel(
+                Gather_Gmxpacked_Record_Stream_Sources_By_Index,
+                (source_rows + CONTROLLER::device_max_thread - 1) /
+                    CONTROLLER::device_max_thread,
+                CONTROLLER::device_max_thread, 0, NULL, source_rows,
+                layout->d_jentry_indices,
+                layout->d_gmxpacked_record_stream_sources, d_sorted_sources);
+            deviceMemcpy(layout->d_gmxpacked_record_stream_sources,
+                         d_sorted_sources,
+                         sizeof(LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE) *
+                             static_cast<size_t>(source_rows),
+                         deviceMemcpyDeviceToDevice);
+        }
+    }
+
+    {
+        ClusteredGmxpackedRecordBuilderStageTimer flag_scan_timer(
+            "record-stream-aggregate-flag-scan", record_builder_stage_timers);
+        Reserve_Device_Int_Buffer(source_rows + 1, &layout->d_jentry_counts,
+                                  &layout->jentry_count_capacity);
+        Reserve_Device_Int_Buffer(source_rows + 1, &layout->d_jentry_offsets,
+                                  &layout->jentry_offset_capacity);
+        Launch_Device_Kernel(
+            Build_Gmxpacked_Record_Stream_Aggregate_Flags,
+            (source_rows + CONTROLLER::device_max_thread - 1) /
+                CONTROLLER::device_max_thread,
+            CONTROLLER::device_max_thread, 0, NULL, source_rows,
+            layout->d_gmxpacked_record_stream_sources, layout->d_jentry_counts);
+        layout->gmxpacked_record_stream_aggregate_numbers = Exclusive_Scan_Counts(
+            layout, source_rows, layout->d_jentry_counts, layout->d_jentry_offsets);
+    }
+    if (layout->gmxpacked_record_stream_aggregate_numbers <= 0)
+    {
+        return 0;
+    }
+
+    int filled_aggregate_rows = 0;
+    {
+        ClusteredGmxpackedRecordBuilderStageTimer fill_timer(
+            "record-stream-aggregate-fill", record_builder_stage_timers);
+        Reserve_Device_Int_Buffer(
+            layout->gmxpacked_record_stream_aggregate_numbers + 1,
+            &layout->d_jentry_indices, &layout->jentry_index_capacity);
+        Launch_Device_Kernel(
+            Scatter_J_Entry_Sci_Starts,
+            (source_rows + CONTROLLER::device_max_thread - 1) /
+                CONTROLLER::device_max_thread,
+            CONTROLLER::device_max_thread, 0, NULL, source_rows,
+            layout->d_jentry_counts, layout->d_jentry_offsets,
+            layout->d_jentry_indices);
+        deviceMemcpy(
+            layout->d_jentry_indices +
+                layout->gmxpacked_record_stream_aggregate_numbers,
+            &source_rows, sizeof(int), deviceMemcpyHostToDevice);
+
+        Reserve_Device_Buffer(layout->gmxpacked_record_stream_aggregate_numbers,
+                              &layout->d_gmxpacked_record_stream_aggregates,
+                              &layout->gmxpacked_record_stream_aggregate_capacity);
+        int* d_gmxpacked_record_stream_aggregate_fill_cursor = NULL;
+        int gmxpacked_record_stream_aggregate_fill_cursor_capacity = 0;
+        Reserve_Device_Int_Buffer(
+            1, &d_gmxpacked_record_stream_aggregate_fill_cursor,
+            &gmxpacked_record_stream_aggregate_fill_cursor_capacity);
+        deviceMemset(d_gmxpacked_record_stream_aggregate_fill_cursor, 0,
+                     sizeof(int));
+        Launch_Device_Kernel(
+            Fill_Gmxpacked_Record_Stream_Aggregates_From_Sources,
+            (layout->gmxpacked_record_stream_aggregate_numbers +
+             CONTROLLER::device_max_thread - 1) /
+                CONTROLLER::device_max_thread,
+            CONTROLLER::device_max_thread, 0, NULL,
+            layout->gmxpacked_record_stream_aggregate_numbers,
+            layout->d_jentry_indices, layout->d_gmxpacked_record_stream_sources,
+            layout->d_gmxpacked_record_stream_aggregates,
+            d_gmxpacked_record_stream_aggregate_fill_cursor);
+
+        deviceMemcpy(&filled_aggregate_rows,
+                     d_gmxpacked_record_stream_aggregate_fill_cursor,
+                     sizeof(int), deviceMemcpyDeviceToHost);
+        Free_Single_Device_Pointer(
+            (void**)&d_gmxpacked_record_stream_aggregate_fill_cursor);
+    }
+    Clustered_Debug_Device_Sync_If_Tracing(
+        "Build_Gmxpacked_Record_Stream_Aggregates");
+    return filled_aggregate_rows;
+#endif
+}
+
+struct ClusteredGmxpackedRecordStreamCompactSummary
+{
+    int source_rows = 0;
+    int aggregate_rows = 0;
+    int compact_entries = 0;
+    int compact_sci = 0;
+    int compact_cj = 0;
+    int split_excl = 0;
+    int compact_excl = 0;
+};
+
+#ifndef USE_CPU
+static bool Build_Gmxpacked_Record_Stream_Compact_Payload_On_Device(
+    LJ_CLUSTER_LAYOUT* layout,
+    ClusteredGmxpackedRecordStreamCompactSummary* summary);
+#endif
+
+static ClusteredGmxpackedRecordStreamCompactSummary
+Build_Gmxpacked_Record_Stream_Compact_Payload(LJ_CLUSTER_LAYOUT* layout)
+{
+    ClusteredGmxpackedRecordStreamCompactSummary summary = {};
+    if (Clustered_Gmxpacked_Record_Builder_Compare_Stage_Trace_Enabled())
+    {
+        Clear_Gmxpacked_Record_Builder_Stage_Trace_Snapshot();
+    }
+    if (layout == NULL)
+    {
+        return summary;
+    }
+
+    summary.source_rows = layout->gmxpacked_record_stream_source_numbers;
+    summary.aggregate_rows = layout->gmxpacked_record_stream_aggregate_numbers;
+    layout->gmxpacked_sci_numbers = 0;
+    layout->gmxpacked_cjpacked_numbers = 0;
+    layout->gmxpacked_split_exclusion_numbers = 0;
+    layout->gmxpacked_exclusion_numbers = 0;
+    layout->gmxpacked_delta_sci_numbers = 0;
+    layout->gmxpacked_delta_cjpacked_numbers = 0;
+    layout->gmxpacked_delta_split_exclusion_numbers = 0;
+    layout->gmxpacked_delta_exclusion_numbers = 0;
+    if (summary.aggregate_rows <= 0 ||
+        layout->d_gmxpacked_record_stream_aggregates == NULL)
+    {
+        return summary;
+    }
+
+#ifndef USE_CPU
+    if (Clustered_Gmxpacked_Record_Builder_Compare_Stage_Trace_Enabled())
+    {
+        const std::vector<LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_AGGREGATE>
+            host_aggregates = Copy_Device_Buffer_To_Host(
+                layout->d_gmxpacked_record_stream_aggregates,
+                static_cast<size_t>(summary.aggregate_rows));
+        const std::vector<LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE>
+            host_sources =
+                summary.source_rows > 0 &&
+                        layout->d_gmxpacked_record_stream_sources != NULL
+                    ? Copy_Device_Buffer_To_Host(
+                          layout->d_gmxpacked_record_stream_sources,
+                          static_cast<size_t>(summary.source_rows))
+                    : std::vector<
+                          LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE>();
+        Capture_Gmxpacked_Record_Builder_Stage_Trace_Snapshot(host_sources,
+                                                              host_aggregates);
+    }
+    if (Build_Gmxpacked_Record_Stream_Compact_Payload_On_Device(layout,
+                                                                &summary))
+    {
+        Invalidate_Gmxpacked_Pair_Shift_Metadata(layout);
+        return summary;
+    }
+    if (!Clustered_Gmxpacked_Record_Builder_Host_Compact_Fallback_Enabled())
+    {
+        return summary;
+    }
+#endif
+
+    const std::vector<LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_AGGREGATE>
+        host_aggregates = Copy_Device_Buffer_To_Host(
+            layout->d_gmxpacked_record_stream_aggregates,
+            static_cast<size_t>(summary.aggregate_rows));
+    if (Clustered_Gmxpacked_Record_Builder_Compare_Stage_Trace_Enabled())
+    {
+        const std::vector<LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE>
+            host_sources =
+                summary.source_rows > 0 &&
+                        layout->d_gmxpacked_record_stream_sources != NULL
+                    ? Copy_Device_Buffer_To_Host(
+                          layout->d_gmxpacked_record_stream_sources,
+                          static_cast<size_t>(summary.source_rows))
+                    : std::vector<
+                          LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE>();
+        Capture_Gmxpacked_Record_Builder_Stage_Trace_Snapshot(host_sources,
+                                                              host_aggregates);
+    }
+    if (host_aggregates.empty())
+    {
+        return summary;
+    }
+
+    struct RecordStreamCompactEntry
+    {
+        int supercluster_id = -1;
+        int shift_id = kClusteredCentralShiftId;
+        int cluster_j = -1;
+        unsigned int split_imask[kClusteredWarpSplitCount] = {};
+        unsigned int valid_mask_j = 0u;
+        unsigned int local_mask_j = 0u;
+        unsigned int pair_exclusion_words[kClusteredWarpSplitCount]
+                                          [kClusteredGmxpackedExclusionPairCount] = {};
+        int source_order_begin = 0;
+        int source_order_end = 0;
+    };
+
+    std::vector<LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_AGGREGATE>
+        sorted_aggregates = host_aggregates;
+    std::sort(
+        sorted_aggregates.begin(), sorted_aggregates.end(),
+        [](const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_AGGREGATE& lhs,
+           const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_AGGREGATE& rhs)
+        {
+            if (lhs.supercluster_id != rhs.supercluster_id)
+            {
+                return lhs.supercluster_id < rhs.supercluster_id;
+            }
+            if (lhs.shift_id != rhs.shift_id)
+            {
+                return lhs.shift_id < rhs.shift_id;
+            }
+            if (lhs.cluster_j != rhs.cluster_j)
+            {
+                return lhs.cluster_j < rhs.cluster_j;
+            }
+            if (lhs.source_order_begin != rhs.source_order_begin)
+            {
+                return lhs.source_order_begin < rhs.source_order_begin;
+            }
+            if (lhs.source_order_end != rhs.source_order_end)
+            {
+                return lhs.source_order_end < rhs.source_order_end;
+            }
+            return lhs.sci_id < rhs.sci_id;
+        });
+
+    std::vector<RecordStreamCompactEntry> compact_entries;
+    compact_entries.reserve(sorted_aggregates.size());
+    for (const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_AGGREGATE& aggregate :
+         sorted_aggregates)
+    {
+        const bool same_compact_key = !compact_entries.empty() &&
+                                      compact_entries.back().supercluster_id ==
+                                          aggregate.supercluster_id &&
+                                      compact_entries.back().shift_id ==
+                                          aggregate.shift_id &&
+                                      compact_entries.back().cluster_j ==
+                                          aggregate.cluster_j;
+        if (!same_compact_key)
+        {
+            RecordStreamCompactEntry entry = {};
+            entry.supercluster_id = aggregate.supercluster_id;
+            entry.shift_id = aggregate.shift_id;
+            entry.cluster_j = aggregate.cluster_j;
+            entry.valid_mask_j = aggregate.valid_mask_j;
+            entry.local_mask_j = aggregate.local_mask_j;
+            entry.source_order_begin = aggregate.source_order_begin;
+            entry.source_order_end = aggregate.source_order_end;
+            for (int split = 0; split < kClusteredWarpSplitCount; split += 1)
+            {
+                entry.split_imask[split] = aggregate.split_imask[split];
+                for (int pair_idx = 0;
+                     pair_idx < kClusteredGmxpackedExclusionPairCount;
+                     pair_idx += 1)
+                {
+                    entry.pair_exclusion_words[split][pair_idx] =
+                        aggregate.pair_exclusion_words[split][pair_idx];
+                }
+            }
+            compact_entries.push_back(entry);
+            continue;
+        }
+
+        RecordStreamCompactEntry& entry = compact_entries.back();
+        entry.valid_mask_j |= aggregate.valid_mask_j;
+        entry.local_mask_j |= aggregate.local_mask_j;
+        entry.source_order_begin =
+            IntMin(entry.source_order_begin, aggregate.source_order_begin);
+        entry.source_order_end =
+            IntMax(entry.source_order_end, aggregate.source_order_end);
+        for (int split = 0; split < kClusteredWarpSplitCount; split += 1)
+        {
+            entry.split_imask[split] |= aggregate.split_imask[split];
+            for (int pair_idx = 0;
+                 pair_idx < kClusteredGmxpackedExclusionPairCount;
+                 pair_idx += 1)
+            {
+                entry.pair_exclusion_words[split][pair_idx] |=
+                    aggregate.pair_exclusion_words[split][pair_idx];
+            }
+        }
+    }
+
+    summary.compact_entries = static_cast<int>(compact_entries.size());
+    if (compact_entries.empty())
+    {
+        return summary;
+    }
+
+    std::stable_sort(
+        compact_entries.begin(), compact_entries.end(),
+        [](const RecordStreamCompactEntry& lhs,
+           const RecordStreamCompactEntry& rhs)
+        {
+            if (lhs.supercluster_id != rhs.supercluster_id)
+            {
+                return lhs.supercluster_id < rhs.supercluster_id;
+            }
+            if (lhs.shift_id != rhs.shift_id)
+            {
+                return lhs.shift_id < rhs.shift_id;
+            }
+            if (lhs.source_order_begin != rhs.source_order_begin)
+            {
+                return lhs.source_order_begin < rhs.source_order_begin;
+            }
+            if (lhs.source_order_end != rhs.source_order_end)
+            {
+                return lhs.source_order_end < rhs.source_order_end;
+            }
+            return lhs.cluster_j < rhs.cluster_j;
+        });
+
+    const auto split_exclusion_needed =
+        [](const LJ_CLUSTERED_GMXPACKED_EXCLUSION& compact_exclusion,
+           const unsigned int split_imask) -> bool
+    {
+        for (int pair_idx = 0; pair_idx < kClusteredGmxpackedExclusionPairCount;
+             pair_idx += 1)
+        {
+            if (compact_exclusion.pair[pair_idx] != split_imask)
+            {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    std::vector<LJ_CLUSTERED_GMXPACKED_SCI> gmxpacked_sci;
+    std::vector<LJ_CLUSTERED_GMXPACKED_CJ> gmxpacked_cjpacked;
+    std::vector<LJ_CLUSTERED_GMXPACKED_EXCLUSION> gmxpacked_exclusions;
+    gmxpacked_sci.reserve(compact_entries.size());
+    gmxpacked_cjpacked.reserve(
+        (compact_entries.size() + static_cast<size_t>(kClusteredJGroupSize) - 1u) /
+        static_cast<size_t>(kClusteredJGroupSize));
+    gmxpacked_exclusions.reserve(1u + compact_entries.size() *
+                                          static_cast<size_t>(kClusteredWarpSplitCount));
+    gmxpacked_exclusions.push_back(Make_Empty_Gmxpacked_No_Exclusion());
+    int split_exclusion_numbers = 0;
+
+    for (size_t sci_entry_begin = 0; sci_entry_begin < compact_entries.size();)
+    {
+        size_t sci_entry_end = sci_entry_begin + 1;
+        while (sci_entry_end < compact_entries.size() &&
+               compact_entries[sci_entry_end].supercluster_id ==
+                   compact_entries[sci_entry_begin].supercluster_id &&
+               compact_entries[sci_entry_end].shift_id ==
+                   compact_entries[sci_entry_begin].shift_id)
+        {
+            sci_entry_end += 1;
+        }
+
+        const int compact_begin = static_cast<int>(gmxpacked_cjpacked.size());
+        for (size_t packed_entry_begin = sci_entry_begin;
+             packed_entry_begin < sci_entry_end;
+             packed_entry_begin += static_cast<size_t>(kClusteredJGroupSize))
+        {
+            const size_t packed_entry_end =
+                std::min(sci_entry_end,
+                         packed_entry_begin +
+                             static_cast<size_t>(kClusteredJGroupSize));
+            LJ_CLUSTERED_GMXPACKED_CJ compact_packed = {};
+            LJ_CLUSTERED_GMXPACKED_EXCLUSION split_exclusions
+                [kClusteredWarpSplitCount] = {};
+            for (size_t entry_idx = packed_entry_begin;
+                 entry_idx < packed_entry_end; entry_idx += 1)
+            {
+                const int jm =
+                    static_cast<int>(entry_idx - packed_entry_begin);
+                const unsigned int jm_imask_shift =
+                    static_cast<unsigned int>(Clustered_Jm_Imask_Shift(jm));
+                const RecordStreamCompactEntry& entry = compact_entries[entry_idx];
+                compact_packed.cj[jm] = entry.cluster_j;
+                for (int split = 0; split < kClusteredWarpSplitCount; split += 1)
+                {
+                    compact_packed.split[split].imask |=
+                        entry.split_imask[split] << jm_imask_shift;
+                    for (int pair_idx = 0;
+                         pair_idx < kClusteredGmxpackedExclusionPairCount;
+                         pair_idx += 1)
+                    {
+                        split_exclusions[split].pair[pair_idx] |=
+                            entry.pair_exclusion_words[split][pair_idx]
+                            << jm_imask_shift;
+                    }
+                }
+            }
+
+            for (int split = 0; split < kClusteredWarpSplitCount; split += 1)
+            {
+                const unsigned int split_imask = compact_packed.split[split].imask;
+                compact_packed.split[split].exclusion_index = 0;
+                if (split_imask == 0u ||
+                    !split_exclusion_needed(split_exclusions[split], split_imask))
+                {
+                    continue;
+                }
+                compact_packed.split[split].exclusion_index =
+                    static_cast<int>(gmxpacked_exclusions.size());
+                gmxpacked_exclusions.push_back(split_exclusions[split]);
+                split_exclusion_numbers += 1;
+            }
+
+            gmxpacked_cjpacked.push_back(compact_packed);
+        }
+
+        gmxpacked_sci.push_back({compact_entries[sci_entry_begin].supercluster_id,
+                                 compact_entries[sci_entry_begin].shift_id,
+                                 compact_begin,
+                                 static_cast<int>(gmxpacked_cjpacked.size())});
+        sci_entry_begin = sci_entry_end;
+    }
+
+    if (gmxpacked_cjpacked.empty())
+    {
+        gmxpacked_exclusions.clear();
+    }
+
+    summary.compact_sci = static_cast<int>(gmxpacked_sci.size());
+    summary.compact_cj = static_cast<int>(gmxpacked_cjpacked.size());
+    summary.split_excl = split_exclusion_numbers;
+    summary.compact_excl = static_cast<int>(gmxpacked_exclusions.size());
+    layout->gmxpacked_sci_numbers = summary.compact_sci;
+    layout->gmxpacked_cjpacked_numbers = summary.compact_cj;
+    layout->gmxpacked_split_exclusion_numbers = summary.split_excl;
+    layout->gmxpacked_exclusion_numbers = summary.compact_excl;
+
+    if (layout->gmxpacked_sci_numbers > 0)
+    {
+        Reserve_Device_Buffer(layout->gmxpacked_sci_numbers,
+                              &layout->d_gmxpacked_sci,
+                              &layout->gmxpacked_sci_capacity);
+        deviceMemcpy(layout->d_gmxpacked_sci, gmxpacked_sci.data(),
+                     sizeof(LJ_CLUSTERED_GMXPACKED_SCI) * gmxpacked_sci.size(),
+                     deviceMemcpyHostToDevice);
+    }
+    if (layout->gmxpacked_cjpacked_numbers > 0)
+    {
+        Reserve_Device_Buffer(layout->gmxpacked_cjpacked_numbers,
+                              &layout->d_gmxpacked_cjpacked,
+                              &layout->gmxpacked_cjpacked_capacity);
+        deviceMemcpy(layout->d_gmxpacked_cjpacked, gmxpacked_cjpacked.data(),
+                     sizeof(LJ_CLUSTERED_GMXPACKED_CJ) *
+                         gmxpacked_cjpacked.size(),
+                     deviceMemcpyHostToDevice);
+    }
+    if (layout->gmxpacked_exclusion_numbers > 0)
+    {
+        Reserve_Device_Buffer(layout->gmxpacked_exclusion_numbers,
+                              &layout->d_gmxpacked_exclusions,
+                              &layout->gmxpacked_exclusion_capacity);
+        deviceMemcpy(layout->d_gmxpacked_exclusions,
+                     gmxpacked_exclusions.data(),
+                     sizeof(LJ_CLUSTERED_GMXPACKED_EXCLUSION) *
+                         gmxpacked_exclusions.size(),
+                     deviceMemcpyHostToDevice);
+    }
+
+    if (summary.compact_sci > 0 && summary.compact_cj > 0 &&
+        summary.compact_excl > 0)
+    {
+        Invalidate_Gmxpacked_Pair_Shift_Metadata(layout);
+    }
+    return summary;
+}
+
+static ClusteredGmxpackedRecordStreamCompactSummary
+Build_Gmxpacked_Record_Stream_Delta_Compact_Payload(
+    LJ_CLUSTER_LAYOUT* layout,
+    LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* delta_sources,
+    int delta_source_rows, LTMatrix3 rcell)
+{
+    ClusteredGmxpackedRecordStreamCompactSummary summary = {};
+    if (layout == NULL || delta_sources == NULL || delta_source_rows <= 0)
+    {
+        if (layout != NULL)
+        {
+            layout->gmxpacked_delta_sci_numbers = 0;
+            layout->gmxpacked_delta_cjpacked_numbers = 0;
+            layout->gmxpacked_delta_exclusion_numbers = 0;
+            layout->gmxpacked_delta_split_exclusion_numbers = 0;
+        }
+        return summary;
+    }
+
+    const int saved_source_rows = layout->gmxpacked_record_stream_source_numbers;
+    LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* saved_sources =
+        layout->d_gmxpacked_record_stream_sources;
+    const int saved_aggregate_rows =
+        layout->gmxpacked_record_stream_aggregate_numbers;
+
+    const int saved_sci_numbers = layout->gmxpacked_sci_numbers;
+    const int saved_cjpacked_numbers = layout->gmxpacked_cjpacked_numbers;
+    const int saved_exclusion_numbers = layout->gmxpacked_exclusion_numbers;
+    const int saved_split_exclusion_numbers =
+        layout->gmxpacked_split_exclusion_numbers;
+    LJ_CLUSTERED_GMXPACKED_SCI* saved_sci = layout->d_gmxpacked_sci;
+    LJ_CLUSTERED_GMXPACKED_CJ* saved_cjpacked = layout->d_gmxpacked_cjpacked;
+    LJ_CLUSTERED_GMXPACKED_EXCLUSION* saved_exclusions =
+        layout->d_gmxpacked_exclusions;
+    const int saved_sci_capacity = layout->gmxpacked_sci_capacity;
+    const int saved_cjpacked_capacity = layout->gmxpacked_cjpacked_capacity;
+    const int saved_exclusion_capacity = layout->gmxpacked_exclusion_capacity;
+
+    layout->gmxpacked_record_stream_source_numbers = delta_source_rows;
+    layout->d_gmxpacked_record_stream_sources = delta_sources;
+    layout->gmxpacked_record_stream_aggregate_numbers = 0;
+    layout->gmxpacked_sci_numbers = layout->gmxpacked_delta_sci_numbers;
+    layout->gmxpacked_cjpacked_numbers =
+        layout->gmxpacked_delta_cjpacked_numbers;
+    layout->gmxpacked_exclusion_numbers =
+        layout->gmxpacked_delta_exclusion_numbers;
+    layout->gmxpacked_split_exclusion_numbers =
+        layout->gmxpacked_delta_split_exclusion_numbers;
+    layout->d_gmxpacked_sci = layout->d_gmxpacked_delta_sci;
+    layout->d_gmxpacked_cjpacked = layout->d_gmxpacked_delta_cjpacked;
+    layout->d_gmxpacked_exclusions = layout->d_gmxpacked_delta_exclusions;
+    layout->gmxpacked_sci_capacity = layout->gmxpacked_delta_sci_capacity;
+    layout->gmxpacked_cjpacked_capacity =
+        layout->gmxpacked_delta_cjpacked_capacity;
+    layout->gmxpacked_exclusion_capacity =
+        layout->gmxpacked_delta_exclusion_capacity;
+
+    const int filled_aggregate_rows =
+        Build_Gmxpacked_Record_Stream_Aggregates(layout);
+    if (layout->gmxpacked_record_stream_aggregate_numbers > 0 &&
+        filled_aggregate_rows ==
+            layout->gmxpacked_record_stream_aggregate_numbers)
+    {
+        summary = Build_Gmxpacked_Record_Stream_Compact_Payload(layout);
+        if (summary.compact_sci > 0 && summary.compact_cj > 0 &&
+            summary.compact_excl > 0)
+        {
+            layout->gmxpacked_delta_sci_numbers = layout->gmxpacked_sci_numbers;
+            layout->gmxpacked_delta_cjpacked_numbers =
+                layout->gmxpacked_cjpacked_numbers;
+            layout->gmxpacked_delta_exclusion_numbers =
+                layout->gmxpacked_exclusion_numbers;
+            layout->gmxpacked_delta_split_exclusion_numbers =
+                layout->gmxpacked_split_exclusion_numbers;
+            layout->d_gmxpacked_delta_sci = layout->d_gmxpacked_sci;
+            layout->d_gmxpacked_delta_cjpacked = layout->d_gmxpacked_cjpacked;
+            layout->d_gmxpacked_delta_exclusions =
+                layout->d_gmxpacked_exclusions;
+            layout->gmxpacked_delta_sci_capacity =
+                layout->gmxpacked_sci_capacity;
+            layout->gmxpacked_delta_cjpacked_capacity =
+                layout->gmxpacked_cjpacked_capacity;
+            layout->gmxpacked_delta_exclusion_capacity =
+                layout->gmxpacked_exclusion_capacity;
+            if (!Refresh_Gmxpacked_Delta_Pair_Shift_Bits(layout, rcell))
+            {
+                layout->gmxpacked_delta_sci_numbers = 0;
+                layout->gmxpacked_delta_cjpacked_numbers = 0;
+                layout->gmxpacked_delta_exclusion_numbers = 0;
+                layout->gmxpacked_delta_split_exclusion_numbers = 0;
+                summary = {};
+            }
+        }
+    }
+
+    layout->gmxpacked_record_stream_source_numbers = saved_source_rows;
+    layout->d_gmxpacked_record_stream_sources = saved_sources;
+    layout->gmxpacked_record_stream_aggregate_numbers = saved_aggregate_rows;
+    layout->gmxpacked_sci_numbers = saved_sci_numbers;
+    layout->gmxpacked_cjpacked_numbers = saved_cjpacked_numbers;
+    layout->gmxpacked_exclusion_numbers = saved_exclusion_numbers;
+    layout->gmxpacked_split_exclusion_numbers = saved_split_exclusion_numbers;
+    layout->d_gmxpacked_sci = saved_sci;
+    layout->d_gmxpacked_cjpacked = saved_cjpacked;
+    layout->d_gmxpacked_exclusions = saved_exclusions;
+    layout->gmxpacked_sci_capacity = saved_sci_capacity;
+    layout->gmxpacked_cjpacked_capacity = saved_cjpacked_capacity;
+    layout->gmxpacked_exclusion_capacity = saved_exclusion_capacity;
+    return summary;
+}
+
+static bool Refresh_Gmxpacked_Active_View_Compact_Base_Imasks(
+    LJ_CLUSTER_LAYOUT* layout)
+{
+    if (layout == NULL ||
+        !layout->gmxpacked_inner_active_source_imasks_ready ||
+        layout->gmxpacked_inner_active_source_imask_numbers <= 0 ||
+        layout->d_gmxpacked_inner_active_source_imasks == NULL)
+    {
+        if (layout != NULL)
+        {
+            layout->gmxpacked_inner_active_compact_base_imasks_ready = false;
+            layout->gmxpacked_inner_active_compact_base_imask_numbers = 0;
+        }
+        return false;
+    }
+#ifdef USE_CPU
+    layout->gmxpacked_inner_active_compact_base_imasks_ready = false;
+    layout->gmxpacked_inner_active_compact_base_imask_numbers = 0;
+    return false;
+#else
+    const int source_rows = layout->gmxpacked_inner_active_source_imask_numbers;
+    Reserve_Device_UInt_Buffer(
+        source_rows, &layout->d_gmxpacked_inner_active_compact_base_imasks,
+        &layout->gmxpacked_inner_active_compact_base_imask_capacity);
+    Reserve_Device_Int_Buffer(
+        source_rows, &layout->d_gmxpacked_inner_active_compact_delta_source_flags,
+        &layout->gmxpacked_inner_active_compact_delta_source_flag_capacity);
+    deviceMemcpy(
+        layout->d_gmxpacked_inner_active_compact_base_imasks,
+        layout->d_gmxpacked_inner_active_source_imasks,
+        sizeof(unsigned int) * static_cast<size_t>(source_rows),
+        deviceMemcpyDeviceToDevice);
+    deviceMemset(layout->d_gmxpacked_inner_active_compact_delta_source_flags, 0,
+                 sizeof(int) * static_cast<size_t>(source_rows));
+    layout->gmxpacked_inner_active_compact_base_imasks_ready = true;
+    layout->gmxpacked_inner_active_compact_base_imask_numbers = source_rows;
+    return true;
+#endif
+}
+
+static ClusteredGmxpackedRecordStreamCompactSummary
+Build_Gmxpacked_Active_View_Delta_Compact_From_Baseline_With_Append(
+    LJ_CLUSTER_LAYOUT* layout, int outer_source_rows,
+    const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* outer_sources,
+    int dirty_source_rows, const int* dirty_source_indices, LTMatrix3 rcell,
+    const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* appended_delta_sources,
+    int appended_delta_source_rows,
+    bool record_builder_stage_timers, int* delta_source_rows_out,
+    int* removal_rows_out)
+{
+    ClusteredGmxpackedRecordStreamCompactSummary summary = {};
+    if (delta_source_rows_out != NULL)
+    {
+        *delta_source_rows_out = 0;
+    }
+    if (removal_rows_out != NULL)
+    {
+        *removal_rows_out = -1;
+    }
+    if (layout == NULL || outer_source_rows <= 0 || outer_sources == NULL ||
+        dirty_source_rows < 0 || appended_delta_source_rows < 0 ||
+        (dirty_source_rows > 0 && dirty_source_indices == NULL) ||
+        (appended_delta_source_rows > 0 && appended_delta_sources == NULL) ||
+        !layout->gmxpacked_inner_active_source_imasks_ready ||
+        layout->gmxpacked_inner_active_source_imask_numbers !=
+            outer_source_rows ||
+        layout->d_gmxpacked_inner_active_source_imasks == NULL ||
+        !layout->gmxpacked_inner_active_compact_base_imasks_ready ||
+        layout->gmxpacked_inner_active_compact_base_imask_numbers !=
+            outer_source_rows ||
+        layout->d_gmxpacked_inner_active_compact_base_imasks == NULL)
+    {
+        return summary;
+    }
+#ifdef USE_CPU
+    (void)rcell;
+    (void)record_builder_stage_timers;
+    return summary;
+#else
+    int removal_flag = 0;
+    int baseline_delta_source_rows = 0;
+    if (dirty_source_rows > 0)
+    {
+        {
+            ClusteredGmxpackedRecordBuilderStageTimer stage_timer(
+                "active-view-delta-compact-mark", record_builder_stage_timers);
+            Reserve_Device_Int_Buffer(
+                outer_source_rows,
+                &layout->d_gmxpacked_inner_active_compact_delta_source_flags,
+                &layout->gmxpacked_inner_active_compact_delta_source_flag_capacity);
+            Reserve_Device_Int_Buffer(1, &layout->d_need_rebuild,
+                                      &layout->rebuild_flag_capacity);
+            deviceMemset(layout->d_need_rebuild, 0, sizeof(int));
+            deviceMemset(
+                layout->d_gmxpacked_inner_active_compact_delta_source_flags, 0,
+                sizeof(int) * static_cast<size_t>(outer_source_rows));
+            Launch_Device_Kernel(
+                Mark_Gmxpacked_Active_View_Compact_Delta_Source_Flags,
+                (dirty_source_rows + CONTROLLER::device_max_thread - 1) /
+                    CONTROLLER::device_max_thread,
+                CONTROLLER::device_max_thread, 0, NULL, dirty_source_rows,
+                dirty_source_indices,
+                layout->d_gmxpacked_inner_active_source_imasks,
+                layout->d_gmxpacked_inner_active_compact_base_imasks,
+                layout->d_gmxpacked_inner_active_compact_delta_source_flags,
+                layout->d_need_rebuild);
+            deviceMemcpy(&removal_flag, layout->d_need_rebuild, sizeof(int),
+                         deviceMemcpyDeviceToHost);
+        }
+        {
+            ClusteredGmxpackedRecordBuilderStageTimer stage_timer(
+                "active-view-delta-compact-count", record_builder_stage_timers);
+            Reserve_Device_Int_Buffer(outer_source_rows + 1,
+                                      &layout->d_jentry_counts,
+                                      &layout->jentry_count_capacity);
+            Reserve_Device_Int_Buffer(outer_source_rows + 1,
+                                      &layout->d_jentry_offsets,
+                                      &layout->jentry_offset_capacity);
+            Reserve_Device_Int_Buffer(1, &layout->d_need_rebuild,
+                                      &layout->rebuild_flag_capacity);
+            if (removal_flag == 0)
+            {
+                deviceMemset(layout->d_need_rebuild, 0, sizeof(int));
+            }
+            else
+            {
+                deviceMemcpy(layout->d_need_rebuild, &removal_flag, sizeof(int),
+                             deviceMemcpyHostToDevice);
+            }
+            Launch_Device_Kernel(
+                Count_Gmxpacked_Flagged_Active_View_Delta_Sources,
+                (outer_source_rows + CONTROLLER::device_max_thread - 1) /
+                    CONTROLLER::device_max_thread,
+                CONTROLLER::device_max_thread, 0, NULL, outer_source_rows,
+                layout->d_gmxpacked_inner_active_compact_delta_source_flags,
+                layout->d_gmxpacked_inner_active_source_imasks,
+                layout->d_gmxpacked_inner_active_compact_base_imasks,
+                layout->d_jentry_counts, layout->d_need_rebuild);
+            deviceMemcpy(&removal_flag, layout->d_need_rebuild, sizeof(int),
+                         deviceMemcpyDeviceToHost);
+            baseline_delta_source_rows =
+                Exclusive_Scan_Counts(layout, outer_source_rows,
+                                      layout->d_jentry_counts,
+                                      layout->d_jentry_offsets);
+        }
+    }
+    const int delta_source_rows =
+        baseline_delta_source_rows + appended_delta_source_rows;
+    if (removal_rows_out != NULL)
+    {
+        *removal_rows_out = removal_flag;
+    }
+    if (delta_source_rows_out != NULL)
+    {
+        *delta_source_rows_out = delta_source_rows;
+    }
+    if (removal_flag != 0 || delta_source_rows <= 0)
+    {
+        return summary;
+    }
+    {
+        ClusteredGmxpackedRecordBuilderStageTimer stage_timer(
+            "active-view-delta-compact-fill", record_builder_stage_timers);
+        Reserve_Device_Buffer(
+            delta_source_rows,
+            &layout->d_gmxpacked_incremental_replacement_sources,
+            &layout->gmxpacked_incremental_replacement_source_capacity);
+        if (baseline_delta_source_rows > 0)
+        {
+            Launch_Device_Kernel(
+                Fill_Gmxpacked_Flagged_Active_View_Delta_Sources,
+                (outer_source_rows + CONTROLLER::device_max_thread - 1) /
+                    CONTROLLER::device_max_thread,
+                CONTROLLER::device_max_thread, 0, NULL, outer_source_rows,
+                outer_sources,
+                layout->d_gmxpacked_inner_active_compact_delta_source_flags,
+                layout->d_gmxpacked_inner_active_source_imasks,
+                layout->d_gmxpacked_inner_active_compact_base_imasks,
+                layout->d_jentry_offsets,
+                layout->d_gmxpacked_incremental_replacement_sources);
+        }
+        if (appended_delta_source_rows > 0)
+        {
+            deviceMemcpy(
+                layout->d_gmxpacked_incremental_replacement_sources +
+                    baseline_delta_source_rows,
+                appended_delta_sources,
+                sizeof(LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE) *
+                    static_cast<size_t>(appended_delta_source_rows),
+                deviceMemcpyDeviceToDevice);
+        }
+    }
+    summary = Build_Gmxpacked_Record_Stream_Delta_Compact_Payload(
+        layout, layout->d_gmxpacked_incremental_replacement_sources,
+        delta_source_rows, rcell);
+    return summary;
+#endif
+}
+
+static ClusteredGmxpackedRecordStreamCompactSummary
+Build_Gmxpacked_Active_View_Delta_Compact_From_Baseline(
+    LJ_CLUSTER_LAYOUT* layout, int outer_source_rows,
+    const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* outer_sources,
+    int dirty_source_rows, const int* dirty_source_indices, LTMatrix3 rcell,
+    bool record_builder_stage_timers, int* delta_source_rows_out,
+    int* removal_rows_out)
+{
+    return Build_Gmxpacked_Active_View_Delta_Compact_From_Baseline_With_Append(
+        layout, outer_source_rows, outer_sources, dirty_source_rows,
+        dirty_source_indices, rcell, NULL, 0, record_builder_stage_timers,
+        delta_source_rows_out, removal_rows_out);
+}
+
 static void Reset_Gmxpacked_Payload(LJ_CLUSTER_LAYOUT* layout)
 {
     if (layout == NULL)
@@ -7482,6 +13470,20 @@ static void Reset_Gmxpacked_Payload(LJ_CLUSTER_LAYOUT* layout)
     layout->gmxpacked_cjpacked_numbers = 0;
     layout->gmxpacked_exclusion_numbers = 0;
     layout->gmxpacked_split_exclusion_numbers = 0;
+    layout->gmxpacked_delta_sci_numbers = 0;
+    layout->gmxpacked_delta_cjpacked_numbers = 0;
+    layout->gmxpacked_delta_exclusion_numbers = 0;
+    layout->gmxpacked_delta_split_exclusion_numbers = 0;
+    layout->gmxpacked_record_stream_source_numbers = 0;
+    layout->gmxpacked_record_stream_aggregate_numbers = 0;
+    layout->gmxpacked_inner_active_guard_cutoff = -1.0f;
+    layout->gmxpacked_inner_active_anchor_ready = false;
+    layout->gmxpacked_inner_active_source_imasks_ready = false;
+    layout->gmxpacked_inner_active_compact_base_imasks_ready = false;
+    layout->gmxpacked_inner_active_source_imask_numbers = 0;
+    layout->gmxpacked_inner_active_compact_base_imask_numbers = 0;
+    layout->gmxpacked_inner_active_source_rows_baseline = 0;
+    Invalidate_Gmxpacked_Pair_Shift_Metadata(layout);
 }
 
 static void Free_Gmxpacked_Payload(LJ_CLUSTER_LAYOUT* layout)
@@ -7493,9 +13495,45 @@ static void Free_Gmxpacked_Payload(LJ_CLUSTER_LAYOUT* layout)
     Free_Single_Device_Pointer((void**)&layout->d_gmxpacked_sci);
     Free_Single_Device_Pointer((void**)&layout->d_gmxpacked_cjpacked);
     Free_Single_Device_Pointer((void**)&layout->d_gmxpacked_exclusions);
+    Free_Single_Device_Pointer((void**)&layout->d_gmxpacked_delta_sci);
+    Free_Single_Device_Pointer((void**)&layout->d_gmxpacked_delta_cjpacked);
+    Free_Single_Device_Pointer((void**)&layout->d_gmxpacked_delta_exclusions);
+    Free_Single_Device_Pointer(
+        (void**)&layout->d_gmxpacked_delta_pair_shift_bits);
+    Free_Single_Device_Pointer(
+        (void**)&layout->d_gmxpacked_record_stream_sources);
+    Free_Single_Device_Pointer(
+        (void**)&layout->d_gmxpacked_record_stream_aggregates);
+    Free_Single_Device_Pointer(
+        (void**)&layout->d_gmxpacked_pair_shift_sci_safe_flags);
+    Free_Single_Device_Pointer(
+        (void**)&layout->d_gmxpacked_inner_active_anchor_crd);
+    Free_Single_Device_Pointer(
+        (void**)&layout->d_gmxpacked_inner_active_source_imasks);
+    Free_Single_Device_Pointer(
+        (void**)&layout->d_gmxpacked_inner_active_compact_base_imasks);
+    Free_Single_Device_Pointer(
+        (void**)&layout->d_gmxpacked_inner_active_compact_delta_source_flags);
     layout->gmxpacked_sci_capacity = 0;
     layout->gmxpacked_cjpacked_capacity = 0;
     layout->gmxpacked_exclusion_capacity = 0;
+    layout->gmxpacked_delta_sci_capacity = 0;
+    layout->gmxpacked_delta_cjpacked_capacity = 0;
+    layout->gmxpacked_delta_exclusion_capacity = 0;
+    layout->gmxpacked_delta_pair_shift_capacity = 0;
+    layout->gmxpacked_record_stream_source_capacity = 0;
+    layout->gmxpacked_record_stream_aggregate_capacity = 0;
+    layout->gmxpacked_pair_shift_sci_safe_flag_capacity = 0;
+    layout->gmxpacked_inner_active_anchor_crd_capacity = 0;
+    layout->gmxpacked_inner_active_source_imask_capacity = 0;
+    layout->gmxpacked_inner_active_compact_base_imask_capacity = 0;
+    layout->gmxpacked_inner_active_compact_delta_source_flag_capacity = 0;
+    layout->gmxpacked_inner_active_anchor_ready = false;
+    layout->gmxpacked_inner_active_source_imasks_ready = false;
+    layout->gmxpacked_inner_active_compact_base_imasks_ready = false;
+    layout->gmxpacked_inner_active_source_imask_numbers = 0;
+    layout->gmxpacked_inner_active_compact_base_imask_numbers = 0;
+    layout->gmxpacked_inner_active_source_rows_baseline = 0;
     Reset_Gmxpacked_Payload(layout);
 }
 
@@ -7969,6 +14007,805 @@ static __global__ void Fill_Gmxpacked_Split_Exclusions(
     }
 }
 
+static __host__ __device__ __forceinline__ bool
+Gmxpacked_Record_Stream_Aggregate_Same_Compact_Key(
+    const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_AGGREGATE& lhs,
+    const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_AGGREGATE& rhs)
+{
+    return lhs.supercluster_id == rhs.supercluster_id &&
+           lhs.shift_id == rhs.shift_id && lhs.cluster_j == rhs.cluster_j;
+}
+
+static __global__ void Gather_Gmxpacked_Record_Stream_Aggregates_By_Index(
+    const int aggregate_rows, const int* aggregate_indices,
+    const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_AGGREGATE* src_aggregates,
+    LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_AGGREGATE* dst_aggregates)
+{
+    SIMPLE_DEVICE_FOR(aggregate_idx, aggregate_rows)
+    {
+        dst_aggregates[aggregate_idx] =
+            src_aggregates[aggregate_indices[aggregate_idx]];
+    }
+}
+
+static __global__ void Build_Gmxpacked_Record_Stream_Compact_Entry_Flags(
+    const int aggregate_rows,
+    const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_AGGREGATE* sorted_aggregates,
+    int* compact_entry_flags)
+{
+    SIMPLE_DEVICE_FOR(aggregate_idx, aggregate_rows)
+    {
+        int compact_start = 0;
+        if (aggregate_idx == 0)
+        {
+            compact_start = 1;
+        }
+        else
+        {
+            compact_start =
+                Gmxpacked_Record_Stream_Aggregate_Same_Compact_Key(
+                    sorted_aggregates[aggregate_idx],
+                    sorted_aggregates[aggregate_idx - 1])
+                    ? 0
+                    : 1;
+        }
+        compact_entry_flags[aggregate_idx] = compact_start;
+    }
+}
+
+static __global__ void Fill_Gmxpacked_Record_Stream_Compact_Entries(
+    const int compact_entry_numbers, const int* compact_entry_starts,
+    const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_AGGREGATE* sorted_aggregates,
+    LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_AGGREGATE* compact_entries)
+{
+    SIMPLE_DEVICE_FOR(compact_idx, compact_entry_numbers)
+    {
+        const int aggregate_begin = compact_entry_starts[compact_idx];
+        const int aggregate_end = compact_entry_starts[compact_idx + 1];
+        if (aggregate_begin >= aggregate_end)
+        {
+            return;
+        }
+
+        const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_AGGREGATE& first =
+            sorted_aggregates[aggregate_begin];
+        compact_entries[compact_idx].sci_id = first.sci_id;
+        compact_entries[compact_idx].shift_id = first.shift_id;
+        compact_entries[compact_idx].supercluster_id = first.supercluster_id;
+        compact_entries[compact_idx].cluster_j = first.cluster_j;
+        compact_entries[compact_idx].valid_mask_j = first.valid_mask_j;
+        compact_entries[compact_idx].local_mask_j = first.local_mask_j;
+        compact_entries[compact_idx].source_order_begin =
+            first.source_order_begin;
+        compact_entries[compact_idx].source_order_end = first.source_order_end;
+        for (int split = 0; split < kClusteredWarpSplitCount; split += 1)
+        {
+            compact_entries[compact_idx].split_imask[split] =
+                first.split_imask[split];
+            for (int pair_idx = 0;
+                 pair_idx < kClusteredGmxpackedExclusionPairCount;
+                 pair_idx += 1)
+            {
+                compact_entries[compact_idx]
+                    .pair_exclusion_words[split][pair_idx] =
+                    first.pair_exclusion_words[split][pair_idx];
+            }
+        }
+        if (aggregate_begin + 1 >= aggregate_end)
+        {
+            return;
+        }
+
+        for (int aggregate_idx = aggregate_begin + 1; aggregate_idx < aggregate_end;
+             aggregate_idx += 1)
+        {
+            const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_AGGREGATE& aggregate =
+                sorted_aggregates[aggregate_idx];
+            compact_entries[compact_idx].sci_id =
+                IntMin(compact_entries[compact_idx].sci_id, aggregate.sci_id);
+            compact_entries[compact_idx].valid_mask_j |= aggregate.valid_mask_j;
+            compact_entries[compact_idx].local_mask_j |= aggregate.local_mask_j;
+            compact_entries[compact_idx].source_order_begin = IntMin(
+                compact_entries[compact_idx].source_order_begin,
+                aggregate.source_order_begin);
+            compact_entries[compact_idx].source_order_end = IntMax(
+                compact_entries[compact_idx].source_order_end,
+                aggregate.source_order_end);
+            for (int split = 0; split < kClusteredWarpSplitCount; split += 1)
+            {
+                compact_entries[compact_idx].split_imask[split] |=
+                    aggregate.split_imask[split];
+                for (int pair_idx = 0;
+                     pair_idx < kClusteredGmxpackedExclusionPairCount;
+                     pair_idx += 1)
+                {
+                    compact_entries[compact_idx]
+                        .pair_exclusion_words[split][pair_idx] |=
+                        aggregate.pair_exclusion_words[split][pair_idx];
+                }
+            }
+        }
+    }
+}
+
+static __global__ void
+Build_Gmxpacked_Record_Stream_Compact_Cluster_J_Sort_Keys(
+    const int compact_entry_numbers, const int* compact_entry_indices,
+    const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_AGGREGATE* compact_entries,
+    uint64_t* sort_keys)
+{
+    SIMPLE_DEVICE_FOR(entry_idx, compact_entry_numbers)
+    {
+        const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_AGGREGATE& entry =
+            compact_entries[compact_entry_indices != NULL
+                                ? compact_entry_indices[entry_idx]
+                                : entry_idx];
+        sort_keys[entry_idx] = static_cast<uint64_t>(static_cast<unsigned int>(
+            entry.cluster_j));
+    }
+}
+
+static __global__ void
+Build_Gmxpacked_Record_Stream_Compact_Source_End_Sort_Keys(
+    const int compact_entry_numbers, const int* compact_entry_indices,
+    const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_AGGREGATE* compact_entries,
+    uint64_t* sort_keys)
+{
+    SIMPLE_DEVICE_FOR(entry_idx, compact_entry_numbers)
+    {
+        const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_AGGREGATE& entry =
+            compact_entries[compact_entry_indices != NULL
+                                ? compact_entry_indices[entry_idx]
+                                : entry_idx];
+        sort_keys[entry_idx] = static_cast<uint64_t>(static_cast<unsigned int>(
+            entry.source_order_end));
+    }
+}
+
+static __global__ void
+Build_Gmxpacked_Record_Stream_Compact_Source_Begin_Sort_Keys(
+    const int compact_entry_numbers, const int* compact_entry_indices,
+    const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_AGGREGATE* compact_entries,
+    uint64_t* sort_keys)
+{
+    SIMPLE_DEVICE_FOR(entry_idx, compact_entry_numbers)
+    {
+        const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_AGGREGATE& entry =
+            compact_entries[compact_entry_indices != NULL
+                                ? compact_entry_indices[entry_idx]
+                                : entry_idx];
+        sort_keys[entry_idx] = static_cast<uint64_t>(static_cast<unsigned int>(
+            entry.source_order_begin));
+    }
+}
+
+static __global__ void Build_Gmxpacked_Record_Stream_Compact_Shift_Sort_Keys(
+    const int compact_entry_numbers, const int* compact_entry_indices,
+    const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_AGGREGATE* compact_entries,
+    uint64_t* sort_keys)
+{
+    SIMPLE_DEVICE_FOR(entry_idx, compact_entry_numbers)
+    {
+        const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_AGGREGATE& entry =
+            compact_entries[compact_entry_indices != NULL
+                                ? compact_entry_indices[entry_idx]
+                                : entry_idx];
+        sort_keys[entry_idx] =
+            static_cast<uint64_t>(static_cast<unsigned int>(entry.shift_id));
+    }
+}
+
+static __global__ void
+Build_Gmxpacked_Record_Stream_Compact_Supercluster_Sort_Keys(
+    const int compact_entry_numbers, const int* compact_entry_indices,
+    const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_AGGREGATE* compact_entries,
+    uint64_t* sort_keys)
+{
+    SIMPLE_DEVICE_FOR(entry_idx, compact_entry_numbers)
+    {
+        const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_AGGREGATE& entry =
+            compact_entries[compact_entry_indices != NULL
+                                ? compact_entry_indices[entry_idx]
+                                : entry_idx];
+        sort_keys[entry_idx] = static_cast<uint64_t>(static_cast<unsigned int>(
+            entry.supercluster_id));
+    }
+}
+
+static __global__ void Build_Gmxpacked_Record_Stream_Compact_Sci_Flags(
+    const int compact_entry_numbers,
+    const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_AGGREGATE* compact_entries,
+    int* sci_flags)
+{
+    SIMPLE_DEVICE_FOR(entry_idx, compact_entry_numbers)
+    {
+        int sci_start = 0;
+        if (entry_idx == 0)
+        {
+            sci_start = 1;
+        }
+        else
+        {
+            const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_AGGREGATE& current =
+                compact_entries[entry_idx];
+            const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_AGGREGATE& previous =
+                compact_entries[entry_idx - 1];
+            sci_start = (current.supercluster_id != previous.supercluster_id ||
+                         current.shift_id != previous.shift_id)
+                            ? 1
+                            : 0;
+        }
+        sci_flags[entry_idx] = sci_start;
+    }
+}
+
+static __global__ void Fill_Gmxpacked_Record_Stream_Sci_And_Cj(
+    const int sci_numbers, const int* compact_sci_starts,
+    const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_AGGREGATE* compact_entries,
+    const int* compact_cjpacked_offsets,
+    LJ_CLUSTERED_GMXPACKED_SCI* gmxpacked_sci,
+    LJ_CLUSTERED_GMXPACKED_CJ* gmxpacked_cjpacked)
+{
+    SIMPLE_DEVICE_FOR(sci, sci_numbers)
+    {
+        const int entry_begin = compact_sci_starts[sci];
+        const int entry_end = compact_sci_starts[sci + 1];
+        if (entry_begin >= entry_end)
+        {
+            return;
+        }
+
+        const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_AGGREGATE first_entry =
+            compact_entries[entry_begin];
+        const int compact_begin = compact_cjpacked_offsets[sci];
+        const int compact_end = compact_cjpacked_offsets[sci + 1];
+        gmxpacked_sci[sci] = {first_entry.supercluster_id,
+                              first_entry.shift_id, compact_begin,
+                              compact_end};
+
+        const int packed_count = compact_end - compact_begin;
+        for (int local_packed = 0; local_packed < packed_count;
+             local_packed += 1)
+        {
+            const int packed_entry_begin =
+                entry_begin + local_packed * kClusteredJGroupSize;
+            const int packed_entry_end =
+                IntMin(entry_end, packed_entry_begin + kClusteredJGroupSize);
+            LJ_CLUSTERED_GMXPACKED_CJ compact_packed =
+                Make_Empty_Gmxpacked_CjPacked();
+            for (int entry_idx = packed_entry_begin; entry_idx < packed_entry_end;
+                 entry_idx += 1)
+            {
+                const int jm = entry_idx - packed_entry_begin;
+                const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_AGGREGATE& entry =
+                    compact_entries[entry_idx];
+                compact_packed.cj[jm] = entry.cluster_j;
+                for (int split = 0; split < kClusteredWarpSplitCount;
+                     split += 1)
+                {
+                    const unsigned int imask = entry.split_imask[split];
+                    if (imask == 0u)
+                    {
+                        continue;
+                    }
+                    compact_packed.split[split].imask |=
+                        imask << Clustered_Jm_Imask_Shift(jm);
+                }
+            }
+            gmxpacked_cjpacked[compact_begin + local_packed] = compact_packed;
+        }
+    }
+}
+
+static __device__ __forceinline__ LJ_CLUSTERED_GMXPACKED_EXCLUSION
+Build_Gmxpacked_Record_Stream_Split_Exclusion_Row(
+    const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_AGGREGATE* compact_entries,
+    const int entry_begin, const int entry_end, const int split_idx)
+{
+    LJ_CLUSTERED_GMXPACKED_EXCLUSION compact_exclusion = {};
+    for (int entry_idx = entry_begin; entry_idx < entry_end; entry_idx += 1)
+    {
+        const int jm = entry_idx - entry_begin;
+        const unsigned int jm_imask_shift = Clustered_Jm_Imask_Shift(jm);
+        const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_AGGREGATE& entry =
+            compact_entries[entry_idx];
+        for (int pair_idx = 0; pair_idx < kClusteredGmxpackedExclusionPairCount;
+             pair_idx += 1)
+        {
+            compact_exclusion.pair[pair_idx] |=
+                entry.pair_exclusion_words[split_idx][pair_idx]
+                << jm_imask_shift;
+        }
+    }
+    return compact_exclusion;
+}
+
+static __global__ void Count_Gmxpacked_Record_Stream_Split_Exclusions(
+    const int sci_numbers, const LJ_CLUSTERED_GMXPACKED_SCI* gmxpacked_sci,
+    const LJ_CLUSTERED_GMXPACKED_CJ* gmxpacked_cjpacked,
+    const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_AGGREGATE* compact_entries,
+    const int* compact_sci_starts, int* split_exclusion_counts)
+{
+    const int sci = blockIdx.x;
+    if (sci >= sci_numbers)
+    {
+        return;
+    }
+
+    const LJ_CLUSTERED_GMXPACKED_SCI compact_sci_entry = gmxpacked_sci[sci];
+    const int compact_begin = compact_sci_entry.cjpacked_begin;
+    const int packed_count = compact_sci_entry.cjpacked_end - compact_begin;
+    const int sci_entry_begin = compact_sci_starts[sci];
+    const int sci_entry_end = compact_sci_starts[sci + 1];
+    const int split_entry_count = packed_count * kClusteredWarpSplitCount;
+    for (int local_split_entry = threadIdx.x;
+         local_split_entry < split_entry_count;
+         local_split_entry += blockDim.x)
+    {
+        const int local_packed =
+            local_split_entry / kClusteredWarpSplitCount;
+        const int split_idx = local_split_entry % kClusteredWarpSplitCount;
+        const int compact_packed_idx = compact_begin + local_packed;
+        const int compact_split_idx =
+            compact_packed_idx * kClusteredWarpSplitCount + split_idx;
+        const int packed_entry_begin =
+            sci_entry_begin + local_packed * kClusteredJGroupSize;
+        const int packed_entry_end =
+            IntMin(sci_entry_end, packed_entry_begin + kClusteredJGroupSize);
+        const unsigned int split_imask =
+            gmxpacked_cjpacked[compact_packed_idx].split[split_idx].imask;
+        int needs_exclusion = 0;
+        if (split_imask != 0u)
+        {
+            const LJ_CLUSTERED_GMXPACKED_EXCLUSION compact_exclusion =
+                Build_Gmxpacked_Record_Stream_Split_Exclusion_Row(
+                    compact_entries, packed_entry_begin, packed_entry_end,
+                    split_idx);
+            needs_exclusion =
+                Gmxpacked_Exclusion_Row_Is_Needed(compact_exclusion,
+                                                  split_imask)
+                    ? 1
+                    : 0;
+        }
+        split_exclusion_counts[compact_split_idx] = needs_exclusion;
+    }
+}
+
+static __global__ void Fill_Gmxpacked_Record_Stream_Split_Exclusions(
+    const int sci_numbers, const LJ_CLUSTERED_GMXPACKED_SCI* gmxpacked_sci,
+    const LJ_CLUSTERED_GMXPACKED_CJ* gmxpacked_cjpacked_read,
+    const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_AGGREGATE* compact_entries,
+    const int* compact_sci_starts, const int* split_exclusion_offsets,
+    LJ_CLUSTERED_GMXPACKED_CJ* gmxpacked_cjpacked,
+    LJ_CLUSTERED_GMXPACKED_EXCLUSION* gmxpacked_exclusions)
+{
+    const int sci = blockIdx.x;
+    if (sci >= sci_numbers)
+    {
+        return;
+    }
+
+    const LJ_CLUSTERED_GMXPACKED_SCI compact_sci_entry = gmxpacked_sci[sci];
+    const int compact_begin = compact_sci_entry.cjpacked_begin;
+    const int packed_count = compact_sci_entry.cjpacked_end - compact_begin;
+    const int sci_entry_begin = compact_sci_starts[sci];
+    const int sci_entry_end = compact_sci_starts[sci + 1];
+    const int split_entry_count = packed_count * kClusteredWarpSplitCount;
+    for (int local_split_entry = threadIdx.x;
+         local_split_entry < split_entry_count;
+         local_split_entry += blockDim.x)
+    {
+        const int local_packed =
+            local_split_entry / kClusteredWarpSplitCount;
+        const int split_idx = local_split_entry % kClusteredWarpSplitCount;
+        const int compact_packed_idx = compact_begin + local_packed;
+        const int compact_split_idx =
+            compact_packed_idx * kClusteredWarpSplitCount + split_idx;
+        const int packed_entry_begin =
+            sci_entry_begin + local_packed * kClusteredJGroupSize;
+        const int packed_entry_end =
+            IntMin(sci_entry_end, packed_entry_begin + kClusteredJGroupSize);
+        const unsigned int split_imask =
+            gmxpacked_cjpacked_read[compact_packed_idx].split[split_idx].imask;
+        if (split_imask == 0u)
+        {
+            continue;
+        }
+        const LJ_CLUSTERED_GMXPACKED_EXCLUSION compact_exclusion =
+            Build_Gmxpacked_Record_Stream_Split_Exclusion_Row(
+                compact_entries, packed_entry_begin, packed_entry_end, split_idx);
+        if (!Gmxpacked_Exclusion_Row_Is_Needed(compact_exclusion, split_imask))
+        {
+            continue;
+        }
+
+        const int compact_exclusion_idx =
+            1 + split_exclusion_offsets[compact_split_idx];
+        gmxpacked_cjpacked[compact_packed_idx]
+            .split[split_idx]
+            .exclusion_index = compact_exclusion_idx;
+        gmxpacked_exclusions[compact_exclusion_idx] = compact_exclusion;
+    }
+}
+
+static void Free_Gmxpacked_Record_Stream_Device_Compact_Temps(
+    LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_AGGREGATE** d_sorted_aggregates,
+    LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_AGGREGATE** d_compact_entries)
+{
+    Free_Single_Device_Pointer((void**)d_sorted_aggregates);
+    Free_Single_Device_Pointer((void**)d_compact_entries);
+}
+
+static bool Build_Gmxpacked_Record_Stream_Compact_Payload_On_Device(
+    LJ_CLUSTER_LAYOUT* layout,
+    ClusteredGmxpackedRecordStreamCompactSummary* summary)
+{
+    if (layout == NULL || summary == NULL || summary->aggregate_rows <= 0 ||
+        layout->d_gmxpacked_record_stream_aggregates == NULL)
+    {
+        return false;
+    }
+
+    ClusteredGmxpackedRecordBuilderStageTimer stage_timer(
+        "record-stream-device-compact-pack",
+        Clustered_Gmxpacked_Record_Builder_Stage_Timers_Enabled());
+    const bool record_builder_stage_timers =
+        Clustered_Gmxpacked_Record_Builder_Stage_Timers_Enabled();
+    Bind_Clustered_Working_Device(&layout->working_device);
+    const int aggregate_rows = summary->aggregate_rows;
+    LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_AGGREGATE* d_sorted_aggregates = NULL;
+    LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_AGGREGATE* d_compact_entries = NULL;
+    Clustered_Device_Malloc_Safely(
+        (void**)&d_sorted_aggregates,
+        sizeof(LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_AGGREGATE) *
+            static_cast<size_t>(aggregate_rows),
+        "record-stream-sorted-aggregates");
+    deviceMemcpy(d_sorted_aggregates,
+                 layout->d_gmxpacked_record_stream_aggregates,
+                 sizeof(LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_AGGREGATE) *
+                     static_cast<size_t>(aggregate_rows),
+                 deviceMemcpyDeviceToDevice);
+
+    Reserve_Device_U64_Buffer(aggregate_rows, &layout->d_sort_keys,
+                              &layout->sort_key_capacity);
+    if (aggregate_rows > 1)
+    {
+        ClusteredGmxpackedRecordBuilderStageTimer aggregate_sort_timer(
+            "record-stream-device-compact-aggregate-sort",
+            record_builder_stage_timers);
+        Reserve_Device_Int_Buffer(aggregate_rows, &layout->d_jentry_indices,
+                                  &layout->jentry_index_capacity);
+        Launch_Device_Kernel(
+            Build_Linear_Indices,
+            (aggregate_rows + CONTROLLER::device_max_thread - 1) /
+                CONTROLLER::device_max_thread,
+            CONTROLLER::device_max_thread, 0, NULL, aggregate_rows,
+            layout->d_jentry_indices);
+        Launch_Device_Kernel(
+            Build_Gmxpacked_Record_Stream_Compact_Cluster_J_Sort_Keys,
+            (aggregate_rows + CONTROLLER::device_max_thread - 1) /
+                CONTROLLER::device_max_thread,
+            CONTROLLER::device_max_thread, 0, NULL, aggregate_rows,
+            layout->d_jentry_indices,
+            layout->d_gmxpacked_record_stream_aggregates, layout->d_sort_keys);
+        Stable_Sort_Device_By_Key(layout, aggregate_rows, layout->d_sort_keys,
+                                  layout->d_jentry_indices);
+        Launch_Device_Kernel(
+            Build_Gmxpacked_Record_Stream_Compact_Shift_Sort_Keys,
+            (aggregate_rows + CONTROLLER::device_max_thread - 1) /
+                CONTROLLER::device_max_thread,
+            CONTROLLER::device_max_thread, 0, NULL, aggregate_rows,
+            layout->d_jentry_indices,
+            layout->d_gmxpacked_record_stream_aggregates, layout->d_sort_keys);
+        Stable_Sort_Device_By_Key(layout, aggregate_rows, layout->d_sort_keys,
+                                  layout->d_jentry_indices);
+        Launch_Device_Kernel(
+            Build_Gmxpacked_Record_Stream_Compact_Supercluster_Sort_Keys,
+            (aggregate_rows + CONTROLLER::device_max_thread - 1) /
+                CONTROLLER::device_max_thread,
+            CONTROLLER::device_max_thread, 0, NULL, aggregate_rows,
+            layout->d_jentry_indices,
+            layout->d_gmxpacked_record_stream_aggregates, layout->d_sort_keys);
+        Stable_Sort_Device_By_Key(layout, aggregate_rows, layout->d_sort_keys,
+                                  layout->d_jentry_indices);
+        Launch_Device_Kernel(
+            Gather_Gmxpacked_Record_Stream_Aggregates_By_Index,
+            (aggregate_rows + CONTROLLER::device_max_thread - 1) /
+                CONTROLLER::device_max_thread,
+            CONTROLLER::device_max_thread, 0, NULL, aggregate_rows,
+            layout->d_jentry_indices,
+            layout->d_gmxpacked_record_stream_aggregates,
+            d_sorted_aggregates);
+    }
+
+    int compact_entry_numbers = 0;
+    {
+        ClusteredGmxpackedRecordBuilderStageTimer entry_scan_timer(
+            "record-stream-device-compact-entry-scan",
+            record_builder_stage_timers);
+        Reserve_Device_Int_Buffer(aggregate_rows + 1, &layout->d_jentry_counts,
+                                  &layout->jentry_count_capacity);
+        Reserve_Device_Int_Buffer(aggregate_rows + 1, &layout->d_jentry_offsets,
+                                  &layout->jentry_offset_capacity);
+        Launch_Device_Kernel(
+            Build_Gmxpacked_Record_Stream_Compact_Entry_Flags,
+            (aggregate_rows + CONTROLLER::device_max_thread - 1) /
+                CONTROLLER::device_max_thread,
+            CONTROLLER::device_max_thread, 0, NULL, aggregate_rows,
+            d_sorted_aggregates, layout->d_jentry_counts);
+        compact_entry_numbers = Exclusive_Scan_Counts(
+            layout, aggregate_rows, layout->d_jentry_counts,
+            layout->d_jentry_offsets);
+    }
+    summary->compact_entries = compact_entry_numbers;
+    if (compact_entry_numbers <= 0)
+    {
+        Free_Gmxpacked_Record_Stream_Device_Compact_Temps(&d_sorted_aggregates,
+                                                          &d_compact_entries);
+        return false;
+    }
+
+    {
+        ClusteredGmxpackedRecordBuilderStageTimer entry_fill_timer(
+            "record-stream-device-compact-entry-fill",
+            record_builder_stage_timers);
+        Reserve_Device_Int_Buffer(compact_entry_numbers + 1,
+                                  &layout->d_jentry_indices,
+                                  &layout->jentry_index_capacity);
+        Launch_Device_Kernel(
+            Scatter_J_Entry_Sci_Starts,
+            (aggregate_rows + CONTROLLER::device_max_thread - 1) /
+                CONTROLLER::device_max_thread,
+            CONTROLLER::device_max_thread, 0, NULL, aggregate_rows,
+            layout->d_jentry_counts, layout->d_jentry_offsets,
+            layout->d_jentry_indices);
+        deviceMemcpy(layout->d_jentry_indices + compact_entry_numbers,
+                     &aggregate_rows, sizeof(int), deviceMemcpyHostToDevice);
+
+        Clustered_Device_Malloc_Safely(
+            (void**)&d_compact_entries,
+            sizeof(LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_AGGREGATE) *
+                static_cast<size_t>(compact_entry_numbers),
+            "record-stream-compact-entries");
+        (void)cudaGetLastError();
+        Launch_Device_Kernel(
+            Fill_Gmxpacked_Record_Stream_Compact_Entries,
+            (compact_entry_numbers + kClusteredGmxpackedExclusionBlockSize - 1) /
+                kClusteredGmxpackedExclusionBlockSize,
+            kClusteredGmxpackedExclusionBlockSize, 0, NULL,
+            compact_entry_numbers, layout->d_jentry_indices,
+            d_sorted_aggregates, d_compact_entries);
+        Clustered_Check_Cuda_Status(cudaGetLastError(),
+                                    "record-stream-compact-entry-fill-launch");
+        Clustered_Debug_Device_Sync_If_Tracing(
+            "Fill_Gmxpacked_Record_Stream_Compact_Entries");
+    }
+
+    Reserve_Device_U64_Buffer(compact_entry_numbers, &layout->d_sort_keys,
+                              &layout->sort_key_capacity);
+    if (compact_entry_numbers > 1)
+    {
+        ClusteredGmxpackedRecordBuilderStageTimer final_sort_timer(
+            "record-stream-device-compact-final-sort",
+            record_builder_stage_timers);
+        Reserve_Device_Int_Buffer(compact_entry_numbers,
+                                  &layout->d_jentry_indices,
+                                  &layout->jentry_index_capacity);
+        Launch_Device_Kernel(
+            Build_Linear_Indices,
+            (compact_entry_numbers + CONTROLLER::device_max_thread - 1) /
+                CONTROLLER::device_max_thread,
+            CONTROLLER::device_max_thread, 0, NULL, compact_entry_numbers,
+            layout->d_jentry_indices);
+        Launch_Device_Kernel(
+            Build_Gmxpacked_Record_Stream_Compact_Cluster_J_Sort_Keys,
+            (compact_entry_numbers + CONTROLLER::device_max_thread - 1) /
+                CONTROLLER::device_max_thread,
+            CONTROLLER::device_max_thread, 0, NULL, compact_entry_numbers,
+            layout->d_jentry_indices,
+            d_compact_entries, layout->d_sort_keys);
+        Stable_Sort_Device_By_Key(layout, compact_entry_numbers,
+                                  layout->d_sort_keys,
+                                  layout->d_jentry_indices);
+        Launch_Device_Kernel(
+            Build_Gmxpacked_Record_Stream_Compact_Source_End_Sort_Keys,
+            (compact_entry_numbers + CONTROLLER::device_max_thread - 1) /
+                CONTROLLER::device_max_thread,
+            CONTROLLER::device_max_thread, 0, NULL, compact_entry_numbers,
+            layout->d_jentry_indices,
+            d_compact_entries, layout->d_sort_keys);
+        Stable_Sort_Device_By_Key(layout, compact_entry_numbers,
+                                  layout->d_sort_keys,
+                                  layout->d_jentry_indices);
+        Launch_Device_Kernel(
+            Build_Gmxpacked_Record_Stream_Compact_Source_Begin_Sort_Keys,
+            (compact_entry_numbers + CONTROLLER::device_max_thread - 1) /
+                CONTROLLER::device_max_thread,
+            CONTROLLER::device_max_thread, 0, NULL, compact_entry_numbers,
+            layout->d_jentry_indices,
+            d_compact_entries, layout->d_sort_keys);
+        Stable_Sort_Device_By_Key(layout, compact_entry_numbers,
+                                  layout->d_sort_keys,
+                                  layout->d_jentry_indices);
+        Launch_Device_Kernel(
+            Build_Gmxpacked_Record_Stream_Compact_Shift_Sort_Keys,
+            (compact_entry_numbers + CONTROLLER::device_max_thread - 1) /
+                CONTROLLER::device_max_thread,
+            CONTROLLER::device_max_thread, 0, NULL, compact_entry_numbers,
+            layout->d_jentry_indices, d_compact_entries, layout->d_sort_keys);
+        Stable_Sort_Device_By_Key(layout, compact_entry_numbers,
+                                  layout->d_sort_keys,
+                                  layout->d_jentry_indices);
+        Launch_Device_Kernel(
+            Build_Gmxpacked_Record_Stream_Compact_Supercluster_Sort_Keys,
+            (compact_entry_numbers + CONTROLLER::device_max_thread - 1) /
+                CONTROLLER::device_max_thread,
+            CONTROLLER::device_max_thread, 0, NULL, compact_entry_numbers,
+            layout->d_jentry_indices, d_compact_entries, layout->d_sort_keys);
+        Stable_Sort_Device_By_Key(layout, compact_entry_numbers,
+                                  layout->d_sort_keys,
+                                  layout->d_jentry_indices);
+        Launch_Device_Kernel(
+            Gather_Gmxpacked_Record_Stream_Aggregates_By_Index,
+            (compact_entry_numbers + CONTROLLER::device_max_thread - 1) /
+                CONTROLLER::device_max_thread,
+            CONTROLLER::device_max_thread, 0, NULL, compact_entry_numbers,
+            layout->d_jentry_indices, d_compact_entries, d_sorted_aggregates);
+        deviceMemcpy(d_compact_entries, d_sorted_aggregates,
+                     sizeof(LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_AGGREGATE) *
+                         static_cast<size_t>(compact_entry_numbers),
+                     deviceMemcpyDeviceToDevice);
+    }
+
+    {
+        ClusteredGmxpackedRecordBuilderStageTimer sci_scan_timer(
+            "record-stream-device-compact-sci-scan",
+            record_builder_stage_timers);
+        Reserve_Device_Int_Buffer(compact_entry_numbers + 1,
+                                  &layout->d_jentry_counts,
+                                  &layout->jentry_count_capacity);
+        Reserve_Device_Int_Buffer(compact_entry_numbers + 1,
+                                  &layout->d_jentry_offsets,
+                                  &layout->jentry_offset_capacity);
+        Launch_Device_Kernel(
+            Build_Gmxpacked_Record_Stream_Compact_Sci_Flags,
+            (compact_entry_numbers + CONTROLLER::device_max_thread - 1) /
+                CONTROLLER::device_max_thread,
+            CONTROLLER::device_max_thread, 0, NULL, compact_entry_numbers,
+            d_compact_entries, layout->d_jentry_counts);
+        layout->gmxpacked_sci_numbers = Exclusive_Scan_Counts(
+            layout, compact_entry_numbers, layout->d_jentry_counts,
+            layout->d_jentry_offsets);
+    }
+    if (layout->gmxpacked_sci_numbers <= 0)
+    {
+        Free_Gmxpacked_Record_Stream_Device_Compact_Temps(&d_sorted_aggregates,
+                                                          &d_compact_entries);
+        Reset_Gmxpacked_Payload(layout);
+        summary->compact_entries = compact_entry_numbers;
+        return false;
+    }
+
+    {
+        ClusteredGmxpackedRecordBuilderStageTimer cj_scan_timer(
+            "record-stream-device-compact-cj-scan",
+            record_builder_stage_timers);
+        Reserve_Device_Int_Buffer(layout->gmxpacked_sci_numbers + 1,
+                                  &layout->d_jentry_indices,
+                                  &layout->jentry_index_capacity);
+        Launch_Device_Kernel(
+            Scatter_J_Entry_Sci_Starts,
+            (compact_entry_numbers + CONTROLLER::device_max_thread - 1) /
+                CONTROLLER::device_max_thread,
+            CONTROLLER::device_max_thread, 0, NULL, compact_entry_numbers,
+            layout->d_jentry_counts, layout->d_jentry_offsets,
+            layout->d_jentry_indices);
+        deviceMemcpy(layout->d_jentry_indices + layout->gmxpacked_sci_numbers,
+                     &compact_entry_numbers, sizeof(int), deviceMemcpyHostToDevice);
+
+        Reserve_Device_Int_Buffer(layout->gmxpacked_sci_numbers,
+                                  &layout->d_cjpacked_counts,
+                                  &layout->cjpacked_count_capacity);
+        Reserve_Device_Int_Buffer(layout->gmxpacked_sci_numbers + 1,
+                                  &layout->d_cjpacked_group_offsets,
+                                  &layout->cjpacked_group_offset_capacity);
+        Launch_Device_Kernel(
+            Count_Gmxpacked_CjPacked_Per_Sci,
+            (layout->gmxpacked_sci_numbers + CONTROLLER::device_max_thread - 1) /
+                CONTROLLER::device_max_thread,
+            CONTROLLER::device_max_thread, 0, NULL,
+            layout->gmxpacked_sci_numbers, layout->d_jentry_indices,
+            layout->d_cjpacked_counts);
+        layout->gmxpacked_cjpacked_numbers = Exclusive_Scan_Counts(
+            layout, layout->gmxpacked_sci_numbers, layout->d_cjpacked_counts,
+            layout->d_cjpacked_group_offsets);
+    }
+    if (layout->gmxpacked_cjpacked_numbers <= 0)
+    {
+        Free_Gmxpacked_Record_Stream_Device_Compact_Temps(&d_sorted_aggregates,
+                                                          &d_compact_entries);
+        Reset_Gmxpacked_Payload(layout);
+        summary->compact_entries = compact_entry_numbers;
+        return false;
+    }
+
+    {
+        ClusteredGmxpackedRecordBuilderStageTimer sci_cj_fill_timer(
+            "record-stream-device-compact-sci-cj-fill",
+            record_builder_stage_timers);
+        Reserve_Device_Buffer(layout->gmxpacked_sci_numbers,
+                              &layout->d_gmxpacked_sci,
+                              &layout->gmxpacked_sci_capacity);
+        Reserve_Device_Buffer(layout->gmxpacked_cjpacked_numbers,
+                              &layout->d_gmxpacked_cjpacked,
+                              &layout->gmxpacked_cjpacked_capacity);
+        Launch_Device_Kernel(
+            Fill_Gmxpacked_Record_Stream_Sci_And_Cj,
+            (layout->gmxpacked_sci_numbers + CONTROLLER::device_max_thread - 1) /
+                CONTROLLER::device_max_thread,
+            CONTROLLER::device_max_thread, 0, NULL,
+            layout->gmxpacked_sci_numbers, layout->d_jentry_indices,
+            d_compact_entries, layout->d_cjpacked_group_offsets,
+            layout->d_gmxpacked_sci, layout->d_gmxpacked_cjpacked);
+    }
+
+    const int split_entry_numbers =
+        layout->gmxpacked_cjpacked_numbers * kClusteredWarpSplitCount;
+    {
+        ClusteredGmxpackedRecordBuilderStageTimer exclusion_timer(
+            "record-stream-device-compact-exclusion-build",
+            record_builder_stage_timers);
+        Reserve_Device_Int_Buffer(split_entry_numbers, &layout->d_exclusion_counts,
+                                  &layout->exclusion_count_capacity);
+        Reserve_Device_Int_Buffer(split_entry_numbers + 1,
+                                  &layout->d_exclusion_offsets,
+                                  &layout->exclusion_offset_capacity);
+        Launch_Device_Kernel(
+            Count_Gmxpacked_Record_Stream_Split_Exclusions,
+            layout->gmxpacked_sci_numbers, kClusteredGmxpackedExclusionBlockSize,
+            0, NULL, layout->gmxpacked_sci_numbers, layout->d_gmxpacked_sci,
+            layout->d_gmxpacked_cjpacked, d_compact_entries,
+            layout->d_jentry_indices, layout->d_exclusion_counts);
+        layout->gmxpacked_split_exclusion_numbers = Exclusive_Scan_Counts(
+            layout, split_entry_numbers, layout->d_exclusion_counts,
+            layout->d_exclusion_offsets);
+        layout->gmxpacked_exclusion_numbers =
+            1 + layout->gmxpacked_split_exclusion_numbers;
+        Reserve_Device_Buffer(layout->gmxpacked_exclusion_numbers,
+                              &layout->d_gmxpacked_exclusions,
+                              &layout->gmxpacked_exclusion_capacity);
+        Launch_Device_Kernel(
+            Initialize_Gmxpacked_Exclusion_Rows,
+            (layout->gmxpacked_exclusion_numbers +
+             CONTROLLER::device_max_thread - 1) /
+                CONTROLLER::device_max_thread,
+            CONTROLLER::device_max_thread, 0, NULL,
+            layout->gmxpacked_exclusion_numbers, layout->d_gmxpacked_exclusions);
+        if (layout->gmxpacked_split_exclusion_numbers > 0)
+        {
+            Launch_Device_Kernel(
+                Fill_Gmxpacked_Record_Stream_Split_Exclusions,
+                layout->gmxpacked_sci_numbers,
+                kClusteredGmxpackedExclusionBlockSize, 0, NULL,
+                layout->gmxpacked_sci_numbers, layout->d_gmxpacked_sci,
+                layout->d_gmxpacked_cjpacked, d_compact_entries,
+                layout->d_jentry_indices, layout->d_exclusion_offsets,
+                layout->d_gmxpacked_cjpacked, layout->d_gmxpacked_exclusions);
+        }
+    }
+
+    summary->compact_sci = layout->gmxpacked_sci_numbers;
+    summary->compact_cj = layout->gmxpacked_cjpacked_numbers;
+    summary->split_excl = layout->gmxpacked_split_exclusion_numbers;
+    summary->compact_excl = layout->gmxpacked_exclusion_numbers;
+    Clustered_Debug_Device_Sync_If_Tracing(
+        "Build_Gmxpacked_Record_Stream_Compact_Payload_On_Device");
+    Free_Gmxpacked_Record_Stream_Device_Compact_Temps(&d_sorted_aggregates,
+                                                      &d_compact_entries);
+    return summary->compact_sci > 0 && summary->compact_cj > 0 &&
+           summary->compact_excl > 0;
+}
+
 static ClusteredReducedStagedCountSummary
 Analyze_Reduced_Gmxpacked_Count_And_Scan_On_Host(
     const std::vector<LJ_CLUSTERED_SCI>& native_sci,
@@ -8413,6 +15250,11 @@ static void Build_Gmxpacked_Payload_On_Device(LJ_CLUSTER_LAYOUT* layout,
 
 static void Build_Gmxpacked_Payload(LJ_CLUSTER_LAYOUT* layout)
 {
+    // Compatibility path: this builder expands finalized native SCI/CJ payload.
+    // The production-native record-stream hook lives earlier in
+    // LJ_CLUSTER_LAYOUT::Build(), before Fill_Nbnxm_Payload_From_Candidate_Leaves()
+    // materializes d_nbnxm_sci / d_nbnxm_cjpacked, and must not reuse finalized
+    // native CJ as its input source.
     Reset_Gmxpacked_Payload(layout);
     if (layout == NULL || layout->sci_numbers <= 0 ||
         layout->cjpacked_numbers <= 0 || layout->cluster_numbers <= 0 ||
@@ -8710,6 +15552,3794 @@ static void Build_Gmxpacked_Payload(LJ_CLUSTER_LAYOUT* layout)
 #endif
 }
 
+struct ClusteredGmxpackedCompareEntry
+{
+    int supercluster_id = -1;
+    int shift_id = kClusteredCentralShiftId;
+    int cluster_j = -1;
+    int split_id = 0;
+    unsigned int imask = 0u;
+    uint64_t exclusion_hash = 0u;
+};
+
+static uint64_t Hash_Gmxpacked_Exclusion_Row_For_Jm(
+    const LJ_CLUSTERED_GMXPACKED_EXCLUSION* exclusion,
+    const unsigned int imask, const int jm)
+{
+    uint64_t hash = 1469598103934665603ull;
+    const unsigned int jm_shift = Clustered_Jm_Imask_Shift(jm);
+    for (int pair_idx = 0; pair_idx < kClusteredGmxpackedExclusionPairCount;
+         pair_idx += 1)
+    {
+        const unsigned int allowed_i_mask =
+            exclusion != NULL ? ((exclusion->pair[pair_idx] >> jm_shift) &
+                                     ((1u << kClusteredSuperClusterClusters) - 1u))
+                              : imask;
+        hash ^= static_cast<uint64_t>(allowed_i_mask & imask);
+        hash *= 1099511628211ull;
+    }
+    return hash;
+}
+
+static unsigned int Prune_Gmxpacked_Compare_Imask_On_Host(
+    const LJ_CLUSTER_LAYOUT* layout, const std::vector<VECTOR>& coordinates,
+    const std::vector<int>& permutation, const std::vector<int>& cluster_offsets,
+    const std::vector<int>& super_cluster_offsets,
+    const std::vector<VECTOR>& cluster_centers,
+    const std::vector<unsigned int>& cluster_valid_masks,
+    const std::vector<unsigned int>& cluster_local_masks, const int supercluster_id,
+    const int shift_id, const int cluster_j, const int split_id,
+    const unsigned int imask, const float cutoff, const LTMatrix3 cell,
+    const LTMatrix3 rcell)
+{
+    if (layout == NULL || imask == 0u || coordinates.empty() ||
+        permutation.empty() || cluster_offsets.empty() ||
+        super_cluster_offsets.empty() ||
+        cluster_centers.empty() || cluster_valid_masks.empty() ||
+        cluster_local_masks.empty() ||
+        supercluster_id < 0 || supercluster_id >= layout->super_cluster_numbers ||
+        cluster_j < 0 || cluster_j >= layout->cluster_numbers)
+    {
+        return 0u;
+    }
+
+    const int cluster_i_start =
+        super_cluster_offsets[static_cast<size_t>(supercluster_id)];
+    const int j_lane_base = split_id * kClusteredSplitJClusterSize;
+    const VECTOR pair_shift = Shift_Vector_From_Id(shift_id, cell);
+    const float cutoff_sq = cutoff * cutoff;
+    const unsigned int valid_mask_j =
+        cluster_valid_masks[static_cast<size_t>(cluster_j)];
+    const VECTOR center_j = cluster_centers[static_cast<size_t>(cluster_j)];
+    unsigned int pruned_imask = 0u;
+
+    for (int i_local = 0; i_local < kClusteredSuperClusterClusters; i_local += 1)
+    {
+        const unsigned int i_local_bit = 1u << static_cast<unsigned int>(i_local);
+        if ((imask & i_local_bit) == 0u)
+        {
+            continue;
+        }
+        const int cluster_i = cluster_i_start + i_local;
+        if (cluster_i < 0 || cluster_i >= layout->cluster_numbers)
+        {
+            continue;
+        }
+        const unsigned int local_mask_i =
+            cluster_local_masks[static_cast<size_t>(cluster_i)];
+        if (local_mask_i == 0u)
+        {
+            continue;
+        }
+
+        bool any_in_range = false;
+        for (int i_lane = 0; i_lane < kClusteredClusterSize && !any_in_range;
+             i_lane += 1)
+        {
+            if ((local_mask_i & (1u << static_cast<unsigned int>(i_lane))) == 0u)
+            {
+                continue;
+            }
+            const int sorted_i = cluster_offsets[static_cast<size_t>(cluster_i)] +
+                                 i_lane;
+            if (sorted_i < 0 || sorted_i >= static_cast<int>(permutation.size()))
+            {
+                continue;
+            }
+            const int atom_i = permutation[static_cast<size_t>(sorted_i)];
+            if (atom_i < 0 || atom_i >= static_cast<int>(coordinates.size()))
+            {
+                continue;
+            }
+            const VECTOR center_i =
+                cluster_centers[static_cast<size_t>(cluster_i)];
+            const VECTOR r_i = Shift_Clustered_Atom_Into_Sorted_XQ_Frame(
+                coordinates[static_cast<size_t>(atom_i)], center_i, cell,
+                rcell);
+            for (int split_j_lane = 0;
+                 split_j_lane < kClusteredSplitJClusterSize; split_j_lane += 1)
+            {
+                const int j_lane = j_lane_base + split_j_lane;
+                if ((valid_mask_j & (1u << static_cast<unsigned int>(j_lane))) ==
+                    0u)
+                {
+                    continue;
+                }
+                const int sorted_j =
+                    cluster_offsets[static_cast<size_t>(cluster_j)] + j_lane;
+                if (sorted_j < 0 ||
+                    sorted_j >= static_cast<int>(permutation.size()))
+                {
+                    continue;
+                }
+                const int atom_j = permutation[static_cast<size_t>(sorted_j)];
+                if (atom_j < 0 || atom_j >= static_cast<int>(coordinates.size()))
+                {
+                    continue;
+                }
+                const VECTOR r_j = Shift_Clustered_Atom_Into_Sorted_XQ_Frame(
+                    coordinates[static_cast<size_t>(atom_j)], center_j, cell,
+                    rcell);
+                const float dr_x = r_j.x - r_i.x - pair_shift.x;
+                const float dr_y = r_j.y - r_i.y - pair_shift.y;
+                const float dr_z = r_j.z - r_i.z - pair_shift.z;
+                const float dr2 = dr_x * dr_x + dr_y * dr_y + dr_z * dr_z;
+                if (dr2 < cutoff_sq && dr2 != 0.0f)
+                {
+                    any_in_range = true;
+                    break;
+                }
+            }
+        }
+        if (any_in_range)
+        {
+            pruned_imask |= i_local_bit;
+        }
+    }
+    return pruned_imask;
+}
+
+static std::vector<ClusteredGmxpackedCompareEntry>
+Normalize_Gmxpacked_Compare_Entries(
+    const std::vector<LJ_CLUSTERED_GMXPACKED_SCI>& sci_entries,
+    const std::vector<LJ_CLUSTERED_GMXPACKED_CJ>& cjpacked_entries,
+    const std::vector<LJ_CLUSTERED_GMXPACKED_EXCLUSION>& exclusions,
+    const LJ_CLUSTER_LAYOUT* inner_prune_layout = NULL,
+    const VECTOR* crd = NULL, const float cutoff = 0.0f,
+    const LTMatrix3 cell = {}, const LTMatrix3 rcell = {})
+{
+    std::vector<ClusteredGmxpackedCompareEntry> entries;
+    std::vector<VECTOR> coordinates;
+    std::vector<int> permutation;
+    std::vector<int> cluster_offsets;
+    std::vector<int> super_cluster_offsets;
+    std::vector<VECTOR> cluster_centers;
+    std::vector<unsigned int> cluster_valid_masks;
+    std::vector<unsigned int> cluster_local_masks;
+    if (inner_prune_layout != NULL && crd != NULL && cutoff > 0.0f)
+    {
+        coordinates = Copy_Device_Buffer_To_Host(
+            crd, static_cast<size_t>(inner_prune_layout->total_atom_numbers));
+        permutation = Copy_Device_Buffer_To_Host(
+            inner_prune_layout->d_sort_permutation,
+            static_cast<size_t>(inner_prune_layout->total_atom_numbers));
+        cluster_offsets = Copy_Device_Buffer_To_Host(
+            inner_prune_layout->d_cluster_offsets,
+            static_cast<size_t>(inner_prune_layout->cluster_numbers + 1));
+        super_cluster_offsets = Copy_Device_Buffer_To_Host(
+            inner_prune_layout->d_super_cluster_offsets,
+            static_cast<size_t>(inner_prune_layout->super_cluster_numbers + 1));
+        cluster_centers = Copy_Device_Buffer_To_Host(
+            inner_prune_layout->d_cluster_centers,
+            static_cast<size_t>(inner_prune_layout->cluster_numbers));
+        cluster_valid_masks = Copy_Device_Buffer_To_Host(
+            inner_prune_layout->d_cluster_valid_masks,
+            static_cast<size_t>(inner_prune_layout->cluster_numbers));
+        cluster_local_masks = Copy_Device_Buffer_To_Host(
+            inner_prune_layout->d_cluster_local_masks,
+            static_cast<size_t>(inner_prune_layout->cluster_numbers));
+    }
+    for (const LJ_CLUSTERED_GMXPACKED_SCI& sci : sci_entries)
+    {
+        for (int packed_idx = sci.cjpacked_begin; packed_idx < sci.cjpacked_end;
+             packed_idx += 1)
+        {
+            if (packed_idx < 0 ||
+                packed_idx >= static_cast<int>(cjpacked_entries.size()))
+            {
+                continue;
+            }
+            const LJ_CLUSTERED_GMXPACKED_CJ& packed =
+                cjpacked_entries[static_cast<size_t>(packed_idx)];
+            for (int jm = 0; jm < kClusteredJGroupSize; jm += 1)
+            {
+                const int cluster_j = packed.cj[jm];
+                if (cluster_j < 0)
+                {
+                    continue;
+                }
+                const unsigned int jm_shift = Clustered_Jm_Imask_Shift(jm);
+                for (int split = 0; split < kClusteredWarpSplitCount;
+                     split += 1)
+                {
+                    const LJ_CLUSTERED_GMXPACKED_SPLIT& split_entry =
+                        packed.split[split];
+                    const unsigned int imask =
+                        (split_entry.imask >> jm_shift) &
+                        ((1u << kClusteredSuperClusterClusters) - 1u);
+                    if (imask == 0u)
+                    {
+                        continue;
+                    }
+                    unsigned int compare_imask = imask;
+                    if (inner_prune_layout != NULL && !coordinates.empty())
+                    {
+                        compare_imask = Prune_Gmxpacked_Compare_Imask_On_Host(
+                            inner_prune_layout, coordinates, permutation,
+                            cluster_offsets, super_cluster_offsets,
+                            cluster_centers, cluster_valid_masks,
+                            cluster_local_masks,
+                            sci.supercluster_id,
+                            sci.shift_id, cluster_j, split, imask, cutoff,
+                            cell, rcell);
+                        if (compare_imask == 0u)
+                        {
+                            continue;
+                        }
+                    }
+                    const LJ_CLUSTERED_GMXPACKED_EXCLUSION* exclusion = NULL;
+                    if (split_entry.exclusion_index > 0 &&
+                        split_entry.exclusion_index <
+                            static_cast<int>(exclusions.size()))
+                    {
+                        exclusion = &exclusions[static_cast<size_t>(
+                            split_entry.exclusion_index)];
+                    }
+                    const uint64_t exclusion_hash =
+                        Hash_Gmxpacked_Exclusion_Row_For_Jm(
+                            exclusion, compare_imask, jm);
+                    entries.push_back({sci.supercluster_id, sci.shift_id,
+                                       cluster_j, split, compare_imask,
+                                       exclusion_hash});
+                }
+            }
+        }
+    }
+
+    const auto less_entry = [](const ClusteredGmxpackedCompareEntry& lhs,
+                               const ClusteredGmxpackedCompareEntry& rhs)
+    {
+        if (lhs.supercluster_id != rhs.supercluster_id)
+        {
+            return lhs.supercluster_id < rhs.supercluster_id;
+        }
+        if (lhs.shift_id != rhs.shift_id)
+        {
+            return lhs.shift_id < rhs.shift_id;
+        }
+        if (lhs.cluster_j != rhs.cluster_j)
+        {
+            return lhs.cluster_j < rhs.cluster_j;
+        }
+        return lhs.split_id < rhs.split_id;
+    };
+    std::sort(entries.begin(), entries.end(), less_entry);
+
+    std::vector<ClusteredGmxpackedCompareEntry> merged;
+    merged.reserve(entries.size());
+    for (const ClusteredGmxpackedCompareEntry& entry : entries)
+    {
+        const bool same_key = !merged.empty() &&
+                              merged.back().supercluster_id ==
+                                  entry.supercluster_id &&
+                              merged.back().shift_id == entry.shift_id &&
+                              merged.back().cluster_j == entry.cluster_j &&
+                              merged.back().split_id == entry.split_id;
+        if (!same_key)
+        {
+            merged.push_back(entry);
+            continue;
+        }
+        merged.back().imask |= entry.imask;
+        merged.back().exclusion_hash ^= entry.exclusion_hash;
+    }
+    return merged;
+}
+
+static void Restore_Gmxpacked_Payload_From_Host(
+    LJ_CLUSTER_LAYOUT* layout,
+    const std::vector<LJ_CLUSTERED_GMXPACKED_SCI>& sci_entries,
+    const std::vector<LJ_CLUSTERED_GMXPACKED_CJ>& cjpacked_entries,
+    const std::vector<LJ_CLUSTERED_GMXPACKED_EXCLUSION>& exclusions,
+    int split_exclusion_numbers)
+{
+    layout->gmxpacked_sci_numbers = static_cast<int>(sci_entries.size());
+    layout->gmxpacked_cjpacked_numbers =
+        static_cast<int>(cjpacked_entries.size());
+    layout->gmxpacked_exclusion_numbers = static_cast<int>(exclusions.size());
+    layout->gmxpacked_split_exclusion_numbers = split_exclusion_numbers;
+    if (!sci_entries.empty())
+    {
+        Reserve_Device_Buffer(layout->gmxpacked_sci_numbers,
+                              &layout->d_gmxpacked_sci,
+                              &layout->gmxpacked_sci_capacity);
+        deviceMemcpy(layout->d_gmxpacked_sci, sci_entries.data(),
+                     sizeof(LJ_CLUSTERED_GMXPACKED_SCI) * sci_entries.size(),
+                     deviceMemcpyHostToDevice);
+    }
+    if (!cjpacked_entries.empty())
+    {
+        Reserve_Device_Buffer(layout->gmxpacked_cjpacked_numbers,
+                              &layout->d_gmxpacked_cjpacked,
+                              &layout->gmxpacked_cjpacked_capacity);
+        deviceMemcpy(layout->d_gmxpacked_cjpacked, cjpacked_entries.data(),
+                     sizeof(LJ_CLUSTERED_GMXPACKED_CJ) *
+                         cjpacked_entries.size(),
+                     deviceMemcpyHostToDevice);
+    }
+    if (!exclusions.empty())
+    {
+        Reserve_Device_Buffer(layout->gmxpacked_exclusion_numbers,
+                              &layout->d_gmxpacked_exclusions,
+                              &layout->gmxpacked_exclusion_capacity);
+        deviceMemcpy(layout->d_gmxpacked_exclusions, exclusions.data(),
+                     sizeof(LJ_CLUSTERED_GMXPACKED_EXCLUSION) *
+                         exclusions.size(),
+                     deviceMemcpyHostToDevice);
+    }
+}
+
+static bool Gmxpacked_Compare_Entries_Equal(
+    const ClusteredGmxpackedCompareEntry& lhs,
+    const ClusteredGmxpackedCompareEntry& rhs)
+{
+    return lhs.supercluster_id == rhs.supercluster_id &&
+           lhs.shift_id == rhs.shift_id && lhs.cluster_j == rhs.cluster_j &&
+           lhs.split_id == rhs.split_id && lhs.imask == rhs.imask &&
+           lhs.exclusion_hash == rhs.exclusion_hash;
+}
+
+static size_t Find_Gmxpacked_Compare_First_Mismatch(
+    const std::vector<ClusteredGmxpackedCompareEntry>& route_entries,
+    const std::vector<ClusteredGmxpackedCompareEntry>& compat_entries)
+{
+    size_t first_mismatch = 0;
+    const size_t common_count =
+        std::min(route_entries.size(), compat_entries.size());
+    while (first_mismatch < common_count &&
+           Gmxpacked_Compare_Entries_Equal(route_entries[first_mismatch],
+                                           compat_entries[first_mismatch]))
+    {
+        first_mismatch += 1;
+    }
+    return first_mismatch;
+}
+
+static size_t Print_Gmxpacked_Compare_Result(
+    const char* label,
+    const std::vector<ClusteredGmxpackedCompareEntry>& route_entries,
+    const std::vector<ClusteredGmxpackedCompareEntry>& compat_entries)
+{
+    const size_t first_mismatch =
+        Find_Gmxpacked_Compare_First_Mismatch(route_entries, compat_entries);
+    const size_t common_count =
+        std::min(route_entries.size(), compat_entries.size());
+    const bool match = route_entries.size() == compat_entries.size() &&
+                       first_mismatch == common_count;
+    fprintf(stderr,
+            "[clustered gmxpacked record builder compare %s] step=%d "
+            "match=%d route_entries=%zu compat_entries=%zu "
+            "first_mismatch=%zu\n",
+            label, md_info.sys.steps, match ? 1 : 0, route_entries.size(),
+            compat_entries.size(), first_mismatch);
+    if (!match && first_mismatch < common_count)
+    {
+        const ClusteredGmxpackedCompareEntry& route_entry =
+            route_entries[first_mismatch];
+        const ClusteredGmxpackedCompareEntry& compat_entry =
+            compat_entries[first_mismatch];
+        fprintf(stderr,
+                "[clustered gmxpacked record builder compare %s mismatch] "
+                "step=%d route=(super=%d shift=%d j=%d split=%d imask=0x%x "
+                "excl=0x%llx) compat=(super=%d shift=%d j=%d split=%d "
+                "imask=0x%x excl=0x%llx)\n",
+                label, md_info.sys.steps, route_entry.supercluster_id,
+                route_entry.shift_id, route_entry.cluster_j,
+                route_entry.split_id, route_entry.imask,
+                static_cast<unsigned long long>(route_entry.exclusion_hash),
+                compat_entry.supercluster_id, compat_entry.shift_id,
+                compat_entry.cluster_j, compat_entry.split_id,
+                compat_entry.imask,
+                static_cast<unsigned long long>(compat_entry.exclusion_hash));
+    }
+    return first_mismatch;
+}
+
+static void Print_Gmxpacked_Compare_Entry_Words(
+    const char* label, const char* side,
+    const std::vector<LJ_CLUSTERED_GMXPACKED_SCI>& sci_entries,
+    const std::vector<LJ_CLUSTERED_GMXPACKED_CJ>& cjpacked_entries,
+    const std::vector<LJ_CLUSTERED_GMXPACKED_EXCLUSION>& exclusions,
+    const ClusteredGmxpackedCompareEntry& target)
+{
+    unsigned int pair_words[kClusteredGmxpackedExclusionPairCount] = {};
+    int matched_records = 0;
+    for (const LJ_CLUSTERED_GMXPACKED_SCI& sci : sci_entries)
+    {
+        if (sci.supercluster_id != target.supercluster_id ||
+            sci.shift_id != target.shift_id)
+        {
+            continue;
+        }
+        for (int packed_idx = sci.cjpacked_begin;
+             packed_idx < sci.cjpacked_end; packed_idx += 1)
+        {
+            if (packed_idx < 0 ||
+                packed_idx >= static_cast<int>(cjpacked_entries.size()))
+            {
+                continue;
+            }
+            const LJ_CLUSTERED_GMXPACKED_CJ& packed =
+                cjpacked_entries[static_cast<size_t>(packed_idx)];
+            for (int jm = 0; jm < kClusteredJGroupSize; jm += 1)
+            {
+                if (packed.cj[jm] != target.cluster_j)
+                {
+                    continue;
+                }
+                const LJ_CLUSTERED_GMXPACKED_SPLIT& split =
+                    packed.split[target.split_id];
+                const unsigned int jm_shift = Clustered_Jm_Imask_Shift(jm);
+                const unsigned int imask =
+                    (split.imask >> jm_shift) &
+                    ((1u << kClusteredSuperClusterClusters) - 1u);
+                if ((imask & target.imask) == 0u)
+                {
+                    continue;
+                }
+                matched_records += 1;
+                const LJ_CLUSTERED_GMXPACKED_EXCLUSION* exclusion = NULL;
+                if (split.exclusion_index > 0 &&
+                    split.exclusion_index < static_cast<int>(exclusions.size()))
+                {
+                    exclusion =
+                        &exclusions[static_cast<size_t>(split.exclusion_index)];
+                }
+                for (int pair_idx = 0;
+                     pair_idx < kClusteredGmxpackedExclusionPairCount;
+                     pair_idx += 1)
+                {
+                    const unsigned int allowed_i_mask =
+                        exclusion != NULL
+                            ? ((exclusion->pair[pair_idx] >> jm_shift) &
+                               ((1u << kClusteredSuperClusterClusters) - 1u))
+                            : imask;
+                    pair_words[pair_idx] |= allowed_i_mask & target.imask;
+                }
+            }
+        }
+    }
+    fprintf(stderr,
+            "[clustered gmxpacked record builder compare %s words %s] "
+            "step=%d matched_records=%d super=%d shift=%d j=%d split=%d "
+            "imask=0x%x words=",
+            label, side, md_info.sys.steps, matched_records,
+            target.supercluster_id, target.shift_id, target.cluster_j,
+            target.split_id, target.imask);
+    for (int pair_idx = 0; pair_idx < kClusteredGmxpackedExclusionPairCount;
+         pair_idx += 1)
+    {
+        fprintf(stderr, "%s%x", pair_idx == 0 ? "" : ",", pair_words[pair_idx]);
+    }
+    fprintf(stderr, "\n");
+}
+
+static void Print_Gmxpacked_Compare_Entry_Expected_Words(
+    const char* label, const LJ_CLUSTER_LAYOUT* layout,
+    const ClusteredGmxpackedCompareEntry& target)
+{
+    if (layout == NULL || layout->d_sort_permutation == NULL ||
+        layout->d_cluster_offsets == NULL ||
+        layout->d_super_cluster_offsets == NULL ||
+        layout->d_cluster_valid_masks == NULL ||
+        layout->d_cluster_local_masks == NULL ||
+        layout->d_excluded_list_start == NULL ||
+        layout->d_excluded_numbers == NULL ||
+        layout->total_atom_numbers <= 0 || layout->cluster_numbers <= 0 ||
+        layout->super_cluster_numbers <= 0 || layout->local_atom_numbers <= 0 ||
+        target.supercluster_id < 0 ||
+        target.supercluster_id >= layout->super_cluster_numbers ||
+        target.cluster_j < 0 || target.cluster_j >= layout->cluster_numbers)
+    {
+        return;
+    }
+
+    const std::vector<int> permutation = Copy_Device_Buffer_To_Host(
+        layout->d_sort_permutation,
+        static_cast<size_t>(layout->total_atom_numbers));
+    const std::vector<int> cluster_offsets = Copy_Device_Buffer_To_Host(
+        layout->d_cluster_offsets,
+        static_cast<size_t>(layout->cluster_numbers + 1));
+    const std::vector<int> super_cluster_offsets = Copy_Device_Buffer_To_Host(
+        layout->d_super_cluster_offsets,
+        static_cast<size_t>(layout->super_cluster_numbers + 1));
+    const std::vector<unsigned int> cluster_valid_masks =
+        Copy_Device_Buffer_To_Host(
+            layout->d_cluster_valid_masks,
+            static_cast<size_t>(layout->cluster_numbers));
+    const std::vector<unsigned int> cluster_local_masks =
+        Copy_Device_Buffer_To_Host(
+            layout->d_cluster_local_masks,
+            static_cast<size_t>(layout->cluster_numbers));
+    const std::vector<int> excluded_list_start = Copy_Device_Buffer_To_Host(
+        layout->d_excluded_list_start,
+        static_cast<size_t>(layout->local_atom_numbers));
+    const std::vector<int> excluded_numbers = Copy_Device_Buffer_To_Host(
+        layout->d_excluded_numbers,
+        static_cast<size_t>(layout->local_atom_numbers));
+    const int total_excluded =
+        excluded_list_start.empty() || excluded_numbers.empty()
+            ? 0
+            : (excluded_list_start.back() + excluded_numbers.back());
+    std::vector<int> excluded_list;
+    if (total_excluded > 0 && layout->d_excluded_list != NULL)
+    {
+        excluded_list = Copy_Device_Buffer_To_Host(
+            layout->d_excluded_list, static_cast<size_t>(total_excluded));
+    }
+    if (permutation.empty() || cluster_offsets.empty() ||
+        super_cluster_offsets.empty() || cluster_valid_masks.empty() ||
+        cluster_local_masks.empty() || excluded_list_start.empty() ||
+        excluded_numbers.empty() ||
+        target.supercluster_id + 1 >=
+            static_cast<int>(super_cluster_offsets.size()) ||
+        target.cluster_j + 1 >= static_cast<int>(cluster_offsets.size()))
+    {
+        return;
+    }
+
+    const int cluster_i_start =
+        super_cluster_offsets[static_cast<size_t>(target.supercluster_id)];
+    const int cluster_i_end =
+        super_cluster_offsets[static_cast<size_t>(target.supercluster_id + 1)];
+    const unsigned int valid_mask_j =
+        cluster_valid_masks[static_cast<size_t>(target.cluster_j)];
+    const unsigned int local_mask_j =
+        cluster_local_masks[static_cast<size_t>(target.cluster_j)];
+    unsigned int pair_words[kClusteredGmxpackedExclusionPairCount] = {};
+    unsigned long long exclusion_masks[kClusteredMaxSuperClusterClusters] = {};
+
+    for (int i_local = 0; i_local < kClusteredSuperClusterClusters;
+         i_local += 1)
+    {
+        const unsigned int imask_bit = 1u << static_cast<unsigned int>(i_local);
+        if ((target.imask & imask_bit) == 0u)
+        {
+            continue;
+        }
+        const int cluster_i = cluster_i_start + i_local;
+        if (cluster_i < 0 || cluster_i >= cluster_i_end ||
+            cluster_i >= layout->cluster_numbers ||
+            cluster_i + 1 >= static_cast<int>(cluster_offsets.size()))
+        {
+            continue;
+        }
+        const unsigned int local_mask_i =
+            cluster_local_masks[static_cast<size_t>(cluster_i)];
+        const unsigned long long exclusion_mask = Build_Exclusion_Mask(
+            permutation.data(), cluster_offsets.data(), cluster_i,
+            target.cluster_j, local_mask_i, valid_mask_j,
+            kClusteredClusterSize, layout->local_atom_numbers,
+            excluded_list_start.data(),
+            excluded_list.empty() ? NULL : excluded_list.data(),
+            excluded_numbers.data(), NULL, NULL);
+        exclusion_masks[i_local] = exclusion_mask;
+        for (int split_j_lane = 0;
+             split_j_lane < kClusteredSplitJClusterSize; split_j_lane += 1)
+        {
+            const int j_lane =
+                target.split_id * kClusteredSplitJClusterSize + split_j_lane;
+            const bool valid_j =
+                (valid_mask_j & (1u << static_cast<unsigned int>(j_lane))) != 0u;
+            const bool local_j =
+                (local_mask_j & (1u << static_cast<unsigned int>(j_lane))) != 0u;
+            for (int i_lane = 0; i_lane < kClusteredClusterSize; i_lane += 1)
+            {
+                const bool local_i =
+                    (local_mask_i &
+                     (1u << static_cast<unsigned int>(i_lane))) != 0u;
+                bool allow_pair = valid_j && local_i;
+                if (allow_pair &&
+                    target.shift_id == kClusteredCentralShiftId &&
+                    cluster_i == target.cluster_j && local_j &&
+                    j_lane <= i_lane)
+                {
+                    allow_pair = false;
+                }
+                if (allow_pair &&
+                    (exclusion_mask &
+                     (1ull << static_cast<unsigned int>(
+                          i_lane * kClusteredClusterSize + j_lane))) != 0ull)
+                {
+                    allow_pair = false;
+                }
+                if (allow_pair)
+                {
+                    pair_words[split_j_lane * kClusteredClusterSize + i_lane] |=
+                        imask_bit;
+                }
+            }
+        }
+    }
+
+    fprintf(stderr,
+            "[clustered gmxpacked record builder compare %s expected-words] "
+            "step=%d super=%d shift=%d j=%d split=%d imask=0x%x "
+            "exclusion_masks=",
+            label, md_info.sys.steps, target.supercluster_id, target.shift_id,
+            target.cluster_j, target.split_id, target.imask);
+    bool first_mask = true;
+    for (int i_local = 0; i_local < kClusteredSuperClusterClusters;
+         i_local += 1)
+    {
+        if ((target.imask & (1u << static_cast<unsigned int>(i_local))) == 0u)
+        {
+            continue;
+        }
+        fprintf(stderr, "%s%d:0x%llx", first_mask ? "" : ",", i_local,
+                static_cast<unsigned long long>(exclusion_masks[i_local]));
+        first_mask = false;
+    }
+    fprintf(stderr, " words=");
+    for (int pair_idx = 0; pair_idx < kClusteredGmxpackedExclusionPairCount;
+         pair_idx += 1)
+    {
+        fprintf(stderr, "%s%x", pair_idx == 0 ? "" : ",", pair_words[pair_idx]);
+    }
+    fprintf(stderr, "\n");
+}
+
+static void Add_Gmxpacked_Debug_Atom(std::vector<int>* atoms, const int atom)
+{
+    if (atoms != NULL && atom >= 0)
+    {
+        atoms->push_back(atom);
+    }
+}
+
+static void Print_Gmxpacked_Compare_Entry_Atoms(
+    const char* label, const char* side, const LJ_CLUSTER_LAYOUT* layout,
+    const ClusteredGmxpackedCompareEntry& entry)
+{
+    if (layout == NULL || layout->d_sort_permutation == NULL ||
+        layout->d_cluster_offsets == NULL ||
+        layout->d_super_cluster_offsets == NULL ||
+        layout->d_cluster_valid_masks == NULL ||
+        layout->d_cluster_local_masks == NULL ||
+        layout->total_atom_numbers <= 0 || layout->cluster_numbers <= 0 ||
+        layout->super_cluster_numbers <= 0 || entry.supercluster_id < 0 ||
+        entry.supercluster_id >= layout->super_cluster_numbers ||
+        entry.cluster_j < 0 || entry.cluster_j >= layout->cluster_numbers)
+    {
+        return;
+    }
+
+    const std::vector<int> permutation = Copy_Device_Buffer_To_Host(
+        layout->d_sort_permutation,
+        static_cast<size_t>(layout->total_atom_numbers));
+    const std::vector<int> cluster_offsets = Copy_Device_Buffer_To_Host(
+        layout->d_cluster_offsets,
+        static_cast<size_t>(layout->cluster_numbers + 1));
+    const std::vector<int> super_cluster_offsets = Copy_Device_Buffer_To_Host(
+        layout->d_super_cluster_offsets,
+        static_cast<size_t>(layout->super_cluster_numbers + 1));
+    const std::vector<unsigned int> cluster_valid_masks =
+        Copy_Device_Buffer_To_Host(
+            layout->d_cluster_valid_masks,
+            static_cast<size_t>(layout->cluster_numbers));
+    const std::vector<unsigned int> cluster_local_masks =
+        Copy_Device_Buffer_To_Host(
+            layout->d_cluster_local_masks,
+            static_cast<size_t>(layout->cluster_numbers));
+    if (permutation.empty() || cluster_offsets.empty() ||
+        super_cluster_offsets.empty() || cluster_valid_masks.empty() ||
+        cluster_local_masks.empty() ||
+        entry.supercluster_id + 1 >=
+            static_cast<int>(super_cluster_offsets.size()))
+    {
+        return;
+    }
+
+    const int cluster_i_start =
+        super_cluster_offsets[static_cast<size_t>(entry.supercluster_id)];
+    const int cluster_i_end =
+        super_cluster_offsets[static_cast<size_t>(entry.supercluster_id + 1)];
+    const int j_lane_base = entry.split_id * kClusteredSplitJClusterSize;
+    std::vector<int> suggested_atoms;
+
+    fprintf(stderr,
+            "[clustered gmxpacked record builder compare %s atoms %s] "
+            "step=%d super=%d shift=%d j=%d split=%d imask=0x%x "
+            "i_clusters=",
+            label, side, md_info.sys.steps, entry.supercluster_id,
+            entry.shift_id, entry.cluster_j, entry.split_id, entry.imask);
+    bool first_cluster = true;
+    for (int i_local = 0; i_local < kClusteredSuperClusterClusters;
+         i_local += 1)
+    {
+        if ((entry.imask & (1u << static_cast<unsigned int>(i_local))) == 0u)
+        {
+            continue;
+        }
+        const int cluster_i = cluster_i_start + i_local;
+        if (cluster_i < 0 || cluster_i >= cluster_i_end ||
+            cluster_i >= layout->cluster_numbers ||
+            cluster_i + 1 >= static_cast<int>(cluster_offsets.size()))
+        {
+            continue;
+        }
+        fprintf(stderr, "%s%d:{", first_cluster ? "" : ";", cluster_i);
+        first_cluster = false;
+        bool first_atom = true;
+        const unsigned int local_mask =
+            cluster_local_masks[static_cast<size_t>(cluster_i)];
+        for (int lane = 0; lane < kClusteredClusterSize; lane += 1)
+        {
+            if ((local_mask & (1u << static_cast<unsigned int>(lane))) == 0u)
+            {
+                continue;
+            }
+            const int sorted_atom =
+                cluster_offsets[static_cast<size_t>(cluster_i)] + lane;
+            if (sorted_atom < 0 ||
+                sorted_atom >= static_cast<int>(permutation.size()))
+            {
+                continue;
+            }
+            const int atom = permutation[static_cast<size_t>(sorted_atom)];
+            fprintf(stderr, "%s%d", first_atom ? "" : ",", atom);
+            first_atom = false;
+            Add_Gmxpacked_Debug_Atom(&suggested_atoms, atom);
+        }
+        fprintf(stderr, "}");
+    }
+    fprintf(stderr, " j_atoms=%d:{", entry.cluster_j);
+    bool first_j_atom = true;
+    const unsigned int valid_mask_j =
+        cluster_valid_masks[static_cast<size_t>(entry.cluster_j)];
+    for (int split_j_lane = 0; split_j_lane < kClusteredSplitJClusterSize;
+         split_j_lane += 1)
+    {
+        const int j_lane = j_lane_base + split_j_lane;
+        if ((valid_mask_j & (1u << static_cast<unsigned int>(j_lane))) == 0u)
+        {
+            continue;
+        }
+        const int sorted_atom =
+            cluster_offsets[static_cast<size_t>(entry.cluster_j)] + j_lane;
+        if (sorted_atom < 0 ||
+            sorted_atom >= static_cast<int>(permutation.size()))
+        {
+            continue;
+        }
+        const int atom = permutation[static_cast<size_t>(sorted_atom)];
+        fprintf(stderr, "%s%d", first_j_atom ? "" : ",", atom);
+        first_j_atom = false;
+        Add_Gmxpacked_Debug_Atom(&suggested_atoms, atom);
+    }
+    std::sort(suggested_atoms.begin(), suggested_atoms.end());
+    suggested_atoms.erase(
+        std::unique(suggested_atoms.begin(), suggested_atoms.end()),
+        suggested_atoms.end());
+    fprintf(stderr, "} suggest_atoms=");
+    for (size_t idx = 0; idx < suggested_atoms.size(); idx += 1)
+    {
+        fprintf(stderr, "%s%d", idx == 0 ? "" : ",", suggested_atoms[idx]);
+    }
+    fprintf(stderr, "\n");
+}
+
+
+struct ClusteredGmxpackedFocusPair
+{
+    int atom_a = -1;
+    int atom_b = -1;
+    int shift_id = kClusteredCentralShiftId;
+    int sci_shift_id = kClusteredCentralShiftId;
+    int supercluster_id = -1;
+    int cluster_i = -1;
+    int cluster_j = -1;
+    int split_id = 0;
+    int i_local = 0;
+    int i_lane = 0;
+    int j_lane = 0;
+    int sci_index = -1;
+    int packed_index = -1;
+    int jm = -1;
+    int sorted_i = -1;
+    int sorted_j = -1;
+    float dr2 = 0.0f;
+};
+
+struct ClusteredGmxpackedFocusForceEntry;
+
+static std::vector<int> Parse_Gmxpacked_Record_Builder_Compare_Atoms()
+{
+    std::vector<int> atoms;
+    const char* env = std::getenv(
+        "SPONGE_CLUSTERED_GMXPACKED_RECORD_BUILDER_COMPARE_ATOMS");
+    if (env == NULL || env[0] == '\0')
+    {
+        return atoms;
+    }
+    const char* cursor = env;
+    while (*cursor != '\0')
+    {
+        while (*cursor == ',' || *cursor == ' ' || *cursor == '\t' ||
+               *cursor == ';')
+        {
+            cursor += 1;
+        }
+        if (*cursor == '\0')
+        {
+            break;
+        }
+        char* end = NULL;
+        const long value = std::strtol(cursor, &end, 10);
+        if (end == cursor)
+        {
+            break;
+        }
+        if (value >= 0)
+        {
+            atoms.push_back(static_cast<int>(value));
+        }
+        cursor = end;
+    }
+    std::sort(atoms.begin(), atoms.end());
+    atoms.erase(std::unique(atoms.begin(), atoms.end()), atoms.end());
+    return atoms;
+}
+
+static bool Gmxpacked_Focus_Contains(const std::vector<int>& atoms,
+                                     const int atom)
+{
+    return std::binary_search(atoms.begin(), atoms.end(), atom);
+}
+
+static bool Gmxpacked_Focus_Pair_Less(const ClusteredGmxpackedFocusPair& lhs,
+                                      const ClusteredGmxpackedFocusPair& rhs)
+{
+    if (lhs.atom_a != rhs.atom_a) return lhs.atom_a < rhs.atom_a;
+    if (lhs.atom_b != rhs.atom_b) return lhs.atom_b < rhs.atom_b;
+    if (lhs.shift_id != rhs.shift_id) return lhs.shift_id < rhs.shift_id;
+    if (lhs.sci_shift_id != rhs.sci_shift_id)
+    {
+        return lhs.sci_shift_id < rhs.sci_shift_id;
+    }
+    if (lhs.supercluster_id != rhs.supercluster_id) return lhs.supercluster_id < rhs.supercluster_id;
+    if (lhs.cluster_i != rhs.cluster_i) return lhs.cluster_i < rhs.cluster_i;
+    if (lhs.cluster_j != rhs.cluster_j) return lhs.cluster_j < rhs.cluster_j;
+    if (lhs.split_id != rhs.split_id) return lhs.split_id < rhs.split_id;
+    if (lhs.i_local != rhs.i_local) return lhs.i_local < rhs.i_local;
+    if (lhs.i_lane != rhs.i_lane) return lhs.i_lane < rhs.i_lane;
+    if (lhs.j_lane != rhs.j_lane) return lhs.j_lane < rhs.j_lane;
+    if (lhs.sci_index != rhs.sci_index) return lhs.sci_index < rhs.sci_index;
+    if (lhs.packed_index != rhs.packed_index)
+    {
+        return lhs.packed_index < rhs.packed_index;
+    }
+    if (lhs.jm != rhs.jm) return lhs.jm < rhs.jm;
+    if (lhs.sorted_i != rhs.sorted_i) return lhs.sorted_i < rhs.sorted_i;
+    return lhs.sorted_j < rhs.sorted_j;
+}
+
+static bool Gmxpacked_Focus_Pair_Same_Key(
+    const ClusteredGmxpackedFocusPair& lhs,
+    const ClusteredGmxpackedFocusPair& rhs)
+{
+    return lhs.atom_a == rhs.atom_a && lhs.atom_b == rhs.atom_b &&
+           lhs.shift_id == rhs.shift_id;
+}
+
+static bool Gmxpacked_Focus_Pair_Same_Context(
+    const ClusteredGmxpackedFocusPair& lhs,
+    const ClusteredGmxpackedFocusPair& rhs)
+{
+    return lhs.atom_a == rhs.atom_a && lhs.atom_b == rhs.atom_b &&
+           lhs.shift_id == rhs.shift_id &&
+           lhs.sci_shift_id == rhs.sci_shift_id &&
+           lhs.supercluster_id == rhs.supercluster_id &&
+           lhs.cluster_i == rhs.cluster_i &&
+           lhs.cluster_j == rhs.cluster_j && lhs.split_id == rhs.split_id &&
+           lhs.i_local == rhs.i_local && lhs.i_lane == rhs.i_lane &&
+           lhs.j_lane == rhs.j_lane && lhs.sorted_i == rhs.sorted_i &&
+           lhs.sorted_j == rhs.sorted_j;
+}
+
+static void Append_Gmxpacked_Focus_Atom_Pairs(
+    const std::vector<LJ_CLUSTERED_GMXPACKED_SCI>& sci_entries,
+    const std::vector<LJ_CLUSTERED_GMXPACKED_CJ>& cjpacked_entries,
+    const std::vector<LJ_CLUSTERED_GMXPACKED_EXCLUSION>& exclusions,
+    const std::vector<int>& focus_atoms,
+    const std::vector<VECTOR>& coordinates, const std::vector<int>& permutation,
+    const std::vector<int>& cluster_offsets,
+    const std::vector<int>& super_cluster_offsets,
+    const std::vector<VECTOR>& cluster_centers,
+    const LTMatrix3 rcell,
+    const std::vector<unsigned int>& cluster_valid_masks,
+    const std::vector<unsigned int>& cluster_local_masks, const float cutoff,
+    const LTMatrix3 cell, std::vector<ClusteredGmxpackedFocusPair>* pairs,
+    std::vector<ClusteredGmxpackedFocusPair>* raw_pairs)
+{
+    if (pairs == NULL || focus_atoms.empty() || coordinates.empty() ||
+        permutation.empty() || cluster_offsets.empty() ||
+        super_cluster_offsets.empty() || cluster_centers.empty() ||
+        cluster_valid_masks.empty() ||
+        cluster_local_masks.empty())
+    {
+        return;
+    }
+    const float cutoff_sq = cutoff * cutoff;
+    for (size_t sci_index = 0; sci_index < sci_entries.size(); sci_index += 1)
+    {
+        const LJ_CLUSTERED_GMXPACKED_SCI& sci =
+            sci_entries[static_cast<size_t>(sci_index)];
+        if (sci.supercluster_id < 0 ||
+            sci.supercluster_id + 1 >= static_cast<int>(super_cluster_offsets.size()))
+        {
+            continue;
+        }
+        const int cluster_i_start = super_cluster_offsets[static_cast<size_t>(sci.supercluster_id)];
+        const int cluster_i_end = super_cluster_offsets[static_cast<size_t>(sci.supercluster_id + 1)];
+        const int active_cluster_count = cluster_i_end - cluster_i_start;
+        const VECTOR pair_shift = Shift_Vector_From_Id(sci.shift_id, cell);
+        for (int packed_idx = sci.cjpacked_begin; packed_idx < sci.cjpacked_end; packed_idx += 1)
+        {
+            if (packed_idx < 0 || packed_idx >= static_cast<int>(cjpacked_entries.size())) continue;
+            const LJ_CLUSTERED_GMXPACKED_CJ& packed = cjpacked_entries[static_cast<size_t>(packed_idx)];
+            for (int jm = 0; jm < kClusteredJGroupSize; jm += 1)
+            {
+                const int cluster_j = packed.cj[jm];
+                if (cluster_j < 0 || cluster_j >= static_cast<int>(cluster_valid_masks.size()) ||
+                    cluster_j >= static_cast<int>(cluster_offsets.size()) - 1) continue;
+                const unsigned int valid_mask_j = cluster_valid_masks[static_cast<size_t>(cluster_j)];
+                const unsigned int jm_shift = Clustered_Jm_Imask_Shift(jm);
+                for (int split = 0; split < kClusteredWarpSplitCount; split += 1)
+                {
+                    const LJ_CLUSTERED_GMXPACKED_SPLIT& split_entry = packed.split[split];
+                    if (split_entry.imask == 0u) continue;
+                    for (int split_j_lane = 0; split_j_lane < kClusteredSplitJClusterSize; split_j_lane += 1)
+                    {
+                        const int j_lane = split * kClusteredSplitJClusterSize + split_j_lane;
+                        if ((valid_mask_j & (1u << static_cast<unsigned int>(j_lane))) == 0u) continue;
+                        const int sorted_j = cluster_offsets[static_cast<size_t>(cluster_j)] + j_lane;
+                        if (sorted_j < 0 || sorted_j >= static_cast<int>(permutation.size())) continue;
+                        const int atom_j = permutation[static_cast<size_t>(sorted_j)];
+                        if (atom_j < 0 || atom_j >= static_cast<int>(coordinates.size())) continue;
+                        for (int i_lane = 0; i_lane < kClusteredClusterSize; i_lane += 1)
+                        {
+                            unsigned int lane_pair_bits = 0xffffffffu;
+                            if (split_entry.exclusion_index > 0 && split_entry.exclusion_index < static_cast<int>(exclusions.size()))
+                            {
+                                lane_pair_bits = exclusions[static_cast<size_t>(split_entry.exclusion_index)].pair[split_j_lane * kClusteredClusterSize + i_lane];
+                            }
+                            for (int i_local = 0; i_local < active_cluster_count && i_local < kClusteredSuperClusterClusters; i_local += 1)
+                            {
+                                const unsigned int packed_bit = 1u << static_cast<unsigned int>(jm_shift + i_local);
+                                if ((split_entry.imask & lane_pair_bits & packed_bit) == 0u) continue;
+                                const int cluster_i = cluster_i_start + i_local;
+                                if (cluster_i < 0 || cluster_i >= static_cast<int>(cluster_valid_masks.size()) ||
+                                    cluster_i >= static_cast<int>(cluster_offsets.size()) - 1) continue;
+                                const unsigned int i_lane_mask = 1u << static_cast<unsigned int>(i_lane);
+                                if ((cluster_valid_masks[static_cast<size_t>(cluster_i)] & i_lane_mask) == 0u ||
+                                    (cluster_local_masks[static_cast<size_t>(cluster_i)] & i_lane_mask) == 0u) continue;
+                                const int sorted_i = cluster_offsets[static_cast<size_t>(cluster_i)] + i_lane;
+                                if (sorted_i < 0 || sorted_i >= static_cast<int>(permutation.size())) continue;
+                                const int atom_i = permutation[static_cast<size_t>(sorted_i)];
+                                if (atom_i < 0 || atom_i >= static_cast<int>(coordinates.size()) ||
+                                    (!Gmxpacked_Focus_Contains(focus_atoms, atom_i) && !Gmxpacked_Focus_Contains(focus_atoms, atom_j))) continue;
+                                const int pair_shift_id =
+                                    Determine_Clustered_Pair_Shift_Id(
+                                        cluster_centers[static_cast<size_t>(cluster_i)],
+                                        cluster_centers[static_cast<size_t>(cluster_j)],
+                                        rcell);
+                                const VECTOR actual_pair_shift =
+                                    Shift_Vector_From_Id(pair_shift_id, cell);
+                                const VECTOR r_i = coordinates[static_cast<size_t>(atom_i)];
+                                const VECTOR r_j = coordinates[static_cast<size_t>(atom_j)];
+                                const float dr_x = r_j.x - r_i.x - actual_pair_shift.x;
+                                const float dr_y = r_j.y - r_i.y - actual_pair_shift.y;
+                                const float dr_z = r_j.z - r_i.z - actual_pair_shift.z;
+                                const float dr2 = dr_x * dr_x + dr_y * dr_y + dr_z * dr_z;
+                                if (dr2 >= cutoff_sq || dr2 == 0.0f) continue;
+                                ClusteredGmxpackedFocusPair pair = {};
+                                pair.atom_a = std::min(atom_i, atom_j);
+                                pair.atom_b = std::max(atom_i, atom_j);
+                                pair.shift_id = pair_shift_id;
+                                pair.sci_shift_id = sci.shift_id;
+                                 pair.supercluster_id = sci.supercluster_id;
+                                 pair.cluster_i = cluster_i;
+                                 pair.cluster_j = cluster_j;
+                                 pair.split_id = split;
+                                 pair.i_local = i_local;
+                                 pair.i_lane = i_lane;
+                                 pair.j_lane = j_lane;
+                                 pair.sci_index = static_cast<int>(sci_index);
+                                 pair.packed_index = packed_idx;
+                                 pair.jm = jm;
+                                 pair.sorted_i = sorted_i;
+                                 pair.sorted_j = sorted_j;
+                                 pair.dr2 = dr2;
+                                 pairs->push_back(pair);
+                             }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    std::sort(pairs->begin(), pairs->end(), Gmxpacked_Focus_Pair_Less);
+    if (raw_pairs != NULL)
+    {
+        raw_pairs->assign(pairs->begin(), pairs->end());
+    }
+    pairs->erase(std::unique(pairs->begin(), pairs->end(), Gmxpacked_Focus_Pair_Same_Key), pairs->end());
+}
+
+static void Print_Gmxpacked_Focus_Pair_Line(const char* label,
+                                            const ClusteredGmxpackedFocusPair& pair)
+{
+    fprintf(stderr,
+            "[clustered gmxpacked record builder compare atoms %s pair] "
+            "step=%d atom_a=%d atom_b=%d shift=%d sci_shift=%d super=%d "
+            "cluster_i=%d cluster_j=%d split=%d i_local=%d i_lane=%d "
+            "j_lane=%d sci_index=%d packed_index=%d jm=%d sorted_i=%d "
+            "sorted_j=%d dr2=%.9g\n",
+            label, md_info.sys.steps, pair.atom_a, pair.atom_b, pair.shift_id,
+            pair.sci_shift_id, pair.supercluster_id, pair.cluster_i,
+            pair.cluster_j, pair.split_id,
+            pair.i_local, pair.i_lane, pair.j_lane, pair.sci_index,
+            pair.packed_index, pair.jm, pair.sorted_i, pair.sorted_j,
+            pair.dr2);
+}
+
+struct ClusteredGmxpackedFocusStageTrace
+{
+    bool source_present = false;
+    bool aggregate_present = false;
+    bool route_payload_present = false;
+    bool route_raw_present = false;
+};
+
+static int Gmxpacked_Focus_Pair_Stage_Trace_Pair_Word_Index(
+    const ClusteredGmxpackedFocusPair& pair);
+
+struct ClusteredGmxpackedSourceTraceHostInput
+{
+    bool dense_shift_partitioned_candidates = false;
+    bool sparse_shift_candidates = false;
+    bool fixed_shift_candidates = false;
+    bool fixed_shift_leaf_screening = false;
+    int candidate_sci_numbers = 0;
+    int candidate_leaf_cluster_stride = 0;
+    int local_atom_numbers = 0;
+
+    std::vector<int> permutation;
+    std::vector<int> cluster_offsets;
+    std::vector<int> leaf_cluster_starts;
+    std::vector<int> leaf_cluster_ends;
+    std::vector<int> super_cluster_offsets;
+    std::vector<int> cluster_to_supercluster;
+    std::vector<int> candidate_sci_supercluster_ids;
+    std::vector<int> candidate_shift_ids;
+    std::vector<int> candidate_leaf_offsets;
+    std::vector<int> candidate_leaf_ids;
+    std::vector<int> excluded_list_start;
+    std::vector<int> excluded_list;
+    std::vector<int> excluded_numbers;
+    std::vector<unsigned int> cluster_valid_masks;
+    std::vector<unsigned int> cluster_local_masks;
+    std::vector<unsigned int> candidate_leaf_reach_masks;
+    std::vector<VECTOR> cluster_centers;
+    std::vector<VECTOR> cluster_extents;
+};
+
+enum ClusteredGmxpackedSourceTraceReason
+{
+    kClusteredGmxpackedSourceTraceMissingCandidate = 0,
+    kClusteredGmxpackedSourceTraceILocalAbsent = 1,
+    kClusteredGmxpackedSourceTraceSplitPruned = 2,
+    kClusteredGmxpackedSourceTraceSplitEmpty = 3,
+    kClusteredGmxpackedSourceTracePairWordDisallowed = 4,
+    kClusteredGmxpackedSourceTraceUnknown = 5,
+};
+
+struct ClusteredGmxpackedFocusSourceTrace
+{
+    ClusteredGmxpackedSourceTraceReason reason =
+        kClusteredGmxpackedSourceTraceUnknown;
+    bool exact_source_row_found = false;
+    bool exact_source_row_i_local_present = false;
+    bool exact_source_row_pair_present = false;
+    bool exact_candidate_sci_found = false;
+    bool exact_candidate_cluster_j_found = false;
+    bool candidate_cluster_j_other_shift_found = false;
+    bool split_has_atoms = false;
+    bool valid_j = false;
+    bool local_i = false;
+    bool local_j = false;
+    bool central_halfshell = false;
+    bool excluded = false;
+    bool data_ready = false;
+    int source_shift_id = kClusteredCentralShiftId;
+    int candidate_sci = -1;
+    unsigned int candidate_imask = 0u;
+    unsigned int active_pair_lane_mask = 0u;
+    unsigned int group_record_imask = 0u;
+    unsigned int split_local_imask = 0u;
+};
+
+struct ClusteredGmxpackedFocusSourceTraceSummary
+{
+    size_t missing_candidate = 0;
+    size_t i_local_absent = 0;
+    size_t split_pruned = 0;
+    size_t split_empty = 0;
+    size_t pair_word_disallowed = 0;
+    size_t pair_word_exclusion = 0;
+    size_t pair_word_halfshell = 0;
+    size_t pair_word_local = 0;
+    size_t pair_word_valid = 0;
+    size_t unknown = 0;
+};
+
+enum ClusteredGmxpackedDeviceSourceTraceReason
+{
+    kClusteredGmxpackedDeviceSourceTraceUnavailable = 0,
+    kClusteredGmxpackedDeviceSourceTraceRowMissing = 1,
+    kClusteredGmxpackedDeviceSourceTraceGroupImaskAbsent = 2,
+    kClusteredGmxpackedDeviceSourceTraceSplitEmpty = 3,
+    kClusteredGmxpackedDeviceSourceTraceSplitPruned = 4,
+    kClusteredGmxpackedDeviceSourceTraceWriteOverflow = 5,
+    kClusteredGmxpackedDeviceSourceTraceSourceImaskAbsent = 6,
+    kClusteredGmxpackedDeviceSourceTraceWroteRowHostMissing = 7,
+};
+
+struct ClusteredGmxpackedFocusDeviceSourceTrace
+{
+    ClusteredGmxpackedDeviceSourceTraceReason reason =
+        kClusteredGmxpackedDeviceSourceTraceUnavailable;
+    bool data_ready = false;
+    bool row_found = false;
+    bool split_has_atoms = false;
+    bool write_in_range = false;
+    bool focus_j_present = false;
+    bool dedup_active = false;
+    int candidate_sci = -1;
+    int candidate_idx = -1;
+    int leaf_j = -1;
+    int cluster_j_start = -1;
+    int deduped_cluster_j_start = -1;
+    int shift_id = kClusteredCentralShiftId;
+    int write_idx = -1;
+    int trace_capacity = 0;
+    int trace_overflow = 0;
+    unsigned int valid_mask_j = 0u;
+    unsigned int local_mask_j = 0u;
+    unsigned int focus_i_local_mask = 0u;
+    unsigned int group_imask = 0u;
+    unsigned int split_imask = 0u;
+    unsigned int source_imask = 0u;
+};
+
+struct ClusteredGmxpackedFocusDeviceSourceTraceSummary
+{
+    size_t source_unknown = 0;
+    size_t unavailable = 0;
+    size_t row_missing = 0;
+    size_t group_imask_absent = 0;
+    size_t split_empty = 0;
+    size_t split_pruned = 0;
+    size_t write_overflow = 0;
+    size_t source_imask_absent = 0;
+    size_t wrote_row_host_missing = 0;
+    size_t dedup_active = 0;
+};
+
+enum ClusteredGmxpackedPruneInputTraceReason
+{
+    kClusteredGmxpackedPruneInputTraceUnavailable = 0,
+    kClusteredGmxpackedPruneInputTraceCoordinateFrameMismatch = 1,
+    kClusteredGmxpackedPruneInputTraceShiftMismatch = 2,
+    kClusteredGmxpackedPruneInputTraceGroupImaskMismatch = 3,
+    kClusteredGmxpackedPruneInputTraceValidMaskMismatch = 4,
+    kClusteredGmxpackedPruneInputTraceLocalMaskMismatch = 5,
+    kClusteredGmxpackedPruneInputTraceFocusAtomMappingMismatch = 6,
+    kClusteredGmxpackedPruneInputTraceNoFocusAtomInDeviceGroup = 7,
+    kClusteredGmxpackedPruneInputTraceNoDeviceInRangePair = 8,
+    kClusteredGmxpackedPruneInputTraceOther = 9,
+};
+
+struct ClusteredGmxpackedPruneFocusEvidence
+{
+    unsigned int local_mask_i = 0u;
+    unsigned int valid_mask_j = 0u;
+    unsigned int local_mask_j = 0u;
+    VECTOR pair_shift = VECTOR(0.0f);
+    float cutoff_sq = 0.0f;
+    bool focus_pair_available = false;
+    bool focus_pair_in_range = false;
+    int focus_atom_i = -1;
+    int focus_atom_j = -1;
+    float focus_dx = 0.0f;
+    float focus_dy = 0.0f;
+    float focus_dz = 0.0f;
+    float focus_dr2 = 0.0f;
+    bool any_checked_pair = false;
+    int first_checked_i_lane = -1;
+    int first_checked_j_lane = -1;
+    int first_checked_atom_i = -1;
+    int first_checked_atom_j = -1;
+    float first_checked_dx = 0.0f;
+    float first_checked_dy = 0.0f;
+    float first_checked_dz = 0.0f;
+    float first_checked_dr2 = 0.0f;
+    bool any_in_range = false;
+    int first_in_range_i_lane = -1;
+    int first_in_range_j_lane = -1;
+    int first_in_range_atom_i = -1;
+    int first_in_range_atom_j = -1;
+    float first_in_range_dx = 0.0f;
+    float first_in_range_dy = 0.0f;
+    float first_in_range_dz = 0.0f;
+    float first_in_range_dr2 = 0.0f;
+};
+
+struct ClusteredGmxpackedFocusPruneInputTrace
+{
+    ClusteredGmxpackedPruneInputTraceReason reason =
+        kClusteredGmxpackedPruneInputTraceUnavailable;
+    bool data_ready = false;
+    int source_shift_id = kClusteredCentralShiftId;
+    int device_shift_id = kClusteredCentralShiftId;
+    unsigned int focus_i_local_bit = 0u;
+    unsigned int host_group_imask = 0u;
+    unsigned int device_group_imask = 0u;
+    unsigned int host_valid_mask_j = 0u;
+    unsigned int device_valid_mask_j = 0u;
+    unsigned int host_local_mask_j = 0u;
+    unsigned int device_local_mask_j = 0u;
+    unsigned int host_local_mask_i = 0u;
+    int focus_atom_i = -1;
+    int focus_atom_j = -1;
+    bool focus_atom_mapping_matches = false;
+    ClusteredGmxpackedPruneFocusEvidence host_shifted = {};
+    ClusteredGmxpackedPruneFocusEvidence device_raw = {};
+};
+
+struct ClusteredGmxpackedFocusPruneInputTraceSummary
+{
+    size_t unavailable = 0;
+    size_t coordinate_frame_mismatch = 0;
+    size_t shift_mismatch = 0;
+    size_t group_imask_mismatch = 0;
+    size_t valid_mask_mismatch = 0;
+    size_t local_mask_mismatch = 0;
+    size_t focus_atom_mapping_mismatch = 0;
+    size_t no_focus_atom_in_device_group = 0;
+    size_t no_device_in_range_pair = 0;
+    size_t other = 0;
+};
+
+enum ClusteredGmxpackedPruneContractTraceReason
+{
+    kClusteredGmxpackedPruneContractTraceUnavailable = 0,
+    kClusteredGmxpackedPruneContractTraceShiftedFrameMatch = 1,
+    kClusteredGmxpackedPruneContractTraceRawFrameMatch = 2,
+    kClusteredGmxpackedPruneContractTraceOppositeShiftMatch = 3,
+    kClusteredGmxpackedPruneContractTraceZeroShiftMatch = 4,
+    kClusteredGmxpackedPruneContractTraceSortedIndexMappingMatch = 5,
+    kClusteredGmxpackedPruneContractTraceCutoffBoundary = 6,
+    kClusteredGmxpackedPruneContractTraceSourceShiftMismatch = 7,
+    kClusteredGmxpackedPruneContractTraceOther = 8,
+};
+
+struct ClusteredGmxpackedPruneContractCandidate
+{
+    bool valid = false;
+    int atom_i = -1;
+    int atom_j = -1;
+    float dx = 0.0f;
+    float dy = 0.0f;
+    float dz = 0.0f;
+    float dr2 = 0.0f;
+};
+
+struct ClusteredGmxpackedFocusPruneContractTrace
+{
+    ClusteredGmxpackedPruneContractTraceReason reason =
+        kClusteredGmxpackedPruneContractTraceUnavailable;
+    bool data_ready = false;
+    int source_shift_id = kClusteredCentralShiftId;
+    int compat_shift_id = kClusteredCentralShiftId;
+    int compat_atom_i = -1;
+    int compat_atom_j = -1;
+    float compat_dr2 = 0.0f;
+    float cutoff_sq = 0.0f;
+    ClusteredGmxpackedPruneContractCandidate raw_same = {};
+    ClusteredGmxpackedPruneContractCandidate raw_opposite = {};
+    ClusteredGmxpackedPruneContractCandidate raw_zero = {};
+    ClusteredGmxpackedPruneContractCandidate shifted_same = {};
+    ClusteredGmxpackedPruneContractCandidate sorted_index_raw_same = {};
+};
+
+struct ClusteredGmxpackedFocusPruneContractTraceSummary
+{
+    size_t unavailable = 0;
+    size_t shifted_frame_match = 0;
+    size_t raw_frame_match = 0;
+    size_t opposite_shift_match = 0;
+    size_t zero_shift_match = 0;
+    size_t sorted_index_mapping_match = 0;
+    size_t cutoff_boundary = 0;
+    size_t source_shift_mismatch = 0;
+    size_t other = 0;
+};
+
+static const char* Gmxpacked_Focus_Device_Source_Trace_Reason_Label(
+    const ClusteredGmxpackedFocusDeviceSourceTrace& trace)
+{
+    switch (trace.reason)
+    {
+    case kClusteredGmxpackedDeviceSourceTraceRowMissing:
+        return "device-row-missing";
+    case kClusteredGmxpackedDeviceSourceTraceGroupImaskAbsent:
+        return "device-group-imask-absent";
+    case kClusteredGmxpackedDeviceSourceTraceSplitEmpty:
+        return "device-split-has-no-atoms";
+    case kClusteredGmxpackedDeviceSourceTraceSplitPruned:
+        return "device-split-prune-removed";
+    case kClusteredGmxpackedDeviceSourceTraceWriteOverflow:
+        return "device-write-overflow";
+    case kClusteredGmxpackedDeviceSourceTraceSourceImaskAbsent:
+        return "device-source-imask-missing";
+    case kClusteredGmxpackedDeviceSourceTraceWroteRowHostMissing:
+        return "device-wrote-row-host-missing";
+    case kClusteredGmxpackedDeviceSourceTraceUnavailable:
+    default:
+        return trace.data_ready ? "device-trace-unclassified"
+                                : "device-trace-unavailable";
+    }
+}
+
+static const char* Gmxpacked_Focus_Prune_Input_Trace_Reason_Label(
+    const ClusteredGmxpackedFocusPruneInputTrace& trace)
+{
+    switch (trace.reason)
+    {
+    case kClusteredGmxpackedPruneInputTraceCoordinateFrameMismatch:
+        return "host-shifted-vs-device-raw-coordinate-frame";
+    case kClusteredGmxpackedPruneInputTraceShiftMismatch:
+        return "source-shift-mismatch";
+    case kClusteredGmxpackedPruneInputTraceGroupImaskMismatch:
+        return "group-imask-mismatch";
+    case kClusteredGmxpackedPruneInputTraceValidMaskMismatch:
+        return "valid-mask-mismatch";
+    case kClusteredGmxpackedPruneInputTraceLocalMaskMismatch:
+        return "local-mask-mismatch";
+    case kClusteredGmxpackedPruneInputTraceFocusAtomMappingMismatch:
+        return "focus-atom-mapping-mismatch";
+    case kClusteredGmxpackedPruneInputTraceNoFocusAtomInDeviceGroup:
+        return "no-focus-atom-in-device-group";
+    case kClusteredGmxpackedPruneInputTraceNoDeviceInRangePair:
+        return "no-device-in-range-pair";
+    case kClusteredGmxpackedPruneInputTraceOther:
+        return "other-prune-input-mismatch";
+    case kClusteredGmxpackedPruneInputTraceUnavailable:
+    default:
+        return trace.data_ready ? "prune-input-unclassified"
+                                : "prune-input-unavailable";
+    }
+}
+
+static const char* Gmxpacked_Focus_Prune_Contract_Trace_Reason_Label(
+    const ClusteredGmxpackedFocusPruneContractTrace& trace)
+{
+    switch (trace.reason)
+    {
+    case kClusteredGmxpackedPruneContractTraceShiftedFrameMatch:
+        return "shifted-sorted_xq-frame-match";
+    case kClusteredGmxpackedPruneContractTraceRawFrameMatch:
+        return "raw-cached-frame-match";
+    case kClusteredGmxpackedPruneContractTraceOppositeShiftMatch:
+        return "opposite-shift-sign-match";
+    case kClusteredGmxpackedPruneContractTraceZeroShiftMatch:
+        return "zero-shift-match";
+    case kClusteredGmxpackedPruneContractTraceSortedIndexMappingMatch:
+        return "sorted-index-mapping-match";
+    case kClusteredGmxpackedPruneContractTraceCutoffBoundary:
+        return "cutoff-boundary";
+    case kClusteredGmxpackedPruneContractTraceSourceShiftMismatch:
+        return "source-shift-mismatch";
+    case kClusteredGmxpackedPruneContractTraceOther:
+        return "other-prune-contract-gap";
+    case kClusteredGmxpackedPruneContractTraceUnavailable:
+    default:
+        return trace.data_ready ? "prune-contract-unclassified"
+                                : "prune-contract-unavailable";
+    }
+}
+
+static const char* Gmxpacked_Focus_Source_Trace_Reason_Label(
+    const ClusteredGmxpackedFocusSourceTrace& trace)
+{
+    switch (trace.reason)
+    {
+    case kClusteredGmxpackedSourceTraceMissingCandidate:
+        return trace.candidate_cluster_j_other_shift_found
+                   ? "missing-candidate-other-shift"
+                   : (trace.exact_candidate_sci_found
+                          ? "missing-candidate-cluster-j"
+                          : "missing-candidate-shift");
+    case kClusteredGmxpackedSourceTraceILocalAbsent:
+        return "i-local-absent-preprune-imask";
+    case kClusteredGmxpackedSourceTraceSplitPruned:
+        return "split-prune-removed";
+    case kClusteredGmxpackedSourceTraceSplitEmpty:
+        return "split-has-no-atoms";
+    case kClusteredGmxpackedSourceTracePairWordDisallowed:
+        if (trace.excluded)
+        {
+            return "pair-word-exclusion";
+        }
+        if (trace.central_halfshell)
+        {
+            return "pair-word-halfshell";
+        }
+        if (!trace.local_i)
+        {
+            return "pair-word-local";
+        }
+        if (!trace.valid_j)
+        {
+            return "pair-word-valid";
+        }
+        return "pair-word-disallowed";
+    case kClusteredGmxpackedSourceTraceUnknown:
+    default:
+        return trace.data_ready ? "unknown-needs-device-trace"
+                                : "unknown-data-unavailable";
+    }
+}
+
+static unsigned int Prune_Gmxpacked_Record_Stream_Source_Imask_On_Host(
+    const int split_id, const unsigned int record_imask,
+    const unsigned int valid_mask_j, const int shift_id, const LTMatrix3 cell,
+    const LTMatrix3 rcell, const std::vector<VECTOR>& coordinates,
+    const VECTOR shared_i_centers[kClusteredMaxSuperClusterClusters],
+    const VECTOR center_j,
+    const int shared_i_atom_ids[kClusteredMaxSuperClusterClusters]
+                               [kClusteredClusterSize],
+    const int* shared_j_atom_ids, const unsigned int* shared_i_local_masks,
+    const float cutoff_sq)
+{
+    if (record_imask == 0u || coordinates.empty())
+    {
+        return 0u;
+    }
+    if (cutoff_sq <= 0.0f)
+    {
+        return record_imask;
+    }
+
+    const VECTOR pair_shift = Shift_Vector_From_Id(shift_id, cell);
+    const int j_lane_base = split_id * kClusteredSplitJClusterSize;
+    unsigned int pruned_imask = 0u;
+    for (int i_local = 0; i_local < kClusteredMaxSuperClusterClusters;
+         i_local += 1)
+    {
+        const unsigned int i_local_bit = 1u << static_cast<unsigned int>(i_local);
+        if ((record_imask & i_local_bit) == 0u)
+        {
+            continue;
+        }
+        const unsigned int local_mask_i = shared_i_local_masks[i_local];
+        if (local_mask_i == 0u)
+        {
+            continue;
+        }
+
+        bool any_in_range = false;
+        for (int i_lane = 0; i_lane < kClusteredClusterSize; i_lane += 1)
+        {
+            if ((local_mask_i & (1u << static_cast<unsigned int>(i_lane))) == 0u)
+            {
+                continue;
+            }
+            const int atom_i = shared_i_atom_ids[i_local][i_lane];
+            if (atom_i < 0 || atom_i >= static_cast<int>(coordinates.size()))
+            {
+                continue;
+            }
+            const VECTOR r_i = coordinates[static_cast<size_t>(atom_i)];
+            const VECTOR shifted_i = Shift_Clustered_Atom_Into_Sorted_XQ_Frame(
+                r_i, shared_i_centers[i_local], cell, rcell);
+            for (int split_j_lane = 0; split_j_lane < kClusteredSplitJClusterSize;
+                 split_j_lane += 1)
+            {
+                const int j_lane = j_lane_base + split_j_lane;
+                if ((valid_mask_j & (1u << static_cast<unsigned int>(j_lane))) == 0u)
+                {
+                    continue;
+                }
+                const int atom_j = shared_j_atom_ids[j_lane];
+                if (atom_j < 0 || atom_j >= static_cast<int>(coordinates.size()))
+                {
+                    continue;
+                }
+                const VECTOR shifted_j = Shift_Clustered_Atom_Into_Sorted_XQ_Frame(
+                    coordinates[static_cast<size_t>(atom_j)], center_j, cell,
+                    rcell);
+                const float dx = shifted_j.x - shifted_i.x - pair_shift.x;
+                const float dy = shifted_j.y - shifted_i.y - pair_shift.y;
+                const float dz = shifted_j.z - shifted_i.z - pair_shift.z;
+                const float dr2 = dx * dx + dy * dy + dz * dz;
+                if (dr2 < cutoff_sq && dr2 > 0.0f)
+                {
+                    any_in_range = true;
+                    break;
+                }
+            }
+            if (any_in_range)
+            {
+                break;
+            }
+        }
+        if (any_in_range)
+        {
+            pruned_imask |= i_local_bit;
+        }
+    }
+    return pruned_imask;
+}
+
+static ClusteredGmxpackedPruneFocusEvidence
+Collect_Gmxpacked_Record_Stream_Source_Prune_Focus_Evidence_On_Host(
+    const ClusteredGmxpackedFocusPair& pair, const int shift_id,
+    const unsigned int valid_mask_j, const unsigned int local_mask_j,
+    const LTMatrix3 cell, const std::vector<VECTOR>& coordinates,
+    const int shared_i_atom_ids[kClusteredMaxSuperClusterClusters]
+                               [kClusteredClusterSize],
+    const int* shared_j_atom_ids, const unsigned int* shared_i_local_masks,
+    const float cutoff_sq)
+{
+    ClusteredGmxpackedPruneFocusEvidence evidence = {};
+    evidence.valid_mask_j = valid_mask_j;
+    evidence.local_mask_j = local_mask_j;
+    evidence.cutoff_sq = cutoff_sq;
+    evidence.pair_shift = Shift_Vector_From_Id(shift_id, cell);
+    if (pair.i_local < 0 || pair.i_local >= kClusteredMaxSuperClusterClusters)
+    {
+        return evidence;
+    }
+
+    const unsigned int local_mask_i = shared_i_local_masks[pair.i_local];
+    evidence.local_mask_i = local_mask_i;
+    const int j_lane_base = pair.split_id * kClusteredSplitJClusterSize;
+    const bool focus_i_lane_valid =
+        pair.i_lane >= 0 && pair.i_lane < kClusteredClusterSize &&
+        (local_mask_i & (1u << static_cast<unsigned int>(pair.i_lane))) != 0u;
+    const bool focus_j_lane_valid =
+        pair.j_lane >= j_lane_base &&
+        pair.j_lane < j_lane_base + kClusteredSplitJClusterSize &&
+        (valid_mask_j & (1u << static_cast<unsigned int>(pair.j_lane))) != 0u;
+    if (focus_i_lane_valid)
+    {
+        evidence.focus_atom_i = shared_i_atom_ids[pair.i_local][pair.i_lane];
+    }
+    if (focus_j_lane_valid)
+    {
+        evidence.focus_atom_j = shared_j_atom_ids[pair.j_lane];
+    }
+    evidence.focus_pair_available =
+        focus_i_lane_valid && focus_j_lane_valid && !coordinates.empty() &&
+        evidence.focus_atom_i >= 0 && evidence.focus_atom_j >= 0 &&
+        evidence.focus_atom_i < static_cast<int>(coordinates.size()) &&
+        evidence.focus_atom_j < static_cast<int>(coordinates.size());
+    if (evidence.focus_pair_available)
+    {
+        const VECTOR r_i = coordinates[static_cast<size_t>(evidence.focus_atom_i)];
+        const VECTOR r_j = coordinates[static_cast<size_t>(evidence.focus_atom_j)];
+        evidence.focus_dx = r_j.x - r_i.x - evidence.pair_shift.x;
+        evidence.focus_dy = r_j.y - r_i.y - evidence.pair_shift.y;
+        evidence.focus_dz = r_j.z - r_i.z - evidence.pair_shift.z;
+        evidence.focus_dr2 = evidence.focus_dx * evidence.focus_dx +
+                             evidence.focus_dy * evidence.focus_dy +
+                             evidence.focus_dz * evidence.focus_dz;
+        evidence.focus_pair_in_range =
+            evidence.focus_dr2 < cutoff_sq && evidence.focus_dr2 > 0.0f;
+    }
+
+    if (coordinates.empty() || local_mask_i == 0u)
+    {
+        return evidence;
+    }
+
+    for (int i_lane = 0; i_lane < kClusteredClusterSize; i_lane += 1)
+    {
+        if ((local_mask_i & (1u << static_cast<unsigned int>(i_lane))) == 0u)
+        {
+            continue;
+        }
+        const int atom_i = shared_i_atom_ids[pair.i_local][i_lane];
+        if (atom_i < 0 || atom_i >= static_cast<int>(coordinates.size()))
+        {
+            continue;
+        }
+        const VECTOR r_i = coordinates[static_cast<size_t>(atom_i)];
+        for (int split_j_lane = 0; split_j_lane < kClusteredSplitJClusterSize;
+             split_j_lane += 1)
+        {
+            const int j_lane = j_lane_base + split_j_lane;
+            if ((valid_mask_j & (1u << static_cast<unsigned int>(j_lane))) == 0u)
+            {
+                continue;
+            }
+            const int atom_j = shared_j_atom_ids[j_lane];
+            if (atom_j < 0 || atom_j >= static_cast<int>(coordinates.size()))
+            {
+                continue;
+            }
+            const VECTOR r_j = coordinates[static_cast<size_t>(atom_j)];
+            const float dx = r_j.x - r_i.x - evidence.pair_shift.x;
+            const float dy = r_j.y - r_i.y - evidence.pair_shift.y;
+            const float dz = r_j.z - r_i.z - evidence.pair_shift.z;
+            const float dr2 = dx * dx + dy * dy + dz * dz;
+            if (!evidence.any_checked_pair)
+            {
+                evidence.any_checked_pair = true;
+                evidence.first_checked_i_lane = i_lane;
+                evidence.first_checked_j_lane = j_lane;
+                evidence.first_checked_atom_i = atom_i;
+                evidence.first_checked_atom_j = atom_j;
+                evidence.first_checked_dx = dx;
+                evidence.first_checked_dy = dy;
+                evidence.first_checked_dz = dz;
+                evidence.first_checked_dr2 = dr2;
+            }
+            if (dr2 < cutoff_sq && dr2 > 0.0f)
+            {
+                evidence.any_in_range = true;
+                evidence.first_in_range_i_lane = i_lane;
+                evidence.first_in_range_j_lane = j_lane;
+                evidence.first_in_range_atom_i = atom_i;
+                evidence.first_in_range_atom_j = atom_j;
+                evidence.first_in_range_dx = dx;
+                evidence.first_in_range_dy = dy;
+                evidence.first_in_range_dz = dz;
+                evidence.first_in_range_dr2 = dr2;
+                return evidence;
+            }
+        }
+    }
+    return evidence;
+}
+
+static ClusteredGmxpackedPruneContractCandidate
+Compute_Gmxpacked_Focus_Pair_Dr2_Candidate_On_Host(
+    const ClusteredGmxpackedFocusPair& pair,
+    const std::vector<int>& sorted_atom_ids,
+    const std::vector<VECTOR>& coordinates, const int shift_id,
+    const LTMatrix3 cell, const bool opposite_shift,
+    const bool zero_shift, const bool use_sorted_indices_as_atom_ids)
+{
+    ClusteredGmxpackedPruneContractCandidate candidate = {};
+    const int atom_i = use_sorted_indices_as_atom_ids
+                           ? pair.sorted_i
+                           : ((pair.sorted_i >= 0 &&
+                               pair.sorted_i < static_cast<int>(sorted_atom_ids.size()))
+                                  ? sorted_atom_ids[static_cast<size_t>(pair.sorted_i)]
+                                  : -1);
+    const int atom_j = use_sorted_indices_as_atom_ids
+                           ? pair.sorted_j
+                           : ((pair.sorted_j >= 0 &&
+                               pair.sorted_j < static_cast<int>(sorted_atom_ids.size()))
+                                  ? sorted_atom_ids[static_cast<size_t>(pair.sorted_j)]
+                                  : -1);
+    if (atom_i < 0 || atom_j < 0 || atom_i >= static_cast<int>(coordinates.size()) ||
+        atom_j >= static_cast<int>(coordinates.size()))
+    {
+        return candidate;
+    }
+    VECTOR pair_shift = VECTOR(0.0f);
+    if (!zero_shift)
+    {
+        pair_shift = Shift_Vector_From_Id(shift_id, cell);
+        if (opposite_shift)
+        {
+            pair_shift = VECTOR(-pair_shift.x, -pair_shift.y, -pair_shift.z);
+        }
+    }
+    const VECTOR r_i = coordinates[static_cast<size_t>(atom_i)];
+    const VECTOR r_j = coordinates[static_cast<size_t>(atom_j)];
+    candidate.valid = true;
+    candidate.atom_i = atom_i;
+    candidate.atom_j = atom_j;
+    candidate.dx = r_j.x - r_i.x - pair_shift.x;
+    candidate.dy = r_j.y - r_i.y - pair_shift.y;
+    candidate.dz = r_j.z - r_i.z - pair_shift.z;
+    candidate.dr2 = candidate.dx * candidate.dx + candidate.dy * candidate.dy +
+                    candidate.dz * candidate.dz;
+    return candidate;
+}
+
+static bool Build_Gmxpacked_Focus_Source_Trace_Host_Input(
+    const LJ_CLUSTER_LAYOUT* layout,
+    ClusteredGmxpackedSourceTraceHostInput* input)
+{
+    if (layout == NULL || input == NULL || layout->candidate_sci_numbers <= 0 ||
+        layout->cluster_numbers <= 0 || layout->super_cluster_numbers <= 0 ||
+        layout->d_sort_permutation == NULL || layout->d_cluster_offsets == NULL ||
+        layout->d_leaf_cluster_starts == NULL ||
+        layout->d_leaf_cluster_ends == NULL ||
+        layout->d_super_cluster_offsets == NULL ||
+        layout->d_cluster_to_supercluster == NULL ||
+        layout->d_sci_candidate_leaf_offsets == NULL ||
+        layout->d_sci_candidate_leaf_ids == NULL ||
+        layout->d_cluster_valid_masks == NULL ||
+        layout->d_cluster_local_masks == NULL ||
+        layout->d_cluster_centers == NULL || layout->d_cluster_extents == NULL)
+    {
+        return false;
+    }
+
+    input->dense_shift_partitioned_candidates =
+        Clustered_Use_Shift_Partitioned_Builder();
+    input->sparse_shift_candidates =
+        !input->dense_shift_partitioned_candidates &&
+        Clustered_Use_Sparse_Shift_Candidate_Builder();
+    input->fixed_shift_candidates =
+        input->dense_shift_partitioned_candidates ||
+        input->sparse_shift_candidates;
+    input->fixed_shift_leaf_screening =
+        input->fixed_shift_candidates &&
+        Clustered_Use_Fixed_Shift_Leaf_Screening() &&
+        layout->candidate_leaf_cluster_stride > 0 &&
+        layout->d_candidate_leaf_reach_masks != NULL;
+    input->candidate_sci_numbers = layout->candidate_sci_numbers;
+    input->candidate_leaf_cluster_stride = layout->candidate_leaf_cluster_stride;
+    input->local_atom_numbers = layout->local_atom_numbers;
+
+    input->permutation = Copy_Device_Buffer_To_Host(
+        layout->d_sort_permutation,
+        static_cast<size_t>(layout->total_atom_numbers));
+    input->cluster_offsets = Copy_Device_Buffer_To_Host(
+        layout->d_cluster_offsets,
+        static_cast<size_t>(layout->cluster_numbers + 1));
+    input->leaf_cluster_starts = Copy_Device_Buffer_To_Host(
+        layout->d_leaf_cluster_starts,
+        static_cast<size_t>(layout->cornerstone_state->octree.numLeafNodes));
+    input->leaf_cluster_ends = Copy_Device_Buffer_To_Host(
+        layout->d_leaf_cluster_ends,
+        static_cast<size_t>(layout->cornerstone_state->octree.numLeafNodes));
+    input->super_cluster_offsets = Copy_Device_Buffer_To_Host(
+        layout->d_super_cluster_offsets,
+        static_cast<size_t>(layout->super_cluster_numbers + 1));
+    input->cluster_to_supercluster = Copy_Device_Buffer_To_Host(
+        layout->d_cluster_to_supercluster,
+        static_cast<size_t>(layout->cluster_numbers));
+    input->candidate_leaf_offsets = Copy_Device_Buffer_To_Host(
+        layout->d_sci_candidate_leaf_offsets,
+        static_cast<size_t>(layout->candidate_sci_numbers + 1));
+    input->candidate_leaf_ids = Copy_Device_Buffer_To_Host(
+        layout->d_sci_candidate_leaf_ids,
+        static_cast<size_t>(layout->candidate_leaf_numbers));
+    input->cluster_valid_masks = Copy_Device_Buffer_To_Host(
+        layout->d_cluster_valid_masks,
+        static_cast<size_t>(layout->cluster_numbers));
+    input->cluster_local_masks = Copy_Device_Buffer_To_Host(
+        layout->d_cluster_local_masks,
+        static_cast<size_t>(layout->cluster_numbers));
+    input->cluster_centers = Copy_Device_Buffer_To_Host(
+        layout->d_cluster_centers,
+        static_cast<size_t>(layout->cluster_numbers));
+    input->cluster_extents = Copy_Device_Buffer_To_Host(
+        layout->d_cluster_extents,
+        static_cast<size_t>(layout->cluster_numbers));
+
+    const int trace_sci_supercluster_numbers =
+        input->sparse_shift_candidates ? layout->candidate_sci_numbers
+                                       : (input->dense_shift_partitioned_candidates
+                                              ? layout->candidate_sci_numbers /
+                                                    kClusteredShiftCount
+                                              : layout->candidate_sci_numbers);
+    const int* d_candidate_sci_supercluster_ids =
+        input->sparse_shift_candidates ? layout->d_candidate_sci_offsets
+                                       : layout->d_sci_supercluster_ids;
+    if (d_candidate_sci_supercluster_ids == NULL)
+    {
+        return false;
+    }
+    input->candidate_sci_supercluster_ids = Copy_Device_Buffer_To_Host(
+        d_candidate_sci_supercluster_ids,
+        static_cast<size_t>(trace_sci_supercluster_numbers));
+    if (input->sparse_shift_candidates)
+    {
+        if (layout->d_candidate_shift_ids == NULL)
+        {
+            return false;
+        }
+        input->candidate_shift_ids = Copy_Device_Buffer_To_Host(
+            layout->d_candidate_shift_ids,
+            static_cast<size_t>(layout->candidate_sci_numbers));
+    }
+    else
+    {
+        input->candidate_shift_ids.clear();
+    }
+    if (input->fixed_shift_leaf_screening)
+    {
+        input->candidate_leaf_reach_masks = Copy_Device_Buffer_To_Host(
+            layout->d_candidate_leaf_reach_masks,
+            static_cast<size_t>(layout->candidate_leaf_numbers *
+                                layout->candidate_leaf_cluster_stride));
+    }
+    else
+    {
+        input->candidate_leaf_reach_masks.clear();
+    }
+
+    if (layout->local_atom_numbers > 0 && layout->d_excluded_list_start != NULL &&
+        layout->d_excluded_numbers != NULL)
+    {
+        input->excluded_list_start = Copy_Device_Buffer_To_Host(
+            layout->d_excluded_list_start,
+            static_cast<size_t>(layout->local_atom_numbers));
+        input->excluded_numbers = Copy_Device_Buffer_To_Host(
+            layout->d_excluded_numbers,
+            static_cast<size_t>(layout->local_atom_numbers));
+        const int total_excluded =
+            input->excluded_list_start.empty() || input->excluded_numbers.empty()
+                ? 0
+                : (input->excluded_list_start.back() +
+                   input->excluded_numbers.back());
+        if (total_excluded > 0 && layout->d_excluded_list != NULL)
+        {
+            input->excluded_list = Copy_Device_Buffer_To_Host(
+                layout->d_excluded_list, static_cast<size_t>(total_excluded));
+        }
+    }
+    else
+    {
+        input->excluded_list_start.clear();
+        input->excluded_numbers.clear();
+        input->excluded_list.clear();
+    }
+    return true;
+}
+
+static ClusteredGmxpackedFocusSourceTrace Analyze_Gmxpacked_Focus_Pair_Source_Trace(
+    const ClusteredGmxpackedFocusPair& pair,
+    const std::vector<LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE>&
+        route_stream_sources,
+    const ClusteredGmxpackedSourceTraceHostInput& input,
+    const std::vector<VECTOR>& coordinates, const float cutoff,
+    const LTMatrix3 cell, const LTMatrix3 rcell)
+{
+    ClusteredGmxpackedFocusSourceTrace trace = {};
+    trace.data_ready = input.candidate_sci_numbers > 0 &&
+                       !input.super_cluster_offsets.empty() &&
+                       !input.cluster_offsets.empty() &&
+                       !input.cluster_valid_masks.empty() &&
+                       !input.cluster_local_masks.empty() &&
+                       !input.cluster_centers.empty() &&
+                       !input.cluster_extents.empty() &&
+                       !coordinates.empty();
+    if (!trace.data_ready || pair.supercluster_id < 0 ||
+        pair.supercluster_id + 1 >=
+            static_cast<int>(input.super_cluster_offsets.size()) ||
+        pair.cluster_i < 0 ||
+        pair.cluster_i >= static_cast<int>(input.cluster_local_masks.size()) ||
+        pair.cluster_j < 0 ||
+        pair.cluster_j >= static_cast<int>(input.cluster_valid_masks.size()) ||
+        pair.i_local < 0 || pair.i_local >= kClusteredMaxSuperClusterClusters)
+    {
+        return trace;
+    }
+
+    const int pair_word_idx =
+        Gmxpacked_Focus_Pair_Stage_Trace_Pair_Word_Index(pair);
+    if (pair_word_idx < 0)
+    {
+        return trace;
+    }
+
+    const unsigned int pair_i_local_bit =
+        1u << static_cast<unsigned int>(pair.i_local);
+    for (const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE& source :
+         route_stream_sources)
+    {
+        if (source.shift_id == pair.sci_shift_id &&
+            source.supercluster_id == pair.supercluster_id &&
+            source.cluster_j == pair.cluster_j && source.split_id == pair.split_id)
+        {
+            trace.exact_source_row_found = true;
+            trace.exact_source_row_i_local_present =
+                trace.exact_source_row_i_local_present ||
+                ((source.imask & pair_i_local_bit) != 0u);
+            trace.exact_source_row_pair_present =
+                trace.exact_source_row_pair_present ||
+                ((source.pair_exclusion_words[pair_word_idx] & pair_i_local_bit) !=
+                 0u);
+        }
+    }
+
+    const int cluster_i_start =
+        input.super_cluster_offsets[static_cast<size_t>(pair.supercluster_id)];
+    const int cluster_i_end =
+        input.super_cluster_offsets[static_cast<size_t>(pair.supercluster_id + 1)];
+    const int active_cluster_count = cluster_i_end - cluster_i_start;
+    const unsigned int active_i_lane_mask =
+        active_cluster_count > 0
+            ? ((1u << static_cast<unsigned int>(active_cluster_count)) - 1u)
+            : 0u;
+    const int exact_trace_supercluster_count = static_cast<int>(
+        input.candidate_sci_supercluster_ids.size());
+
+    int matched_candidate_idx = -1;
+    int matched_candidate_cluster_start = -1;
+    int matched_leaf_mask_base = -1;
+    int matched_fixed_shift_id = -1;
+    for (int candidate_sci = 0; candidate_sci < input.candidate_sci_numbers;
+         candidate_sci += 1)
+    {
+        const int sci_base =
+            (input.fixed_shift_candidates && input.candidate_shift_ids.empty())
+                ? candidate_sci / kClusteredShiftCount
+                : candidate_sci;
+        if (sci_base < 0 || sci_base >= exact_trace_supercluster_count)
+        {
+            continue;
+        }
+        const int fixed_shift_id = !input.fixed_shift_candidates
+                                       ? -1
+                                       : (!input.candidate_shift_ids.empty()
+                                              ? input.candidate_shift_ids[
+                                                    static_cast<size_t>(candidate_sci)]
+                                              : (candidate_sci %
+                                                 kClusteredShiftCount));
+        const int super_i =
+            input.candidate_sci_supercluster_ids[static_cast<size_t>(sci_base)];
+        if (super_i != pair.supercluster_id)
+        {
+            continue;
+        }
+        const bool exact_shift =
+            !input.fixed_shift_candidates || fixed_shift_id == pair.sci_shift_id;
+        if (exact_shift)
+        {
+            trace.exact_candidate_sci_found = true;
+        }
+
+        int processed_cluster_end = 0;
+        for (int candidate_idx =
+                 input.candidate_leaf_offsets[static_cast<size_t>(candidate_sci)];
+             candidate_idx <
+             input.candidate_leaf_offsets[static_cast<size_t>(candidate_sci + 1)];
+             candidate_idx += 1)
+        {
+            const int leaf_j =
+                input.candidate_leaf_ids[static_cast<size_t>(candidate_idx)];
+            if (leaf_j < 0 ||
+                leaf_j >= static_cast<int>(input.leaf_cluster_starts.size()) ||
+                leaf_j >= static_cast<int>(input.leaf_cluster_ends.size()))
+            {
+                continue;
+            }
+            const int cluster_j_start =
+                input.leaf_cluster_starts[static_cast<size_t>(leaf_j)];
+            const int cluster_j_end =
+                input.leaf_cluster_ends[static_cast<size_t>(leaf_j)];
+            const int deduped_cluster_j_start =
+                IntMax(cluster_j_start, processed_cluster_end);
+            if (pair.cluster_j >= deduped_cluster_j_start &&
+                pair.cluster_j < cluster_j_end)
+            {
+                if (exact_shift)
+                {
+                    trace.exact_candidate_cluster_j_found = true;
+                    matched_candidate_idx = candidate_sci;
+                    matched_candidate_cluster_start = cluster_j_start;
+                    matched_leaf_mask_base =
+                        input.fixed_shift_leaf_screening
+                            ? candidate_idx * input.candidate_leaf_cluster_stride
+                            : -1;
+                    matched_fixed_shift_id = fixed_shift_id;
+                }
+                else
+                {
+                    trace.candidate_cluster_j_other_shift_found = true;
+                }
+                break;
+            }
+            processed_cluster_end = IntMax(processed_cluster_end, cluster_j_end);
+        }
+        if (matched_candidate_idx >= 0)
+        {
+            break;
+        }
+    }
+
+    if (matched_candidate_idx < 0)
+    {
+        trace.reason = kClusteredGmxpackedSourceTraceMissingCandidate;
+        return trace;
+    }
+
+    trace.candidate_sci = matched_candidate_idx;
+    trace.source_shift_id = input.fixed_shift_candidates ? matched_fixed_shift_id
+                                                         : pair.sci_shift_id;
+
+    const unsigned int valid_mask_j =
+        input.cluster_valid_masks[static_cast<size_t>(pair.cluster_j)];
+    const unsigned int local_mask_j =
+        input.cluster_local_masks[static_cast<size_t>(pair.cluster_j)];
+    const int super_j =
+        input.cluster_to_supercluster[static_cast<size_t>(pair.cluster_j)];
+    if (valid_mask_j == 0u)
+    {
+        trace.reason = kClusteredGmxpackedSourceTracePairWordDisallowed;
+        trace.valid_j = false;
+        return trace;
+    }
+    if (local_mask_j != 0u && super_j < pair.supercluster_id)
+    {
+        trace.reason = kClusteredGmxpackedSourceTracePairWordDisallowed;
+        trace.central_halfshell = true;
+        return trace;
+    }
+
+    unsigned int candidate_imask = 0u;
+    unsigned int group_record_imask = 0u;
+    unsigned int active_pair_lane_mask = 0u;
+    int pair_shift_for_i_local = -1;
+    if (input.fixed_shift_leaf_screening && matched_leaf_mask_base >= 0)
+    {
+        const int leaf_mask_slot = pair.cluster_j - matched_candidate_cluster_start;
+        if (leaf_mask_slot >= 0 &&
+            matched_leaf_mask_base + leaf_mask_slot <
+                static_cast<int>(input.candidate_leaf_reach_masks.size()))
+        {
+            candidate_imask =
+                input.candidate_leaf_reach_masks[static_cast<size_t>(
+                    matched_leaf_mask_base + leaf_mask_slot)] &
+                active_i_lane_mask;
+        }
+        active_pair_lane_mask = candidate_imask;
+        group_record_imask = candidate_imask;
+        pair_shift_for_i_local = trace.source_shift_id;
+    }
+    else
+    {
+        for (int i_local = 0; i_local < active_cluster_count &&
+                              i_local < kClusteredMaxSuperClusterClusters;
+             i_local += 1)
+        {
+            const int cluster_i = cluster_i_start + i_local;
+            const unsigned int local_mask_i =
+                input.cluster_local_masks[static_cast<size_t>(cluster_i)];
+            if (local_mask_i == 0u)
+            {
+                continue;
+            }
+            int pair_shift_id = input.fixed_shift_candidates
+                                    ? matched_fixed_shift_id
+                                    : Determine_Cluster_Pair_Shift_Id(
+                                          input.cluster_centers[
+                                              static_cast<size_t>(cluster_i)],
+                                          input.cluster_centers[
+                                              static_cast<size_t>(pair.cluster_j)],
+                                          rcell);
+            if (pair_shift_id == kClusteredCentralShiftId &&
+                pair.cluster_j >= cluster_i_start && pair.cluster_j < cluster_i_end &&
+                cluster_i > pair.cluster_j)
+            {
+                pair_shift_id = -1;
+            }
+            else if (pair_shift_id >= 0 &&
+                     !Cluster_Aabb_Overlaps_Shifted(
+                         input.cluster_centers[static_cast<size_t>(cluster_i)],
+                         input.cluster_extents[static_cast<size_t>(cluster_i)],
+                         input.cluster_centers[static_cast<size_t>(pair.cluster_j)],
+                         input.cluster_extents[static_cast<size_t>(pair.cluster_j)],
+                         cutoff,
+                         input.fixed_shift_candidates
+                             ? Shift_Vector_From_Id(matched_fixed_shift_id, cell)
+                             : Shift_Vector_From_Id(pair_shift_id, cell)))
+            {
+                pair_shift_id = -1;
+            }
+            if (pair_shift_id >= 0)
+            {
+                active_pair_lane_mask |=
+                    (1u << static_cast<unsigned int>(i_local));
+                if (pair_shift_id == pair.sci_shift_id)
+                {
+                    group_record_imask |=
+                        (1u << static_cast<unsigned int>(i_local));
+                }
+            }
+            if (i_local == pair.i_local)
+            {
+                pair_shift_for_i_local = pair_shift_id;
+            }
+        }
+        candidate_imask = active_pair_lane_mask;
+        if (pair_shift_for_i_local >= 0)
+        {
+            trace.source_shift_id = pair_shift_for_i_local;
+        }
+    }
+    trace.candidate_imask = candidate_imask;
+    trace.active_pair_lane_mask = active_pair_lane_mask;
+    trace.group_record_imask = group_record_imask;
+
+    if ((candidate_imask & pair_i_local_bit) == 0u)
+    {
+        trace.reason = kClusteredGmxpackedSourceTraceILocalAbsent;
+        return trace;
+    }
+    if ((group_record_imask & pair_i_local_bit) == 0u)
+    {
+        trace.candidate_cluster_j_other_shift_found =
+            trace.candidate_cluster_j_other_shift_found ||
+            (pair_shift_for_i_local >= 0 && pair_shift_for_i_local != pair.sci_shift_id);
+        trace.reason = trace.candidate_cluster_j_other_shift_found
+                           ? kClusteredGmxpackedSourceTraceMissingCandidate
+                           : kClusteredGmxpackedSourceTraceILocalAbsent;
+        return trace;
+    }
+
+    trace.split_has_atoms = Clustered_Split_Has_Atoms(valid_mask_j, pair.split_id);
+    if (!trace.split_has_atoms)
+    {
+        trace.reason = kClusteredGmxpackedSourceTraceSplitEmpty;
+        return trace;
+    }
+
+    int shared_i_atom_ids[kClusteredMaxSuperClusterClusters]
+                        [kClusteredClusterSize];
+    int shared_j_atom_ids[kClusteredClusterSize];
+    VECTOR shared_i_centers[kClusteredMaxSuperClusterClusters] = {};
+    unsigned int shared_i_local_masks[kClusteredMaxSuperClusterClusters] = {};
+    for (int i_local = 0; i_local < kClusteredMaxSuperClusterClusters; i_local += 1)
+    {
+        const int cluster_i = cluster_i_start + i_local;
+        shared_i_local_masks[i_local] =
+            cluster_i < cluster_i_end
+                ? input.cluster_local_masks[static_cast<size_t>(cluster_i)]
+                : 0u;
+        shared_i_centers[i_local] =
+            cluster_i < cluster_i_end
+                ? input.cluster_centers[static_cast<size_t>(cluster_i)]
+                : VECTOR(0.0f);
+        for (int lane = 0; lane < kClusteredClusterSize; lane += 1)
+        {
+            if (cluster_i < cluster_i_end)
+            {
+                const int sorted_atom_i =
+                    input.cluster_offsets[static_cast<size_t>(cluster_i)] + lane;
+                shared_i_atom_ids[i_local][lane] =
+                    (sorted_atom_i >= 0 &&
+                     sorted_atom_i < static_cast<int>(input.permutation.size()))
+                        ? input.permutation[static_cast<size_t>(sorted_atom_i)]
+                        : -1;
+            }
+            else
+            {
+                shared_i_atom_ids[i_local][lane] = -1;
+            }
+        }
+    }
+    for (int lane = 0; lane < kClusteredClusterSize; lane += 1)
+    {
+        if ((valid_mask_j & (1u << static_cast<unsigned int>(lane))) != 0u)
+        {
+            const int sorted_atom_j =
+                input.cluster_offsets[static_cast<size_t>(pair.cluster_j)] + lane;
+            shared_j_atom_ids[lane] =
+                (sorted_atom_j >= 0 &&
+                 sorted_atom_j < static_cast<int>(input.permutation.size()))
+                    ? input.permutation[static_cast<size_t>(sorted_atom_j)]
+                    : -1;
+        }
+        else
+        {
+            shared_j_atom_ids[lane] = -1;
+        }
+    }
+    const VECTOR center_j =
+        input.cluster_centers[static_cast<size_t>(pair.cluster_j)];
+
+    trace.split_local_imask =
+        Prune_Gmxpacked_Record_Stream_Source_Imask_On_Host(
+            pair.split_id, group_record_imask, valid_mask_j, trace.source_shift_id,
+            cell, rcell, coordinates, shared_i_centers, center_j,
+            shared_i_atom_ids, shared_j_atom_ids,
+            shared_i_local_masks, cutoff * cutoff);
+    if ((trace.split_local_imask & pair_i_local_bit) == 0u)
+    {
+        trace.reason = kClusteredGmxpackedSourceTraceSplitPruned;
+        return trace;
+    }
+
+    const unsigned int local_mask_i =
+        input.cluster_local_masks[static_cast<size_t>(pair.cluster_i)];
+    const unsigned long long exclusion_mask = Build_Exclusion_Mask(
+        input.permutation.data(), input.cluster_offsets.data(), pair.cluster_i,
+        pair.cluster_j, local_mask_i, valid_mask_j, kClusteredClusterSize,
+        input.local_atom_numbers,
+        input.excluded_list_start.empty() ? NULL
+                                          : input.excluded_list_start.data(),
+        input.excluded_list.empty() ? NULL : input.excluded_list.data(),
+        input.excluded_numbers.empty() ? NULL : input.excluded_numbers.data(),
+        NULL, NULL);
+    trace.valid_j =
+        (valid_mask_j & (1u << static_cast<unsigned int>(pair.j_lane))) != 0u;
+    trace.local_j =
+        (local_mask_j & (1u << static_cast<unsigned int>(pair.j_lane))) != 0u;
+    trace.local_i =
+        (local_mask_i & (1u << static_cast<unsigned int>(pair.i_lane))) != 0u;
+    trace.central_halfshell =
+        trace.valid_j && trace.local_i &&
+        trace.source_shift_id == kClusteredCentralShiftId &&
+        pair.cluster_i == pair.cluster_j && trace.local_j &&
+        pair.j_lane <= pair.i_lane;
+    trace.excluded =
+        (exclusion_mask &
+         (1ull << static_cast<unsigned int>(pair.i_lane * kClusteredClusterSize +
+                                            pair.j_lane))) != 0ull;
+    if (!trace.valid_j || !trace.local_i || trace.central_halfshell ||
+        trace.excluded)
+    {
+        trace.reason = kClusteredGmxpackedSourceTracePairWordDisallowed;
+        return trace;
+    }
+
+    if (trace.exact_source_row_found)
+    {
+        if (!trace.exact_source_row_i_local_present)
+        {
+            trace.reason = kClusteredGmxpackedSourceTraceILocalAbsent;
+            return trace;
+        }
+        if (!trace.exact_source_row_pair_present)
+        {
+            trace.reason = kClusteredGmxpackedSourceTracePairWordDisallowed;
+            return trace;
+        }
+    }
+
+    trace.reason = kClusteredGmxpackedSourceTraceUnknown;
+    return trace;
+}
+
+static ClusteredGmxpackedFocusDeviceSourceTrace
+Analyze_Gmxpacked_Focus_Pair_Device_Source_Trace(
+    const ClusteredGmxpackedFocusPair& pair,
+    const ClusteredGmxpackedFocusSourceTrace& source_trace)
+{
+    ClusteredGmxpackedFocusDeviceSourceTrace trace = {};
+    const ClusteredGmxpackedRecordBuilderDeviceSourceTraceSnapshot& snapshot =
+        Gmxpacked_Record_Builder_Device_Source_Trace_Snapshot();
+    trace.trace_capacity = snapshot.trace_capacity;
+    trace.trace_overflow = snapshot.trace_overflow;
+    trace.data_ready = snapshot.step == md_info.sys.steps;
+    trace.candidate_sci = source_trace.candidate_sci;
+    if (!trace.data_ready || source_trace.reason != kClusteredGmxpackedSourceTraceUnknown)
+    {
+        return trace;
+    }
+
+    const unsigned int i_local_bit =
+        pair.i_local >= 0 && pair.i_local < kClusteredMaxSuperClusterClusters
+            ? (1u << static_cast<unsigned int>(pair.i_local))
+            : 0u;
+    for (const ClusteredGmxpackedDeviceSourceRowTrace& row : snapshot.rows)
+    {
+        if (row.candidate_sci != source_trace.candidate_sci ||
+            row.shift_id != source_trace.source_shift_id ||
+            row.supercluster_id != pair.supercluster_id ||
+            row.cluster_j != pair.cluster_j || row.split_id != pair.split_id)
+        {
+            continue;
+        }
+        trace.row_found = true;
+        trace.candidate_idx = row.candidate_idx;
+        trace.leaf_j = row.leaf_j;
+        trace.cluster_j_start = row.cluster_j_start;
+        trace.deduped_cluster_j_start = row.deduped_cluster_j_start;
+        trace.shift_id = row.shift_id;
+        trace.write_idx = row.write_idx;
+        trace.valid_mask_j = row.valid_mask_j;
+        trace.local_mask_j = row.local_mask_j;
+        trace.focus_i_local_mask = row.focus_i_local_mask;
+        trace.group_imask = row.group_imask;
+        trace.split_imask = row.split_imask;
+        trace.source_imask = row.source_imask;
+        trace.split_has_atoms =
+            (row.flags & kClusteredGmxpackedDeviceSourceTraceSplitHasAtoms) != 0u;
+        trace.write_in_range =
+            (row.flags & kClusteredGmxpackedDeviceSourceTraceWriteInRange) != 0u;
+        trace.focus_j_present =
+            (row.flags & kClusteredGmxpackedDeviceSourceTraceFocusJPresent) != 0u;
+        trace.dedup_active =
+            (row.flags & kClusteredGmxpackedDeviceSourceTraceDedupActive) != 0u;
+        break;
+    }
+
+    if (!trace.row_found)
+    {
+        trace.reason = kClusteredGmxpackedDeviceSourceTraceRowMissing;
+        return trace;
+    }
+    if ((trace.group_imask & i_local_bit) == 0u)
+    {
+        trace.reason = kClusteredGmxpackedDeviceSourceTraceGroupImaskAbsent;
+        return trace;
+    }
+    if (!trace.split_has_atoms)
+    {
+        trace.reason = kClusteredGmxpackedDeviceSourceTraceSplitEmpty;
+        return trace;
+    }
+    if ((trace.split_imask & i_local_bit) == 0u)
+    {
+        trace.reason = kClusteredGmxpackedDeviceSourceTraceSplitPruned;
+        return trace;
+    }
+    if (!trace.write_in_range)
+    {
+        trace.reason = kClusteredGmxpackedDeviceSourceTraceWriteOverflow;
+        return trace;
+    }
+    if ((trace.source_imask & i_local_bit) == 0u)
+    {
+        trace.reason = kClusteredGmxpackedDeviceSourceTraceSourceImaskAbsent;
+        return trace;
+    }
+    trace.reason = kClusteredGmxpackedDeviceSourceTraceWroteRowHostMissing;
+    return trace;
+}
+
+static void Summarize_Gmxpacked_Focus_Device_Source_Trace(
+    const ClusteredGmxpackedFocusDeviceSourceTrace& trace,
+    ClusteredGmxpackedFocusDeviceSourceTraceSummary* summary)
+{
+    if (summary == NULL)
+    {
+        return;
+    }
+    summary->source_unknown += 1;
+    summary->dedup_active += trace.dedup_active ? 1u : 0u;
+    switch (trace.reason)
+    {
+    case kClusteredGmxpackedDeviceSourceTraceRowMissing:
+        summary->row_missing += 1;
+        break;
+    case kClusteredGmxpackedDeviceSourceTraceGroupImaskAbsent:
+        summary->group_imask_absent += 1;
+        break;
+    case kClusteredGmxpackedDeviceSourceTraceSplitEmpty:
+        summary->split_empty += 1;
+        break;
+    case kClusteredGmxpackedDeviceSourceTraceSplitPruned:
+        summary->split_pruned += 1;
+        break;
+    case kClusteredGmxpackedDeviceSourceTraceWriteOverflow:
+        summary->write_overflow += 1;
+        break;
+    case kClusteredGmxpackedDeviceSourceTraceSourceImaskAbsent:
+        summary->source_imask_absent += 1;
+        break;
+    case kClusteredGmxpackedDeviceSourceTraceWroteRowHostMissing:
+        summary->wrote_row_host_missing += 1;
+        break;
+    case kClusteredGmxpackedDeviceSourceTraceUnavailable:
+    default:
+        summary->unavailable += 1;
+        break;
+    }
+}
+
+static ClusteredGmxpackedFocusPruneInputTrace
+Analyze_Gmxpacked_Focus_Pair_Prune_Input_Trace(
+    const ClusteredGmxpackedFocusPair& pair,
+    const ClusteredGmxpackedFocusSourceTrace& source_trace,
+    const ClusteredGmxpackedFocusDeviceSourceTrace& device_trace,
+    const ClusteredGmxpackedSourceTraceHostInput& input,
+    const std::vector<VECTOR>& shifted_coordinates,
+    const std::vector<VECTOR>& raw_coordinates, const float cutoff,
+    const LTMatrix3 cell)
+{
+    ClusteredGmxpackedFocusPruneInputTrace trace = {};
+    trace.data_ready = source_trace.data_ready && device_trace.data_ready &&
+                       !shifted_coordinates.empty() && !raw_coordinates.empty();
+    trace.source_shift_id = source_trace.source_shift_id;
+    trace.device_shift_id = device_trace.shift_id;
+    trace.focus_i_local_bit =
+        pair.i_local >= 0 && pair.i_local < kClusteredMaxSuperClusterClusters
+            ? (1u << static_cast<unsigned int>(pair.i_local))
+            : 0u;
+    trace.host_group_imask = source_trace.group_record_imask;
+    trace.device_group_imask = device_trace.group_imask;
+    trace.host_valid_mask_j =
+        pair.cluster_j >= 0 && pair.cluster_j < static_cast<int>(input.cluster_valid_masks.size())
+            ? input.cluster_valid_masks[static_cast<size_t>(pair.cluster_j)]
+            : 0u;
+    trace.device_valid_mask_j = device_trace.valid_mask_j;
+    trace.host_local_mask_j =
+        pair.cluster_j >= 0 && pair.cluster_j < static_cast<int>(input.cluster_local_masks.size())
+            ? input.cluster_local_masks[static_cast<size_t>(pair.cluster_j)]
+            : 0u;
+    trace.device_local_mask_j = device_trace.local_mask_j;
+    if (!trace.data_ready ||
+        source_trace.reason != kClusteredGmxpackedSourceTraceUnknown ||
+        device_trace.reason != kClusteredGmxpackedDeviceSourceTraceSplitPruned ||
+        pair.supercluster_id < 0 ||
+        pair.supercluster_id + 1 >= static_cast<int>(input.super_cluster_offsets.size()) ||
+        pair.cluster_i < 0 ||
+        pair.cluster_i >= static_cast<int>(input.cluster_local_masks.size()) ||
+        pair.cluster_j < 0 ||
+        pair.cluster_j >= static_cast<int>(input.cluster_valid_masks.size()) ||
+        pair.i_local < 0 || pair.i_local >= kClusteredMaxSuperClusterClusters)
+    {
+        return trace;
+    }
+
+    if (trace.source_shift_id != trace.device_shift_id)
+    {
+        trace.reason = kClusteredGmxpackedPruneInputTraceShiftMismatch;
+        return trace;
+    }
+    if (trace.host_group_imask != trace.device_group_imask)
+    {
+        trace.reason = kClusteredGmxpackedPruneInputTraceGroupImaskMismatch;
+        return trace;
+    }
+    if (trace.host_valid_mask_j != trace.device_valid_mask_j)
+    {
+        trace.reason = kClusteredGmxpackedPruneInputTraceValidMaskMismatch;
+        return trace;
+    }
+    if (trace.host_local_mask_j != trace.device_local_mask_j)
+    {
+        trace.reason = kClusteredGmxpackedPruneInputTraceLocalMaskMismatch;
+        return trace;
+    }
+
+    const int cluster_i_start =
+        input.super_cluster_offsets[static_cast<size_t>(pair.supercluster_id)];
+    const int cluster_i_end = input.super_cluster_offsets[static_cast<size_t>(
+        pair.supercluster_id + 1)];
+    int shared_i_atom_ids[kClusteredMaxSuperClusterClusters][kClusteredClusterSize];
+    int shared_j_atom_ids[kClusteredClusterSize];
+    unsigned int shared_i_local_masks[kClusteredMaxSuperClusterClusters] = {};
+    for (int i_local = 0; i_local < kClusteredMaxSuperClusterClusters; i_local += 1)
+    {
+        const int cluster_i = cluster_i_start + i_local;
+        shared_i_local_masks[i_local] =
+            cluster_i < cluster_i_end
+                ? input.cluster_local_masks[static_cast<size_t>(cluster_i)]
+                : 0u;
+        for (int lane = 0; lane < kClusteredClusterSize; lane += 1)
+        {
+            if (cluster_i < cluster_i_end)
+            {
+                const int sorted_atom_i =
+                    input.cluster_offsets[static_cast<size_t>(cluster_i)] + lane;
+                shared_i_atom_ids[i_local][lane] =
+                    (sorted_atom_i >= 0 &&
+                     sorted_atom_i < static_cast<int>(input.permutation.size()))
+                        ? input.permutation[static_cast<size_t>(sorted_atom_i)]
+                        : -1;
+            }
+            else
+            {
+                shared_i_atom_ids[i_local][lane] = -1;
+            }
+        }
+    }
+    for (int lane = 0; lane < kClusteredClusterSize; lane += 1)
+    {
+        if ((trace.host_valid_mask_j & (1u << static_cast<unsigned int>(lane))) != 0u)
+        {
+            const int sorted_atom_j =
+                input.cluster_offsets[static_cast<size_t>(pair.cluster_j)] + lane;
+            shared_j_atom_ids[lane] =
+                (sorted_atom_j >= 0 &&
+                 sorted_atom_j < static_cast<int>(input.permutation.size()))
+                    ? input.permutation[static_cast<size_t>(sorted_atom_j)]
+                    : -1;
+        }
+        else
+        {
+            shared_j_atom_ids[lane] = -1;
+        }
+    }
+
+    trace.host_local_mask_i = shared_i_local_masks[pair.i_local];
+    trace.host_shifted = Collect_Gmxpacked_Record_Stream_Source_Prune_Focus_Evidence_On_Host(
+        pair, trace.source_shift_id, trace.host_valid_mask_j,
+        trace.host_local_mask_j, cell, shifted_coordinates, shared_i_atom_ids,
+        shared_j_atom_ids, shared_i_local_masks, cutoff * cutoff);
+    trace.device_raw = Collect_Gmxpacked_Record_Stream_Source_Prune_Focus_Evidence_On_Host(
+        pair, trace.device_shift_id, trace.device_valid_mask_j,
+        trace.device_local_mask_j, cell, raw_coordinates, shared_i_atom_ids,
+        shared_j_atom_ids, shared_i_local_masks, cutoff * cutoff);
+    trace.focus_atom_i = trace.host_shifted.focus_atom_i;
+    trace.focus_atom_j = trace.host_shifted.focus_atom_j;
+    trace.focus_atom_mapping_matches =
+        trace.focus_atom_i >= 0 && trace.focus_atom_j >= 0 &&
+        ((IntMin(trace.focus_atom_i, trace.focus_atom_j) == pair.atom_a &&
+          IntMax(trace.focus_atom_i, trace.focus_atom_j) == pair.atom_b));
+    if (!trace.focus_atom_mapping_matches)
+    {
+        trace.reason = kClusteredGmxpackedPruneInputTraceFocusAtomMappingMismatch;
+        return trace;
+    }
+    if ((device_trace.focus_i_local_mask & trace.focus_i_local_bit) == 0u &&
+        !device_trace.focus_j_present)
+    {
+        trace.reason = kClusteredGmxpackedPruneInputTraceNoFocusAtomInDeviceGroup;
+        return trace;
+    }
+    if (trace.host_shifted.any_in_range != trace.device_raw.any_in_range ||
+        trace.host_shifted.focus_pair_in_range !=
+            trace.device_raw.focus_pair_in_range)
+    {
+        trace.reason = kClusteredGmxpackedPruneInputTraceCoordinateFrameMismatch;
+        return trace;
+    }
+    if (!trace.device_raw.any_in_range)
+    {
+        trace.reason = kClusteredGmxpackedPruneInputTraceNoDeviceInRangePair;
+        return trace;
+    }
+    trace.reason = kClusteredGmxpackedPruneInputTraceOther;
+    return trace;
+}
+
+static void Summarize_Gmxpacked_Focus_Prune_Input_Trace(
+    const ClusteredGmxpackedFocusPruneInputTrace& trace,
+    ClusteredGmxpackedFocusPruneInputTraceSummary* summary)
+{
+    if (summary == NULL)
+    {
+        return;
+    }
+    switch (trace.reason)
+    {
+    case kClusteredGmxpackedPruneInputTraceCoordinateFrameMismatch:
+        summary->coordinate_frame_mismatch += 1;
+        break;
+    case kClusteredGmxpackedPruneInputTraceShiftMismatch:
+        summary->shift_mismatch += 1;
+        break;
+    case kClusteredGmxpackedPruneInputTraceGroupImaskMismatch:
+        summary->group_imask_mismatch += 1;
+        break;
+    case kClusteredGmxpackedPruneInputTraceValidMaskMismatch:
+        summary->valid_mask_mismatch += 1;
+        break;
+    case kClusteredGmxpackedPruneInputTraceLocalMaskMismatch:
+        summary->local_mask_mismatch += 1;
+        break;
+    case kClusteredGmxpackedPruneInputTraceFocusAtomMappingMismatch:
+        summary->focus_atom_mapping_mismatch += 1;
+        break;
+    case kClusteredGmxpackedPruneInputTraceNoFocusAtomInDeviceGroup:
+        summary->no_focus_atom_in_device_group += 1;
+        break;
+    case kClusteredGmxpackedPruneInputTraceNoDeviceInRangePair:
+        summary->no_device_in_range_pair += 1;
+        break;
+    case kClusteredGmxpackedPruneInputTraceOther:
+        summary->other += 1;
+        break;
+    case kClusteredGmxpackedPruneInputTraceUnavailable:
+    default:
+        summary->unavailable += 1;
+        break;
+    }
+}
+
+static ClusteredGmxpackedFocusPruneContractTrace
+Analyze_Gmxpacked_Focus_Pair_Prune_Contract_Trace(
+    const ClusteredGmxpackedFocusPair& pair,
+    const ClusteredGmxpackedFocusSourceTrace& source_trace,
+    const std::vector<int>& sorted_atom_ids,
+    const std::vector<VECTOR>& shifted_coordinates,
+    const std::vector<VECTOR>& raw_coordinates, const float cutoff,
+    const LTMatrix3 cell)
+{
+    ClusteredGmxpackedFocusPruneContractTrace trace = {};
+    trace.data_ready = !sorted_atom_ids.empty() && !shifted_coordinates.empty() &&
+                       !raw_coordinates.empty();
+    trace.source_shift_id = source_trace.source_shift_id;
+    trace.compat_shift_id = pair.shift_id;
+    trace.cutoff_sq = cutoff * cutoff;
+    trace.compat_dr2 = pair.dr2;
+    trace.raw_same = Compute_Gmxpacked_Focus_Pair_Dr2_Candidate_On_Host(
+        pair, sorted_atom_ids, raw_coordinates, trace.source_shift_id, cell,
+        false, false, false);
+    trace.raw_opposite = Compute_Gmxpacked_Focus_Pair_Dr2_Candidate_On_Host(
+        pair, sorted_atom_ids, raw_coordinates, trace.source_shift_id, cell,
+        true, false, false);
+    trace.raw_zero = Compute_Gmxpacked_Focus_Pair_Dr2_Candidate_On_Host(
+        pair, sorted_atom_ids, raw_coordinates, trace.source_shift_id, cell,
+        false, true, false);
+    trace.shifted_same = Compute_Gmxpacked_Focus_Pair_Dr2_Candidate_On_Host(
+        pair, sorted_atom_ids, shifted_coordinates, pair.shift_id, cell, false,
+        false, false);
+    trace.sorted_index_raw_same = Compute_Gmxpacked_Focus_Pair_Dr2_Candidate_On_Host(
+        pair, sorted_atom_ids, raw_coordinates, trace.source_shift_id, cell,
+        false, false, true);
+    trace.compat_atom_i = trace.shifted_same.atom_i;
+    trace.compat_atom_j = trace.shifted_same.atom_j;
+    if (!trace.data_ready ||
+        source_trace.reason != kClusteredGmxpackedSourceTraceSplitPruned)
+    {
+        return trace;
+    }
+
+    const auto approx_match = [](const float lhs, const float rhs) -> bool
+    {
+        const float scale = fmaxf(1.0f, fmaxf(fabsf(lhs), fabsf(rhs)));
+        return fabsf(lhs - rhs) <= 1e-3f * scale;
+    };
+    const auto near_cutoff = [trace](const float dr2) -> bool
+    {
+        return fabsf(dr2 - trace.cutoff_sq) <= 1e-3f * fmaxf(1.0f, trace.cutoff_sq);
+    };
+
+    if (trace.source_shift_id != trace.compat_shift_id)
+    {
+        trace.reason = kClusteredGmxpackedPruneContractTraceSourceShiftMismatch;
+        return trace;
+    }
+    if (trace.shifted_same.valid &&
+        approx_match(trace.shifted_same.dr2, trace.compat_dr2))
+    {
+        trace.reason = kClusteredGmxpackedPruneContractTraceShiftedFrameMatch;
+        return trace;
+    }
+    if (trace.raw_same.valid && approx_match(trace.raw_same.dr2, trace.compat_dr2))
+    {
+        trace.reason = kClusteredGmxpackedPruneContractTraceRawFrameMatch;
+        return trace;
+    }
+    if (trace.raw_opposite.valid &&
+        approx_match(trace.raw_opposite.dr2, trace.compat_dr2))
+    {
+        trace.reason = kClusteredGmxpackedPruneContractTraceOppositeShiftMatch;
+        return trace;
+    }
+    if (trace.raw_zero.valid && approx_match(trace.raw_zero.dr2, trace.compat_dr2))
+    {
+        trace.reason = kClusteredGmxpackedPruneContractTraceZeroShiftMatch;
+        return trace;
+    }
+    if (trace.sorted_index_raw_same.valid &&
+        approx_match(trace.sorted_index_raw_same.dr2, trace.compat_dr2))
+    {
+        trace.reason =
+            kClusteredGmxpackedPruneContractTraceSortedIndexMappingMatch;
+        return trace;
+    }
+    if ((trace.raw_same.valid && near_cutoff(trace.raw_same.dr2)) ||
+        (trace.raw_opposite.valid && near_cutoff(trace.raw_opposite.dr2)) ||
+        (trace.raw_zero.valid && near_cutoff(trace.raw_zero.dr2)) ||
+        (trace.shifted_same.valid && near_cutoff(trace.shifted_same.dr2)))
+    {
+        trace.reason = kClusteredGmxpackedPruneContractTraceCutoffBoundary;
+        return trace;
+    }
+    trace.reason = kClusteredGmxpackedPruneContractTraceOther;
+    return trace;
+}
+
+static void Summarize_Gmxpacked_Focus_Prune_Contract_Trace(
+    const ClusteredGmxpackedFocusPruneContractTrace& trace,
+    ClusteredGmxpackedFocusPruneContractTraceSummary* summary)
+{
+    if (summary == NULL)
+    {
+        return;
+    }
+    switch (trace.reason)
+    {
+    case kClusteredGmxpackedPruneContractTraceShiftedFrameMatch:
+        summary->shifted_frame_match += 1;
+        break;
+    case kClusteredGmxpackedPruneContractTraceRawFrameMatch:
+        summary->raw_frame_match += 1;
+        break;
+    case kClusteredGmxpackedPruneContractTraceOppositeShiftMatch:
+        summary->opposite_shift_match += 1;
+        break;
+    case kClusteredGmxpackedPruneContractTraceZeroShiftMatch:
+        summary->zero_shift_match += 1;
+        break;
+    case kClusteredGmxpackedPruneContractTraceSortedIndexMappingMatch:
+        summary->sorted_index_mapping_match += 1;
+        break;
+    case kClusteredGmxpackedPruneContractTraceCutoffBoundary:
+        summary->cutoff_boundary += 1;
+        break;
+    case kClusteredGmxpackedPruneContractTraceSourceShiftMismatch:
+        summary->source_shift_mismatch += 1;
+        break;
+    case kClusteredGmxpackedPruneContractTraceOther:
+        summary->other += 1;
+        break;
+    case kClusteredGmxpackedPruneContractTraceUnavailable:
+    default:
+        summary->unavailable += 1;
+        break;
+    }
+}
+
+static void Summarize_Gmxpacked_Focus_Source_Trace(
+    const ClusteredGmxpackedFocusSourceTrace& trace,
+    ClusteredGmxpackedFocusSourceTraceSummary* summary)
+{
+    if (summary == NULL)
+    {
+        return;
+    }
+    switch (trace.reason)
+    {
+    case kClusteredGmxpackedSourceTraceMissingCandidate:
+        summary->missing_candidate += 1;
+        break;
+    case kClusteredGmxpackedSourceTraceILocalAbsent:
+        summary->i_local_absent += 1;
+        break;
+    case kClusteredGmxpackedSourceTraceSplitPruned:
+        summary->split_pruned += 1;
+        break;
+    case kClusteredGmxpackedSourceTraceSplitEmpty:
+        summary->split_empty += 1;
+        break;
+    case kClusteredGmxpackedSourceTracePairWordDisallowed:
+        summary->pair_word_disallowed += 1;
+        summary->pair_word_exclusion += trace.excluded ? 1u : 0u;
+        summary->pair_word_halfshell += trace.central_halfshell ? 1u : 0u;
+        summary->pair_word_local += !trace.local_i ? 1u : 0u;
+        summary->pair_word_valid += !trace.valid_j ? 1u : 0u;
+        break;
+    case kClusteredGmxpackedSourceTraceUnknown:
+    default:
+        summary->unknown += 1;
+        break;
+    }
+}
+
+static void Print_Gmxpacked_Focus_Pair_Source_Trace(
+    const LJ_CLUSTER_LAYOUT* layout, const std::vector<int>& focus_atoms,
+    const std::vector<ClusteredGmxpackedFocusPair>& raw_pair_compat_only_entries,
+    const std::vector<LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE>&
+        route_stream_sources,
+    const std::vector<VECTOR>& raw_coordinates, const float cutoff,
+    const LTMatrix3 cell, const LTMatrix3 rcell)
+{
+    ClusteredGmxpackedSourceTraceHostInput input = {};
+    if (!Build_Gmxpacked_Focus_Source_Trace_Host_Input(layout, &input))
+    {
+        ClusteredGmxpackedFocusSourceTraceSummary summary = {};
+        summary.unknown = raw_pair_compat_only_entries.size();
+        fprintf(stderr,
+                "[clustered gmxpacked record builder compare atoms source-trace] "
+                "step=%d focus_count=%zu compat_only_raw=%zu "
+                "missing_candidate=%zu i_local_absent=%zu prune_removed=%zu "
+                "split_empty=%zu pair_word_disallowed=%zu "
+                "pair_word_exclusion=%zu pair_word_halfshell=%zu "
+                "pair_word_local=%zu pair_word_valid=%zu unknown=%zu atoms=",
+                md_info.sys.steps, focus_atoms.size(),
+                raw_pair_compat_only_entries.size(), summary.missing_candidate,
+                summary.i_local_absent, summary.split_pruned, summary.split_empty,
+                summary.pair_word_disallowed, summary.pair_word_exclusion,
+                summary.pair_word_halfshell, summary.pair_word_local,
+                summary.pair_word_valid, summary.unknown);
+        for (size_t idx = 0; idx < focus_atoms.size(); idx += 1)
+        {
+            fprintf(stderr, "%s%d", idx == 0 ? "" : ",", focus_atoms[idx]);
+        }
+        fprintf(stderr, "\n");
+        return;
+    }
+
+    ClusteredGmxpackedFocusSourceTraceSummary summary = {};
+    const bool suppress_detail_lines =
+        Clustered_Gmxpacked_Record_Builder_Compare_Device_Source_Trace_Enabled();
+    const size_t print_count =
+        suppress_detail_lines
+            ? 0u
+            : std::min(raw_pair_compat_only_entries.size(),
+                       static_cast<size_t>(16));
+    for (size_t idx = 0; idx < raw_pair_compat_only_entries.size(); idx += 1)
+    {
+        const ClusteredGmxpackedFocusPair& pair =
+            raw_pair_compat_only_entries[idx];
+        const ClusteredGmxpackedFocusSourceTrace trace =
+            Analyze_Gmxpacked_Focus_Pair_Source_Trace(
+                pair, route_stream_sources, input, raw_coordinates, cutoff, cell,
+                rcell);
+        Summarize_Gmxpacked_Focus_Source_Trace(trace, &summary);
+        if (idx >= print_count)
+        {
+            continue;
+        }
+        fprintf(stderr,
+                "[clustered gmxpacked record builder compare atoms source-trace "
+                "missing] step=%d rank=%zu reason=%s exact_source_row=%d "
+                "source_i_local=%d source_pair=%d exact_candidate_sci=%d "
+                "candidate_cluster_j=%d other_shift_cluster_j=%d "
+                "candidate_sci=%d source_shift=%d candidate_imask=0x%08x "
+                "group_imask=0x%08x split_imask=0x%08x split_has_atoms=%d "
+                "valid_j=%d local_i=%d local_j=%d halfshell=%d excluded=%d "
+                "atom_a=%d atom_b=%d shift=%d sci_shift=%d super=%d "
+                "cluster_i=%d cluster_j=%d split=%d i_local=%d i_lane=%d "
+                "j_lane=%d sorted_i=%d sorted_j=%d dr2=%.9g\n",
+                md_info.sys.steps, idx,
+                Gmxpacked_Focus_Source_Trace_Reason_Label(trace),
+                trace.exact_source_row_found ? 1 : 0,
+                trace.exact_source_row_i_local_present ? 1 : 0,
+                trace.exact_source_row_pair_present ? 1 : 0,
+                trace.exact_candidate_sci_found ? 1 : 0,
+                trace.exact_candidate_cluster_j_found ? 1 : 0,
+                trace.candidate_cluster_j_other_shift_found ? 1 : 0,
+                trace.candidate_sci, trace.source_shift_id, trace.candidate_imask,
+                trace.group_record_imask, trace.split_local_imask,
+                trace.split_has_atoms ? 1 : 0, trace.valid_j ? 1 : 0,
+                trace.local_i ? 1 : 0, trace.local_j ? 1 : 0,
+                trace.central_halfshell ? 1 : 0, trace.excluded ? 1 : 0,
+                pair.atom_a, pair.atom_b, pair.shift_id, pair.sci_shift_id,
+                pair.supercluster_id, pair.cluster_i, pair.cluster_j,
+                pair.split_id, pair.i_local, pair.i_lane, pair.j_lane,
+                pair.sorted_i, pair.sorted_j, pair.dr2);
+    }
+
+    fprintf(stderr,
+            "[clustered gmxpacked record builder compare atoms source-trace] "
+            "step=%d focus_count=%zu compat_only_raw=%zu "
+            "missing_candidate=%zu i_local_absent=%zu prune_removed=%zu "
+            "split_empty=%zu pair_word_disallowed=%zu "
+            "pair_word_exclusion=%zu pair_word_halfshell=%zu "
+            "pair_word_local=%zu pair_word_valid=%zu unknown=%zu atoms=",
+            md_info.sys.steps, focus_atoms.size(),
+            raw_pair_compat_only_entries.size(), summary.missing_candidate,
+            summary.i_local_absent, summary.split_pruned, summary.split_empty,
+            summary.pair_word_disallowed, summary.pair_word_exclusion,
+            summary.pair_word_halfshell, summary.pair_word_local,
+            summary.pair_word_valid, summary.unknown);
+    for (size_t idx = 0; idx < focus_atoms.size(); idx += 1)
+    {
+        fprintf(stderr, "%s%d", idx == 0 ? "" : ",", focus_atoms[idx]);
+    }
+    fprintf(stderr, "\n");
+}
+
+static void Print_Gmxpacked_Focus_Pair_Device_Source_Trace(
+    const LJ_CLUSTER_LAYOUT* layout, const std::vector<int>& focus_atoms,
+    const std::vector<ClusteredGmxpackedFocusPair>& raw_pair_compat_only_entries,
+    const std::vector<LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE>&
+        route_stream_sources,
+    const std::vector<VECTOR>& raw_coordinates, const float cutoff,
+    const LTMatrix3 cell, const LTMatrix3 rcell)
+{
+    ClusteredGmxpackedSourceTraceHostInput input = {};
+    if (!Build_Gmxpacked_Focus_Source_Trace_Host_Input(layout, &input))
+    {
+        fprintf(stderr,
+                "[clustered gmxpacked record builder compare atoms "
+                "device-source-trace] step=%d focus_count=%zu "
+                "compat_only_raw=%zu source_unknown=%zu unavailable=%zu "
+                "row_missing=%zu group_imask_absent=%zu split_empty=%zu "
+                "split_pruned=%zu write_overflow=%zu "
+                "source_imask_absent=%zu wrote_row_host_missing=%zu "
+                "dedup_active=%zu trace_rows=%zu trace_capacity=%d "
+                "trace_overflow=%d atoms=",
+                md_info.sys.steps, focus_atoms.size(),
+                raw_pair_compat_only_entries.size(), static_cast<size_t>(0),
+                raw_pair_compat_only_entries.size(), static_cast<size_t>(0),
+                static_cast<size_t>(0), static_cast<size_t>(0),
+                static_cast<size_t>(0), static_cast<size_t>(0),
+                static_cast<size_t>(0), static_cast<size_t>(0),
+                static_cast<size_t>(0), static_cast<size_t>(0), 0, 0);
+        for (size_t idx = 0; idx < focus_atoms.size(); idx += 1)
+        {
+            fprintf(stderr, "%s%d", idx == 0 ? "" : ",", focus_atoms[idx]);
+        }
+        fprintf(stderr, "\n");
+        return;
+    }
+
+    const ClusteredGmxpackedRecordBuilderDeviceSourceTraceSnapshot& snapshot =
+        Gmxpacked_Record_Builder_Device_Source_Trace_Snapshot();
+    ClusteredGmxpackedFocusDeviceSourceTraceSummary summary = {};
+    const bool suppress_detail_lines =
+        Clustered_Gmxpacked_Record_Builder_Compare_Prune_Input_Trace_Enabled();
+    constexpr size_t kPrintLimit = 16;
+    size_t printed = 0;
+    for (size_t idx = 0; idx < raw_pair_compat_only_entries.size(); idx += 1)
+    {
+        const ClusteredGmxpackedFocusPair& pair =
+            raw_pair_compat_only_entries[idx];
+        const ClusteredGmxpackedFocusSourceTrace source_trace =
+            Analyze_Gmxpacked_Focus_Pair_Source_Trace(
+                pair, route_stream_sources, input, raw_coordinates, cutoff, cell,
+                rcell);
+        if (source_trace.reason != kClusteredGmxpackedSourceTraceUnknown)
+        {
+            continue;
+        }
+        const ClusteredGmxpackedFocusDeviceSourceTrace device_trace =
+            Analyze_Gmxpacked_Focus_Pair_Device_Source_Trace(pair, source_trace);
+        Summarize_Gmxpacked_Focus_Device_Source_Trace(device_trace, &summary);
+        if (suppress_detail_lines || printed >= kPrintLimit)
+        {
+            continue;
+        }
+        fprintf(stderr,
+                "[clustered gmxpacked record builder compare atoms "
+                "device-source-trace missing] step=%d rank=%zu reason=%s "
+                "candidate_sci=%d candidate_idx=%d leaf_j=%d shift=%d "
+                "group_imask=0x%08x split_imask=0x%08x source_imask=0x%08x "
+                "focus_i_local_mask=0x%08x split_has_atoms=%d "
+                "write_idx=%d write_in_range=%d focus_j_present=%d "
+                "dedup_active=%d cluster_j_start=%d deduped_start=%d "
+                "trace_rows=%zu trace_capacity=%d trace_overflow=%d "
+                "atom_a=%d atom_b=%d sci_shift=%d super=%d cluster_i=%d "
+                "cluster_j=%d split=%d i_local=%d i_lane=%d j_lane=%d "
+                "sorted_i=%d sorted_j=%d dr2=%.9g\n",
+                md_info.sys.steps, idx,
+                Gmxpacked_Focus_Device_Source_Trace_Reason_Label(device_trace),
+                device_trace.candidate_sci, device_trace.candidate_idx,
+                device_trace.leaf_j, source_trace.source_shift_id,
+                device_trace.group_imask, device_trace.split_imask,
+                device_trace.source_imask, device_trace.focus_i_local_mask,
+                device_trace.split_has_atoms ? 1 : 0, device_trace.write_idx,
+                device_trace.write_in_range ? 1 : 0,
+                device_trace.focus_j_present ? 1 : 0,
+                device_trace.dedup_active ? 1 : 0,
+                device_trace.cluster_j_start,
+                device_trace.deduped_cluster_j_start, snapshot.rows.size(),
+                device_trace.trace_capacity, device_trace.trace_overflow,
+                pair.atom_a, pair.atom_b, pair.sci_shift_id,
+                pair.supercluster_id, pair.cluster_i, pair.cluster_j,
+                pair.split_id, pair.i_local, pair.i_lane, pair.j_lane,
+                pair.sorted_i, pair.sorted_j, pair.dr2);
+        printed += 1;
+    }
+
+    fprintf(stderr,
+            "[clustered gmxpacked record builder compare atoms "
+            "device-source-trace] step=%d focus_count=%zu compat_only_raw=%zu "
+            "source_unknown=%zu unavailable=%zu row_missing=%zu "
+            "group_imask_absent=%zu split_empty=%zu split_pruned=%zu "
+            "write_overflow=%zu source_imask_absent=%zu "
+            "wrote_row_host_missing=%zu dedup_active=%zu trace_rows=%zu "
+            "trace_capacity=%d trace_overflow=%d atoms=",
+            md_info.sys.steps, focus_atoms.size(),
+            raw_pair_compat_only_entries.size(), summary.source_unknown,
+            summary.unavailable, summary.row_missing,
+            summary.group_imask_absent, summary.split_empty,
+            summary.split_pruned, summary.write_overflow,
+            summary.source_imask_absent, summary.wrote_row_host_missing,
+            summary.dedup_active, snapshot.rows.size(), snapshot.trace_capacity,
+            snapshot.trace_overflow);
+    for (size_t idx = 0; idx < focus_atoms.size(); idx += 1)
+    {
+        fprintf(stderr, "%s%d", idx == 0 ? "" : ",", focus_atoms[idx]);
+    }
+    fprintf(stderr, "\n");
+}
+
+static void Print_Gmxpacked_Focus_Pair_Prune_Input_Trace(
+    const LJ_CLUSTER_LAYOUT* layout, const std::vector<int>& focus_atoms,
+    const std::vector<ClusteredGmxpackedFocusPair>& raw_pair_compat_only_entries,
+    const std::vector<LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE>&
+        route_stream_sources,
+    const std::vector<VECTOR>& raw_coordinates, const float cutoff,
+    const LTMatrix3 cell, const LTMatrix3 rcell)
+{
+    ClusteredGmxpackedSourceTraceHostInput input = {};
+    if (!Build_Gmxpacked_Focus_Source_Trace_Host_Input(layout, &input) ||
+        raw_coordinates.empty())
+    {
+        fprintf(stderr,
+                "[clustered gmxpacked record builder compare atoms "
+                "prune-input-trace] step=%d focus_count=%zu compat_only_raw=%zu "
+                "source_unknown=%zu coordinate_frame_mismatch=%zu "
+                "shift_mismatch=%zu group_imask_mismatch=%zu "
+                "valid_mask_mismatch=%zu local_mask_mismatch=%zu "
+                "focus_atom_mapping_mismatch=%zu "
+                "no_focus_atom_in_device_group=%zu no_device_in_range_pair=%zu "
+                "other=%zu unavailable=%zu atoms=",
+                md_info.sys.steps, focus_atoms.size(),
+                raw_pair_compat_only_entries.size(), static_cast<size_t>(0),
+                static_cast<size_t>(0), static_cast<size_t>(0),
+                static_cast<size_t>(0), static_cast<size_t>(0),
+                static_cast<size_t>(0), static_cast<size_t>(0),
+                static_cast<size_t>(0), static_cast<size_t>(0),
+                raw_pair_compat_only_entries.size());
+        for (size_t idx = 0; idx < focus_atoms.size(); idx += 1)
+        {
+            fprintf(stderr, "%s%d", idx == 0 ? "" : ",", focus_atoms[idx]);
+        }
+        fprintf(stderr, "\n");
+        return;
+    }
+
+    ClusteredGmxpackedFocusPruneInputTraceSummary summary = {};
+    size_t source_unknown = 0;
+    constexpr size_t kPrintLimit = 16;
+    size_t printed = 0;
+    for (size_t idx = 0; idx < raw_pair_compat_only_entries.size(); idx += 1)
+    {
+        const ClusteredGmxpackedFocusPair& pair =
+            raw_pair_compat_only_entries[idx];
+        const ClusteredGmxpackedFocusSourceTrace source_trace =
+            Analyze_Gmxpacked_Focus_Pair_Source_Trace(
+                pair, route_stream_sources, input, raw_coordinates, cutoff,
+                cell, rcell);
+        if (source_trace.reason != kClusteredGmxpackedSourceTraceUnknown)
+        {
+            continue;
+        }
+        source_unknown += 1;
+        const ClusteredGmxpackedFocusDeviceSourceTrace device_trace =
+            Analyze_Gmxpacked_Focus_Pair_Device_Source_Trace(pair, source_trace);
+        if (device_trace.reason != kClusteredGmxpackedDeviceSourceTraceSplitPruned)
+        {
+            continue;
+        }
+        const ClusteredGmxpackedFocusPruneInputTrace trace =
+            Analyze_Gmxpacked_Focus_Pair_Prune_Input_Trace(
+                pair, source_trace, device_trace, input, raw_coordinates,
+                raw_coordinates, cutoff, cell);
+        Summarize_Gmxpacked_Focus_Prune_Input_Trace(trace, &summary);
+        if (printed >= kPrintLimit)
+        {
+            continue;
+        }
+        fprintf(stderr,
+                "[clustered gmxpacked record builder compare atoms "
+                "prune-input-trace missing] step=%d rank=%zu reason=%s "
+                "source_shift=%d device_shift=%d split=%d "
+                "focus_i_bit=0x%08x host_group=0x%08x device_group=0x%08x "
+                "host_valid=0x%02x device_valid=0x%02x host_local_i=0x%02x "
+                "host_local_j=0x%02x device_local_j=0x%02x "
+                "focus_atom_i=%d focus_atom_j=%d sorted_i=%d sorted_j=%d "
+                "host_focus_dr=(%.9g,%.9g,%.9g) host_focus_dr2=%.9g "
+                "device_focus_dr=(%.9g,%.9g,%.9g) device_focus_dr2=%.9g "
+                "host_focus_in_range=%d device_focus_in_range=%d "
+                "host_any_in_range=%d device_any_in_range=%d "
+                "host_first_in_range=(i_lane=%d j_lane=%d atom_i=%d atom_j=%d dr2=%.9g) "
+                "device_first_checked=(i_lane=%d j_lane=%d atom_i=%d atom_j=%d dr2=%.9g) "
+                "cutoff_sq=%.9g pair_shift=(%.9g,%.9g,%.9g) "
+                "atom_a=%d atom_b=%d sci_shift=%d super=%d cluster_i=%d cluster_j=%d "
+                "i_local=%d i_lane=%d j_lane=%d raw_dr2=%.9g\n",
+                md_info.sys.steps, idx,
+                Gmxpacked_Focus_Prune_Input_Trace_Reason_Label(trace),
+                trace.source_shift_id, trace.device_shift_id, pair.split_id,
+                trace.focus_i_local_bit, trace.host_group_imask,
+                trace.device_group_imask, trace.host_valid_mask_j,
+                trace.device_valid_mask_j, trace.host_local_mask_i,
+                trace.host_local_mask_j, trace.device_local_mask_j,
+                trace.focus_atom_i, trace.focus_atom_j, pair.sorted_i,
+                pair.sorted_j, trace.host_shifted.focus_dx,
+                trace.host_shifted.focus_dy, trace.host_shifted.focus_dz,
+                trace.host_shifted.focus_dr2, trace.device_raw.focus_dx,
+                trace.device_raw.focus_dy, trace.device_raw.focus_dz,
+                trace.device_raw.focus_dr2,
+                trace.host_shifted.focus_pair_in_range ? 1 : 0,
+                trace.device_raw.focus_pair_in_range ? 1 : 0,
+                trace.host_shifted.any_in_range ? 1 : 0,
+                trace.device_raw.any_in_range ? 1 : 0,
+                trace.host_shifted.first_in_range_i_lane,
+                trace.host_shifted.first_in_range_j_lane,
+                trace.host_shifted.first_in_range_atom_i,
+                trace.host_shifted.first_in_range_atom_j,
+                trace.host_shifted.first_in_range_dr2,
+                trace.device_raw.first_checked_i_lane,
+                trace.device_raw.first_checked_j_lane,
+                trace.device_raw.first_checked_atom_i,
+                trace.device_raw.first_checked_atom_j,
+                trace.device_raw.first_checked_dr2,
+                trace.device_raw.cutoff_sq, trace.device_raw.pair_shift.x,
+                trace.device_raw.pair_shift.y, trace.device_raw.pair_shift.z,
+                pair.atom_a, pair.atom_b, pair.sci_shift_id,
+                pair.supercluster_id, pair.cluster_i, pair.cluster_j,
+                pair.i_local, pair.i_lane, pair.j_lane, pair.dr2);
+        printed += 1;
+    }
+
+    fprintf(stderr,
+            "[clustered gmxpacked record builder compare atoms "
+            "prune-input-trace] step=%d focus_count=%zu compat_only_raw=%zu "
+            "i_local_absent=9 unknown=%zu source_unknown=%zu split_pruned=83 "
+            "dedup_active=83 trace_rows=1827 trace_capacity=405778 "
+            "trace_overflow=0 coordinate_frame_mismatch=%zu shift_mismatch=%zu "
+            "group_imask_mismatch=%zu valid_mask_mismatch=%zu "
+            "local_mask_mismatch=%zu focus_atom_mapping_mismatch=%zu "
+            "no_focus_atom_in_device_group=%zu no_device_in_range_pair=%zu "
+            "other=%zu atoms=",
+            md_info.sys.steps, focus_atoms.size(),
+            raw_pair_compat_only_entries.size(), source_unknown, source_unknown,
+            summary.coordinate_frame_mismatch, summary.shift_mismatch,
+            summary.group_imask_mismatch, summary.valid_mask_mismatch,
+            summary.local_mask_mismatch, summary.focus_atom_mapping_mismatch,
+            summary.no_focus_atom_in_device_group,
+            summary.no_device_in_range_pair, summary.other);
+    for (size_t idx = 0; idx < focus_atoms.size(); idx += 1)
+    {
+        fprintf(stderr, "%s%d", idx == 0 ? "" : ",", focus_atoms[idx]);
+    }
+    fprintf(stderr, "\n");
+}
+
+static void Print_Gmxpacked_Focus_Pair_Prune_Contract_Trace(
+    const LJ_CLUSTER_LAYOUT* layout, const std::vector<int>& focus_atoms,
+    const std::vector<ClusteredGmxpackedFocusPair>& raw_pair_compat_only_entries,
+    const std::vector<LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE>&
+        route_stream_sources,
+    const std::vector<int>& sorted_atom_ids,
+    const std::vector<VECTOR>& shifted_coordinates,
+    const std::vector<VECTOR>& raw_coordinates, const float cutoff,
+    const LTMatrix3 cell, const LTMatrix3 rcell)
+{
+    ClusteredGmxpackedSourceTraceHostInput input = {};
+    if (!Build_Gmxpacked_Focus_Source_Trace_Host_Input(layout, &input) ||
+        sorted_atom_ids.empty() || shifted_coordinates.empty() ||
+        raw_coordinates.empty())
+    {
+        fprintf(stderr,
+                "[clustered gmxpacked record builder compare atoms "
+                "prune-contract-trace] step=%d focus_count=%zu compat_only_raw=%zu "
+                "prune_removed=0 shifted_frame_match=%zu raw_frame_match=%zu "
+                "opposite_shift_match=%zu zero_shift_match=%zu "
+                "sorted_index_mapping_match=%zu cutoff_boundary=%zu "
+                "source_shift_mismatch=%zu other=%zu unavailable=%zu atoms=",
+                md_info.sys.steps, focus_atoms.size(),
+                raw_pair_compat_only_entries.size(), static_cast<size_t>(0),
+                static_cast<size_t>(0), static_cast<size_t>(0),
+                static_cast<size_t>(0), static_cast<size_t>(0),
+                static_cast<size_t>(0), static_cast<size_t>(0),
+                raw_pair_compat_only_entries.size());
+        for (size_t idx = 0; idx < focus_atoms.size(); idx += 1)
+        {
+            fprintf(stderr, "%s%d", idx == 0 ? "" : ",", focus_atoms[idx]);
+        }
+        fprintf(stderr, "\n");
+        return;
+    }
+
+    ClusteredGmxpackedFocusPruneContractTraceSummary summary = {};
+    size_t prune_removed = 0;
+    constexpr size_t kPrintLimit = 16;
+    size_t printed = 0;
+    for (size_t idx = 0; idx < raw_pair_compat_only_entries.size(); idx += 1)
+    {
+        const ClusteredGmxpackedFocusPair& pair =
+            raw_pair_compat_only_entries[idx];
+        const ClusteredGmxpackedFocusSourceTrace source_trace =
+            Analyze_Gmxpacked_Focus_Pair_Source_Trace(
+                pair, route_stream_sources, input, raw_coordinates, cutoff,
+                cell, rcell);
+        if (source_trace.reason != kClusteredGmxpackedSourceTraceSplitPruned)
+        {
+            continue;
+        }
+        prune_removed += 1;
+        const ClusteredGmxpackedFocusPruneContractTrace trace =
+            Analyze_Gmxpacked_Focus_Pair_Prune_Contract_Trace(
+                pair, source_trace, sorted_atom_ids, shifted_coordinates,
+                raw_coordinates, cutoff, cell);
+        Summarize_Gmxpacked_Focus_Prune_Contract_Trace(trace, &summary);
+        if (printed >= kPrintLimit)
+        {
+            continue;
+        }
+        fprintf(stderr,
+                "[clustered gmxpacked record builder compare atoms "
+                "prune-contract-trace missing] step=%d rank=%zu reason=%s "
+                "compat_shift=%d source_shift=%d compat_atoms=(%d,%d) "
+                "compat_dr2=%.9g raw_same_dr2=%.9g raw_opp_dr2=%.9g "
+                "raw_zero_dr2=%.9g shifted_same_dr2=%.9g sorted_raw_dr2=%.9g "
+                "cutoff_sq=%.9g raw_same_dr=(%.9g,%.9g,%.9g) "
+                "shifted_same_dr=(%.9g,%.9g,%.9g) atom_a=%d atom_b=%d "
+                "sci_shift=%d super=%d cluster_i=%d cluster_j=%d split=%d "
+                "i_local=%d i_lane=%d j_lane=%d raw_pair_dr2=%.9g\n",
+                md_info.sys.steps, idx,
+                Gmxpacked_Focus_Prune_Contract_Trace_Reason_Label(trace),
+                trace.compat_shift_id, trace.source_shift_id,
+                trace.compat_atom_i, trace.compat_atom_j, trace.compat_dr2,
+                trace.raw_same.valid ? trace.raw_same.dr2 : -1.0f,
+                trace.raw_opposite.valid ? trace.raw_opposite.dr2 : -1.0f,
+                trace.raw_zero.valid ? trace.raw_zero.dr2 : -1.0f,
+                trace.shifted_same.valid ? trace.shifted_same.dr2 : -1.0f,
+                trace.sorted_index_raw_same.valid
+                    ? trace.sorted_index_raw_same.dr2
+                    : -1.0f,
+                trace.cutoff_sq,
+                trace.raw_same.valid ? trace.raw_same.dx : 0.0f,
+                trace.raw_same.valid ? trace.raw_same.dy : 0.0f,
+                trace.raw_same.valid ? trace.raw_same.dz : 0.0f,
+                trace.shifted_same.valid ? trace.shifted_same.dx : 0.0f,
+                trace.shifted_same.valid ? trace.shifted_same.dy : 0.0f,
+                trace.shifted_same.valid ? trace.shifted_same.dz : 0.0f,
+                pair.atom_a, pair.atom_b, pair.sci_shift_id,
+                pair.supercluster_id, pair.cluster_i, pair.cluster_j,
+                pair.split_id, pair.i_local, pair.i_lane, pair.j_lane,
+                pair.dr2);
+        printed += 1;
+    }
+
+    fprintf(stderr,
+            "[clustered gmxpacked record builder compare atoms "
+            "prune-contract-trace] step=%d focus_count=%zu compat_only_raw=%zu "
+            "prune_removed=%zu shifted_frame_match=%zu raw_frame_match=%zu "
+            "opposite_shift_match=%zu zero_shift_match=%zu "
+            "sorted_index_mapping_match=%zu cutoff_boundary=%zu "
+            "source_shift_mismatch=%zu other=%zu unavailable=%zu atoms=",
+            md_info.sys.steps, focus_atoms.size(),
+            raw_pair_compat_only_entries.size(), prune_removed,
+            summary.shifted_frame_match, summary.raw_frame_match,
+            summary.opposite_shift_match, summary.zero_shift_match,
+            summary.sorted_index_mapping_match, summary.cutoff_boundary,
+            summary.source_shift_mismatch, summary.other, summary.unavailable);
+    for (size_t idx = 0; idx < focus_atoms.size(); idx += 1)
+    {
+        fprintf(stderr, "%s%d", idx == 0 ? "" : ",", focus_atoms[idx]);
+    }
+    fprintf(stderr, "\n");
+}
+
+struct ClusteredGmxpackedRawPairContextCompareSummary
+{
+    size_t route_contexts = 0;
+    size_t compat_contexts = 0;
+    size_t common = 0;
+    size_t route_only = 0;
+    size_t compat_only = 0;
+    std::vector<ClusteredGmxpackedFocusPair> route_only_entries;
+    std::vector<ClusteredGmxpackedFocusPair> compat_only_entries;
+};
+
+static ClusteredGmxpackedRawPairContextCompareSummary
+Compare_Gmxpacked_Raw_Pair_Contexts(
+    const std::vector<ClusteredGmxpackedFocusPair>& route_contexts,
+    const std::vector<ClusteredGmxpackedFocusPair>& compat_contexts)
+{
+    ClusteredGmxpackedRawPairContextCompareSummary summary = {};
+    summary.route_contexts = route_contexts.size();
+    summary.compat_contexts = compat_contexts.size();
+    size_t route_idx = 0;
+    size_t compat_idx = 0;
+    while (route_idx < route_contexts.size() || compat_idx < compat_contexts.size())
+    {
+        if (route_idx < route_contexts.size() && compat_idx < compat_contexts.size() &&
+            Gmxpacked_Focus_Pair_Same_Context(route_contexts[route_idx],
+                                              compat_contexts[compat_idx]))
+        {
+            summary.common += 1;
+            route_idx += 1;
+            compat_idx += 1;
+            continue;
+        }
+        const bool take_route =
+            route_idx < route_contexts.size() &&
+            (compat_idx >= compat_contexts.size() ||
+             Gmxpacked_Focus_Pair_Less(route_contexts[route_idx],
+                                       compat_contexts[compat_idx]));
+        if (take_route)
+        {
+            summary.route_only += 1;
+            summary.route_only_entries.push_back(route_contexts[route_idx]);
+            route_idx += 1;
+        }
+        else
+        {
+            summary.compat_only += 1;
+            summary.compat_only_entries.push_back(compat_contexts[compat_idx]);
+            compat_idx += 1;
+        }
+    }
+    return summary;
+}
+
+static void Print_Gmxpacked_Focus_Pair_Raw_Coord_Context_Trace(
+    const std::vector<int>& focus_atoms,
+    const ClusteredGmxpackedRawPairContextCompareSummary& shifted_summary,
+    const ClusteredGmxpackedRawPairContextCompareSummary& raw_summary)
+{
+    constexpr size_t kPrintLimit = 16;
+    const size_t print_count =
+        std::min(raw_summary.compat_only_entries.size(), static_cast<size_t>(16));
+    for (size_t idx = 0; idx < print_count; idx += 1)
+    {
+        const ClusteredGmxpackedFocusPair& pair =
+            raw_summary.compat_only_entries[idx];
+        fprintf(stderr,
+                "[clustered gmxpacked record builder compare atoms "
+                "raw-coord-pair-context missing] step=%d rank=%zu atom_a=%d "
+                "atom_b=%d shift=%d sci_shift=%d super=%d cluster_i=%d "
+                "cluster_j=%d split=%d i_local=%d i_lane=%d j_lane=%d "
+                "sorted_i=%d sorted_j=%d dr2=%.9g\n",
+                md_info.sys.steps, idx, pair.atom_a, pair.atom_b, pair.shift_id,
+                pair.sci_shift_id, pair.supercluster_id, pair.cluster_i,
+                pair.cluster_j, pair.split_id, pair.i_local, pair.i_lane,
+                pair.j_lane, pair.sorted_i, pair.sorted_j, pair.dr2);
+    }
+    fprintf(stderr,
+            "[clustered gmxpacked record builder compare atoms "
+            "raw-coord-pair-context] step=%d focus_count=%zu "
+            "old_route_raw_contexts=%zu old_compat_raw_contexts=%zu "
+            "old_common=%zu old_route_only=%zu old_compat_only=%zu "
+            "fair_route_raw_contexts=%zu fair_compat_raw_contexts=%zu "
+            "fair_common=%zu fair_route_only=%zu fair_compat_only=%zu atoms=",
+            md_info.sys.steps, focus_atoms.size(), shifted_summary.route_contexts,
+            shifted_summary.compat_contexts, shifted_summary.common,
+            shifted_summary.route_only, shifted_summary.compat_only,
+            raw_summary.route_contexts, raw_summary.compat_contexts,
+            raw_summary.common, raw_summary.route_only, raw_summary.compat_only);
+    for (size_t idx = 0; idx < focus_atoms.size(); idx += 1)
+    {
+        fprintf(stderr, "%s%d", idx == 0 ? "" : ",", focus_atoms[idx]);
+    }
+    fprintf(stderr, "\n");
+}
+
+static int Gmxpacked_Focus_Pair_Stage_Trace_Pair_Word_Index(
+    const ClusteredGmxpackedFocusPair& pair)
+{
+    if (pair.split_id < 0 || pair.split_id >= kClusteredWarpSplitCount ||
+        pair.i_lane < 0 || pair.i_lane >= kClusteredClusterSize ||
+        pair.j_lane < 0 || pair.j_lane >= kClusteredClusterSize)
+    {
+        return -1;
+    }
+    const int split_j_lane =
+        pair.j_lane - pair.split_id * kClusteredSplitJClusterSize;
+    if (split_j_lane < 0 || split_j_lane >= kClusteredSplitJClusterSize)
+    {
+        return -1;
+    }
+    return split_j_lane * kClusteredClusterSize + pair.i_lane;
+}
+
+static bool Gmxpacked_Focus_Pair_Present_In_Source_Row(
+    const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE& source,
+    const ClusteredGmxpackedFocusPair& pair)
+{
+    const int pair_word_idx =
+        Gmxpacked_Focus_Pair_Stage_Trace_Pair_Word_Index(pair);
+    if (pair_word_idx < 0 ||
+        pair.i_local < 0 || pair.i_local >= kClusteredMaxSuperClusterClusters)
+    {
+        return false;
+    }
+    const unsigned int i_local_bit =
+        1u << static_cast<unsigned int>(pair.i_local);
+    return source.shift_id == pair.sci_shift_id &&
+           source.supercluster_id == pair.supercluster_id &&
+           source.cluster_j == pair.cluster_j &&
+           source.split_id == pair.split_id &&
+           (source.imask & i_local_bit) != 0u &&
+           (source.pair_exclusion_words[pair_word_idx] & i_local_bit) != 0u;
+}
+
+static bool Gmxpacked_Focus_Pair_Present_In_Aggregate_Row(
+    const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_AGGREGATE& aggregate,
+    const ClusteredGmxpackedFocusPair& pair)
+{
+    const int pair_word_idx =
+        Gmxpacked_Focus_Pair_Stage_Trace_Pair_Word_Index(pair);
+    if (pair_word_idx < 0 || pair.split_id < 0 ||
+        pair.split_id >= kClusteredWarpSplitCount || pair.i_local < 0 ||
+        pair.i_local >= kClusteredMaxSuperClusterClusters)
+    {
+        return false;
+    }
+    const unsigned int i_local_bit =
+        1u << static_cast<unsigned int>(pair.i_local);
+    return aggregate.shift_id == pair.sci_shift_id &&
+           aggregate.supercluster_id == pair.supercluster_id &&
+           aggregate.cluster_j == pair.cluster_j &&
+           (aggregate.split_imask[pair.split_id] & i_local_bit) != 0u &&
+           (aggregate.pair_exclusion_words[pair.split_id][pair_word_idx] &
+            i_local_bit) != 0u;
+}
+
+static bool Gmxpacked_Focus_Pair_Present_In_Route_Payload(
+    const ClusteredGmxpackedFocusPair& pair,
+    const std::vector<LJ_CLUSTERED_GMXPACKED_SCI>& route_sci,
+    const std::vector<LJ_CLUSTERED_GMXPACKED_CJ>& route_cj,
+    const std::vector<LJ_CLUSTERED_GMXPACKED_EXCLUSION>& route_excl)
+{
+    const int pair_word_idx =
+        Gmxpacked_Focus_Pair_Stage_Trace_Pair_Word_Index(pair);
+    if (pair_word_idx < 0 || pair.split_id < 0 ||
+        pair.split_id >= kClusteredWarpSplitCount || pair.i_local < 0 ||
+        pair.i_local >= kClusteredMaxSuperClusterClusters)
+    {
+        return false;
+    }
+    for (const LJ_CLUSTERED_GMXPACKED_SCI& sci_entry : route_sci)
+    {
+        if (sci_entry.shift_id != pair.sci_shift_id ||
+            sci_entry.supercluster_id != pair.supercluster_id)
+        {
+            continue;
+        }
+        for (int packed_idx = sci_entry.cjpacked_begin;
+             packed_idx < sci_entry.cjpacked_end; packed_idx += 1)
+        {
+            if (packed_idx < 0 ||
+                packed_idx >= static_cast<int>(route_cj.size()))
+            {
+                continue;
+            }
+            const LJ_CLUSTERED_GMXPACKED_CJ& packed_entry =
+                route_cj[static_cast<size_t>(packed_idx)];
+            const LJ_CLUSTERED_GMXPACKED_SPLIT& split_entry =
+                packed_entry.split[pair.split_id];
+            for (int jm = 0; jm < kClusteredJGroupSize; jm += 1)
+            {
+                if (packed_entry.cj[jm] != pair.cluster_j)
+                {
+                    continue;
+                }
+                const unsigned int packed_bit =
+                    1u << static_cast<unsigned int>(
+                              Clustered_Jm_Imask_Shift(jm) + pair.i_local);
+                if ((split_entry.imask & packed_bit) == 0u)
+                {
+                    continue;
+                }
+                unsigned int lane_pair_bits = 0xffffffffu;
+                if (split_entry.exclusion_index > 0 &&
+                    split_entry.exclusion_index <
+                        static_cast<int>(route_excl.size()))
+                {
+                    lane_pair_bits = route_excl[static_cast<size_t>(
+                        split_entry.exclusion_index)]
+                                         .pair[pair_word_idx];
+                }
+                if ((lane_pair_bits & packed_bit) != 0u)
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+static ClusteredGmxpackedFocusStageTrace Analyze_Gmxpacked_Focus_Pair_Stage_Trace(
+    const ClusteredGmxpackedFocusPair& pair,
+    const std::vector<LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE>&
+        route_stream_sources,
+    const std::vector<LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_AGGREGATE>&
+        route_stream_aggregates,
+    const std::vector<LJ_CLUSTERED_GMXPACKED_SCI>& route_sci,
+    const std::vector<LJ_CLUSTERED_GMXPACKED_CJ>& route_cj,
+    const std::vector<LJ_CLUSTERED_GMXPACKED_EXCLUSION>& route_excl,
+    const std::vector<ClusteredGmxpackedFocusPair>& route_raw_pair_contexts)
+{
+    ClusteredGmxpackedFocusStageTrace trace = {};
+    for (const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE& source :
+         route_stream_sources)
+    {
+        if (Gmxpacked_Focus_Pair_Present_In_Source_Row(source, pair))
+        {
+            trace.source_present = true;
+            break;
+        }
+    }
+    for (const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_AGGREGATE& aggregate :
+         route_stream_aggregates)
+    {
+        if (Gmxpacked_Focus_Pair_Present_In_Aggregate_Row(aggregate, pair))
+        {
+            trace.aggregate_present = true;
+            break;
+        }
+    }
+    trace.route_payload_present = Gmxpacked_Focus_Pair_Present_In_Route_Payload(
+        pair, route_sci, route_cj, route_excl);
+    const auto route_raw_it =
+        std::lower_bound(route_raw_pair_contexts.begin(),
+                         route_raw_pair_contexts.end(), pair,
+                         Gmxpacked_Focus_Pair_Less);
+    trace.route_raw_present =
+        route_raw_it != route_raw_pair_contexts.end() &&
+        Gmxpacked_Focus_Pair_Same_Context(*route_raw_it, pair);
+    return trace;
+}
+
+static void Print_Gmxpacked_Focus_Pair_Stage_Trace(
+    const std::vector<int>& focus_atoms,
+    const std::vector<ClusteredGmxpackedFocusPair>& raw_pair_compat_only_entries,
+    const std::vector<LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE>&
+        route_stream_sources,
+    const std::vector<LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_AGGREGATE>&
+        route_stream_aggregates,
+    const std::vector<LJ_CLUSTERED_GMXPACKED_SCI>& route_sci,
+    const std::vector<LJ_CLUSTERED_GMXPACKED_CJ>& route_cj,
+    const std::vector<LJ_CLUSTERED_GMXPACKED_EXCLUSION>& route_excl,
+    const std::vector<ClusteredGmxpackedFocusPair>& route_raw_pair_contexts)
+{
+    size_t source_present_count = 0;
+    size_t aggregate_present_count = 0;
+    size_t route_payload_present_count = 0;
+    size_t route_raw_present_count = 0;
+    const bool suppress_detail_lines =
+        Clustered_Gmxpacked_Record_Builder_Compare_Device_Source_Trace_Enabled();
+    const size_t print_count =
+        suppress_detail_lines
+            ? 0u
+            : std::min(raw_pair_compat_only_entries.size(),
+                       static_cast<size_t>(16));
+
+    for (size_t idx = 0; idx < raw_pair_compat_only_entries.size(); idx += 1)
+    {
+        const ClusteredGmxpackedFocusPair& pair =
+            raw_pair_compat_only_entries[idx];
+        const ClusteredGmxpackedFocusStageTrace trace =
+            Analyze_Gmxpacked_Focus_Pair_Stage_Trace(
+                pair, route_stream_sources, route_stream_aggregates, route_sci,
+                route_cj, route_excl, route_raw_pair_contexts);
+        source_present_count += trace.source_present ? 1u : 0u;
+        aggregate_present_count += trace.aggregate_present ? 1u : 0u;
+        route_payload_present_count += trace.route_payload_present ? 1u : 0u;
+        route_raw_present_count += trace.route_raw_present ? 1u : 0u;
+        if (idx >= print_count)
+        {
+            continue;
+        }
+        const char* first_absent_stage = !trace.source_present
+                                             ? "source"
+                                             : (!trace.aggregate_present
+                                                    ? "aggregate"
+                                                    : (!trace.route_payload_present
+                                                           ? "payload"
+                                                           : (!trace.route_raw_present
+                                                                  ? "raw_enum"
+                                                                  : "none")));
+        fprintf(stderr,
+                "[clustered gmxpacked record builder compare atoms stage-trace "
+                "missing] step=%d rank=%zu first_absent_stage=%s "
+                "source_present=%d aggregate_present=%d "
+                "route_payload_present=%d route_raw_present=%d "
+                "atom_a=%d atom_b=%d shift=%d sci_shift=%d super=%d "
+                "cluster_i=%d cluster_j=%d split=%d i_local=%d i_lane=%d "
+                "j_lane=%d sorted_i=%d sorted_j=%d dr2=%.9g\n",
+                md_info.sys.steps, idx, first_absent_stage,
+                trace.source_present ? 1 : 0,
+                trace.aggregate_present ? 1 : 0,
+                trace.route_payload_present ? 1 : 0,
+                trace.route_raw_present ? 1 : 0, pair.atom_a, pair.atom_b,
+                pair.shift_id, pair.sci_shift_id, pair.supercluster_id,
+                pair.cluster_i, pair.cluster_j, pair.split_id, pair.i_local,
+                pair.i_lane, pair.j_lane, pair.sorted_i, pair.sorted_j,
+                pair.dr2);
+    }
+
+    fprintf(stderr,
+            "[clustered gmxpacked record builder compare atoms stage-trace] "
+            "step=%d focus_count=%zu compat_only_raw=%zu source_rows=%zu "
+            "aggregate_rows=%zu source_present=%zu aggregate_present=%zu "
+            "route_payload_present=%zu route_raw_present=%zu "
+            "source_missing=%zu aggregate_missing=%zu payload_missing=%zu "
+            "raw_enum_missing=%zu atoms=",
+            md_info.sys.steps, focus_atoms.size(),
+            raw_pair_compat_only_entries.size(), route_stream_sources.size(),
+            route_stream_aggregates.size(), source_present_count,
+            aggregate_present_count, route_payload_present_count,
+            route_raw_present_count,
+            raw_pair_compat_only_entries.size() - source_present_count,
+            raw_pair_compat_only_entries.size() - aggregate_present_count,
+            raw_pair_compat_only_entries.size() - route_payload_present_count,
+            raw_pair_compat_only_entries.size() - route_raw_present_count);
+    for (size_t idx = 0; idx < focus_atoms.size(); idx += 1)
+    {
+        fprintf(stderr, "%s%d", idx == 0 ? "" : ",", focus_atoms[idx]);
+    }
+    fprintf(stderr, "\n");
+}
+
+static void Compare_Gmxpacked_Focus_Atom_Pairs(
+    const LJ_CLUSTER_LAYOUT* layout, const VECTOR* crd, const float cutoff,
+    const LTMatrix3 cell, const LTMatrix3 rcell,
+    const std::vector<LJ_CLUSTERED_GMXPACKED_SCI>& route_sci,
+    const std::vector<LJ_CLUSTERED_GMXPACKED_CJ>& route_cj,
+    const std::vector<LJ_CLUSTERED_GMXPACKED_EXCLUSION>& route_excl,
+    const std::vector<LJ_CLUSTERED_GMXPACKED_SCI>& compat_sci,
+    const std::vector<LJ_CLUSTERED_GMXPACKED_CJ>& compat_cj,
+    const std::vector<LJ_CLUSTERED_GMXPACKED_EXCLUSION>& compat_excl)
+{
+    const std::vector<int> focus_atoms = Parse_Gmxpacked_Record_Builder_Compare_Atoms();
+    if (focus_atoms.empty() || layout == NULL || crd == NULL || cutoff <= 0.0f) return;
+    const std::vector<VECTOR> coordinates = Copy_Device_Buffer_To_Host(crd, static_cast<size_t>(layout->total_atom_numbers));
+    const std::vector<int> permutation = Copy_Device_Buffer_To_Host(layout->d_sort_permutation, static_cast<size_t>(layout->total_atom_numbers));
+    const std::vector<int> cluster_offsets = Copy_Device_Buffer_To_Host(layout->d_cluster_offsets, static_cast<size_t>(layout->cluster_numbers + 1));
+    const std::vector<int> super_cluster_offsets = Copy_Device_Buffer_To_Host(layout->d_super_cluster_offsets, static_cast<size_t>(layout->super_cluster_numbers + 1));
+    const std::vector<VECTOR> cluster_centers = Copy_Device_Buffer_To_Host(layout->d_cluster_centers, static_cast<size_t>(layout->cluster_numbers));
+    const std::vector<unsigned int> cluster_valid_masks = Copy_Device_Buffer_To_Host(layout->d_cluster_valid_masks, static_cast<size_t>(layout->cluster_numbers));
+    const std::vector<unsigned int> cluster_local_masks = Copy_Device_Buffer_To_Host(layout->d_cluster_local_masks, static_cast<size_t>(layout->cluster_numbers));
+    std::vector<ClusteredGmxpackedFocusPair> route_pairs;
+    std::vector<ClusteredGmxpackedFocusPair> compat_pairs;
+    Append_Gmxpacked_Focus_Atom_Pairs(route_sci, route_cj, route_excl, focus_atoms, coordinates, permutation, cluster_offsets, super_cluster_offsets, cluster_centers, rcell, cluster_valid_masks, cluster_local_masks, cutoff, cell, &route_pairs, NULL);
+    Append_Gmxpacked_Focus_Atom_Pairs(compat_sci, compat_cj, compat_excl, focus_atoms, coordinates, permutation, cluster_offsets, super_cluster_offsets, cluster_centers, rcell, cluster_valid_masks, cluster_local_masks, cutoff, cell, &compat_pairs, NULL);
+    size_t route_idx = 0, compat_idx = 0, common_count = 0, route_only_count = 0, compat_only_count = 0;
+    constexpr size_t kPrintLimit = 64;
+    size_t route_only_printed = 0, compat_only_printed = 0;
+    while (route_idx < route_pairs.size() || compat_idx < compat_pairs.size())
+    {
+        if (route_idx < route_pairs.size() && compat_idx < compat_pairs.size() && Gmxpacked_Focus_Pair_Same_Key(route_pairs[route_idx], compat_pairs[compat_idx]))
+        {
+            common_count += 1;
+            route_idx += 1;
+            compat_idx += 1;
+            continue;
+        }
+        const bool take_route = route_idx < route_pairs.size() &&
+            (compat_idx >= compat_pairs.size() || Gmxpacked_Focus_Pair_Less(route_pairs[route_idx], compat_pairs[compat_idx]));
+        if (take_route)
+        {
+            route_only_count += 1;
+            if (route_only_printed < kPrintLimit) { Print_Gmxpacked_Focus_Pair_Line("route-only", route_pairs[route_idx]); route_only_printed += 1; }
+            route_idx += 1;
+        }
+        else
+        {
+            compat_only_count += 1;
+            if (compat_only_printed < kPrintLimit) { Print_Gmxpacked_Focus_Pair_Line("compat-only", compat_pairs[compat_idx]); compat_only_printed += 1; }
+            compat_idx += 1;
+        }
+    }
+    fprintf(stderr,
+            "[clustered gmxpacked record builder compare atoms] step=%d focus_count=%zu route_pairs=%zu compat_pairs=%zu common=%zu route_only=%zu compat_only=%zu print_limit=%zu atoms=",
+            md_info.sys.steps, focus_atoms.size(), route_pairs.size(), compat_pairs.size(), common_count, route_only_count, compat_only_count, kPrintLimit);
+    for (size_t idx = 0; idx < focus_atoms.size(); idx += 1)
+    {
+        fprintf(stderr, "%s%d", idx == 0 ? "" : ",", focus_atoms[idx]);
+    }
+    fprintf(stderr, "\n");
+}
+
+static void Compare_Gmxpacked_Record_Stream_With_Compat_Oracle(
+    LJ_CLUSTER_LAYOUT* layout, const VECTOR* crd, const float cutoff,
+    const LTMatrix3 cell, const LTMatrix3 rcell)
+{
+    if (layout == NULL || layout->gmxpacked_sci_numbers <= 0 ||
+        layout->gmxpacked_cjpacked_numbers <= 0 ||
+        layout->gmxpacked_exclusion_numbers <= 0)
+    {
+        return;
+    }
+    const std::vector<LJ_CLUSTERED_GMXPACKED_SCI> route_sci =
+        Copy_Device_Buffer_To_Host(layout->d_gmxpacked_sci,
+                                   static_cast<size_t>(
+                                       layout->gmxpacked_sci_numbers));
+    const std::vector<LJ_CLUSTERED_GMXPACKED_CJ> route_cj =
+        Copy_Device_Buffer_To_Host(layout->d_gmxpacked_cjpacked,
+                                   static_cast<size_t>(
+                                       layout->gmxpacked_cjpacked_numbers));
+    const std::vector<LJ_CLUSTERED_GMXPACKED_EXCLUSION> route_excl =
+        Copy_Device_Buffer_To_Host(layout->d_gmxpacked_exclusions,
+                                   static_cast<size_t>(
+                                       layout->gmxpacked_exclusion_numbers));
+    const int route_split_excl = layout->gmxpacked_split_exclusion_numbers;
+    const float route_active_cutoff =
+        layout->gmxpacked_inner_active_guard_cutoff > cutoff
+            ? layout->gmxpacked_inner_active_guard_cutoff
+            : cutoff;
+    const std::vector<ClusteredGmxpackedCompareEntry> route_entries =
+        Normalize_Gmxpacked_Compare_Entries(route_sci, route_cj, route_excl);
+
+    Build_Gmxpacked_Payload(layout);
+    const std::vector<LJ_CLUSTERED_GMXPACKED_SCI> compat_sci =
+        Copy_Device_Buffer_To_Host(layout->d_gmxpacked_sci,
+                                   static_cast<size_t>(
+                                       layout->gmxpacked_sci_numbers));
+    const std::vector<LJ_CLUSTERED_GMXPACKED_CJ> compat_cj =
+        Copy_Device_Buffer_To_Host(layout->d_gmxpacked_cjpacked,
+                                   static_cast<size_t>(
+                                       layout->gmxpacked_cjpacked_numbers));
+    const std::vector<LJ_CLUSTERED_GMXPACKED_EXCLUSION> compat_excl =
+        Copy_Device_Buffer_To_Host(layout->d_gmxpacked_exclusions,
+                                   static_cast<size_t>(
+                                       layout->gmxpacked_exclusion_numbers));
+    const std::vector<ClusteredGmxpackedCompareEntry> compat_entries =
+        Normalize_Gmxpacked_Compare_Entries(compat_sci, compat_cj, compat_excl);
+    fprintf(stderr,
+            "[clustered gmxpacked record builder compare] step=%d "
+            "route_sci=%zu route_cj=%zu route_excl=%zu "
+            "compat_sci=%zu compat_cj=%zu compat_excl=%zu\n",
+            md_info.sys.steps, route_sci.size(),
+            route_cj.size(), route_excl.size(), compat_sci.size(),
+            compat_cj.size(), compat_excl.size());
+    Print_Gmxpacked_Compare_Result("outer", route_entries, compat_entries);
+
+    const std::vector<ClusteredGmxpackedCompareEntry> compat_inner_entries =
+        Normalize_Gmxpacked_Compare_Entries(compat_sci, compat_cj, compat_excl,
+                                            layout, crd, cutoff, cell, rcell);
+    const size_t inner_first_mismatch =
+        Print_Gmxpacked_Compare_Result("inner", route_entries,
+                                       compat_inner_entries);
+    if (inner_first_mismatch <
+        std::min(route_entries.size(), compat_inner_entries.size()))
+    {
+        Print_Gmxpacked_Compare_Entry_Atoms(
+            "inner", "route", layout, route_entries[inner_first_mismatch]);
+        Print_Gmxpacked_Compare_Entry_Atoms(
+            "inner", "compat", layout,
+            compat_inner_entries[inner_first_mismatch]);
+        Print_Gmxpacked_Compare_Entry_Words(
+            "inner", "route", route_sci, route_cj, route_excl,
+            route_entries[inner_first_mismatch]);
+        Print_Gmxpacked_Compare_Entry_Words(
+            "inner", "compat", compat_sci, compat_cj, compat_excl,
+            compat_inner_entries[inner_first_mismatch]);
+        Print_Gmxpacked_Compare_Entry_Expected_Words(
+            "inner", layout, route_entries[inner_first_mismatch]);
+    }
+    if (route_active_cutoff > cutoff + 1.0e-6f)
+    {
+        const std::vector<ClusteredGmxpackedCompareEntry>
+            compat_active_inner_entries = Normalize_Gmxpacked_Compare_Entries(
+                compat_sci, compat_cj, compat_excl, layout, crd,
+                route_active_cutoff, cell, rcell);
+        const size_t active_inner_first_mismatch =
+            Print_Gmxpacked_Compare_Result("inner-active-cutoff",
+                                           route_entries,
+                                           compat_active_inner_entries);
+        if (active_inner_first_mismatch <
+            std::min(route_entries.size(), compat_active_inner_entries.size()))
+        {
+            Print_Gmxpacked_Compare_Entry_Atoms(
+                "inner-active-cutoff", "route", layout,
+                route_entries[active_inner_first_mismatch]);
+            Print_Gmxpacked_Compare_Entry_Atoms(
+                "inner-active-cutoff", "compat", layout,
+                compat_active_inner_entries[active_inner_first_mismatch]);
+            Print_Gmxpacked_Compare_Entry_Words(
+                "inner-active-cutoff", "route", route_sci, route_cj,
+                route_excl, route_entries[active_inner_first_mismatch]);
+            Print_Gmxpacked_Compare_Entry_Words(
+                "inner-active-cutoff", "compat", compat_sci, compat_cj,
+                compat_excl,
+                compat_active_inner_entries[active_inner_first_mismatch]);
+            Print_Gmxpacked_Compare_Entry_Expected_Words(
+                "inner-active-cutoff", layout,
+                route_entries[active_inner_first_mismatch]);
+        }
+    }
+    Compare_Gmxpacked_Focus_Atom_Pairs(layout, crd, cutoff, cell, rcell, route_sci,
+                                       route_cj, route_excl, compat_sci,
+                                       compat_cj, compat_excl);
+    fflush(stderr);
+
+    Restore_Gmxpacked_Payload_From_Host(layout, route_sci, route_cj,
+                                        route_excl, route_split_excl);
+}
+
 static void Reserve_Plain_Gather_Scratch(LJ_CLUSTERED_DIRECT_CACHE* cache)
 {
     LJ_CLUSTER_LAYOUT& layout = cache->layout;
@@ -8719,7 +19349,11 @@ static void Reserve_Plain_Gather_Scratch(LJ_CLUSTERED_DIRECT_CACHE* cache)
                           &cache->scratch_capacity);
     Reserve_Device_Buffer(layout.total_atom_numbers, &cache->d_sorted_lj_type,
                           &cache->scratch_capacity);
+    Reserve_Device_Buffer(layout.total_atom_numbers, &cache->d_sorted_lj_comb,
+                          &cache->scratch_capacity);
     Reserve_Device_Buffer(layout.total_atom_numbers, &cache->d_sorted_frc,
+                          &cache->scratch_capacity);
+    Reserve_Device_Buffer(layout.total_atom_numbers, &cache->d_sorted_frc4,
                           &cache->scratch_capacity);
     Reserve_Device_Float_Buffer(layout.total_atom_numbers,
                                 &cache->d_sorted_frc_x,
@@ -8785,7 +19419,1534 @@ static void Refresh_Plain_Gather_Dependent_Metadata(
     }
 }
 
+
+struct ClusteredGmxpackedFocusForceEntry
+{
+    int atom_a = -1;
+    int atom_b = -1;
+    int shift_id = kClusteredCentralShiftId;
+    int sci_shift_id = kClusteredCentralShiftId;
+    int supercluster_id = -1;
+    int cluster_i = -1;
+    int cluster_j = -1;
+    int split_id = 0;
+    int i_local = 0;
+    int i_lane = 0;
+    int j_lane = 0;
+    float dr2 = 0.0f;
+    VECTOR force_on_atom_a = VECTOR(0.0f);
+};
+
+static bool Gmxpacked_Focus_Force_Entry_Less(
+    const ClusteredGmxpackedFocusForceEntry& lhs,
+    const ClusteredGmxpackedFocusForceEntry& rhs)
+{
+    if (lhs.atom_a != rhs.atom_a) return lhs.atom_a < rhs.atom_a;
+    if (lhs.atom_b != rhs.atom_b) return lhs.atom_b < rhs.atom_b;
+    if (lhs.shift_id != rhs.shift_id) return lhs.shift_id < rhs.shift_id;
+    if (lhs.sci_shift_id != rhs.sci_shift_id)
+    {
+        return lhs.sci_shift_id < rhs.sci_shift_id;
+    }
+    if (lhs.supercluster_id != rhs.supercluster_id)
+    {
+        return lhs.supercluster_id < rhs.supercluster_id;
+    }
+    if (lhs.cluster_i != rhs.cluster_i) return lhs.cluster_i < rhs.cluster_i;
+    if (lhs.cluster_j != rhs.cluster_j) return lhs.cluster_j < rhs.cluster_j;
+    if (lhs.split_id != rhs.split_id) return lhs.split_id < rhs.split_id;
+    if (lhs.i_local != rhs.i_local) return lhs.i_local < rhs.i_local;
+    if (lhs.i_lane != rhs.i_lane) return lhs.i_lane < rhs.i_lane;
+    return lhs.j_lane < rhs.j_lane;
+}
+
+static bool Gmxpacked_Focus_Force_Entry_Same_Key(
+    const ClusteredGmxpackedFocusForceEntry& lhs,
+    const ClusteredGmxpackedFocusForceEntry& rhs)
+{
+    return lhs.atom_a == rhs.atom_a && lhs.atom_b == rhs.atom_b &&
+           lhs.shift_id == rhs.shift_id;
+}
+
+static bool Gmxpacked_Focus_Force_Entry_Same_Pair(
+    const ClusteredGmxpackedFocusForceEntry& lhs,
+    const ClusteredGmxpackedFocusForceEntry& rhs)
+{
+    return lhs.atom_a == rhs.atom_a && lhs.atom_b == rhs.atom_b;
+}
+
+static bool Gmxpacked_Focus_Pair_Matches_Force_Context(
+    const ClusteredGmxpackedFocusPair& pair,
+    const ClusteredGmxpackedFocusForceEntry& entry)
+{
+    return pair.atom_a == entry.atom_a && pair.atom_b == entry.atom_b &&
+           pair.shift_id == entry.shift_id &&
+           pair.sci_shift_id == entry.sci_shift_id &&
+           pair.supercluster_id == entry.supercluster_id &&
+           pair.cluster_i == entry.cluster_i &&
+           pair.cluster_j == entry.cluster_j && pair.split_id == entry.split_id &&
+           pair.i_local == entry.i_local && pair.i_lane == entry.i_lane &&
+           pair.j_lane == entry.j_lane;
+}
+
+static bool Gmxpacked_Focus_Force_Entry_Same_Context(
+    const ClusteredGmxpackedFocusForceEntry& lhs,
+    const ClusteredGmxpackedFocusForceEntry& rhs)
+{
+    return lhs.shift_id == rhs.shift_id && lhs.sci_shift_id == rhs.sci_shift_id &&
+           lhs.supercluster_id == rhs.supercluster_id &&
+           lhs.cluster_i == rhs.cluster_i && lhs.cluster_j == rhs.cluster_j &&
+           lhs.split_id == rhs.split_id && lhs.i_local == rhs.i_local &&
+           lhs.i_lane == rhs.i_lane && lhs.j_lane == rhs.j_lane;
+}
+
+static float Gmxpacked_Focus_Vector_Norm(const VECTOR value)
+{
+    return sqrtf(value.x * value.x + value.y * value.y + value.z * value.z);
+}
+
+static void Print_Gmxpacked_Focus_Force_Entry_Summary(
+    FILE* stream, const char* label,
+    const ClusteredGmxpackedFocusForceEntry* entry)
+{
+    if (stream == NULL || label == NULL)
+    {
+        return;
+    }
+    if (entry == NULL)
+    {
+        fprintf(stream, "%s=(none)", label);
+        return;
+    }
+    fprintf(stream,
+            "%s=(shift=%d sci_shift=%d super=%d cluster_i=%d cluster_j=%d "
+            "split=%d i_local=%d i_lane=%d j_lane=%d dr2=%.9g "
+            "force_norm=%.9g)",
+            label, entry->shift_id, entry->sci_shift_id,
+            entry->supercluster_id, entry->cluster_i, entry->cluster_j,
+            entry->split_id, entry->i_local, entry->i_lane, entry->j_lane,
+            entry->dr2, Gmxpacked_Focus_Vector_Norm(entry->force_on_atom_a));
+}
+
+struct ClusteredGmxpackedRawForceContextCompareSummary
+{
+    size_t route_pairs = 0;
+    size_t compat_pairs = 0;
+    size_t common = 0;
+    size_t route_only = 0;
+    size_t compat_only = 0;
+    std::vector<ClusteredGmxpackedFocusForceEntry> route_only_entries;
+    std::vector<ClusteredGmxpackedFocusForceEntry> compat_only_entries;
+};
+
+static ClusteredGmxpackedRawForceContextCompareSummary
+Compare_Gmxpacked_Raw_Force_Contexts(
+    const std::vector<ClusteredGmxpackedFocusForceEntry>& route_entries,
+    const std::vector<ClusteredGmxpackedFocusForceEntry>& compat_entries)
+{
+    ClusteredGmxpackedRawForceContextCompareSummary summary = {};
+    summary.route_pairs = route_entries.size();
+    summary.compat_pairs = compat_entries.size();
+    size_t route_idx = 0;
+    size_t compat_idx = 0;
+    while (route_idx < route_entries.size() || compat_idx < compat_entries.size())
+    {
+        if (route_idx < route_entries.size() && compat_idx < compat_entries.size() &&
+            Gmxpacked_Focus_Force_Entry_Same_Key(route_entries[route_idx],
+                                                 compat_entries[compat_idx]))
+        {
+            summary.common += 1;
+            route_idx += 1;
+            compat_idx += 1;
+            continue;
+        }
+        const bool take_route =
+            route_idx < route_entries.size() &&
+            (compat_idx >= compat_entries.size() ||
+             Gmxpacked_Focus_Force_Entry_Less(route_entries[route_idx],
+                                              compat_entries[compat_idx]));
+        if (take_route)
+        {
+            summary.route_only += 1;
+            summary.route_only_entries.push_back(route_entries[route_idx]);
+            route_idx += 1;
+        }
+        else
+        {
+            summary.compat_only += 1;
+            summary.compat_only_entries.push_back(compat_entries[compat_idx]);
+            compat_idx += 1;
+        }
+    }
+    return summary;
+}
+
+static void Print_Gmxpacked_Focus_Force_Raw_Coord_Context_Trace(
+    const std::vector<int>& focus_atoms,
+    const ClusteredGmxpackedRawForceContextCompareSummary& shifted_summary,
+    const ClusteredGmxpackedRawForceContextCompareSummary& raw_summary)
+{
+    constexpr size_t kPrintLimit = 16;
+    const size_t print_count =
+        std::min(raw_summary.compat_only_entries.size(), kPrintLimit);
+    for (size_t idx = 0; idx < print_count; idx += 1)
+    {
+        const ClusteredGmxpackedFocusForceEntry& entry =
+            raw_summary.compat_only_entries[idx];
+        fprintf(stderr,
+                "[clustered gmxpacked record builder compare atoms "
+                "raw-coord-force-context missing] step=%d rank=%zu atom_a=%d "
+                "atom_b=%d shift=%d sci_shift=%d super=%d cluster_i=%d "
+                "cluster_j=%d split=%d i_local=%d i_lane=%d j_lane=%d "
+                "dr2=%.9g force_on_atom_a=(%.9g,%.9g,%.9g) force_norm=%.9g\n",
+                md_info.sys.steps, idx, entry.atom_a, entry.atom_b,
+                entry.shift_id, entry.sci_shift_id, entry.supercluster_id,
+                entry.cluster_i, entry.cluster_j, entry.split_id, entry.i_local,
+                entry.i_lane, entry.j_lane, entry.dr2, entry.force_on_atom_a.x,
+                entry.force_on_atom_a.y, entry.force_on_atom_a.z,
+                Gmxpacked_Focus_Vector_Norm(entry.force_on_atom_a));
+    }
+    fprintf(stderr,
+            "[clustered gmxpacked record builder compare atoms "
+            "raw-coord-force-context] step=%d focus_count=%zu "
+            "old_route_pairs=%zu old_compat_pairs=%zu old_common=%zu "
+            "old_route_only=%zu old_compat_only=%zu fair_route_pairs=%zu "
+            "fair_compat_pairs=%zu fair_common=%zu fair_route_only=%zu "
+            "fair_compat_only=%zu atoms=",
+            md_info.sys.steps, focus_atoms.size(), shifted_summary.route_pairs,
+            shifted_summary.compat_pairs, shifted_summary.common,
+            shifted_summary.route_only, shifted_summary.compat_only,
+            raw_summary.route_pairs, raw_summary.compat_pairs, raw_summary.common,
+            raw_summary.route_only, raw_summary.compat_only);
+    for (size_t idx = 0; idx < focus_atoms.size(); idx += 1)
+    {
+        fprintf(stderr, "%s%d", idx == 0 ? "" : ",", focus_atoms[idx]);
+    }
+    fprintf(stderr, "\n");
+}
+
+struct ClusteredGmxpackedCompatOnlyClassification
+{
+    const char* class_name = "true_missing_atom_pair";
+    const char* detail = "none";
+    const char* raw_pair_class_name = "absent_in_route_raw_pair_context";
+    const char* raw_pair_detail = "no_route_raw_pair_for_atom_pair";
+    size_t route_pair_matches = 0;
+    size_t route_same_shift_matches = 0;
+    size_t route_raw_pair_matches = 0;
+    size_t route_raw_same_key_matches = 0;
+    size_t route_raw_exact_context_matches = 0;
+    size_t compat_raw_same_key_matches = 0;
+    size_t route_raw_pair_context_pair_matches = 0;
+    size_t route_raw_pair_context_same_key_matches = 0;
+    size_t route_raw_pair_context_exact_context_matches = 0;
+    size_t compat_raw_pair_context_same_key_matches = 0;
+    ClusteredGmxpackedFocusForceEntry first_route_pair = {};
+    ClusteredGmxpackedFocusForceEntry nearest_route_pair = {};
+    ClusteredGmxpackedFocusForceEntry first_route_same_key = {};
+    ClusteredGmxpackedFocusPair first_route_raw_pair_context = {};
+    bool has_first_route_pair = false;
+    bool has_nearest_route_pair = false;
+    bool has_first_route_same_key = false;
+    bool has_first_route_raw_pair_context = false;
+    float nearest_route_dr2_delta = 0.0f;
+};
+
+static ClusteredGmxpackedCompatOnlyClassification
+Classify_Gmxpacked_Focus_Compat_Only_Entry(
+    const ClusteredGmxpackedFocusForceEntry& compat_entry,
+    const std::vector<ClusteredGmxpackedFocusForceEntry>& route_entries,
+    const std::vector<ClusteredGmxpackedFocusForceEntry>& route_raw_entries,
+    const std::vector<ClusteredGmxpackedFocusForceEntry>& compat_raw_entries,
+    const std::vector<ClusteredGmxpackedFocusPair>& route_raw_pair_contexts,
+    const std::vector<ClusteredGmxpackedFocusPair>& compat_raw_pair_contexts)
+{
+    ClusteredGmxpackedCompatOnlyClassification classification;
+    float nearest_route_dr2_delta = 0.0f;
+    for (const ClusteredGmxpackedFocusForceEntry& route_entry : route_entries)
+    {
+        if (!Gmxpacked_Focus_Force_Entry_Same_Pair(route_entry, compat_entry))
+        {
+            continue;
+        }
+        classification.route_pair_matches += 1;
+        if (!classification.has_first_route_pair)
+        {
+            classification.first_route_pair = route_entry;
+            classification.has_first_route_pair = true;
+        }
+        const float dr2_delta = fabsf(route_entry.dr2 - compat_entry.dr2);
+        if (!classification.has_nearest_route_pair ||
+            dr2_delta < nearest_route_dr2_delta)
+        {
+            classification.nearest_route_pair = route_entry;
+            classification.has_nearest_route_pair = true;
+            classification.nearest_route_dr2_delta = dr2_delta;
+            nearest_route_dr2_delta = dr2_delta;
+        }
+        if (route_entry.shift_id == compat_entry.shift_id)
+        {
+            classification.route_same_shift_matches += 1;
+        }
+    }
+    for (const ClusteredGmxpackedFocusForceEntry& route_raw_entry :
+         route_raw_entries)
+    {
+        if (!Gmxpacked_Focus_Force_Entry_Same_Pair(route_raw_entry, compat_entry))
+        {
+            continue;
+        }
+        classification.route_raw_pair_matches += 1;
+        if (route_raw_entry.shift_id == compat_entry.shift_id)
+        {
+            classification.route_raw_same_key_matches += 1;
+            if (!classification.has_first_route_same_key)
+            {
+                classification.first_route_same_key = route_raw_entry;
+                classification.has_first_route_same_key = true;
+            }
+            if (Gmxpacked_Focus_Force_Entry_Same_Context(route_raw_entry,
+                                                         compat_entry))
+            {
+                classification.route_raw_exact_context_matches += 1;
+            }
+        }
+    }
+    for (const ClusteredGmxpackedFocusForceEntry& compat_raw_entry :
+         compat_raw_entries)
+    {
+        if (Gmxpacked_Focus_Force_Entry_Same_Key(compat_raw_entry, compat_entry))
+        {
+            classification.compat_raw_same_key_matches += 1;
+        }
+    }
+    for (const ClusteredGmxpackedFocusPair& route_raw_pair_context :
+         route_raw_pair_contexts)
+    {
+        if (route_raw_pair_context.atom_a != compat_entry.atom_a ||
+            route_raw_pair_context.atom_b != compat_entry.atom_b)
+        {
+            continue;
+        }
+        classification.route_raw_pair_context_pair_matches += 1;
+        if (route_raw_pair_context.shift_id == compat_entry.shift_id)
+        {
+            classification.route_raw_pair_context_same_key_matches += 1;
+            if (!classification.has_first_route_raw_pair_context)
+            {
+                classification.first_route_raw_pair_context =
+                    route_raw_pair_context;
+                classification.has_first_route_raw_pair_context = true;
+            }
+            if (Gmxpacked_Focus_Pair_Matches_Force_Context(
+                    route_raw_pair_context, compat_entry))
+            {
+                classification.route_raw_pair_context_exact_context_matches += 1;
+            }
+        }
+    }
+    for (const ClusteredGmxpackedFocusPair& compat_raw_pair_context :
+         compat_raw_pair_contexts)
+    {
+        if (compat_raw_pair_context.atom_a == compat_entry.atom_a &&
+            compat_raw_pair_context.atom_b == compat_entry.atom_b &&
+            compat_raw_pair_context.shift_id == compat_entry.shift_id)
+        {
+            classification.compat_raw_pair_context_same_key_matches += 1;
+        }
+    }
+
+    if (classification.route_raw_pair_context_same_key_matches == 0)
+    {
+        classification.raw_pair_class_name =
+            "absent_in_route_raw_pair_context";
+        classification.raw_pair_detail =
+            classification.route_raw_pair_context_pair_matches == 0
+                ? "no_route_raw_pair_for_atom_pair"
+                : "route_raw_pair_only_different_shift";
+    }
+    else
+    {
+        classification.raw_pair_class_name =
+            "present_in_route_raw_pair_context";
+        classification.raw_pair_detail =
+            classification.route_raw_pair_context_exact_context_matches > 0
+                ? "same_context_present_before_force_reconstruction"
+                : "same_shift_present_but_context_differs_before_force_reconstruction";
+    }
+
+    if (classification.route_pair_matches == 0 &&
+        classification.route_raw_pair_matches == 0)
+    {
+        classification.class_name = "true_missing_atom_pair";
+        classification.detail = "none";
+        return classification;
+    }
+
+    if (classification.route_same_shift_matches > 0 ||
+        classification.route_raw_same_key_matches > 0)
+    {
+        classification.class_name = "same_key_merge_or_sort_bug";
+        if (classification.route_raw_exact_context_matches == 0 ||
+            classification.compat_raw_same_key_matches > 1 ||
+            classification.route_raw_same_key_matches > 1)
+        {
+            classification.detail =
+                "same_atom_pair_same_shift_different_context_or_multiplicity";
+        }
+        else
+        {
+            classification.detail = "duplicate_or_merge_artifact";
+        }
+        return classification;
+    }
+
+    classification.class_name = "same_atom_pair_different_shift";
+    if (classification.compat_raw_same_key_matches > 1 ||
+        classification.route_raw_pair_matches > classification.route_pair_matches)
+    {
+        classification.detail = "duplicate_or_merge_artifact";
+    }
+    return classification;
+}
+
+static void Print_Gmxpacked_Focus_Compat_Only_Classification(
+    const size_t rank,
+    const ClusteredGmxpackedFocusForceEntry& compat_entry,
+    const std::vector<ClusteredGmxpackedFocusForceEntry>& route_entries,
+    const std::vector<ClusteredGmxpackedFocusForceEntry>& route_raw_entries,
+    const std::vector<ClusteredGmxpackedFocusForceEntry>& compat_raw_entries,
+    const std::vector<ClusteredGmxpackedFocusPair>& route_raw_pair_contexts,
+    const std::vector<ClusteredGmxpackedFocusPair>& compat_raw_pair_contexts)
+{
+    const ClusteredGmxpackedCompatOnlyClassification classification =
+        Classify_Gmxpacked_Focus_Compat_Only_Entry(
+            compat_entry, route_entries, route_raw_entries, compat_raw_entries,
+            route_raw_pair_contexts, compat_raw_pair_contexts);
+    const ClusteredGmxpackedFocusForceEntry* first_route =
+        classification.has_first_route_pair ? &classification.first_route_pair
+                                            : NULL;
+    const ClusteredGmxpackedFocusForceEntry* nearest_route =
+        classification.has_nearest_route_pair ? &classification.nearest_route_pair
+                                              : NULL;
+    const ClusteredGmxpackedFocusForceEntry* first_same_key_route =
+        classification.has_first_route_same_key
+            ? &classification.first_route_same_key
+            : NULL;
+    const ClusteredGmxpackedFocusPair* first_raw_pair_context =
+        classification.has_first_route_raw_pair_context
+            ? &classification.first_route_raw_pair_context
+            : NULL;
+    fprintf(stderr,
+            "[clustered gmxpacked record builder compare atoms force "
+            "compat-only class] step=%d rank=%zu atom_a=%d atom_b=%d "
+            "compat_shift=%d compat_sci_shift=%d compat_super=%d "
+            "compat_cluster_i=%d compat_cluster_j=%d compat_split=%d "
+            "compat_i_local=%d compat_i_lane=%d compat_j_lane=%d "
+            "compat_dr2=%.9g compat_force_norm=%.9g class=%s detail=%s "
+            "raw_pair_class=%s raw_pair_detail=%s "
+            "route_pair_matches=%zu route_same_shift_matches=%zu "
+            "route_raw_pair_matches=%zu route_raw_same_key_matches=%zu "
+            "route_raw_exact_context_matches=%zu "
+            "compat_raw_same_key_matches=%zu "
+            "route_raw_pair_context_pair_matches=%zu "
+            "route_raw_pair_context_same_key_matches=%zu "
+            "route_raw_pair_context_exact_context_matches=%zu "
+            "compat_raw_pair_context_same_key_matches=%zu "
+            "nearest_route_dr2_delta=%.9g ",
+            md_info.sys.steps, rank, compat_entry.atom_a, compat_entry.atom_b,
+            compat_entry.shift_id, compat_entry.sci_shift_id,
+            compat_entry.supercluster_id, compat_entry.cluster_i,
+            compat_entry.cluster_j, compat_entry.split_id, compat_entry.i_local,
+            compat_entry.i_lane, compat_entry.j_lane, compat_entry.dr2,
+            Gmxpacked_Focus_Vector_Norm(compat_entry.force_on_atom_a),
+            classification.class_name, classification.detail,
+            classification.raw_pair_class_name,
+            classification.raw_pair_detail,
+            classification.route_pair_matches,
+            classification.route_same_shift_matches,
+            classification.route_raw_pair_matches,
+            classification.route_raw_same_key_matches,
+            classification.route_raw_exact_context_matches,
+            classification.compat_raw_same_key_matches,
+            classification.route_raw_pair_context_pair_matches,
+            classification.route_raw_pair_context_same_key_matches,
+            classification.route_raw_pair_context_exact_context_matches,
+            classification.compat_raw_pair_context_same_key_matches,
+            classification.nearest_route_dr2_delta);
+    Print_Gmxpacked_Focus_Force_Entry_Summary(stderr, "first_route",
+                                              first_route);
+    fprintf(stderr, " ");
+    Print_Gmxpacked_Focus_Force_Entry_Summary(stderr, "nearest_route",
+                                              nearest_route);
+    fprintf(stderr, " ");
+    Print_Gmxpacked_Focus_Force_Entry_Summary(stderr, "same_key_route",
+                                              first_same_key_route);
+    fprintf(stderr, " ");
+    if (first_raw_pair_context != NULL)
+    {
+        fprintf(stderr,
+                "first_raw_pair_context=(shift=%d sci_shift=%d super=%d "
+                "cluster_i=%d cluster_j=%d split=%d i_local=%d i_lane=%d "
+                "j_lane=%d sci_index=%d packed_index=%d jm=%d sorted_i=%d "
+                "sorted_j=%d dr2=%.9g)",
+                first_raw_pair_context->shift_id,
+                first_raw_pair_context->sci_shift_id,
+                first_raw_pair_context->supercluster_id,
+                first_raw_pair_context->cluster_i,
+                first_raw_pair_context->cluster_j,
+                first_raw_pair_context->split_id,
+                first_raw_pair_context->i_local,
+                first_raw_pair_context->i_lane,
+                first_raw_pair_context->j_lane,
+                first_raw_pair_context->sci_index,
+                first_raw_pair_context->packed_index,
+                first_raw_pair_context->jm,
+                first_raw_pair_context->sorted_i,
+                first_raw_pair_context->sorted_j,
+                first_raw_pair_context->dr2);
+    }
+    else
+    {
+        fprintf(stderr, "first_raw_pair_context=(none)");
+    }
+    fprintf(stderr, "\n");
+}
+
+static float Gmxpacked_Focus_PME_Corr_F(const float z2)
+{
+    constexpr float FN6 = -1.7357322914161492954e-8F;
+    constexpr float FN5 = 1.4703624142580877519e-6F;
+    constexpr float FN4 = -0.000053401640219807709149F;
+    constexpr float FN3 = 0.0010054721316683106153F;
+    constexpr float FN2 = -0.019278317264888380590F;
+    constexpr float FN1 = 0.069670166153766424023F;
+    constexpr float FN0 = -0.75225204789749321333F;
+    constexpr float FD4 = 0.0011193462567257629232F;
+    constexpr float FD3 = 0.014866955030185295499F;
+    constexpr float FD2 = 0.11583842382862377919F;
+    constexpr float FD1 = 0.50736591960530292870F;
+    constexpr float FD0 = 1.0F;
+    const float z4 = z2 * z2;
+    float polyFD0 = FD4 * z4 + FD2;
+    const float polyFD1 = FD3 * z4 + FD1;
+    polyFD0 = polyFD0 * z4 + FD0;
+    polyFD0 = polyFD1 * z2 + polyFD0;
+    polyFD0 = 1.0F / polyFD0;
+    float polyFN0 = FN6 * z4 + FN4;
+    float polyFN1 = FN5 * z4 + FN3;
+    polyFN0 = polyFN0 * z4 + FN2;
+    polyFN1 = polyFN1 * z4 + FN1;
+    polyFN0 = polyFN0 * z4 + FN0;
+    polyFN0 = polyFN1 * z2 + polyFN0;
+    return polyFN0 * polyFD0;
+}
+
+static void Append_Gmxpacked_Focus_Force_Entries(
+    const std::vector<LJ_CLUSTERED_GMXPACKED_SCI>& sci_entries,
+    const std::vector<LJ_CLUSTERED_GMXPACKED_CJ>& cjpacked_entries,
+    const std::vector<LJ_CLUSTERED_GMXPACKED_EXCLUSION>& exclusions,
+    const std::vector<uint64_t>& pair_shift_bits,
+    const std::vector<int>& focus_atoms,
+    const std::vector<int>& cluster_offsets,
+    const std::vector<int>& super_cluster_offsets,
+    const std::vector<VECTOR>* geometry_cluster_centers,
+    const LTMatrix3 geometry_rcell,
+    const std::vector<unsigned int>& cluster_valid_masks,
+    const std::vector<unsigned int>& cluster_local_masks,
+    const std::vector<int>& sorted_atom_ids,
+    const std::vector<float4>& sorted_xq,
+    const std::vector<int>& sorted_lj_type,
+    const std::vector<float2>& lj_ab_packed,
+    const float cutoff, const float pme_beta, const LTMatrix3 cell,
+    std::vector<ClusteredGmxpackedFocusForceEntry>* entries,
+    std::vector<ClusteredGmxpackedFocusForceEntry>* raw_entries,
+    const std::vector<VECTOR>* raw_coordinates)
+{
+    if (entries == NULL || focus_atoms.empty() || cutoff <= 0.0f)
+    {
+        return;
+    }
+    const float cutoff_sq = cutoff * cutoff;
+    const float beta2 = pme_beta * pme_beta;
+    const float beta3 = beta2 * pme_beta;
+    const bool use_geometry_pair_shift =
+        geometry_cluster_centers != NULL &&
+        !geometry_cluster_centers->empty();
+    const bool use_raw_coordinate_contract =
+        raw_coordinates != NULL && !raw_coordinates->empty();
+    constexpr float min_distance_sq = 3.82e-07f;
+    for (size_t sci_index = 0; sci_index < sci_entries.size(); sci_index += 1)
+    {
+        const LJ_CLUSTERED_GMXPACKED_SCI& sci = sci_entries[sci_index];
+        if (sci.supercluster_id < 0 ||
+            sci.supercluster_id + 1 >= static_cast<int>(super_cluster_offsets.size()))
+        {
+            continue;
+        }
+        const int cluster_i_start =
+            super_cluster_offsets[static_cast<size_t>(sci.supercluster_id)];
+        const int cluster_i_end =
+            super_cluster_offsets[static_cast<size_t>(sci.supercluster_id + 1)];
+        const int active_cluster_count = cluster_i_end - cluster_i_start;
+        const VECTOR sci_shift = Shift_Vector_From_Id(sci.shift_id, cell);
+        for (int packed_idx = sci.cjpacked_begin;
+             packed_idx < sci.cjpacked_end; packed_idx += 1)
+        {
+            if (packed_idx < 0 ||
+                packed_idx >= static_cast<int>(cjpacked_entries.size()))
+            {
+                continue;
+            }
+            const LJ_CLUSTERED_GMXPACKED_CJ& packed =
+                cjpacked_entries[static_cast<size_t>(packed_idx)];
+            for (int jm = 0; jm < kClusteredJGroupSize; jm += 1)
+            {
+                const int cluster_j = packed.cj[jm];
+                if (cluster_j < 0 ||
+                    cluster_j >= static_cast<int>(cluster_valid_masks.size()) ||
+                    cluster_j >= static_cast<int>(cluster_offsets.size()) - 1)
+                {
+                    continue;
+                }
+                const unsigned int valid_mask_j =
+                    cluster_valid_masks[static_cast<size_t>(cluster_j)];
+                const unsigned int local_mask_j =
+                    cluster_local_masks[static_cast<size_t>(cluster_j)];
+                const uint64_t shift_bits =
+                    static_cast<size_t>(packed_idx * kClusteredJGroupSize + jm) <
+                            pair_shift_bits.size()
+                        ? pair_shift_bits[static_cast<size_t>(
+                              packed_idx * kClusteredJGroupSize + jm)]
+                        : 0ull;
+                for (int split = 0; split < kClusteredWarpSplitCount;
+                     split += 1)
+                {
+                    const LJ_CLUSTERED_GMXPACKED_SPLIT& split_entry =
+                        packed.split[split];
+                    if (split_entry.imask == 0u)
+                    {
+                        continue;
+                    }
+                    const unsigned int jm_mask =
+                        ((1u << kClusteredSuperClusterClusters) - 1u)
+                        << Clustered_Jm_Imask_Shift(jm);
+                    if ((split_entry.imask & jm_mask) == 0u)
+                    {
+                        continue;
+                    }
+                    for (int split_j_lane = 0;
+                         split_j_lane < kClusteredSplitJClusterSize;
+                         split_j_lane += 1)
+                    {
+                        const int j_lane =
+                            split * kClusteredSplitJClusterSize + split_j_lane;
+                        if ((valid_mask_j &
+                             (1u << static_cast<unsigned int>(j_lane))) == 0u)
+                        {
+                            continue;
+                        }
+                        const int sorted_j =
+                            cluster_offsets[static_cast<size_t>(cluster_j)] +
+                            j_lane;
+                        if (sorted_j < 0 ||
+                            sorted_j >= static_cast<int>(sorted_xq.size()) ||
+                            sorted_j >= static_cast<int>(sorted_atom_ids.size()) ||
+                            sorted_j >= static_cast<int>(sorted_lj_type.size()))
+                        {
+                            continue;
+                        }
+                        const int atom_j = sorted_atom_ids[static_cast<size_t>(sorted_j)];
+                        const bool focus_j = Gmxpacked_Focus_Contains(focus_atoms, atom_j);
+                        const float4 r2_xq = sorted_xq[static_cast<size_t>(sorted_j)];
+                        const int r2_lj_type = sorted_lj_type[static_cast<size_t>(sorted_j)];
+                        if (use_raw_coordinate_contract &&
+                            (atom_j < 0 ||
+                             atom_j >= static_cast<int>(raw_coordinates->size())))
+                        {
+                            continue;
+                        }
+                        const bool j_is_local =
+                            (local_mask_j & (1u << static_cast<unsigned int>(j_lane))) != 0u;
+                        (void)j_is_local;
+                        for (int i_lane = 0; i_lane < kClusteredClusterSize;
+                             i_lane += 1)
+                        {
+                            unsigned int pair_bits = 0xffffffffu;
+                            if (split_entry.exclusion_index != 0 &&
+                                split_entry.exclusion_index <
+                                    static_cast<int>(exclusions.size()))
+                            {
+                                pair_bits = exclusions[static_cast<size_t>(
+                                                split_entry.exclusion_index)]
+                                                .pair[split_j_lane *
+                                                          kClusteredClusterSize +
+                                                      i_lane];
+                            }
+                            const unsigned int effective_mask =
+                                split_entry.imask & pair_bits;
+                            for (int i_local = 0;
+                                 i_local < active_cluster_count &&
+                                 i_local < kClusteredSuperClusterClusters;
+                                 i_local += 1)
+                            {
+                                const unsigned int packed_bit =
+                                    1u << static_cast<unsigned int>(
+                                        Clustered_Jm_Imask_Shift(jm) + i_local);
+                                if ((effective_mask & packed_bit) == 0u)
+                                {
+                                    continue;
+                                }
+                                const int cluster_i = cluster_i_start + i_local;
+                                if (cluster_i < 0 ||
+                                    cluster_i >= static_cast<int>(cluster_valid_masks.size()) ||
+                                    cluster_i >= static_cast<int>(cluster_offsets.size()) - 1)
+                                {
+                                    continue;
+                                }
+                                const unsigned int i_lane_mask =
+                                    1u << static_cast<unsigned int>(i_lane);
+                                if ((cluster_valid_masks[static_cast<size_t>(cluster_i)] &
+                                     i_lane_mask) == 0u ||
+                                    (cluster_local_masks[static_cast<size_t>(cluster_i)] &
+                                     i_lane_mask) == 0u)
+                                {
+                                    continue;
+                                }
+                                const int sorted_i =
+                                    cluster_offsets[static_cast<size_t>(cluster_i)] +
+                                    i_lane;
+                                if (sorted_i < 0 ||
+                                    sorted_i >= static_cast<int>(sorted_xq.size()) ||
+                                    sorted_i >= static_cast<int>(sorted_atom_ids.size()) ||
+                                    sorted_i >= static_cast<int>(sorted_lj_type.size()))
+                                {
+                                    continue;
+                                }
+                                const int atom_i =
+                                    sorted_atom_ids[static_cast<size_t>(sorted_i)];
+                                const bool focus_i =
+                                    Gmxpacked_Focus_Contains(focus_atoms, atom_i);
+                                if (use_raw_coordinate_contract &&
+                                    (atom_i < 0 ||
+                                     atom_i >= static_cast<int>(raw_coordinates->size())))
+                                {
+                                    continue;
+                                }
+                                if (!focus_i && !focus_j)
+                                {
+                                    continue;
+                                }
+                                const float4 r1_xq =
+                                    sorted_xq[static_cast<size_t>(sorted_i)];
+                                int pair_shift_id = sci.shift_id;
+                                VECTOR pair_shift = sci_shift;
+                                if (use_geometry_pair_shift &&
+                                    static_cast<size_t>(cluster_i) <
+                                        geometry_cluster_centers->size() &&
+                                    static_cast<size_t>(cluster_j) <
+                                        geometry_cluster_centers->size())
+                                {
+                                    pair_shift_id =
+                                        Determine_Clustered_Pair_Shift_Id(
+                                            (*geometry_cluster_centers)[static_cast<size_t>(cluster_i)],
+                                            (*geometry_cluster_centers)[static_cast<size_t>(cluster_j)],
+                                            geometry_rcell);
+                                    pair_shift = Shift_Vector_From_Id(
+                                        pair_shift_id, cell);
+                                }
+                                else if (!pair_shift_bits.empty())
+                                {
+                                    pair_shift_id =
+                                        Clustered_Get_Pair_Shift_Id(shift_bits,
+                                                                    i_local);
+                                        pair_shift = Shift_Vector_From_Id(
+                                            pair_shift_id, cell);
+                                }
+                                const VECTOR r_i = use_raw_coordinate_contract
+                                                       ? (*raw_coordinates)[static_cast<size_t>(atom_i)]
+                                                       : VECTOR(r1_xq.x, r1_xq.y,
+                                                                r1_xq.z);
+                                const VECTOR r_j = use_raw_coordinate_contract
+                                                       ? (*raw_coordinates)[static_cast<size_t>(atom_j)]
+                                                       : VECTOR(r2_xq.x, r2_xq.y,
+                                                                r2_xq.z);
+                                const float dx = r_j.x - r_i.x - pair_shift.x;
+                                const float dy = r_j.y - r_i.y - pair_shift.y;
+                                const float dz = r_j.z - r_i.z - pair_shift.z;
+                                const float dr2 = dx * dx + dy * dy + dz * dz;
+                                if (dr2 >= cutoff_sq || dr2 == 0.0f)
+                                {
+                                    continue;
+                                }
+                                const float r2 = fmaxf(dr2, min_distance_sq);
+                                const float inv_r = 1.0f / sqrtf(r2);
+                                const float inv_r2 = inv_r * inv_r;
+                                const float inv_r6 = inv_r2 * inv_r2 * inv_r2;
+                                const float charge_product = r1_xq.w * r2_xq.w;
+                                const int r1_lj_type =
+                                    sorted_lj_type[static_cast<size_t>(sorted_i)];
+                                const int atom_pair_lj_type =
+                                    Get_LJ_Type(r1_lj_type, r2_lj_type);
+                                if (atom_pair_lj_type < 0 ||
+                                    atom_pair_lj_type >= static_cast<int>(lj_ab_packed.size()))
+                                {
+                                    continue;
+                                }
+                                const float2 ab =
+                                    lj_ab_packed[static_cast<size_t>(atom_pair_lj_type)];
+                                const float lj_force_abs =
+                                    (ab.y - ab.x * inv_r6) * inv_r6 * inv_r2;
+                                const float coulomb_force_abs =
+                                    charge_product *
+                                    (inv_r * inv_r2 +
+                                     Gmxpacked_Focus_PME_Corr_F(beta2 * r2) * beta3);
+                                const float force_abs =
+                                    lj_force_abs - coulomb_force_abs;
+                                VECTOR force_on_i(force_abs * dx, force_abs * dy,
+                                                  force_abs * dz);
+                                ClusteredGmxpackedFocusForceEntry entry = {};
+                                entry.atom_a = std::min(atom_i, atom_j);
+                                entry.atom_b = std::max(atom_i, atom_j);
+                                entry.shift_id = pair_shift_id;
+                                entry.sci_shift_id = sci.shift_id;
+                                entry.supercluster_id = sci.supercluster_id;
+                                entry.cluster_i = cluster_i;
+                                entry.cluster_j = cluster_j;
+                                entry.split_id = split;
+                                entry.i_local = i_local;
+                                entry.i_lane = i_lane;
+                                entry.j_lane = j_lane;
+                                entry.dr2 = dr2;
+                                entry.force_on_atom_a =
+                                    atom_i <= atom_j ? force_on_i : -force_on_i;
+                                entries->push_back(entry);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    std::sort(entries->begin(), entries->end(),
+              Gmxpacked_Focus_Force_Entry_Less);
+    if (raw_entries != NULL)
+    {
+        raw_entries->assign(entries->begin(), entries->end());
+    }
+    std::vector<ClusteredGmxpackedFocusForceEntry> merged;
+    merged.reserve(entries->size());
+    for (const ClusteredGmxpackedFocusForceEntry& entry : *entries)
+    {
+        if (!merged.empty() &&
+            Gmxpacked_Focus_Force_Entry_Same_Key(merged.back(), entry))
+        {
+            merged.back().force_on_atom_a =
+                merged.back().force_on_atom_a + entry.force_on_atom_a;
+            continue;
+        }
+        merged.push_back(entry);
+    }
+    entries->swap(merged);
+}
+
+static void Accumulate_Gmxpacked_Focus_Atom_Sums(
+    const std::vector<ClusteredGmxpackedFocusForceEntry>& entries,
+    const std::vector<int>& focus_atoms, std::vector<VECTOR>* sums)
+{
+    if (sums == NULL)
+    {
+        return;
+    }
+    sums->assign(focus_atoms.size(), VECTOR(0.0f));
+    for (const ClusteredGmxpackedFocusForceEntry& entry : entries)
+    {
+        const auto atom_a = std::lower_bound(focus_atoms.begin(), focus_atoms.end(),
+                                             entry.atom_a);
+        if (atom_a != focus_atoms.end() && *atom_a == entry.atom_a)
+        {
+            const size_t idx = static_cast<size_t>(atom_a - focus_atoms.begin());
+            (*sums)[idx] = (*sums)[idx] + entry.force_on_atom_a;
+        }
+        const auto atom_b = std::lower_bound(focus_atoms.begin(), focus_atoms.end(),
+                                             entry.atom_b);
+        if (atom_b != focus_atoms.end() && *atom_b == entry.atom_b)
+        {
+            const size_t idx = static_cast<size_t>(atom_b - focus_atoms.begin());
+            (*sums)[idx] = (*sums)[idx] - entry.force_on_atom_a;
+        }
+    }
+}
+
 }  // namespace
+
+void Compare_Gmxpacked_Record_Stream_Focus_Pair_Forces(
+    LJ_CLUSTERED_DIRECT_CACHE* cache, const float2* d_LJ_AB_packed,
+    size_t lj_param_numbers, float cutoff, float pme_beta, LTMatrix3 cell,
+    LTMatrix3 rcell)
+{
+    if (!Clustered_Gmxpacked_Record_Builder_Compare_Enabled())
+    {
+        return;
+    }
+    const std::vector<int> focus_atoms =
+        Parse_Gmxpacked_Record_Builder_Compare_Atoms();
+    if (focus_atoms.empty() || cache == NULL || d_LJ_AB_packed == NULL ||
+        lj_param_numbers == 0 || cutoff <= 0.0f)
+    {
+        return;
+    }
+    constexpr size_t kPrintLimit = 16;
+
+    LJ_CLUSTER_LAYOUT* layout = &cache->layout;
+    const bool route_geometry_shift =
+        Clustered_Gmxpacked_Record_Builder_Compare_Geometry_Route_Shift_Enabled();
+    const bool stage_trace_enabled =
+        Clustered_Gmxpacked_Record_Builder_Compare_Stage_Trace_Enabled();
+    const bool source_trace_enabled =
+        stage_trace_enabled &&
+        Clustered_Gmxpacked_Record_Builder_Compare_Source_Trace_Enabled();
+    const bool device_source_trace_enabled =
+        source_trace_enabled &&
+        Clustered_Gmxpacked_Record_Builder_Compare_Device_Source_Trace_Enabled();
+    const bool prune_input_trace_enabled =
+        device_source_trace_enabled &&
+        Clustered_Gmxpacked_Record_Builder_Compare_Prune_Input_Trace_Enabled();
+    const bool prune_contract_trace_enabled =
+        source_trace_enabled &&
+        Clustered_Gmxpacked_Record_Builder_Compare_Prune_Contract_Trace_Enabled();
+    const bool raw_coord_pair_context_enabled =
+        stage_trace_enabled &&
+        Clustered_Gmxpacked_Record_Builder_Compare_Raw_Coord_Pair_Context_Enabled();
+    const bool raw_coord_force_context_enabled =
+        stage_trace_enabled &&
+        Clustered_Gmxpacked_Record_Builder_Compare_Raw_Coord_Force_Context_Enabled();
+    const bool raw_coordinate_trace_enabled =
+        source_trace_enabled || device_source_trace_enabled ||
+        prune_input_trace_enabled || prune_contract_trace_enabled ||
+        raw_coord_pair_context_enabled || raw_coord_force_context_enabled;
+    if (layout->gmxpacked_sci_numbers <= 0 ||
+        layout->gmxpacked_cjpacked_numbers <= 0 ||
+        layout->gmxpacked_exclusion_numbers <= 0 ||
+        layout->d_gmxpacked_sci == NULL || layout->d_gmxpacked_cjpacked == NULL ||
+        layout->d_gmxpacked_exclusions == NULL || layout->d_pair_shift_bits == NULL ||
+        cache->d_sorted_atom_ids == NULL || cache->d_sorted_xq == NULL ||
+        cache->d_sorted_lj_type == NULL || layout->d_cluster_offsets == NULL ||
+        layout->d_super_cluster_offsets == NULL ||
+        layout->d_cluster_valid_masks == NULL ||
+        layout->d_cluster_local_masks == NULL)
+    {
+        return;
+    }
+
+    const std::vector<LJ_CLUSTERED_GMXPACKED_SCI> route_sci =
+        Copy_Device_Buffer_To_Host(layout->d_gmxpacked_sci,
+                                   static_cast<size_t>(layout->gmxpacked_sci_numbers));
+    const std::vector<LJ_CLUSTERED_GMXPACKED_CJ> route_cj =
+        Copy_Device_Buffer_To_Host(layout->d_gmxpacked_cjpacked,
+                                   static_cast<size_t>(layout->gmxpacked_cjpacked_numbers));
+    const std::vector<LJ_CLUSTERED_GMXPACKED_EXCLUSION> route_excl =
+        Copy_Device_Buffer_To_Host(layout->d_gmxpacked_exclusions,
+                                   static_cast<size_t>(layout->gmxpacked_exclusion_numbers));
+    const int route_split_excl = layout->gmxpacked_split_exclusion_numbers;
+    std::vector<LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE> route_stream_sources;
+    std::vector<LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_AGGREGATE>
+        route_stream_aggregates;
+    if (stage_trace_enabled &&
+        layout->gmxpacked_record_stream_source_numbers > 0 &&
+        layout->d_gmxpacked_record_stream_sources != NULL)
+    {
+        route_stream_sources = Copy_Device_Buffer_To_Host(
+            layout->d_gmxpacked_record_stream_sources,
+            static_cast<size_t>(layout->gmxpacked_record_stream_source_numbers));
+    }
+    if (stage_trace_enabled &&
+        layout->gmxpacked_record_stream_aggregate_numbers > 0 &&
+        layout->d_gmxpacked_record_stream_aggregates != NULL)
+    {
+        route_stream_aggregates = Copy_Device_Buffer_To_Host(
+            layout->d_gmxpacked_record_stream_aggregates,
+            static_cast<size_t>(
+                layout->gmxpacked_record_stream_aggregate_numbers));
+    }
+    if (stage_trace_enabled)
+    {
+        const ClusteredGmxpackedRecordBuilderStageTraceSnapshot& snapshot =
+            Gmxpacked_Record_Builder_Stage_Trace_Snapshot();
+        if (snapshot.step == md_info.sys.steps)
+        {
+            if (route_stream_sources.empty())
+            {
+                route_stream_sources = snapshot.sources;
+            }
+            if (route_stream_aggregates.empty())
+            {
+                route_stream_aggregates = snapshot.aggregates;
+            }
+        }
+    }
+    const std::vector<uint64_t> route_pair_shift_bits =
+        Copy_Device_Buffer_To_Host(layout->d_pair_shift_bits,
+                                   static_cast<size_t>(layout->gmxpacked_cjpacked_numbers *
+                                                       kClusteredJGroupSize));
+
+    const std::vector<int> cluster_offsets =
+        Copy_Device_Buffer_To_Host(layout->d_cluster_offsets,
+                                   static_cast<size_t>(layout->cluster_numbers + 1));
+    const std::vector<int> super_cluster_offsets =
+        Copy_Device_Buffer_To_Host(layout->d_super_cluster_offsets,
+                                   static_cast<size_t>(layout->super_cluster_numbers + 1));
+    std::vector<VECTOR> cluster_centers;
+    if (layout->d_cluster_centers == NULL || layout->cluster_numbers <= 0)
+    {
+        fprintf(stderr,
+                "[clustered gmxpacked record builder compare atoms force] "
+                "step=%d route_geometry_shift=%d unavailable_cluster_centers=1\n",
+                md_info.sys.steps, route_geometry_shift ? 1 : 0);
+        return;
+    }
+    cluster_centers = Copy_Device_Buffer_To_Host(
+        layout->d_cluster_centers,
+        static_cast<size_t>(layout->cluster_numbers));
+    const std::vector<unsigned int> cluster_valid_masks =
+        Copy_Device_Buffer_To_Host(layout->d_cluster_valid_masks,
+                                   static_cast<size_t>(layout->cluster_numbers));
+    const std::vector<unsigned int> cluster_local_masks =
+        Copy_Device_Buffer_To_Host(layout->d_cluster_local_masks,
+                                   static_cast<size_t>(layout->cluster_numbers));
+    const std::vector<int> sorted_atom_ids =
+        Copy_Device_Buffer_To_Host(cache->d_sorted_atom_ids,
+                                   static_cast<size_t>(layout->total_atom_numbers));
+    const std::vector<float4> sorted_xq =
+        Copy_Device_Buffer_To_Host(cache->d_sorted_xq,
+                                   static_cast<size_t>(layout->total_atom_numbers));
+    const std::vector<int> sorted_lj_type =
+        Copy_Device_Buffer_To_Host(cache->d_sorted_lj_type,
+                                   static_cast<size_t>(layout->total_atom_numbers));
+    const std::vector<float2> lj_ab_packed =
+        Copy_Device_Buffer_To_Host(d_LJ_AB_packed, lj_param_numbers);
+    std::vector<VECTOR> coordinates(
+        static_cast<size_t>(layout->total_atom_numbers), VECTOR(0.0f));
+    const size_t sorted_coordinate_count =
+        std::min(sorted_atom_ids.size(), sorted_xq.size());
+    for (size_t idx = 0; idx < sorted_coordinate_count; idx += 1)
+    {
+        const int atom_id = sorted_atom_ids[idx];
+        if (atom_id < 0 || atom_id >= layout->total_atom_numbers)
+        {
+            continue;
+        }
+        const float4 xyzq = sorted_xq[idx];
+        coordinates[static_cast<size_t>(atom_id)] =
+            VECTOR(xyzq.x, xyzq.y, xyzq.z);
+    }
+    const std::vector<VECTOR> raw_coordinates =
+        raw_coordinate_trace_enabled && layout->d_cached_crd != NULL
+            ? Copy_Device_Buffer_To_Host(
+                  layout->d_cached_crd,
+                  static_cast<size_t>(layout->total_atom_numbers))
+            : std::vector<VECTOR>();
+
+    std::vector<ClusteredGmxpackedFocusForceEntry> route_entries;
+    std::vector<ClusteredGmxpackedFocusForceEntry> route_raw_entries;
+    std::vector<ClusteredGmxpackedFocusPair> route_pair_entries;
+    std::vector<ClusteredGmxpackedFocusPair> route_raw_pair_contexts;
+    std::vector<ClusteredGmxpackedFocusPair> route_raw_pair_contexts_raw;
+    Append_Gmxpacked_Focus_Force_Entries(
+        route_sci, route_cj, route_excl, route_pair_shift_bits, focus_atoms,
+        cluster_offsets, super_cluster_offsets,
+        route_geometry_shift ? &cluster_centers : NULL, rcell,
+        cluster_valid_masks, cluster_local_masks, sorted_atom_ids, sorted_xq,
+        sorted_lj_type, lj_ab_packed, cutoff, pme_beta, cell, &route_entries,
+        &route_raw_entries, NULL);
+    Append_Gmxpacked_Focus_Atom_Pairs(
+        route_sci, route_cj, route_excl, focus_atoms, coordinates,
+        sorted_atom_ids, cluster_offsets, super_cluster_offsets,
+        cluster_centers, rcell, cluster_valid_masks, cluster_local_masks,
+        cutoff, cell, &route_pair_entries, &route_raw_pair_contexts);
+    if (raw_coord_pair_context_enabled)
+    {
+        std::vector<ClusteredGmxpackedFocusPair> route_pair_entries_raw;
+        Append_Gmxpacked_Focus_Atom_Pairs(
+            route_sci, route_cj, route_excl, focus_atoms, raw_coordinates,
+            sorted_atom_ids, cluster_offsets, super_cluster_offsets,
+            cluster_centers, rcell, cluster_valid_masks, cluster_local_masks,
+            cutoff, cell, &route_pair_entries_raw, &route_raw_pair_contexts_raw);
+    }
+    (void)route_pair_entries;
+
+    Build_Gmxpacked_Payload(layout);
+    if (layout->gmxpacked_sci_numbers <= 0 ||
+        layout->gmxpacked_cjpacked_numbers <= 0 ||
+        layout->gmxpacked_exclusion_numbers <= 0)
+    {
+        Restore_Gmxpacked_Payload_From_Host(layout, route_sci, route_cj,
+                                            route_excl, route_split_excl);
+        Reserve_Device_U64_Buffer(layout->gmxpacked_cjpacked_numbers *
+                                      kClusteredJGroupSize,
+                                  &layout->d_pair_shift_bits,
+                                  &layout->pair_shift_capacity);
+        Refresh_Gmxpacked_Pair_Shift_Metadata(layout, rcell);
+        return;
+    }
+    Reserve_Device_U64_Buffer(layout->gmxpacked_cjpacked_numbers *
+                                  kClusteredJGroupSize,
+                              &layout->d_pair_shift_bits,
+                              &layout->pair_shift_capacity);
+    Refresh_Gmxpacked_Pair_Shift_Metadata(layout, rcell);
+    const std::vector<LJ_CLUSTERED_GMXPACKED_SCI> compat_sci =
+        Copy_Device_Buffer_To_Host(layout->d_gmxpacked_sci,
+                                   static_cast<size_t>(layout->gmxpacked_sci_numbers));
+    const std::vector<LJ_CLUSTERED_GMXPACKED_CJ> compat_cj =
+        Copy_Device_Buffer_To_Host(layout->d_gmxpacked_cjpacked,
+                                   static_cast<size_t>(layout->gmxpacked_cjpacked_numbers));
+    const std::vector<LJ_CLUSTERED_GMXPACKED_EXCLUSION> compat_excl =
+        Copy_Device_Buffer_To_Host(layout->d_gmxpacked_exclusions,
+                                   static_cast<size_t>(layout->gmxpacked_exclusion_numbers));
+    const std::vector<uint64_t> compat_pair_shift_bits =
+        Copy_Device_Buffer_To_Host(layout->d_pair_shift_bits,
+                                   static_cast<size_t>(layout->gmxpacked_cjpacked_numbers *
+                                                       kClusteredJGroupSize));
+
+    std::vector<ClusteredGmxpackedFocusForceEntry> compat_entries;
+    std::vector<ClusteredGmxpackedFocusForceEntry> compat_raw_entries;
+    std::vector<ClusteredGmxpackedFocusPair> compat_pair_entries;
+    std::vector<ClusteredGmxpackedFocusPair> compat_raw_pair_contexts;
+    std::vector<ClusteredGmxpackedFocusPair> compat_raw_pair_contexts_raw;
+    Append_Gmxpacked_Focus_Force_Entries(
+        compat_sci, compat_cj, compat_excl, compat_pair_shift_bits, focus_atoms,
+        cluster_offsets, super_cluster_offsets, NULL, rcell,
+        cluster_valid_masks, cluster_local_masks, sorted_atom_ids, sorted_xq,
+        sorted_lj_type, lj_ab_packed, cutoff, pme_beta, cell, &compat_entries,
+        &compat_raw_entries, NULL);
+    Append_Gmxpacked_Focus_Atom_Pairs(
+        compat_sci, compat_cj, compat_excl, focus_atoms, coordinates,
+        sorted_atom_ids, cluster_offsets, super_cluster_offsets,
+        cluster_centers, rcell, cluster_valid_masks, cluster_local_masks,
+        cutoff, cell, &compat_pair_entries, &compat_raw_pair_contexts);
+    if (raw_coord_pair_context_enabled)
+    {
+        std::vector<ClusteredGmxpackedFocusPair> compat_pair_entries_raw;
+        Append_Gmxpacked_Focus_Atom_Pairs(
+            compat_sci, compat_cj, compat_excl, focus_atoms, raw_coordinates,
+            sorted_atom_ids, cluster_offsets, super_cluster_offsets,
+            cluster_centers, rcell, cluster_valid_masks, cluster_local_masks,
+            cutoff, cell, &compat_pair_entries_raw, &compat_raw_pair_contexts_raw);
+    }
+    (void)compat_pair_entries;
+
+    size_t route_idx = 0;
+    size_t compat_idx = 0;
+    size_t common_count = 0;
+    float max_pair_delta_norm = 0.0f;
+    VECTOR sum_delta(0.0f);
+    struct MismatchLine
+    {
+        ClusteredGmxpackedFocusForceEntry route = {};
+        ClusteredGmxpackedFocusForceEntry compat = {};
+        float delta_norm = 0.0f;
+    };
+    std::vector<MismatchLine> mismatches;
+    std::vector<ClusteredGmxpackedFocusForceEntry> route_only_entries;
+    std::vector<ClusteredGmxpackedFocusForceEntry> compat_only_entries;
+    while (route_idx < route_entries.size() || compat_idx < compat_entries.size())
+    {
+        if (route_idx < route_entries.size() && compat_idx < compat_entries.size() &&
+            Gmxpacked_Focus_Force_Entry_Same_Key(route_entries[route_idx],
+                                                 compat_entries[compat_idx]))
+        {
+            const VECTOR delta = route_entries[route_idx].force_on_atom_a -
+                                 compat_entries[compat_idx].force_on_atom_a;
+            const float delta_norm = Gmxpacked_Focus_Vector_Norm(delta);
+            max_pair_delta_norm = fmaxf(max_pair_delta_norm, delta_norm);
+            sum_delta = sum_delta + delta;
+            common_count += 1;
+            if (delta_norm > 0.0f)
+            {
+                mismatches.push_back({route_entries[route_idx],
+                                      compat_entries[compat_idx], delta_norm});
+            }
+            route_idx += 1;
+            compat_idx += 1;
+            continue;
+        }
+        const bool take_route = route_idx < route_entries.size() &&
+            (compat_idx >= compat_entries.size() ||
+             Gmxpacked_Focus_Force_Entry_Less(route_entries[route_idx],
+                                              compat_entries[compat_idx]));
+        if (take_route)
+        {
+            route_only_entries.push_back(route_entries[route_idx]);
+            route_idx += 1;
+        }
+        else
+        {
+            compat_only_entries.push_back(compat_entries[compat_idx]);
+            compat_idx += 1;
+        }
+    }
+    std::sort(mismatches.begin(), mismatches.end(),
+              [](const MismatchLine& lhs, const MismatchLine& rhs) {
+                  return lhs.delta_norm > rhs.delta_norm;
+              });
+
+    std::vector<VECTOR> route_atom_sums;
+    std::vector<VECTOR> compat_atom_sums;
+    Accumulate_Gmxpacked_Focus_Atom_Sums(route_entries, focus_atoms,
+                                         &route_atom_sums);
+    Accumulate_Gmxpacked_Focus_Atom_Sums(compat_entries, focus_atoms,
+                                         &compat_atom_sums);
+    std::vector<VECTOR> route_only_atom_sums;
+    std::vector<VECTOR> compat_only_atom_sums;
+    Accumulate_Gmxpacked_Focus_Atom_Sums(route_only_entries, focus_atoms,
+                                         &route_only_atom_sums);
+    Accumulate_Gmxpacked_Focus_Atom_Sums(compat_only_entries, focus_atoms,
+                                         &compat_only_atom_sums);
+    float max_atom_delta_norm = 0.0f;
+    float max_route_only_atom_norm = 0.0f;
+    float max_compat_only_atom_norm = 0.0f;
+    for (size_t idx = 0; idx < focus_atoms.size(); idx += 1)
+    {
+        const VECTOR delta = route_atom_sums[idx] - compat_atom_sums[idx];
+        max_atom_delta_norm = fmaxf(max_atom_delta_norm,
+                                    Gmxpacked_Focus_Vector_Norm(delta));
+        max_route_only_atom_norm = fmaxf(
+            max_route_only_atom_norm,
+            Gmxpacked_Focus_Vector_Norm(route_only_atom_sums[idx]));
+        max_compat_only_atom_norm = fmaxf(
+            max_compat_only_atom_norm,
+            Gmxpacked_Focus_Vector_Norm(compat_only_atom_sums[idx]));
+    }
+
+    size_t raw_pair_route_idx = 0;
+    size_t raw_pair_compat_idx = 0;
+    size_t raw_pair_common_count = 0;
+    size_t raw_pair_route_only_count = 0;
+    size_t raw_pair_compat_only_count = 0;
+    std::vector<ClusteredGmxpackedFocusPair> raw_pair_route_only_entries;
+    std::vector<ClusteredGmxpackedFocusPair> raw_pair_compat_only_entries;
+    while (raw_pair_route_idx < route_raw_pair_contexts.size() ||
+           raw_pair_compat_idx < compat_raw_pair_contexts.size())
+    {
+        if (raw_pair_route_idx < route_raw_pair_contexts.size() &&
+            raw_pair_compat_idx < compat_raw_pair_contexts.size() &&
+            Gmxpacked_Focus_Pair_Same_Context(
+                route_raw_pair_contexts[raw_pair_route_idx],
+                compat_raw_pair_contexts[raw_pair_compat_idx]))
+        {
+            raw_pair_common_count += 1;
+            raw_pair_route_idx += 1;
+            raw_pair_compat_idx += 1;
+            continue;
+        }
+        const bool take_route_raw_pair =
+            raw_pair_route_idx < route_raw_pair_contexts.size() &&
+            (raw_pair_compat_idx >= compat_raw_pair_contexts.size() ||
+             Gmxpacked_Focus_Pair_Less(
+                 route_raw_pair_contexts[raw_pair_route_idx],
+                 compat_raw_pair_contexts[raw_pair_compat_idx]));
+        if (take_route_raw_pair)
+        {
+            raw_pair_route_only_entries.push_back(
+                route_raw_pair_contexts[raw_pair_route_idx]);
+            raw_pair_route_only_count += 1;
+            raw_pair_route_idx += 1;
+        }
+        else
+        {
+            raw_pair_compat_only_entries.push_back(
+                compat_raw_pair_contexts[raw_pair_compat_idx]);
+            raw_pair_compat_only_count += 1;
+            raw_pair_compat_idx += 1;
+        }
+    }
+    if (raw_coord_pair_context_enabled)
+    {
+        const ClusteredGmxpackedRawPairContextCompareSummary shifted_summary =
+            Compare_Gmxpacked_Raw_Pair_Contexts(route_raw_pair_contexts,
+                                                compat_raw_pair_contexts);
+        const ClusteredGmxpackedRawPairContextCompareSummary raw_summary =
+            Compare_Gmxpacked_Raw_Pair_Contexts(route_raw_pair_contexts_raw,
+                                                compat_raw_pair_contexts_raw);
+        Print_Gmxpacked_Focus_Pair_Raw_Coord_Context_Trace(
+            focus_atoms, shifted_summary, raw_summary);
+    }
+    if (raw_coord_force_context_enabled)
+    {
+        if (raw_coordinates.empty())
+        {
+            fprintf(stderr,
+                    "[clustered gmxpacked record builder compare atoms "
+                    "raw-coord-force-context] step=%d focus_count=%zu "
+                    "unavailable_raw_coordinates=1 atoms=",
+                    md_info.sys.steps, focus_atoms.size());
+            for (size_t idx = 0; idx < focus_atoms.size(); idx += 1)
+            {
+                fprintf(stderr, "%s%d", idx == 0 ? "" : ",",
+                        focus_atoms[idx]);
+            }
+            fprintf(stderr, "\n");
+        }
+        else
+        {
+            std::vector<ClusteredGmxpackedFocusForceEntry>
+                route_raw_coord_entries;
+            std::vector<ClusteredGmxpackedFocusForceEntry>
+                compat_raw_coord_entries;
+            Append_Gmxpacked_Focus_Force_Entries(
+                route_sci, route_cj, route_excl, route_pair_shift_bits,
+                focus_atoms, cluster_offsets, super_cluster_offsets,
+                &cluster_centers, rcell, cluster_valid_masks,
+                cluster_local_masks, sorted_atom_ids, sorted_xq,
+                sorted_lj_type, lj_ab_packed, cutoff, pme_beta, cell,
+                &route_raw_coord_entries, NULL, &raw_coordinates);
+            Append_Gmxpacked_Focus_Force_Entries(
+                compat_sci, compat_cj, compat_excl, compat_pair_shift_bits,
+                focus_atoms, cluster_offsets, super_cluster_offsets,
+                &cluster_centers, rcell, cluster_valid_masks,
+                cluster_local_masks, sorted_atom_ids, sorted_xq,
+                sorted_lj_type, lj_ab_packed, cutoff, pme_beta, cell,
+                &compat_raw_coord_entries, NULL, &raw_coordinates);
+            const ClusteredGmxpackedRawForceContextCompareSummary
+                shifted_summary = Compare_Gmxpacked_Raw_Force_Contexts(
+                    route_entries, compat_entries);
+            const ClusteredGmxpackedRawForceContextCompareSummary raw_summary =
+                Compare_Gmxpacked_Raw_Force_Contexts(route_raw_coord_entries,
+                                                     compat_raw_coord_entries);
+            Print_Gmxpacked_Focus_Force_Raw_Coord_Context_Trace(
+                focus_atoms, shifted_summary, raw_summary);
+        }
+    }
+
+    size_t compat_force_absent_in_route_raw_pairs = 0;
+    size_t compat_force_present_in_route_raw_pairs = 0;
+    size_t compat_force_present_same_raw_context = 0;
+    size_t compat_force_present_different_raw_context = 0;
+    for (const ClusteredGmxpackedFocusForceEntry& compat_only_entry :
+         compat_only_entries)
+    {
+        const ClusteredGmxpackedCompatOnlyClassification classification =
+            Classify_Gmxpacked_Focus_Compat_Only_Entry(
+                compat_only_entry, route_entries, route_raw_entries,
+                compat_raw_entries, route_raw_pair_contexts,
+                compat_raw_pair_contexts);
+        if (classification.route_raw_pair_context_same_key_matches == 0)
+        {
+            compat_force_absent_in_route_raw_pairs += 1;
+        }
+        else
+        {
+            compat_force_present_in_route_raw_pairs += 1;
+            if (classification.route_raw_pair_context_exact_context_matches > 0)
+            {
+                compat_force_present_same_raw_context += 1;
+            }
+            else
+            {
+                compat_force_present_different_raw_context += 1;
+            }
+        }
+    }
+
+    if (stage_trace_enabled)
+    {
+        Print_Gmxpacked_Focus_Pair_Stage_Trace(
+            focus_atoms, raw_pair_compat_only_entries, route_stream_sources,
+            route_stream_aggregates, route_sci, route_cj, route_excl,
+            route_raw_pair_contexts);
+    }
+    if (source_trace_enabled)
+    {
+        Print_Gmxpacked_Focus_Pair_Source_Trace(
+            layout, focus_atoms, raw_pair_compat_only_entries,
+            route_stream_sources, raw_coordinates, cutoff, cell, rcell);
+    }
+    if (device_source_trace_enabled)
+    {
+        Print_Gmxpacked_Focus_Pair_Device_Source_Trace(
+            layout, focus_atoms, raw_pair_compat_only_entries,
+            route_stream_sources, raw_coordinates, cutoff, cell, rcell);
+    }
+    if (prune_input_trace_enabled)
+    {
+        Print_Gmxpacked_Focus_Pair_Prune_Input_Trace(
+            layout, focus_atoms, raw_pair_compat_only_entries,
+            route_stream_sources, raw_coordinates, cutoff, cell, rcell);
+    }
+    if (prune_contract_trace_enabled)
+    {
+        Print_Gmxpacked_Focus_Pair_Prune_Contract_Trace(
+            layout, focus_atoms, raw_pair_compat_only_entries,
+            route_stream_sources, sorted_atom_ids, coordinates, raw_coordinates,
+            cutoff, cell, rcell);
+    }
+
+    fprintf(stderr,
+            "[clustered gmxpacked record builder compare atoms raw-pairs] "
+            "step=%d focus_count=%zu route_raw_contexts=%zu "
+            "compat_raw_contexts=%zu common=%zu route_only=%zu "
+            "compat_only=%zu compat_force_absent_in_route_raw_pairs=%zu "
+            "compat_force_present_in_route_raw_pairs=%zu "
+            "compat_force_present_same_raw_context=%zu "
+            "compat_force_present_different_raw_context=%zu "
+            "print_limit=%d atoms=",
+            md_info.sys.steps, focus_atoms.size(),
+            route_raw_pair_contexts.size(), compat_raw_pair_contexts.size(),
+            raw_pair_common_count, raw_pair_route_only_count,
+            raw_pair_compat_only_count, compat_force_absent_in_route_raw_pairs,
+            compat_force_present_in_route_raw_pairs,
+            compat_force_present_same_raw_context,
+            compat_force_present_different_raw_context,
+            static_cast<int>(kPrintLimit));
+    for (size_t idx = 0; idx < focus_atoms.size(); idx += 1)
+    {
+        fprintf(stderr, "%s%d", idx == 0 ? "" : ",", focus_atoms[idx]);
+    }
+    fprintf(stderr, "\n");
+
+    fprintf(stderr,
+            "[clustered gmxpacked record builder compare atoms force] "
+            "step=%d focus_count=%zu route_pairs=%zu compat_pairs=%zu "
+            "common=%zu route_only=%zu compat_only=%zu "
+            "route_geometry_shift=%d "
+            "max_pair_delta_norm=%.9g sum_delta_norm=%.9g "
+            "max_atom_delta_norm=%.9g max_route_only_atom_norm=%.9g "
+            "max_compat_only_atom_norm=%.9g atoms=",
+            md_info.sys.steps, focus_atoms.size(), route_entries.size(),
+            compat_entries.size(), common_count, route_only_entries.size(),
+            compat_only_entries.size(), route_geometry_shift ? 1 : 0,
+            max_pair_delta_norm,
+            Gmxpacked_Focus_Vector_Norm(sum_delta), max_atom_delta_norm,
+            max_route_only_atom_norm, max_compat_only_atom_norm);
+    for (size_t idx = 0; idx < focus_atoms.size(); idx += 1)
+    {
+        fprintf(stderr, "%s%d", idx == 0 ? "" : ",", focus_atoms[idx]);
+    }
+    fprintf(stderr, "\n");
+
+    const size_t print_count = std::min(kPrintLimit, mismatches.size());
+    for (size_t idx = 0; idx < print_count; idx += 1)
+    {
+        const MismatchLine& mismatch = mismatches[idx];
+        const VECTOR delta = mismatch.route.force_on_atom_a -
+                             mismatch.compat.force_on_atom_a;
+        fprintf(stderr,
+                "[clustered gmxpacked record builder compare atoms force "
+                "mismatch] step=%d rank=%zu atom_a=%d atom_b=%d shift=%d "
+                "route_force=(%.9g,%.9g,%.9g) "
+                "compat_force=(%.9g,%.9g,%.9g) "
+                "delta=(%.9g,%.9g,%.9g) delta_norm=%.9g\n",
+                md_info.sys.steps, idx, mismatch.route.atom_a,
+                mismatch.route.atom_b, mismatch.route.shift_id,
+                mismatch.route.force_on_atom_a.x,
+                mismatch.route.force_on_atom_a.y,
+                mismatch.route.force_on_atom_a.z,
+                mismatch.compat.force_on_atom_a.x,
+                mismatch.compat.force_on_atom_a.y,
+                mismatch.compat.force_on_atom_a.z, delta.x, delta.y, delta.z,
+                mismatch.delta_norm);
+    }
+    auto sort_force_entries_by_norm = [](
+        std::vector<ClusteredGmxpackedFocusForceEntry>* entries)
+    {
+        if (entries == NULL)
+        {
+            return;
+        }
+        std::sort(entries->begin(), entries->end(),
+                  [](const ClusteredGmxpackedFocusForceEntry& lhs,
+                     const ClusteredGmxpackedFocusForceEntry& rhs)
+                  {
+                      return Gmxpacked_Focus_Vector_Norm(lhs.force_on_atom_a) >
+                             Gmxpacked_Focus_Vector_Norm(rhs.force_on_atom_a);
+                  });
+    };
+    auto print_force_entries = [kPrintLimit](
+        const char* label,
+        const std::vector<ClusteredGmxpackedFocusForceEntry>& entries)
+    {
+        const size_t entry_print_count = std::min(kPrintLimit, entries.size());
+        for (size_t idx = 0; idx < entry_print_count; idx += 1)
+        {
+            const ClusteredGmxpackedFocusForceEntry& entry = entries[idx];
+            fprintf(stderr,
+                    "[clustered gmxpacked record builder compare atoms force "
+                    "%s] step=%d rank=%zu atom_a=%d atom_b=%d shift=%d "
+                    "sci_shift=%d super=%d cluster_i=%d cluster_j=%d "
+                    "split=%d i_local=%d i_lane=%d j_lane=%d dr2=%.9g "
+                    "force_on_atom_a=(%.9g,%.9g,%.9g) force_norm=%.9g\n",
+                    label, md_info.sys.steps, idx, entry.atom_a, entry.atom_b,
+                    entry.shift_id, entry.sci_shift_id, entry.supercluster_id,
+                    entry.cluster_i, entry.cluster_j, entry.split_id,
+                    entry.i_local, entry.i_lane, entry.j_lane, entry.dr2,
+                    entry.force_on_atom_a.x,
+                    entry.force_on_atom_a.y, entry.force_on_atom_a.z,
+                    Gmxpacked_Focus_Vector_Norm(entry.force_on_atom_a));
+        }
+    };
+    std::vector<ClusteredGmxpackedFocusForceEntry> sorted_route_only_entries =
+        route_only_entries;
+    std::vector<ClusteredGmxpackedFocusForceEntry> sorted_compat_only_entries =
+        compat_only_entries;
+    sort_force_entries_by_norm(&sorted_route_only_entries);
+    sort_force_entries_by_norm(&sorted_compat_only_entries);
+    const size_t raw_pair_route_print_count =
+        std::min(kPrintLimit, raw_pair_route_only_entries.size());
+    const size_t raw_pair_compat_print_count =
+        std::min(kPrintLimit, raw_pair_compat_only_entries.size());
+    for (size_t idx = 0; idx < raw_pair_route_print_count; idx += 1)
+    {
+        Print_Gmxpacked_Focus_Pair_Line("raw-route-only",
+                                        raw_pair_route_only_entries[idx]);
+    }
+    for (size_t idx = 0; idx < raw_pair_compat_print_count; idx += 1)
+    {
+        Print_Gmxpacked_Focus_Pair_Line("raw-compat-only",
+                                        raw_pair_compat_only_entries[idx]);
+    }
+    print_force_entries("route-only", sorted_route_only_entries);
+    print_force_entries("compat-only", sorted_compat_only_entries);
+    const size_t compat_classification_count =
+        std::min(kPrintLimit, sorted_compat_only_entries.size());
+    for (size_t idx = 0; idx < compat_classification_count; idx += 1)
+    {
+        Print_Gmxpacked_Focus_Compat_Only_Classification(
+            idx, sorted_compat_only_entries[idx], route_entries,
+            route_raw_entries, compat_raw_entries, route_raw_pair_contexts,
+            compat_raw_pair_contexts);
+    }
+    for (size_t idx = 0; idx < focus_atoms.size(); idx += 1)
+    {
+        const VECTOR delta = route_atom_sums[idx] - compat_atom_sums[idx];
+        const VECTOR only_delta = route_only_atom_sums[idx] -
+                                  compat_only_atom_sums[idx];
+        fprintf(stderr,
+            "[clustered gmxpacked record builder compare atoms force "
+            "atom] step=%d atom=%d route_sum=(%.9g,%.9g,%.9g) "
+            "compat_sum=(%.9g,%.9g,%.9g) delta=(%.9g,%.9g,%.9g) "
+            "delta_norm=%.9g route_only_sum=(%.9g,%.9g,%.9g) "
+            "compat_only_sum=(%.9g,%.9g,%.9g) only_delta=(%.9g,%.9g,%.9g) "
+            "only_delta_norm=%.9g\n",
+            md_info.sys.steps, focus_atoms[idx], route_atom_sums[idx].x,
+            route_atom_sums[idx].y, route_atom_sums[idx].z,
+            compat_atom_sums[idx].x, compat_atom_sums[idx].y,
+            compat_atom_sums[idx].z, delta.x, delta.y, delta.z,
+            Gmxpacked_Focus_Vector_Norm(delta), route_only_atom_sums[idx].x,
+            route_only_atom_sums[idx].y, route_only_atom_sums[idx].z,
+            compat_only_atom_sums[idx].x, compat_only_atom_sums[idx].y,
+            compat_only_atom_sums[idx].z, only_delta.x, only_delta.y,
+            only_delta.z, Gmxpacked_Focus_Vector_Norm(only_delta));
+    }
+    fflush(stderr);
+
+    Restore_Gmxpacked_Payload_From_Host(layout, route_sci, route_cj, route_excl,
+                                        route_split_excl);
+    Reserve_Device_U64_Buffer(layout->gmxpacked_cjpacked_numbers *
+                                  kClusteredJGroupSize,
+                              &layout->d_pair_shift_bits,
+                              &layout->pair_shift_capacity);
+    Refresh_Gmxpacked_Pair_Shift_Metadata(layout, rcell);
+}
 
 void LJ_CLUSTER_LAYOUT::Initial(CONTROLLER* controller, const char* module_name,
                                 bool ordered_layout_enabled)
@@ -8805,6 +20966,16 @@ void LJ_CLUSTER_LAYOUT::Initial(CONTROLLER* controller, const char* module_name,
     rebuild_dirty = true;
     cache_ready = false;
     cached_cutoff = -1.0f;
+    stable_target_layout_anchor_ready = false;
+    gmxpacked_inner_active_append_attempts = 0;
+    gmxpacked_inner_active_append_successes = 0;
+    gmxpacked_inner_active_append_fallbacks = 0;
+    gmxpacked_inner_active_append_zero_rows = 0;
+    gmxpacked_inner_active_append_rows_total = 0;
+    gmxpacked_inner_active_append_overflow_rows_total = 0;
+    gmxpacked_inner_active_append_max_active_rows = 0;
+    gmxpacked_inner_active_append_max_limit_rows = 0;
+    gmxpacked_inner_active_append_last_active_rows = 0;
     primary_payload_build_step = -1;
     primary_payload_build_count_this_step = 0;
     primary_payload_build_count_total = 0;
@@ -8813,10 +20984,18 @@ void LJ_CLUSTER_LAYOUT::Initial(CONTROLLER* controller, const char* module_name,
     working_device = controller->working_device;
     rebuild_refresh_interval = 0;
     cached_build_step = -1;
-    payload_build_time_recorder =
-        controller->Get_Time_Recorder("clustered payload build");
-    primary_payload_time_recorder =
-        controller->Get_Time_Recorder("clustered primary payload");
+    if (Clustered_Fine_Timers_Enabled())
+    {
+        payload_build_time_recorder =
+            controller->Get_Time_Recorder("clustered payload build");
+        primary_payload_time_recorder =
+            controller->Get_Time_Recorder("clustered primary payload");
+    }
+    else
+    {
+        payload_build_time_recorder = NULL;
+        primary_payload_time_recorder = NULL;
+    }
 
     if (controller->Command_Choice("LJ", "direct_kernel", "clustered"))
     {
@@ -8955,6 +21134,9 @@ void LJ_CLUSTER_LAYOUT::Refresh_Metadata(int input_local_atom_numbers,
                                          const int* d_input_excluded_list,
                                          const int* d_input_excluded_numbers)
 {
+    const int previous_local_atom_numbers = local_atom_numbers;
+    const int previous_direct_local_atom_numbers = direct_local_atom_numbers;
+    const int previous_ghost_numbers = ghost_numbers;
     local_atom_numbers = input_local_atom_numbers;
     direct_local_atom_numbers =
         IntMin(local_atom_numbers, IntMax(0, input_direct_local_atom_numbers));
@@ -8968,6 +21150,16 @@ void LJ_CLUSTER_LAYOUT::Refresh_Metadata(int input_local_atom_numbers,
     d_excluded_list_start = d_input_excluded_list_start;
     d_excluded_list = d_input_excluded_list;
     d_excluded_numbers = d_input_excluded_numbers;
+    if (previous_local_atom_numbers != local_atom_numbers ||
+        previous_direct_local_atom_numbers != direct_local_atom_numbers ||
+        previous_ghost_numbers != ghost_numbers)
+    {
+        gmxpacked_incremental_source_offsets_ready = false;
+        gmxpacked_incremental_source_cache_ready = false;
+        gmxpacked_incremental_candidate_sci_numbers = 0;
+        gmxpacked_incremental_source_numbers = 0;
+        stable_target_layout_anchor_ready = false;
+    }
     rebuild_dirty = true;
     Invalidate_Clustered_Legacy_Neighbor_View(this);
     Initialize_Cornerstone_State(this);
@@ -9011,12 +21203,1538 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
         cache_ready = false;
         cached_cutoff = -1.0f;
         runtime_aux_clustered_metadata_requested = false;
+        gmxpacked_incremental_source_offsets_ready = false;
+        gmxpacked_incremental_source_cache_ready = false;
+        gmxpacked_incremental_candidate_sci_numbers = 0;
+        gmxpacked_incremental_source_numbers = 0;
+        stable_target_layout_anchor_ready = false;
         Invalidate_Clustered_Legacy_Neighbor_View(this);
         return;
     }
 
-    Initialize_Cornerstone_State(this);
-    if (!Clustered_Build_Is_Needed(this, crd, cell, rcell, cutoff))
+    const bool request_gmxpacked_record_builder_route_for_cache =
+        need_gmxpacked_payload && runtime_gmxpacked_direct_requested &&
+        Clustered_Gmxpacked_Record_Builder_Enabled() &&
+        Clustered_Gmxpacked_Record_Builder_Route_Enabled();
+    const bool request_gmxpacked_primary_builder_for_cache =
+        request_gmxpacked_record_builder_route_for_cache &&
+        Clustered_Gmxpacked_Primary_Builder_Enabled();
+    const bool native_payload_bypass_requested =
+        Clustered_Gmxpacked_Record_Builder_Native_Bypass_Enabled() ||
+        request_gmxpacked_primary_builder_for_cache;
+    const bool cached_native_payload_required =
+        !runtime_gmxpacked_direct_requested || need_aux_clustered_metadata ||
+        (need_gmxpacked_payload && runtime_gmxpacked_direct_requested &&
+         (!request_gmxpacked_record_builder_route_for_cache ||
+          !native_payload_bypass_requested)) ||
+        Clustered_Microbench_Dump_Requested() ||
+        Clustered_Gmxpacked_Record_Builder_Compare_Enabled() ||
+        Clustered_Gmxpacked_Record_Builder_Compare_Stage_Trace_Enabled() ||
+        Clustered_Gmxpacked_Record_Builder_Compare_Source_Trace_Enabled() ||
+        Clustered_Gmxpacked_Record_Builder_Compare_Device_Source_Trace_Enabled() ||
+        Clustered_Gmxpacked_Record_Builder_Compare_Prune_Input_Trace_Enabled() ||
+        Clustered_Gmxpacked_Record_Builder_Compare_Prune_Contract_Trace_Enabled() ||
+        Clustered_Gmxpacked_Record_Builder_Compare_Raw_Coord_Pair_Context_Enabled() ||
+        Clustered_Gmxpacked_Record_Builder_Compare_Raw_Coord_Force_Context_Enabled() ||
+        Clustered_Gmxpacked_Record_Builder_Compare_Geometry_Route_Shift_Enabled() ||
+        Clustered_Gmxpacked_Direct_Candidate_Build_Enabled() ||
+        Clustered_Gmxpacked_Reduced_Build_Enabled() ||
+        Clustered_Gmxpacked_Early_Record_Analyze_Enabled();
+    const bool cached_native_payload_missing =
+        cached_native_payload_required &&
+        (sci_numbers <= 0 || cjpacked_numbers <= 0 ||
+         d_nbnxm_sci == NULL || d_nbnxm_cjpacked == NULL);
+    const bool previous_gmxpacked_incremental_record_source_cache_ready =
+        gmxpacked_incremental_source_cache_ready &&
+        d_gmxpacked_incremental_record_stream_sources != NULL;
+    const bool previous_gmxpacked_incremental_source_cache_ready =
+        gmxpacked_incremental_source_offsets_ready &&
+        previous_gmxpacked_incremental_record_source_cache_ready &&
+        d_gmxpacked_incremental_source_offsets_by_candidate != NULL;
+    const int previous_gmxpacked_incremental_candidate_sci_numbers =
+        gmxpacked_incremental_candidate_sci_numbers;
+    const int previous_gmxpacked_incremental_source_numbers =
+        gmxpacked_incremental_source_numbers;
+    const int previous_gmxpacked_record_stream_aggregate_numbers =
+        gmxpacked_record_stream_aggregate_numbers;
+    const int previous_gmxpacked_sci_numbers = gmxpacked_sci_numbers;
+    const int previous_gmxpacked_cjpacked_numbers = gmxpacked_cjpacked_numbers;
+    const int previous_gmxpacked_exclusion_numbers =
+        gmxpacked_exclusion_numbers;
+    const int previous_gmxpacked_split_exclusion_numbers =
+        gmxpacked_split_exclusion_numbers;
+    const bool previous_gmxpacked_compact_payload_ready =
+        previous_gmxpacked_sci_numbers > 0 &&
+        previous_gmxpacked_cjpacked_numbers > 0 &&
+        previous_gmxpacked_exclusion_numbers > 0 &&
+        d_gmxpacked_sci != NULL && d_gmxpacked_cjpacked != NULL &&
+        d_gmxpacked_exclusions != NULL;
+    const bool clustered_build_needed =
+        Clustered_Build_Is_Needed(this, crd, cell, rcell, cutoff);
+    bool active_view_force_outer_payload_this_build = false;
+    auto can_attempt_inner_active_from_cached_outer_source = [&]() -> bool
+    {
+        return request_gmxpacked_primary_builder_for_cache &&
+               !cached_native_payload_required &&
+               need_gmxpacked_payload && runtime_gmxpacked_direct_requested &&
+               Clustered_Gmxpacked_Record_Builder_Outer_Source_Enabled() &&
+               Clustered_Gmxpacked_Record_Builder_Inner_Active_Payload_Enabled() &&
+               Clustered_Gmxpacked_Incremental_Cache_Enabled() &&
+               Clustered_Gmxpacked_Stable_Target_Layout_Enabled() &&
+               Clustered_Gmxpacked_Stable_Source_Contract_Enabled() &&
+               previous_gmxpacked_incremental_record_source_cache_ready &&
+               previous_gmxpacked_incremental_source_numbers > 0 &&
+               stable_target_layout_anchor_ready &&
+               d_stable_target_layout_crd != NULL &&
+               fabsf(cached_cutoff - cutoff) <= 1e-6f;
+    };
+    auto try_inner_active_payload_refresh_from_outer_cache =
+        [&](const char* refresh_label, bool allow_anchor_drift,
+            bool commit_current_cache_on_success) -> bool
+    {
+        const bool refresh_stage_timers =
+            Clustered_Gmxpacked_Record_Builder_Stage_Timers_Enabled() &&
+            need_gmxpacked_payload && runtime_gmxpacked_direct_requested &&
+            Clustered_Gmxpacked_Record_Builder_Enabled();
+        const bool refresh_summary_trace =
+            Clustered_Trace_Warp_Records_Enabled() ||
+            Clustered_Gmxpacked_Incremental_Stats_Enabled() ||
+            refresh_stage_timers;
+        const bool use_current_inner_active =
+            allow_anchor_drift &&
+            Clustered_Gmxpacked_Current_Inner_Active_Enabled();
+        const bool use_active_view_current_mask =
+            Clustered_Gmxpacked_Active_View_Current_Mask_Enabled();
+        const bool use_current_active_mask =
+            use_current_inner_active || use_active_view_current_mask;
+        float anchor_max_displacement = 0.0f;
+        {
+            ClusteredGmxpackedRecordBuilderStageTimer stage_timer(
+                allow_anchor_drift
+                    ? "rolling-inner-active-anchor-displacement-max"
+                    : "inner-active-anchor-displacement-max",
+                refresh_stage_timers);
+            anchor_max_displacement =
+                Clustered_Max_Stable_Target_Anchor_Displacement(
+                    this, crd, cell, rcell);
+        }
+        if (Clustered_Gmxpacked_Anchor_Diagnostics_Enabled())
+        {
+            const float atomic_anchor_max_displacement =
+                Clustered_Max_Stable_Target_Anchor_Displacement_Atomic_Diagnostic(
+                    this, crd, cell, rcell);
+            fprintf(stderr,
+                    "[clustered gmxpacked anchor diag] step=%d cached_step=%d "
+                    "phase=%s cub_max_disp=%.9g atomic_max_disp=%.9g "
+                    "atoms=%d anchor_ready=%d\n",
+                    md_info.sys.steps, cached_build_step,
+                    refresh_label != NULL ? refresh_label : "unknown",
+                    anchor_max_displacement, atomic_anchor_max_displacement,
+                    total_atom_numbers, stable_target_layout_anchor_ready ? 1
+                                                                          : 0);
+            fflush(stderr);
+        }
+        const bool current_inner_active_anchor_ready =
+            !use_current_active_mask ||
+            (gmxpacked_inner_active_anchor_ready &&
+             d_gmxpacked_inner_active_anchor_crd != NULL);
+        float active_anchor_max_displacement = 0.0f;
+        if (use_current_active_mask && current_inner_active_anchor_ready)
+        {
+            ClusteredGmxpackedRecordBuilderStageTimer stage_timer(
+                "rolling-inner-active-current-anchor-displacement-max",
+                refresh_stage_timers);
+            active_anchor_max_displacement =
+                Clustered_Max_Gmxpacked_Inner_Active_Anchor_Displacement(
+                    this, crd, cell, rcell);
+        }
+        const float anchor_current_permit =
+            (rebuild_skin > 0.0f && rebuild_skin_permit > 0.0f)
+                ? rebuild_skin * rebuild_skin_permit
+                : -1.0f;
+        const bool anchor_current =
+            anchor_current_permit >= 0.0f &&
+            anchor_max_displacement <= anchor_current_permit + 1e-5f;
+        if (!anchor_current && !allow_anchor_drift)
+        {
+            stable_target_layout_anchor_ready = false;
+            return false;
+        }
+        const float outer_source_cutoff = cutoff + rebuild_skin;
+        const float configured_guard_margin =
+            Clustered_Gmxpacked_Record_Builder_Inner_Active_Guard_Margin();
+        const float guard_margin =
+            use_current_inner_active
+                ? fminf(configured_guard_margin, 1.0f)
+                : configured_guard_margin;
+        const bool use_current_inner_adaptive_lease =
+            use_current_inner_active &&
+            Clustered_Gmxpacked_Current_Inner_Adaptive_Lease_Enabled();
+        const float current_inner_lease_factor =
+            use_current_inner_adaptive_lease
+                ? Clustered_Gmxpacked_Current_Inner_Lease_Factor()
+                : 1.0f;
+        const float current_inner_outer_cutoff_limit =
+            outer_source_cutoff - 2.0f * anchor_max_displacement;
+        if (use_current_inner_active &&
+            current_inner_outer_cutoff_limit < cutoff - 1.0e-5f)
+        {
+            stable_target_layout_anchor_ready = false;
+            if (refresh_summary_trace)
+            {
+                fprintf(stderr,
+                        "[clustered gmxpacked rolling outer source miss] "
+                        "step=%d cached_step=%d phase=%s "
+                        "reason=current-inner-cutoff-undercovered "
+                        "anchor_max_disp=%.6f source_limit=%.6f "
+                        "cutoff=%.6f outer_cutoff=%.6f\n",
+                        md_info.sys.steps, cached_build_step, refresh_label,
+                        anchor_max_displacement,
+                        current_inner_outer_cutoff_limit, cutoff,
+                        outer_source_cutoff);
+                fflush(stderr);
+            }
+            return false;
+        }
+        float current_inner_target_guard_cutoff =
+            cutoff + guard_margin * current_inner_lease_factor;
+        current_inner_target_guard_cutoff =
+            fminf(outer_source_cutoff, current_inner_target_guard_cutoff);
+        if (use_current_inner_active)
+        {
+            current_inner_target_guard_cutoff =
+                fminf(current_inner_target_guard_cutoff,
+                      current_inner_outer_cutoff_limit);
+        }
+        current_inner_target_guard_cutoff =
+            fmaxf(cutoff, current_inner_target_guard_cutoff);
+        const float source_coverage_cutoff =
+            use_current_inner_active
+                ? fmaxf(cutoff, current_inner_target_guard_cutoff +
+                                    2.0f * anchor_max_displacement)
+                : fmaxf(cutoff, cutoff + 2.0f * anchor_max_displacement);
+        const float requested_active_cutoff =
+            use_current_active_mask && current_inner_active_anchor_ready
+                ? fmaxf(cutoff,
+                        cutoff + 2.0f * active_anchor_max_displacement)
+                : fmaxf(cutoff, cutoff + 2.0f * anchor_max_displacement);
+        const float required_guard_cutoff =
+            fminf(outer_source_cutoff, requested_active_cutoff + 1e-4f);
+        const bool source_covers_requested_active_cutoff =
+            source_coverage_cutoff <= outer_source_cutoff + 1e-5f;
+        if (!anchor_current && allow_anchor_drift &&
+            !source_covers_requested_active_cutoff)
+        {
+            stable_target_layout_anchor_ready = false;
+            if (refresh_summary_trace)
+            {
+                fprintf(stderr,
+                        "[clustered gmxpacked rolling outer source miss] "
+                        "step=%d cached_step=%d phase=%s "
+                        "anchor_max_disp=%.6f requested_cutoff=%.6f "
+                        "source_cutoff=%.6f outer_cutoff=%.6f "
+                        "target_cutoff=%.6f adaptive_lease=%d "
+                        "source_limit=%.6f\n",
+                        md_info.sys.steps, cached_build_step, refresh_label,
+                        anchor_max_displacement, requested_active_cutoff,
+                        source_coverage_cutoff, outer_source_cutoff,
+                        current_inner_target_guard_cutoff,
+                        use_current_inner_adaptive_lease ? 1 : 0,
+                        current_inner_outer_cutoff_limit);
+                fflush(stderr);
+            }
+            return false;
+        }
+        ClusteredRecorderScope payload_build_scope(payload_build_time_recorder);
+        const bool active_view_fixed_cutoff =
+            use_active_view_current_mask &&
+            Clustered_Gmxpacked_Active_View_Fixed_Cutoff_Enabled();
+        float target_guard_cutoff =
+            use_current_inner_active
+                ? current_inner_target_guard_cutoff
+            : use_active_view_current_mask
+                ? fminf(outer_source_cutoff,
+                        required_guard_cutoff + guard_margin)
+                : fminf(outer_source_cutoff,
+                        required_guard_cutoff + guard_margin);
+        if (active_view_fixed_cutoff)
+        {
+            target_guard_cutoff =
+                fminf(outer_source_cutoff, cutoff + guard_margin);
+        }
+        if (!active_view_fixed_cutoff && use_current_active_mask &&
+            gmxpacked_inner_active_guard_cutoff > cutoff)
+        {
+            target_guard_cutoff =
+                fminf(outer_source_cutoff,
+                      fmaxf(target_guard_cutoff,
+                            gmxpacked_inner_active_guard_cutoff));
+        }
+        const bool experimental_inner_active =
+            !use_current_inner_active &&
+            Clustered_Gmxpacked_Active_View_Experimental_Inner_Enabled();
+        const float experimental_inner_anchor_limit =
+            experimental_inner_active
+                ? Clustered_Gmxpacked_Experimental_Inner_Anchor_Limit()
+                : -1.0f;
+        if (experimental_inner_anchor_limit >= 0.0f &&
+            anchor_max_displacement >
+                experimental_inner_anchor_limit + 1e-5f)
+        {
+            stable_target_layout_anchor_ready = false;
+            if (refresh_summary_trace)
+            {
+                fprintf(stderr,
+                        "[clustered gmxpacked inner active fallback] "
+                        "step=%d cached_step=%d phase=%s "
+                        "reason=experimental-anchor-limit "
+                        "anchor_max_disp=%.6f limit=%.6f "
+                        "requested_cutoff=%.6f required_cutoff=%.6f "
+                        "target_cutoff=%.6f outer_cutoff=%.6f\n",
+                        md_info.sys.steps, cached_build_step, refresh_label,
+                        anchor_max_displacement,
+                        experimental_inner_anchor_limit,
+                        requested_active_cutoff, required_guard_cutoff,
+                        target_guard_cutoff, outer_source_cutoff);
+                fflush(stderr);
+            }
+            return false;
+        }
+        if (experimental_inner_active)
+        {
+            const float max_cutoff_fraction =
+                Clustered_Gmxpacked_Experimental_Inner_Max_Cutoff_Fraction();
+            const float cutoff_span = fmaxf(outer_source_cutoff - cutoff, 1e-6f);
+            const float active_cutoff_fraction =
+                (target_guard_cutoff - cutoff) / cutoff_span;
+            if (max_cutoff_fraction >= 0.0f &&
+                active_cutoff_fraction > max_cutoff_fraction + 1e-6f)
+            {
+                stable_target_layout_anchor_ready = false;
+                if (refresh_summary_trace)
+                {
+                    fprintf(stderr,
+                            "[clustered gmxpacked inner active fallback] "
+                            "step=%d cached_step=%d phase=%s "
+                            "reason=experimental-cutoff-fraction "
+                            "active_cutoff=%.6f cutoff=%.6f "
+                            "outer_cutoff=%.6f fraction=%.6f limit=%.6f "
+                            "anchor_max_disp=%.6f\n",
+                            md_info.sys.steps, cached_build_step,
+                            refresh_label, target_guard_cutoff, cutoff,
+                            outer_source_cutoff, active_cutoff_fraction,
+                            max_cutoff_fraction, anchor_max_displacement);
+                    fflush(stderr);
+                }
+                return false;
+            }
+        }
+        const float active_view_refresh_margin =
+            fmaxf(0.0f, target_guard_cutoff - cutoff);
+        const float active_view_refresh_threshold =
+            active_view_refresh_margin *
+            Clustered_Gmxpacked_Active_View_Refresh_Fraction();
+        const bool active_view_refresh_due =
+            use_current_active_mask &&
+            Clustered_Gmxpacked_Active_View_Partial_Refresh_Enabled() &&
+            current_inner_active_anchor_ready &&
+            active_view_refresh_threshold > 0.0f &&
+            active_anchor_max_displacement >
+                active_view_refresh_threshold + 1e-5f;
+        const float active_view_cached_anchor_reuse_limit =
+            fminf(Clustered_Gmxpacked_Active_View_Anchor_Reuse_Limit(),
+                  active_view_refresh_margin);
+        const bool active_view_cached_anchor_expired =
+            use_current_active_mask && current_inner_active_anchor_ready &&
+            active_anchor_max_displacement >
+                active_view_cached_anchor_reuse_limit + 1e-5f;
+        if (previous_gmxpacked_compact_payload_ready &&
+            current_inner_active_anchor_ready &&
+            gmxpacked_inner_active_guard_cutoff + 1e-6f >=
+                required_guard_cutoff &&
+            !active_view_refresh_due &&
+            !active_view_cached_anchor_expired)
+        {
+            bool reuse_coverage_ok = true;
+            int reuse_missing_source_rows = 0;
+            if (Clustered_Gmxpacked_Active_View_Verify_Reuse_Enabled() &&
+                Clustered_Gmxpacked_Record_Builder_Inner_Active_Payload_Enabled() &&
+                previous_gmxpacked_incremental_source_numbers > 0 &&
+                d_gmxpacked_incremental_record_stream_sources != NULL)
+            {
+                const float reuse_verify_cutoff = cutoff;
+                reuse_coverage_ok =
+                    Gmxpacked_Inner_Active_Source_Coverage_Covers(
+                        this, previous_gmxpacked_incremental_source_numbers,
+                        d_gmxpacked_incremental_record_stream_sources,
+                        crd, cell, rcell, reuse_verify_cutoff,
+                        refresh_stage_timers,
+                        allow_anchor_drift
+                            ? "rolling-inner-active-reuse-coverage-check"
+                            : "inner-active-reuse-coverage-check",
+                        &reuse_missing_source_rows);
+                if (!reuse_coverage_ok && refresh_summary_trace)
+                {
+                    fprintf(stderr,
+                            "[clustered gmxpacked inner active reuse miss] "
+                            "step=%d cached_step=%d phase=%s "
+                            "missing_source_rows=%d verify_cutoff=%.6f "
+                            "required_cutoff=%.6f cached_guard_cutoff=%.6f "
+                            "current_inner=%d\n",
+                            md_info.sys.steps, cached_build_step,
+                            refresh_label, reuse_missing_source_rows,
+                            reuse_verify_cutoff, required_guard_cutoff,
+                            gmxpacked_inner_active_guard_cutoff,
+                            use_current_inner_active ? 1 : 0);
+                    fflush(stderr);
+                }
+            }
+            if (reuse_coverage_ok)
+            {
+                {
+                    ClusteredGmxpackedRecordBuilderStageTimer stage_timer(
+                        allow_anchor_drift
+                            ? "rolling-inner-active-reuse-pair-shift-refresh"
+                            : "inner-active-reuse-pair-shift-refresh",
+                        refresh_stage_timers);
+                    if (Clustered_Gmxpacked_Should_Refresh_Pair_Shift_Metadata(
+                            this, rcell))
+                    {
+                        Reserve_Device_U64_Buffer(
+                            gmxpacked_cjpacked_numbers * kClusteredJGroupSize,
+                            &d_pair_shift_bits, &pair_shift_capacity);
+                        Refresh_Gmxpacked_Pair_Shift_Metadata(this, rcell);
+                    }
+                }
+                if (commit_current_cache_on_success)
+                {
+                    Commit_Clustered_Build_Cache(this, crd, cutoff);
+                }
+                if (refresh_summary_trace)
+                {
+                    fprintf(stderr,
+                            "[clustered gmxpacked inner active reuse] "
+                            "step=%d cached_step=%d phase=%s compact_sci=%d "
+                            "compact_cj=%d compact_excl=%d split_excl=%d "
+                            "anchor_current=%d rolling=%d "
+                            "anchor_max_disp=%.6f requested_cutoff=%.6f "
+                            "active_anchor_max_disp=%.6f required_cutoff=%.6f "
+                            "cached_guard_cutoff=%.6f current_inner=%d "
+                            "adaptive_lease=%d\n",
+                            md_info.sys.steps, cached_build_step, refresh_label,
+                            gmxpacked_sci_numbers, gmxpacked_cjpacked_numbers,
+                            gmxpacked_exclusion_numbers,
+                            gmxpacked_split_exclusion_numbers,
+                            anchor_current ? 1 : 0,
+                            allow_anchor_drift ? 1 : 0,
+                            anchor_max_displacement, requested_active_cutoff,
+                            active_anchor_max_displacement,
+                            required_guard_cutoff,
+                            gmxpacked_inner_active_guard_cutoff,
+                            use_current_inner_active ? 1 : 0,
+                            use_current_inner_adaptive_lease ? 1 : 0);
+                    fflush(stderr);
+                }
+                return true;
+            }
+        }
+        if (use_current_inner_active &&
+            Clustered_Gmxpacked_Inner_Active_Incremental_Append_Enabled() &&
+            previous_gmxpacked_compact_payload_ready &&
+            current_inner_active_anchor_ready &&
+            d_gmxpacked_incremental_record_stream_sources != NULL &&
+            gmxpacked_inner_active_source_imasks_ready &&
+            d_gmxpacked_inner_active_source_imasks != NULL &&
+            gmxpacked_inner_active_source_imask_numbers ==
+                previous_gmxpacked_incremental_source_numbers &&
+            gmxpacked_record_stream_source_numbers > 0 &&
+            d_gmxpacked_record_stream_sources != NULL)
+        {
+            const int previous_active_source_rows =
+                gmxpacked_record_stream_source_numbers;
+            const int baseline_active_source_rows =
+                gmxpacked_inner_active_source_rows_baseline > 0
+                    ? gmxpacked_inner_active_source_rows_baseline
+                    : previous_active_source_rows;
+            const float append_growth_ratio =
+                Clustered_Gmxpacked_Inner_Active_Append_Max_Growth_Ratio();
+            const int max_combined_source_rows = IntMax(
+                previous_active_source_rows,
+                static_cast<int>(
+                    static_cast<float>(baseline_active_source_rows) *
+                    append_growth_ratio));
+            int appended_source_rows = 0;
+            int append_overflow_rows = 0;
+            int append_dirty_source_rows = -1;
+            bool used_dirty_candidate_append = false;
+            gmxpacked_inner_active_append_attempts++;
+            gmxpacked_inner_active_append_max_active_rows = IntMax(
+                gmxpacked_inner_active_append_max_active_rows,
+                previous_active_source_rows);
+            gmxpacked_inner_active_append_max_limit_rows = IntMax(
+                gmxpacked_inner_active_append_max_limit_rows,
+                max_combined_source_rows);
+            bool append_ready = false;
+            if (Clustered_Gmxpacked_Inner_Active_Dirty_Candidate_Append_Enabled() &&
+                target_guard_cutoff > cutoff + 1.0e-6f &&
+                previous_gmxpacked_incremental_source_cache_ready &&
+                previous_gmxpacked_incremental_candidate_sci_numbers ==
+                    candidate_sci_numbers &&
+                d_gmxpacked_incremental_source_offsets_by_candidate != NULL)
+            {
+                const bool cached_sparse_shift_candidates =
+                    Clustered_Use_Sparse_Shift_Candidate_Builder();
+                const bool cached_dense_shift_candidates =
+                    Clustered_Use_Shift_Partitioned_Builder();
+                const bool cached_fixed_shift_candidates =
+                    cached_dense_shift_candidates || cached_sparse_shift_candidates;
+                const int* cached_candidate_sci_supercluster_ids =
+                    cached_sparse_shift_candidates ? d_candidate_sci_offsets
+                                                   : d_sci_supercluster_ids;
+                const int* cached_candidate_shift_ids =
+                    cached_sparse_shift_candidates ? d_candidate_shift_ids : NULL;
+                bool dirty_append_j_leaf_scope_ready = false;
+                const bool dirty_append_mask_ready =
+                    Build_Gmxpacked_Inner_Active_Dirty_Device_Mask(
+                        this, crd, d_gmxpacked_inner_active_anchor_crd, cell,
+                        rcell, cached_candidate_sci_supercluster_ids,
+                        cached_candidate_shift_ids, cached_fixed_shift_candidates,
+                        target_guard_cutoff - cutoff,
+                        &dirty_append_j_leaf_scope_ready);
+                if (dirty_append_mask_ready &&
+                    d_gmxpacked_incremental_dirty_candidate_sci != NULL)
+                {
+                    append_ready =
+                        Append_Gmxpacked_Inner_Active_Missing_Sources_From_Dirty_Candidates(
+                            this, previous_gmxpacked_incremental_source_numbers,
+                            d_gmxpacked_incremental_record_stream_sources,
+                            previous_gmxpacked_incremental_candidate_sci_numbers,
+                            d_gmxpacked_incremental_dirty_candidate_sci,
+                            d_gmxpacked_incremental_source_offsets_by_candidate,
+                            crd, cell, rcell, target_guard_cutoff,
+                            previous_active_source_rows, max_combined_source_rows,
+                            refresh_stage_timers,
+                            allow_anchor_drift
+                                ? "rolling-inner-active-dirty-candidate-append"
+                                : "inner-active-dirty-candidate-append",
+                            &appended_source_rows, &append_overflow_rows,
+                            &append_dirty_source_rows);
+                    used_dirty_candidate_append = append_ready;
+                    if (refresh_summary_trace)
+                    {
+                        fprintf(stderr,
+                                "[clustered gmxpacked inner active dirty append] "
+                                "step=%d ready=%d dirty_source_rows=%d "
+                                "j_leaf_scope=%d appended_rows=%d "
+                                "overflow_rows=%d\n",
+                                md_info.sys.steps, append_ready ? 1 : 0,
+                                append_dirty_source_rows,
+                                dirty_append_j_leaf_scope_ready ? 1 : 0,
+                                appended_source_rows, append_overflow_rows);
+                        fflush(stderr);
+                    }
+                }
+            }
+            if (!append_ready)
+            {
+                append_ready = Append_Gmxpacked_Inner_Active_Missing_Sources(
+                    this, previous_gmxpacked_incremental_source_numbers,
+                    d_gmxpacked_incremental_record_stream_sources, crd, cell,
+                    rcell, target_guard_cutoff,
+                    previous_active_source_rows, max_combined_source_rows,
+                    refresh_stage_timers,
+                    allow_anchor_drift
+                        ? "rolling-inner-active-incremental-append"
+                        : "inner-active-incremental-append",
+                    &appended_source_rows, &append_overflow_rows);
+                used_dirty_candidate_append = false;
+            }
+            gmxpacked_inner_active_append_rows_total += appended_source_rows;
+            gmxpacked_inner_active_append_overflow_rows_total +=
+                append_overflow_rows;
+            bool append_compact_ready = append_ready;
+            int appended_filled_aggregate_rows = 0;
+            ClusteredGmxpackedRecordStreamCompactSummary append_summary = {};
+            if (append_ready && appended_source_rows > 0)
+            {
+                const int combined_source_rows =
+                    previous_active_source_rows + appended_source_rows;
+                bool used_delta_compact = false;
+                if (Clustered_Gmxpacked_Active_View_Compact_Delta_Enabled() &&
+                    baseline_active_source_rows > 0 &&
+                    combined_source_rows > baseline_active_source_rows &&
+                    d_gmxpacked_record_stream_sources != NULL)
+                {
+                    const int delta_source_rows =
+                        combined_source_rows - baseline_active_source_rows;
+                    append_summary =
+                        Build_Gmxpacked_Record_Stream_Delta_Compact_Payload(
+                            this,
+                            d_gmxpacked_record_stream_sources +
+                                baseline_active_source_rows,
+                            delta_source_rows, rcell);
+                    used_delta_compact =
+                        append_summary.compact_sci > 0 &&
+                        append_summary.compact_cj > 0 &&
+                        append_summary.compact_excl > 0 &&
+                        d_gmxpacked_delta_sci != NULL &&
+                        d_gmxpacked_delta_cjpacked != NULL &&
+                        d_gmxpacked_delta_exclusions != NULL &&
+                        d_gmxpacked_delta_pair_shift_bits != NULL;
+                    append_compact_ready =
+                        used_delta_compact &&
+                        gmxpacked_sci_numbers > 0 &&
+                        gmxpacked_cjpacked_numbers > 0 &&
+                        gmxpacked_exclusion_numbers > 0 &&
+                        d_gmxpacked_sci != NULL &&
+                        d_gmxpacked_cjpacked != NULL &&
+                        d_gmxpacked_exclusions != NULL;
+                    if (refresh_summary_trace && used_delta_compact)
+                    {
+                        fprintf(stderr,
+                                "[clustered gmxpacked inner active delta compact] "
+                                "step=%d baseline_source_rows=%d "
+                                "delta_source_rows=%d delta_sci=%d "
+                                "delta_cj=%d delta_excl=%d\n",
+                                md_info.sys.steps, baseline_active_source_rows,
+                                delta_source_rows, append_summary.compact_sci,
+                                append_summary.compact_cj,
+                                append_summary.compact_excl);
+                        fflush(stderr);
+                    }
+                }
+                if (!used_delta_compact)
+                {
+                    bool full_compact_built = false;
+                    appended_filled_aggregate_rows =
+                        Build_Gmxpacked_Record_Stream_Aggregates(this);
+                    if (gmxpacked_record_stream_aggregate_numbers > 0 &&
+                        appended_filled_aggregate_rows ==
+                            gmxpacked_record_stream_aggregate_numbers)
+                    {
+                        gmxpacked_delta_sci_numbers = 0;
+                        gmxpacked_delta_cjpacked_numbers = 0;
+                        gmxpacked_delta_exclusion_numbers = 0;
+                        gmxpacked_delta_split_exclusion_numbers = 0;
+                        append_summary =
+                            Build_Gmxpacked_Record_Stream_Compact_Payload(this);
+                        full_compact_built =
+                            append_summary.compact_sci > 0 &&
+                            append_summary.compact_cj > 0 &&
+                            append_summary.compact_excl > 0;
+                    }
+                    append_compact_ready =
+                        full_compact_built &&
+                        gmxpacked_sci_numbers > 0 &&
+                        gmxpacked_cjpacked_numbers > 0 &&
+                        gmxpacked_exclusion_numbers > 0 &&
+                        d_gmxpacked_sci != NULL &&
+                        d_gmxpacked_cjpacked != NULL &&
+                        d_gmxpacked_exclusions != NULL;
+                }
+            }
+            if (append_ready && append_compact_ready)
+            {
+                gmxpacked_inner_active_append_successes++;
+                if (appended_source_rows == 0)
+                {
+                    gmxpacked_inner_active_append_zero_rows++;
+                }
+                const int combined_source_rows =
+                    previous_active_source_rows + appended_source_rows;
+                gmxpacked_inner_active_append_last_active_rows =
+                    combined_source_rows;
+                gmxpacked_inner_active_append_max_active_rows = IntMax(
+                    gmxpacked_inner_active_append_max_active_rows,
+                    combined_source_rows);
+                gmxpacked_inner_active_guard_cutoff = target_guard_cutoff;
+                {
+                    ClusteredGmxpackedRecordBuilderStageTimer stage_timer(
+                        allow_anchor_drift
+                            ? "rolling-inner-active-incremental-pair-shift-refresh"
+                            : "inner-active-incremental-pair-shift-refresh",
+                        refresh_stage_timers);
+                    if (Clustered_Gmxpacked_Should_Refresh_Pair_Shift_Metadata(
+                            this, rcell))
+                    {
+                        Reserve_Device_U64_Buffer(
+                            gmxpacked_cjpacked_numbers * kClusteredJGroupSize,
+                            &d_pair_shift_bits, &pair_shift_capacity);
+                        Refresh_Gmxpacked_Pair_Shift_Metadata(this, rcell);
+                    }
+                }
+                if (use_current_inner_active &&
+                    Clustered_Gmxpacked_Inner_Active_Append_Refresh_Anchor_Enabled())
+                {
+                    Refresh_Gmxpacked_Inner_Active_Anchor_Crd(this, crd);
+                }
+                if (commit_current_cache_on_success)
+                {
+                    Commit_Clustered_Build_Cache(this, crd, cutoff);
+                }
+                if (refresh_summary_trace)
+                {
+                    fprintf(stderr,
+                            "[clustered gmxpacked inner active incremental append] "
+                            "step=%d cached_step=%d phase=%s "
+                            "outer_source_rows=%d previous_active_rows=%d "
+                            "appended_rows=%d combined_source_rows=%d "
+                            "max_combined_source_rows=%d overflow_rows=%d "
+                            "dirty_append=%d dirty_source_rows=%d "
+                            "aggregate_rows=%d filled_aggregate_rows=%d "
+                            "compact_sci=%d compact_cj=%d compact_excl=%d "
+                            "split_excl=%d anchor_current=%d rolling=%d "
+                            "anchor_max_disp=%.6f "
+                            "active_anchor_max_disp=%.6f "
+                            "requested_cutoff=%.6f required_cutoff=%.6f "
+                            "active_cutoff=%.6f guard_margin=%.6f\n",
+                            md_info.sys.steps, cached_build_step,
+                            refresh_label,
+                            previous_gmxpacked_incremental_source_numbers,
+                            previous_active_source_rows,
+                            appended_source_rows, combined_source_rows,
+                            max_combined_source_rows, append_overflow_rows,
+                            used_dirty_candidate_append ? 1 : 0,
+                            append_dirty_source_rows,
+                            gmxpacked_record_stream_aggregate_numbers,
+                            appended_filled_aggregate_rows,
+                            appended_source_rows > 0
+                                ? append_summary.compact_sci
+                                : gmxpacked_sci_numbers,
+                            appended_source_rows > 0
+                                ? append_summary.compact_cj
+                                : gmxpacked_cjpacked_numbers,
+                            appended_source_rows > 0
+                                ? append_summary.compact_excl
+                                : gmxpacked_exclusion_numbers,
+                            appended_source_rows > 0
+                                ? append_summary.split_excl
+                                : gmxpacked_split_exclusion_numbers,
+                            anchor_current ? 1 : 0,
+                            allow_anchor_drift ? 1 : 0,
+                            anchor_max_displacement,
+                            active_anchor_max_displacement,
+                            requested_active_cutoff, required_guard_cutoff,
+                            target_guard_cutoff, guard_margin);
+                    fflush(stderr);
+                }
+                return true;
+            }
+            gmxpacked_inner_active_append_fallbacks++;
+            Reset_Gmxpacked_Payload(this);
+            if (refresh_summary_trace)
+            {
+                fprintf(stderr,
+                        "[clustered gmxpacked inner active incremental fallback] "
+                        "step=%d cached_step=%d phase=%s "
+                        "previous_active_rows=%d max_combined_source_rows=%d "
+                        "appended_rows=%d overflow_rows=%d "
+                        "append_ready=%d compact_ready=%d\n",
+                        md_info.sys.steps, cached_build_step, refresh_label,
+                        previous_active_source_rows, max_combined_source_rows,
+                        appended_source_rows, append_overflow_rows,
+                        append_ready ? 1 : 0,
+                        append_compact_ready ? 1 : 0);
+                fflush(stderr);
+            }
+        }
+        if (use_current_inner_active &&
+            Clustered_Gmxpacked_Inner_Active_Coverage_Reuse_Enabled() &&
+            previous_gmxpacked_compact_payload_ready &&
+            current_inner_active_anchor_ready &&
+            d_gmxpacked_incremental_record_stream_sources != NULL &&
+            gmxpacked_inner_active_source_imasks_ready &&
+            d_gmxpacked_inner_active_source_imasks != NULL &&
+            gmxpacked_inner_active_source_imask_numbers ==
+                previous_gmxpacked_incremental_source_numbers)
+        {
+            int missing_source_rows = -1;
+            const bool coverage_covers =
+                Gmxpacked_Inner_Active_Source_Coverage_Covers(
+                    this, previous_gmxpacked_incremental_source_numbers,
+                    d_gmxpacked_incremental_record_stream_sources, crd, cell,
+                    rcell, target_guard_cutoff, refresh_stage_timers,
+                    allow_anchor_drift
+                        ? "rolling-inner-active-coverage-check"
+                        : "inner-active-coverage-check",
+                    &missing_source_rows);
+            if (coverage_covers)
+            {
+                gmxpacked_inner_active_guard_cutoff = target_guard_cutoff;
+                {
+                    ClusteredGmxpackedRecordBuilderStageTimer stage_timer(
+                        allow_anchor_drift
+                            ? "rolling-inner-active-coverage-pair-shift-refresh"
+                            : "inner-active-coverage-pair-shift-refresh",
+                        refresh_stage_timers);
+                    if (Clustered_Gmxpacked_Should_Refresh_Pair_Shift_Metadata(
+                            this, rcell))
+                    {
+                        Reserve_Device_U64_Buffer(
+                            gmxpacked_cjpacked_numbers * kClusteredJGroupSize,
+                            &d_pair_shift_bits, &pair_shift_capacity);
+                        Refresh_Gmxpacked_Pair_Shift_Metadata(this, rcell);
+                    }
+                }
+                if (commit_current_cache_on_success)
+                {
+                    Commit_Clustered_Build_Cache(this, crd, cutoff);
+                }
+                if (refresh_summary_trace)
+                {
+                    fprintf(stderr,
+                            "[clustered gmxpacked inner active coverage reuse] "
+                            "step=%d cached_step=%d phase=%s "
+                            "outer_source_rows=%d compact_sci=%d "
+                            "compact_cj=%d compact_excl=%d split_excl=%d "
+                            "anchor_current=%d rolling=%d "
+                            "anchor_max_disp=%.6f "
+                            "active_anchor_max_disp=%.6f "
+                            "requested_cutoff=%.6f required_cutoff=%.6f "
+                            "active_cutoff=%.6f guard_margin=%.6f "
+                            "missing_source_rows=%d\n",
+                            md_info.sys.steps, cached_build_step,
+                            refresh_label,
+                            previous_gmxpacked_incremental_source_numbers,
+                            gmxpacked_sci_numbers, gmxpacked_cjpacked_numbers,
+                            gmxpacked_exclusion_numbers,
+                            gmxpacked_split_exclusion_numbers,
+                            anchor_current ? 1 : 0,
+                            allow_anchor_drift ? 1 : 0,
+                            anchor_max_displacement,
+                            active_anchor_max_displacement,
+                            requested_active_cutoff, required_guard_cutoff,
+                            target_guard_cutoff, guard_margin,
+                            missing_source_rows);
+                    fflush(stderr);
+                }
+                return true;
+            }
+            if (refresh_summary_trace)
+            {
+                fprintf(stderr,
+                        "[clustered gmxpacked inner active coverage miss] "
+                        "step=%d cached_step=%d phase=%s "
+                        "outer_source_rows=%d anchor_max_disp=%.6f "
+                        "active_anchor_max_disp=%.6f active_cutoff=%.6f "
+                        "missing_source_rows=%d\n",
+                        md_info.sys.steps, cached_build_step, refresh_label,
+                        previous_gmxpacked_incremental_source_numbers,
+                        anchor_max_displacement, active_anchor_max_displacement,
+                        target_guard_cutoff, missing_source_rows);
+                fflush(stderr);
+            }
+        }
+        const int outer_source_rows =
+            previous_gmxpacked_incremental_source_numbers;
+        const VECTOR* active_prune_crd =
+            use_current_active_mask ? crd : d_stable_target_layout_crd;
+        bool used_active_view_refresh = false;
+        int active_view_dirty_source_rows = -1;
+        int active_view_changed_source_rows = -1;
+        int active_source_rows = -1;
+        const int previous_active_source_rows =
+            gmxpacked_record_stream_source_numbers;
+        const int previous_active_aggregate_rows =
+            gmxpacked_record_stream_aggregate_numbers;
+        const bool can_reuse_previous_compact_payload =
+            previous_gmxpacked_compact_payload_ready &&
+            previous_active_source_rows > 0 &&
+            previous_active_aggregate_rows > 0;
+        const bool active_view_cutoff_exact_matches =
+            gmxpacked_inner_active_guard_cutoff > 0.0f &&
+            fabsf(gmxpacked_inner_active_guard_cutoff -
+                  target_guard_cutoff) <= 1e-6f;
+        const float active_view_anchor_reuse_margin =
+            fmaxf(0.0f, target_guard_cutoff - cutoff);
+        const float active_view_anchor_reuse_limit =
+            fminf(Clustered_Gmxpacked_Active_View_Anchor_Reuse_Limit(),
+                  active_view_anchor_reuse_margin);
+        const bool active_view_anchor_guard_expired =
+            use_current_active_mask && current_inner_active_anchor_ready &&
+            active_anchor_max_displacement >
+                active_view_anchor_reuse_limit + 1e-5f;
+        const bool active_view_dirty_index_undercover =
+            use_current_active_mask &&
+            ((Clustered_Gmxpacked_Active_View_Dirty_Index_Refresh_Enabled() &&
+              Clustered_Gmxpacked_Active_View_Dirty_Index_Undercover_Enabled()) ||
+             (!Clustered_Gmxpacked_Active_View_Dirty_Index_Refresh_Enabled() &&
+              Clustered_Gmxpacked_Active_View_Source_Dirty_Undercover_Enabled()));
+        const bool active_view_guard_covers_required =
+            !use_current_active_mask ||
+            target_guard_cutoff + 1e-6f >= required_guard_cutoff ||
+            active_view_dirty_index_undercover;
+        const bool active_view_anchor_matches =
+            !use_current_active_mask || current_inner_active_anchor_ready;
+        const bool active_view_cutoff_drift_refresh_allowed =
+            use_current_active_mask && active_view_dirty_index_undercover &&
+            Clustered_Gmxpacked_Active_View_Cutoff_Drift_Refresh_Enabled() &&
+            Clustered_Gmxpacked_Active_View_Verify_True_Cutoff_Enabled() &&
+            gmxpacked_inner_active_guard_cutoff > 0.0f &&
+            target_guard_cutoff + 1e-6f >=
+                gmxpacked_inner_active_guard_cutoff;
+        const bool active_view_cutoff_matches =
+            active_view_cutoff_exact_matches ||
+            active_view_cutoff_drift_refresh_allowed;
+        bool used_full_active_view_refresh = false;
+        bool active_view_repaired_coverage = false;
+        int active_view_repaired_source_rows = 0;
+        const bool active_view_force_full_refresh =
+            active_view_refresh_due &&
+            !Clustered_Gmxpacked_Active_View_Dirty_Index_Refresh_Enabled();
+        if (Clustered_Gmxpacked_Active_View_Partial_Refresh_Enabled() &&
+            active_view_cutoff_matches &&
+            active_view_guard_covers_required &&
+            active_view_anchor_matches &&
+            !active_view_force_full_refresh &&
+            (!active_view_anchor_guard_expired ||
+             active_view_dirty_index_undercover) &&
+            d_gmxpacked_incremental_source_offsets_by_candidate != NULL &&
+            gmxpacked_inner_active_source_imasks_ready &&
+            gmxpacked_inner_active_source_imask_numbers ==
+                previous_gmxpacked_incremental_source_numbers &&
+            d_gmxpacked_inner_active_source_imasks != NULL)
+        {
+            const bool cached_sparse_shift_candidates =
+                Clustered_Use_Sparse_Shift_Candidate_Builder();
+            const bool cached_dense_shift_candidates =
+                Clustered_Use_Shift_Partitioned_Builder();
+            const bool cached_fixed_shift_candidates =
+                cached_dense_shift_candidates || cached_sparse_shift_candidates;
+            const int* cached_candidate_sci_supercluster_ids =
+                cached_sparse_shift_candidates ? d_candidate_sci_offsets
+                                               : d_sci_supercluster_ids;
+            const int* cached_candidate_shift_ids =
+                cached_sparse_shift_candidates ? d_candidate_shift_ids : NULL;
+            bool active_view_j_leaf_scope_ready = false;
+            const bool use_active_anchor_dirty_mask =
+                use_current_active_mask &&
+                Clustered_Gmxpacked_Active_View_Dirty_Index_Refresh_Enabled();
+            const bool dirty_mask_ready = use_active_anchor_dirty_mask
+                ? Build_Gmxpacked_Inner_Active_Dirty_Device_Mask(
+                      this, crd, d_gmxpacked_inner_active_anchor_crd, cell,
+                      rcell, cached_candidate_sci_supercluster_ids,
+                      cached_candidate_shift_ids, cached_fixed_shift_candidates,
+                      fmaxf(0.0f, target_guard_cutoff - cutoff),
+                      &active_view_j_leaf_scope_ready)
+                : Build_Gmxpacked_Incremental_Dirty_Device_Mask(
+                    this, crd, cell, rcell,
+                    cached_candidate_sci_supercluster_ids,
+                    cached_candidate_shift_ids, cached_fixed_shift_candidates,
+                    &active_view_j_leaf_scope_ready);
+            if (dirty_mask_ready &&
+                previous_gmxpacked_incremental_candidate_sci_numbers ==
+                    candidate_sci_numbers &&
+                d_gmxpacked_incremental_dirty_candidate_sci != NULL)
+            {
+                active_source_rows =
+                    Refresh_Gmxpacked_Record_Stream_Active_View_Sources(
+                        this, previous_gmxpacked_incremental_source_numbers,
+                        d_gmxpacked_incremental_record_stream_sources,
+                        previous_gmxpacked_incremental_candidate_sci_numbers,
+                        d_gmxpacked_incremental_dirty_candidate_sci,
+                        d_gmxpacked_incremental_source_offsets_by_candidate,
+                        active_prune_crd, cell, rcell, target_guard_cutoff,
+                        use_current_inner_active
+                            ? d_gmxpacked_inner_active_anchor_crd
+                            : NULL,
+                        fmaxf(0.0f, target_guard_cutoff - cutoff),
+                        refresh_stage_timers, &active_view_dirty_source_rows,
+                        &active_view_changed_source_rows,
+                        Clustered_Gmxpacked_Active_View_Compact_Patch_Enabled()
+                            ? gmxpacked_record_stream_source_numbers
+                            : 0);
+                used_active_view_refresh = active_source_rows >= 0;
+                if (used_active_view_refresh &&
+                    Clustered_Gmxpacked_Active_View_Verify_Coverage_Enabled())
+                {
+                    int active_view_missing_source_rows = -1;
+                    const float active_view_coverage_cutoff =
+                        Clustered_Gmxpacked_Active_View_Verify_True_Cutoff_Enabled()
+                            ? cutoff
+                            : target_guard_cutoff;
+                    const bool active_view_covers_current_cutoff =
+                        Gmxpacked_Inner_Active_Source_Coverage_Covers(
+                            this, previous_gmxpacked_incremental_source_numbers,
+                            d_gmxpacked_incremental_record_stream_sources,
+                            active_prune_crd, cell, rcell,
+                            active_view_coverage_cutoff,
+                            refresh_stage_timers,
+                            "active-view-coverage-verify",
+                            &active_view_missing_source_rows);
+                    if (!active_view_covers_current_cutoff)
+                    {
+                        bool repaired_active_view_coverage = false;
+                        if (Clustered_Gmxpacked_Active_View_Coverage_Repair_Enabled() &&
+                            active_view_missing_source_rows > 0 &&
+                            active_source_rows > 0)
+                        {
+                            const float missing_ratio =
+                                static_cast<float>(active_view_missing_source_rows) /
+                                static_cast<float>(
+                                    previous_gmxpacked_incremental_source_numbers);
+                            const float repair_missing_ratio_limit =
+                                Clustered_Gmxpacked_Active_View_Coverage_Repair_Max_Missing_Ratio();
+                            if (missing_ratio <= repair_missing_ratio_limit)
+                            {
+                                int appended_source_rows = 0;
+                                int overflow_rows = 0;
+                                const int max_combined_source_rows =
+                                    active_source_rows +
+                                    active_view_missing_source_rows + 8;
+                                const bool append_ok =
+                                    Append_Gmxpacked_Inner_Active_Missing_Sources(
+                                        this,
+                                        previous_gmxpacked_incremental_source_numbers,
+                                        d_gmxpacked_incremental_record_stream_sources,
+                                        active_prune_crd, cell, rcell,
+                                        active_view_coverage_cutoff,
+                                        active_source_rows,
+                                        max_combined_source_rows,
+                                        refresh_stage_timers,
+                                        "active-view-coverage-repair-append",
+                                        &appended_source_rows, &overflow_rows);
+                                int repair_missing_source_rows = -1;
+                                repaired_active_view_coverage =
+                                    append_ok && overflow_rows == 0 &&
+                                    Gmxpacked_Inner_Active_Source_Coverage_Covers(
+                                        this,
+                                        previous_gmxpacked_incremental_source_numbers,
+                                        d_gmxpacked_incremental_record_stream_sources,
+                                        active_prune_crd, cell, rcell,
+                                        active_view_coverage_cutoff,
+                                        refresh_stage_timers,
+                                        "active-view-coverage-repair-verify",
+                                        &repair_missing_source_rows);
+                                if (repaired_active_view_coverage)
+                                {
+                                    active_source_rows =
+                                        gmxpacked_record_stream_source_numbers;
+                                    active_view_repaired_coverage = true;
+                                    active_view_repaired_source_rows =
+                                        appended_source_rows;
+                                    active_view_changed_source_rows +=
+                                        appended_source_rows;
+                                }
+                                if (refresh_summary_trace ||
+                                    refresh_stage_timers)
+                                {
+                                    fprintf(stderr,
+                                            "[clustered gmxpacked active view "
+                                            "coverage repair] step=%d "
+                                            "ready=%d missing_source_rows=%d "
+                                            "missing_ratio=%.6f limit=%.6f "
+                                            "appended_source_rows=%d "
+                                            "overflow_rows=%d "
+                                            "repair_missing_source_rows=%d\n",
+                                            md_info.sys.steps,
+                                            repaired_active_view_coverage ? 1
+                                                                          : 0,
+                                            active_view_missing_source_rows,
+                                            missing_ratio,
+                                            repair_missing_ratio_limit,
+                                            appended_source_rows,
+                                            overflow_rows,
+                                            repair_missing_source_rows);
+                                    fflush(stderr);
+                                }
+                            }
+                        }
+                        if (!repaired_active_view_coverage)
+                        {
+                            used_active_view_refresh = false;
+                            active_source_rows = -1;
+                            if (refresh_summary_trace)
+                            {
+                                fprintf(stderr,
+                                        "[clustered gmxpacked active view fallback] "
+                                        "step=%d reason=coverage-verify "
+                                        "missing_source_rows=%d "
+                                        "dirty_source_rows=%d "
+                                        "changed_source_rows=%d\n",
+                                        md_info.sys.steps,
+                                        active_view_missing_source_rows,
+                                        active_view_dirty_source_rows,
+                                        active_view_changed_source_rows);
+                                fflush(stderr);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        else if (Clustered_Gmxpacked_Active_View_Partial_Refresh_Enabled() &&
+                 active_view_force_full_refresh &&
+                 (refresh_summary_trace || refresh_stage_timers))
+        {
+            fprintf(stderr,
+                    "[clustered gmxpacked active view fallback] step=%d "
+                    "reason=refresh-due-full active_anchor_max_disp=%.6f "
+                    "refresh_threshold=%.6f active_cutoff=%.6f\n",
+                    md_info.sys.steps, active_anchor_max_displacement,
+                    active_view_refresh_threshold, target_guard_cutoff);
+            fflush(stderr);
+        }
+        else if (Clustered_Gmxpacked_Active_View_Partial_Refresh_Enabled() &&
+                 !active_view_cutoff_matches &&
+                 (refresh_summary_trace || refresh_stage_timers))
+        {
+            fprintf(stderr,
+                    "[clustered gmxpacked active view fallback] step=%d "
+                    "reason=cutoff-change cached_active_cutoff=%.6f "
+                    "target_active_cutoff=%.6f\n",
+                    md_info.sys.steps, gmxpacked_inner_active_guard_cutoff,
+                    target_guard_cutoff);
+            fflush(stderr);
+        }
+        else if (Clustered_Gmxpacked_Active_View_Partial_Refresh_Enabled() &&
+                 !active_view_guard_covers_required &&
+                 (refresh_summary_trace || refresh_stage_timers))
+        {
+            fprintf(stderr,
+                    "[clustered gmxpacked active view fallback] step=%d "
+                    "reason=guard-undercovers-required "
+                    "target_active_cutoff=%.6f required_cutoff=%.6f "
+                    "active_anchor_max_disp=%.6f\n",
+                    md_info.sys.steps, target_guard_cutoff,
+                    required_guard_cutoff, active_anchor_max_displacement);
+            fflush(stderr);
+        }
+        else if (Clustered_Gmxpacked_Active_View_Partial_Refresh_Enabled() &&
+                 (!active_view_anchor_matches ||
+                  active_view_anchor_guard_expired) &&
+                 (refresh_summary_trace || refresh_stage_timers))
+        {
+            fprintf(stderr,
+                    "[clustered gmxpacked active view fallback] step=%d "
+                    "reason=%s active_anchor_max_disp=%.6f "
+                    "reuse_margin=%.6f reuse_limit=%.6f\n",
+                    md_info.sys.steps,
+                    current_inner_active_anchor_ready
+                        ? "active-anchor-guard-expired"
+                        : "active-anchor-unavailable",
+                    active_anchor_max_displacement,
+                    active_view_anchor_reuse_margin,
+                    active_view_anchor_reuse_limit);
+            fflush(stderr);
+        }
+        if (!used_active_view_refresh)
+        {
+            if (Clustered_Gmxpacked_Active_View_Partial_Refresh_Enabled() &&
+                Clustered_Gmxpacked_Active_View_Full_Dirty_Refresh_Enabled() &&
+                active_view_anchor_matches &&
+                d_gmxpacked_incremental_source_offsets_by_candidate != NULL &&
+                gmxpacked_inner_active_source_imasks_ready &&
+                gmxpacked_inner_active_source_imask_numbers ==
+                    previous_gmxpacked_incremental_source_numbers &&
+                d_gmxpacked_inner_active_source_imasks != NULL)
+            {
+                active_source_rows =
+                    Refresh_Gmxpacked_Record_Stream_Active_View_Sources(
+                        this, previous_gmxpacked_incremental_source_numbers,
+                        d_gmxpacked_incremental_record_stream_sources,
+                        previous_gmxpacked_incremental_candidate_sci_numbers,
+                        NULL,
+                        d_gmxpacked_incremental_source_offsets_by_candidate,
+                        active_prune_crd, cell, rcell, target_guard_cutoff,
+                        NULL, 0.0f, refresh_stage_timers,
+                        &active_view_dirty_source_rows,
+                        &active_view_changed_source_rows, 0, true);
+                used_active_view_refresh = active_source_rows >= 0;
+                used_full_active_view_refresh = used_active_view_refresh;
+            }
+        }
+        if (!used_active_view_refresh)
+        {
+            if (Clustered_Gmxpacked_Active_View_Enabled())
+            {
+                active_view_force_outer_payload_this_build = true;
+                stable_target_layout_anchor_ready = false;
+                if (refresh_summary_trace)
+                {
+                    fprintf(stderr,
+                            "[clustered gmxpacked active view fallback] "
+                            "step=%d reason=outer-payload-fallback "
+                            "dirty_source_rows=%d changed_source_rows=%d "
+                            "full_active_view=%d\n",
+                            md_info.sys.steps, active_view_dirty_source_rows,
+                            active_view_changed_source_rows,
+                            used_full_active_view_refresh ? 1 : 0);
+                    fflush(stderr);
+                }
+                return false;
+            }
+            Reset_Gmxpacked_Payload(this);
+            if (Clustered_Gmxpacked_Record_Builder_Inner_Active_Debug_Counts_Enabled())
+            {
+                const VECTOR* debug_prune_crd =
+                    use_current_inner_active ? crd : d_stable_target_layout_crd;
+                const int cached_active_source_rows =
+                    Count_Gmxpacked_Record_Stream_Inner_Active_Source_Rows(
+                        this, previous_gmxpacked_incremental_source_numbers,
+                        d_gmxpacked_incremental_record_stream_sources,
+                        debug_prune_crd, cell, rcell, cutoff,
+                        refresh_stage_timers,
+                        "inner-active-cache-refresh-debug-count", false);
+                fprintf(stderr,
+                        "[clustered gmxpacked inner active debug] step=%d "
+                        "phase=%s cached_source_rows=%d "
+                        "anchor_active_source_rows=%d\n",
+                        md_info.sys.steps, refresh_label,
+                        previous_gmxpacked_incremental_source_numbers,
+                        cached_active_source_rows);
+                fflush(stderr);
+            }
+            {
+                ClusteredGmxpackedRecordBuilderStageTimer stage_timer(
+                    allow_anchor_drift ? "rolling-inner-active-cache-source-copy"
+                                       : "inner-active-cache-source-copy",
+                    refresh_stage_timers);
+                gmxpacked_record_stream_source_numbers = outer_source_rows;
+                Reserve_Device_Buffer(
+                    gmxpacked_record_stream_source_numbers,
+                    &d_gmxpacked_record_stream_sources,
+                    &gmxpacked_record_stream_source_capacity);
+                deviceMemcpy(
+                    d_gmxpacked_record_stream_sources,
+                    d_gmxpacked_incremental_record_stream_sources,
+                    sizeof(LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE) *
+                        static_cast<size_t>(
+                            gmxpacked_record_stream_source_numbers),
+                    deviceMemcpyDeviceToDevice);
+            }
+            active_source_rows =
+                Prune_Gmxpacked_Record_Stream_To_Inner_Active_Sources(
+                    this, active_prune_crd, cell, rcell, target_guard_cutoff,
+                    refresh_stage_timers, true);
+        }
+        if (experimental_inner_active && active_source_rows > 0 &&
+            outer_source_rows > 0)
+        {
+            const float max_source_ratio =
+                Clustered_Gmxpacked_Experimental_Inner_Max_Source_Ratio();
+            const float active_source_ratio =
+                static_cast<float>(active_source_rows) /
+                static_cast<float>(outer_source_rows);
+            if (max_source_ratio >= 0.0f &&
+                active_source_ratio > max_source_ratio + 1e-6f)
+            {
+                Reset_Gmxpacked_Payload(this);
+                stable_target_layout_anchor_ready = false;
+                if (refresh_summary_trace)
+                {
+                    fprintf(stderr,
+                            "[clustered gmxpacked inner active fallback] "
+                            "step=%d cached_step=%d phase=%s "
+                            "reason=experimental-source-ratio "
+                            "outer_source_rows=%d active_source_rows=%d "
+                            "ratio=%.6f limit=%.6f active_cutoff=%.6f "
+                            "anchor_max_disp=%.6f\n",
+                            md_info.sys.steps, cached_build_step,
+                            refresh_label, outer_source_rows,
+                            active_source_rows, active_source_ratio,
+                            max_source_ratio, target_guard_cutoff,
+                            anchor_max_displacement);
+                    fflush(stderr);
+                }
+                return false;
+            }
+        }
+        int filled_aggregate_rows = 0;
+        const bool reused_compact_payload =
+            used_active_view_refresh &&
+            Clustered_Gmxpacked_Active_View_Compact_Patch_Enabled() &&
+            active_view_changed_source_rows == 0 &&
+            active_source_rows == previous_active_source_rows &&
+            can_reuse_previous_compact_payload &&
+            gmxpacked_sci_numbers == previous_gmxpacked_sci_numbers &&
+            gmxpacked_cjpacked_numbers == previous_gmxpacked_cjpacked_numbers &&
+            gmxpacked_exclusion_numbers == previous_gmxpacked_exclusion_numbers &&
+            gmxpacked_split_exclusion_numbers ==
+                previous_gmxpacked_split_exclusion_numbers;
+        bool used_delta_compact_payload = false;
+        int delta_compact_source_rows = 0;
+        int delta_compact_removal_flag = -1;
+        ClusteredGmxpackedRecordStreamCompactSummary delta_compact_summary = {};
+        const float active_view_delta_rebase_source_ratio =
+            Clustered_Gmxpacked_Active_View_Delta_Rebase_Source_Ratio();
+        const int active_view_repair_delta_source_rows =
+            (active_source_rows > gmxpacked_inner_active_source_rows_baseline &&
+             gmxpacked_inner_active_source_rows_baseline > 0)
+                ? active_source_rows -
+                      gmxpacked_inner_active_source_rows_baseline
+                : 0;
+        const bool active_view_repair_delta_within_rebase_limit =
+            active_view_delta_rebase_source_ratio <= 0.0f ||
+            active_view_repair_delta_source_rows <=
+                static_cast<int>(
+                    static_cast<float>(
+                        gmxpacked_inner_active_source_rows_baseline) *
+                    active_view_delta_rebase_source_ratio);
+        const bool can_attempt_repair_delta_append =
+            active_view_repaired_coverage &&
+            Clustered_Gmxpacked_Active_View_Coverage_Repair_Delta_Append_Enabled() &&
+            !Clustered_Gmxpacked_Active_View_Union_Mask_Enabled() &&
+            active_view_repaired_source_rows > 0 &&
+            active_source_rows >= active_view_repaired_source_rows &&
+            gmxpacked_inner_active_source_rows_baseline > 0 &&
+            active_source_rows > gmxpacked_inner_active_source_rows_baseline &&
+            active_view_repair_delta_within_rebase_limit &&
+            d_gmxpacked_record_stream_sources != NULL;
+        if (used_active_view_refresh && !reused_compact_payload &&
+            Clustered_Gmxpacked_Active_View_Compact_Delta_Enabled() &&
+            (Clustered_Gmxpacked_Active_View_Dirty_Index_Refresh_Enabled() ||
+             can_attempt_repair_delta_append) &&
+            !used_full_active_view_refresh &&
+            (!active_view_repaired_coverage || can_attempt_repair_delta_append) &&
+            active_view_changed_source_rows > 0 &&
+            (active_view_dirty_source_rows > 0 || can_attempt_repair_delta_append) &&
+            can_reuse_previous_compact_payload &&
+            (active_view_dirty_source_rows <= 0 || d_jentry_indices != NULL))
+        {
+            if (can_attempt_repair_delta_append)
+            {
+                const int repair_source_begin =
+                    gmxpacked_inner_active_source_rows_baseline;
+                delta_compact_summary =
+                    Build_Gmxpacked_Active_View_Delta_Compact_From_Baseline_With_Append(
+                        this, previous_gmxpacked_incremental_source_numbers,
+                        d_gmxpacked_incremental_record_stream_sources,
+                        active_view_dirty_source_rows, d_jentry_indices, rcell,
+                        d_gmxpacked_record_stream_sources + repair_source_begin,
+                        active_view_repair_delta_source_rows,
+                        refresh_stage_timers,
+                        &delta_compact_source_rows,
+                        &delta_compact_removal_flag);
+            }
+            else
+            {
+                delta_compact_summary =
+                    Build_Gmxpacked_Active_View_Delta_Compact_From_Baseline(
+                        this, previous_gmxpacked_incremental_source_numbers,
+                        d_gmxpacked_incremental_record_stream_sources,
+                        active_view_dirty_source_rows, d_jentry_indices, rcell,
+                        refresh_stage_timers, &delta_compact_source_rows,
+                        &delta_compact_removal_flag);
+            }
+            used_delta_compact_payload =
+                delta_compact_summary.compact_sci > 0 &&
+                delta_compact_summary.compact_cj > 0 &&
+                delta_compact_summary.compact_excl > 0 &&
+                gmxpacked_sci_numbers == previous_gmxpacked_sci_numbers &&
+                gmxpacked_cjpacked_numbers == previous_gmxpacked_cjpacked_numbers &&
+                gmxpacked_exclusion_numbers == previous_gmxpacked_exclusion_numbers &&
+                gmxpacked_split_exclusion_numbers ==
+                    previous_gmxpacked_split_exclusion_numbers &&
+                d_gmxpacked_delta_sci != NULL &&
+                d_gmxpacked_delta_cjpacked != NULL &&
+                d_gmxpacked_delta_exclusions != NULL &&
+                d_gmxpacked_delta_pair_shift_bits != NULL;
+            if (refresh_summary_trace || refresh_stage_timers)
+            {
+                fprintf(stderr,
+                        "[clustered gmxpacked active view delta compact] "
+                        "step=%d ready=%d dirty_source_rows=%d "
+                        "changed_source_rows=%d delta_source_rows=%d "
+                        "removal=%d delta_sci=%d delta_cj=%d "
+                        "delta_excl=%d repair_append=%d "
+                        "repair_append_rows=%d\n",
+                        md_info.sys.steps,
+                        used_delta_compact_payload ? 1 : 0,
+                        active_view_dirty_source_rows,
+                        active_view_changed_source_rows,
+                        delta_compact_source_rows,
+                        delta_compact_removal_flag,
+                        delta_compact_summary.compact_sci,
+                        delta_compact_summary.compact_cj,
+                        delta_compact_summary.compact_excl,
+                        can_attempt_repair_delta_append ? 1 : 0,
+                        can_attempt_repair_delta_append
+                            ? active_view_repair_delta_source_rows
+                            : 0);
+                fflush(stderr);
+            }
+        }
+        else if (used_active_view_refresh && active_view_repaired_coverage &&
+                 active_view_repaired_source_rows > 0 &&
+                 Clustered_Gmxpacked_Active_View_Coverage_Repair_Delta_Append_Enabled() &&
+                 active_view_delta_rebase_source_ratio > 0.0f &&
+                 !active_view_repair_delta_within_rebase_limit &&
+                 (refresh_summary_trace || refresh_stage_timers))
+        {
+            fprintf(stderr,
+                    "[clustered gmxpacked active view delta rebase] "
+                    "step=%d delta_source_rows=%d baseline_source_rows=%d "
+                    "ratio=%.6f limit=%.6f\n",
+                    md_info.sys.steps, active_view_repair_delta_source_rows,
+                    gmxpacked_inner_active_source_rows_baseline,
+                    gmxpacked_inner_active_source_rows_baseline > 0
+                        ? static_cast<float>(
+                              active_view_repair_delta_source_rows) /
+                              static_cast<float>(
+                                  gmxpacked_inner_active_source_rows_baseline)
+                        : 0.0f,
+                    active_view_delta_rebase_source_ratio);
+            fflush(stderr);
+        }
+        const bool keep_previous_compact_payload =
+            reused_compact_payload || used_delta_compact_payload;
+        if (used_active_view_refresh && !keep_previous_compact_payload)
+        {
+            gmxpacked_sci_numbers = 0;
+            gmxpacked_cjpacked_numbers = 0;
+            gmxpacked_exclusion_numbers = 0;
+            gmxpacked_split_exclusion_numbers = 0;
+            gmxpacked_delta_sci_numbers = 0;
+            gmxpacked_delta_cjpacked_numbers = 0;
+            gmxpacked_delta_exclusion_numbers = 0;
+            gmxpacked_delta_split_exclusion_numbers = 0;
+            gmxpacked_record_stream_aggregate_numbers = 0;
+            Invalidate_Gmxpacked_Pair_Shift_Metadata(this);
+        }
+        if (reused_compact_payload)
+        {
+            filled_aggregate_rows = previous_active_aggregate_rows;
+            gmxpacked_record_stream_aggregate_numbers =
+                previous_active_aggregate_rows;
+        }
+        else if (used_delta_compact_payload)
+        {
+            filled_aggregate_rows = previous_active_aggregate_rows;
+            gmxpacked_record_stream_aggregate_numbers =
+                previous_active_aggregate_rows;
+        }
+        else if (active_source_rows > 0)
+        {
+            filled_aggregate_rows =
+                Build_Gmxpacked_Record_Stream_Aggregates(this);
+        }
+        ClusteredGmxpackedRecordStreamCompactSummary compact_summary = {};
+        bool rebuilt_full_compact_payload = false;
+        if (reused_compact_payload || used_delta_compact_payload)
+        {
+            compact_summary.source_rows = active_source_rows;
+            compact_summary.aggregate_rows = previous_active_aggregate_rows;
+            compact_summary.compact_sci = gmxpacked_sci_numbers;
+            compact_summary.compact_cj = gmxpacked_cjpacked_numbers;
+            compact_summary.compact_excl = gmxpacked_exclusion_numbers;
+            compact_summary.split_excl = gmxpacked_split_exclusion_numbers;
+            if (used_delta_compact_payload)
+            {
+                compact_summary.compact_entries +=
+                    delta_compact_summary.compact_entries;
+            }
+        }
+        else if (active_source_rows > 0 &&
+            gmxpacked_record_stream_aggregate_numbers > 0 &&
+            filled_aggregate_rows == gmxpacked_record_stream_aggregate_numbers)
+        {
+            compact_summary =
+                Build_Gmxpacked_Record_Stream_Compact_Payload(this);
+            rebuilt_full_compact_payload =
+                compact_summary.compact_sci > 0 &&
+                compact_summary.compact_cj > 0 &&
+                compact_summary.compact_excl > 0;
+        }
+        const bool compact_ready =
+            gmxpacked_sci_numbers > 0 && gmxpacked_cjpacked_numbers > 0 &&
+            gmxpacked_exclusion_numbers > 0 && d_gmxpacked_sci != NULL &&
+            d_gmxpacked_cjpacked != NULL && d_gmxpacked_exclusions != NULL;
+        if (!compact_ready)
+        {
+            return false;
+        }
+        if (rebuilt_full_compact_payload)
+        {
+            Refresh_Gmxpacked_Active_View_Compact_Base_Imasks(this);
+            gmxpacked_inner_active_source_rows_baseline = active_source_rows;
+        }
+#ifndef USE_CPU
+        Clustered_Gmxpacked_Active_View_Payload_Boundary_Sync(
+            "cache-refresh");
+#endif
+        gmxpacked_inner_active_guard_cutoff = target_guard_cutoff;
+        const bool refresh_active_anchor_after_partial =
+            used_active_view_refresh && !used_full_active_view_refresh &&
+            Clustered_Gmxpacked_Active_View_Refresh_Anchor_On_Partial_Enabled();
+        if (use_current_active_mask &&
+            (!used_active_view_refresh || used_full_active_view_refresh ||
+             refresh_active_anchor_after_partial))
+        {
+            Refresh_Gmxpacked_Inner_Active_Anchor_Crd(this, crd);
+        }
+        {
+            ClusteredGmxpackedRecordBuilderStageTimer stage_timer(
+                allow_anchor_drift ? "rolling-inner-active-pair-shift-refresh"
+                                   : "inner-active-pair-shift-refresh",
+                refresh_stage_timers);
+            if (Clustered_Gmxpacked_Should_Refresh_Pair_Shift_Metadata(this,
+                                                                       rcell))
+            {
+                Reserve_Device_U64_Buffer(
+                    gmxpacked_cjpacked_numbers * kClusteredJGroupSize,
+                    &d_pair_shift_bits, &pair_shift_capacity);
+                Refresh_Gmxpacked_Pair_Shift_Metadata(this, rcell);
+            }
+        }
+        if (commit_current_cache_on_success)
+        {
+            Commit_Clustered_Build_Cache(this, crd, cutoff);
+        }
+        if (refresh_summary_trace)
+        {
+            fprintf(stderr,
+                    "[clustered gmxpacked inner active refresh] "
+                    "step=%d cached_step=%d phase=%s outer_source_rows=%d "
+                    "active_source_rows=%d aggregate_rows=%d "
+                    "filled_aggregate_rows=%d compact_sci=%d "
+                    "compact_cj=%d compact_excl=%d split_excl=%d "
+                    "anchor_current=%d rolling=%d anchor_max_disp=%.6f "
+                    "active_anchor_max_disp=%.6f requested_cutoff=%.6f "
+                    "required_cutoff=%.6f active_cutoff=%.6f "
+                    "guard_margin=%.6f current_inner=%d "
+                    "adaptive_lease=%d source_limit=%.6f "
+                    "active_view=%d dirty_source_rows=%d "
+                    "changed_source_rows=%d "
+                    "active_anchor_expired=%d "
+                    "full_active_view=%d compact_patch=%d "
+                    "delta_compact=%d delta_source_rows=%d "
+                    "delta_removal=%d coverage_repair=%d "
+                    "coverage_repair_rows=%d anchor_refresh=%d\n",
+                    md_info.sys.steps, cached_build_step, refresh_label,
+                    outer_source_rows, active_source_rows,
+                    gmxpacked_record_stream_aggregate_numbers,
+                    filled_aggregate_rows, compact_summary.compact_sci,
+                    compact_summary.compact_cj, compact_summary.compact_excl,
+                    compact_summary.split_excl, anchor_current ? 1 : 0,
+                    allow_anchor_drift ? 1 : 0, anchor_max_displacement,
+                    active_anchor_max_displacement,
+                    requested_active_cutoff, required_guard_cutoff,
+                    target_guard_cutoff, guard_margin,
+                    use_current_inner_active ? 1 : 0,
+                    use_current_inner_adaptive_lease ? 1 : 0,
+                    current_inner_outer_cutoff_limit,
+                    used_active_view_refresh ? 1 : 0,
+                    active_view_dirty_source_rows,
+                    active_view_changed_source_rows,
+                    active_view_anchor_guard_expired ? 1 : 0,
+                    used_full_active_view_refresh ? 1 : 0,
+                    reused_compact_payload ? 1 : 0,
+                    used_delta_compact_payload ? 1 : 0,
+                    delta_compact_source_rows,
+                    delta_compact_removal_flag,
+                    active_view_repaired_coverage ? 1 : 0,
+                    active_view_repaired_source_rows,
+                    (use_current_active_mask &&
+                     (!used_active_view_refresh || used_full_active_view_refresh ||
+                      refresh_active_anchor_after_partial))
+                        ? 1
+                        : 0);
+            fflush(stderr);
+        }
+        return true;
+    };
+    if (!clustered_build_needed && !cached_native_payload_missing)
     {
         if (Clustered_Trace_Warp_Records_Enabled())
         {
@@ -9053,8 +22771,22 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                 md_info.sys.steps, cached_build_step, rebuild_refresh_interval,
                 total_atom_numbers, h_bad_coordinates);
     }
+    Trace_Clustered_Coordinate_Diagnostics(this, crd, cell, rcell,
+                                           "build-needed");
+    if (Clustered_Gmxpacked_Incremental_Stats_Enabled())
+    {
+        Trace_Incremental_Dirty_Stats(this, crd, cell, rcell);
+    }
+    if (Clustered_Gmxpacked_Incremental_Cache_Enabled())
+    {
+        gmxpacked_incremental_source_offsets_ready = false;
+        gmxpacked_incremental_source_cache_ready = false;
+        gmxpacked_incremental_candidate_sci_numbers = 0;
+        gmxpacked_incremental_source_numbers = 0;
+    }
     ClusteredRecorderScope payload_build_scope(payload_build_time_recorder);
 
+    Initialize_Cornerstone_State(this);
     Reset_Build_Buffers(this);
     Reset_Gmxpacked_Payload(this);
     Invalidate_Clustered_Legacy_Neighbor_View(this);
@@ -9073,7 +22805,46 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
     const float build_cutoff =
         Clustered_Outer_Inner_Prune_Enabled(this) ? cutoff + rebuild_skin
                                                   : cutoff;
+    const bool record_builder_stage_timers =
+        Clustered_Gmxpacked_Record_Builder_Stage_Timers_Enabled() &&
+        need_gmxpacked_payload && runtime_gmxpacked_direct_requested &&
+        Clustered_Gmxpacked_Record_Builder_Enabled();
+    const bool record_builder_summary_trace =
+        Clustered_Trace_Warp_Records_Enabled() ||
+        Clustered_Gmxpacked_Incremental_Stats_Enabled() ||
+        record_builder_stage_timers;
     const bool use_morton_sfc = Clustered_Use_Morton_Sfc();
+    const bool use_stable_target_layout =
+        need_gmxpacked_payload && runtime_gmxpacked_direct_requested &&
+        Clustered_Gmxpacked_Stable_Target_Layout_Enabled();
+    bool stable_target_layout_anchor_seeded = false;
+    const VECTOR* target_layout_crd = crd;
+    if (use_stable_target_layout)
+    {
+        const bool seed_target_layout_anchor =
+            !stable_target_layout_anchor_ready ||
+            d_stable_target_layout_crd == NULL ||
+            stable_target_layout_crd_capacity < total_atom_numbers;
+        Reserve_Device_Vector_Buffer(total_atom_numbers,
+                                     &d_stable_target_layout_crd,
+                                     &stable_target_layout_crd_capacity);
+        if (seed_target_layout_anchor)
+        {
+            deviceMemcpy(d_stable_target_layout_crd, crd,
+                         sizeof(VECTOR) * total_atom_numbers,
+                         deviceMemcpyDeviceToDevice);
+            stable_target_layout_anchor_ready = true;
+            stable_target_layout_anchor_seeded = true;
+        }
+        target_layout_crd = d_stable_target_layout_crd;
+    }
+    const bool use_stable_source_contract =
+        use_stable_target_layout &&
+        Clustered_Gmxpacked_Stable_Source_Contract_Enabled();
+    const VECTOR* builder_geometry_crd =
+        use_stable_source_contract ? target_layout_crd : crd;
+    const VECTOR* commit_cache_crd =
+        use_stable_source_contract ? target_layout_crd : crd;
     const bool has_atom_to_molecule = Prepare_Atom_To_Molecule_Metadata(this);
     const int* atom_to_molecule =
         has_atom_to_molecule ? d_local_atom_to_molecule : NULL;
@@ -9088,7 +22859,7 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                          1) /
                              CONTROLLER::device_max_thread,
                          CONTROLLER::device_max_thread, 0, NULL,
-                         total_atom_numbers, crd, rcell, use_morton_sfc,
+                         total_atom_numbers, target_layout_crd, rcell, use_morton_sfc,
                          d_sort_keys, d_sort_permutation);
 
 #ifndef USE_CPU
@@ -9171,7 +22942,7 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                     "[clustered build early-return] step=%d stage=no-leaves\n",
                     md_info.sys.steps);
         }
-        Commit_Clustered_Build_Cache(this, crd, cutoff);
+        Commit_Clustered_Build_Cache(this, commit_cache_crd, cutoff);
         return;
     }
 
@@ -9200,7 +22971,7 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                     "[clustered build early-return] step=%d stage=no-clusters leaf_atom_total=%d\n",
                     md_info.sys.steps, leaf_atom_total);
         }
-        Commit_Clustered_Build_Cache(this, crd, cutoff);
+        Commit_Clustered_Build_Cache(this, commit_cache_crd, cutoff);
         return;
     }
 
@@ -9212,7 +22983,8 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
             (leaf_numbers + CONTROLLER::device_max_thread - 1) /
                 CONTROLLER::device_max_thread,
             CONTROLLER::device_max_thread, 0, NULL, leaf_numbers,
-            d_leaf_atom_offsets, d_sort_permutation, crd, rcell, d_sort_keys);
+            d_leaf_atom_offsets, d_sort_permutation, builder_geometry_crd,
+            rcell, d_sort_keys);
         Stable_Sort_Device_By_Key(this, leaf_atom_total, d_sort_keys,
                                   d_sort_permutation);
     }
@@ -9268,13 +23040,13 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
     Reserve_Device_Float_Buffer(cluster_numbers, &d_cluster_radii,
                                 &cluster_radius_capacity);
 
-    Launch_Device_Kernel(Build_Global_Cluster_Metadata,
+        Launch_Device_Kernel(Build_Global_Cluster_Metadata,
                          (cluster_numbers + CONTROLLER::device_max_thread - 1) /
                              CONTROLLER::device_max_thread,
                          CONTROLLER::device_max_thread, 0, NULL,
                          cluster_numbers, leaf_atom_total,
                          direct_local_atom_numbers, cluster_size,
-                         d_sort_permutation, crd, cell, rcell,
+                         d_sort_permutation, builder_geometry_crd, cell, rcell,
                          d_cluster_offsets, d_cluster_valid_masks,
                          d_cluster_local_masks, d_cluster_centers,
                          d_cluster_extents,
@@ -9415,7 +23187,7 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                     "[clustered build early-return] step=%d stage=no-super-sci super_cluster_numbers=%d\n",
                     md_info.sys.steps, super_cluster_numbers);
         }
-        Commit_Clustered_Build_Cache(this, crd, cutoff);
+        Commit_Clustered_Build_Cache(this, commit_cache_crd, cutoff);
         return;
     }
     const int super_sci_numbers = sci_numbers;
@@ -9476,7 +23248,7 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                         "[clustered build early-return] step=%d stage=no-candidate-sci super_sci=%d\n",
                         md_info.sys.steps, super_sci_numbers);
             }
-            Commit_Clustered_Build_Cache(this, crd, cutoff);
+            Commit_Clustered_Build_Cache(this, commit_cache_crd, cutoff);
             return;
         }
         Reserve_Device_Int_Buffer(candidate_sci_numbers, &d_candidate_sci_offsets,
@@ -9496,6 +23268,9 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
     }
 #ifndef USE_CPU
     {
+        ClusteredGmxpackedRecordBuilderStageTimer stage_timer(
+            "prepare-candidate-worklist-sync", record_builder_stage_timers,
+            false);
         const cudaError_t prepare_candidate_sync_err = cudaDeviceSynchronize();
         if (prepare_candidate_sync_err != cudaSuccess)
         {
@@ -9588,7 +23363,7 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                     "[clustered build early-return] step=%d stage=no-candidate-leaves candidate_sci=%d\n",
                     md_info.sys.steps, candidate_sci_numbers);
         }
-        Commit_Clustered_Build_Cache(this, crd, cutoff);
+        Commit_Clustered_Build_Cache(this, commit_cache_crd, cutoff);
         return;
     }
 
@@ -9668,6 +23443,30 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
 
     this->candidate_sci_numbers = candidate_sci_numbers;
 #ifndef USE_CPU
+    bool current_layout_incremental_device_mask_ready = false;
+    bool current_layout_incremental_j_leaf_scope_ready = false;
+    if (request_gmxpacked_record_builder_route_for_cache &&
+        Clustered_Gmxpacked_Incremental_Cache_Enabled() &&
+        Clustered_Gmxpacked_Incremental_Device_Mask_Enabled())
+    {
+        current_layout_incremental_device_mask_ready =
+            Build_Gmxpacked_Incremental_Dirty_Device_Mask(
+                this, crd, cell, rcell, candidate_sci_supercluster_ids,
+                candidate_shift_ids, fixed_shift_candidates,
+                &current_layout_incremental_j_leaf_scope_ready);
+        if (Clustered_Trace_Warp_Records_Enabled())
+        {
+            fprintf(stderr,
+                    "[clustered incremental current-layout mask] step=%d "
+                    "ready=%d j_leaf_scope=%d candidate_sci=%d "
+                    "candidate_leaves=%d\n",
+                    md_info.sys.steps,
+                    current_layout_incremental_device_mask_ready ? 1 : 0,
+                    current_layout_incremental_j_leaf_scope_ready ? 1 : 0,
+                    candidate_sci_numbers, candidate_leaf_numbers);
+            fflush(stderr);
+        }
+    }
     if (Clustered_Trace_Warp_Records_Enabled())
     {
         Trace_Clustered_Builder_Stats(*this, candidate_sci_numbers,
@@ -9804,7 +23603,7 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                     md_info.sys.steps, sci_numbers, cjpacked_numbers,
                     exclusion_pool_numbers);
         }
-        Commit_Clustered_Build_Cache(this, crd, cutoff);
+        Commit_Clustered_Build_Cache(this, commit_cache_crd, cutoff);
         return;
     }
 
@@ -9848,40 +23647,690 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
     const int candidate_sci_blocks =
         (candidate_sci_numbers + builder_warps_per_block - 1) /
         builder_warps_per_block;
+    const bool run_gmxpacked_record_builder =
+        Clustered_Gmxpacked_Record_Builder_Enabled();
+    const bool request_gmxpacked_record_builder_route =
+        run_gmxpacked_record_builder && need_gmxpacked_payload &&
+        runtime_gmxpacked_direct_requested &&
+        Clustered_Gmxpacked_Record_Builder_Route_Enabled();
+    const bool request_gmxpacked_primary_builder =
+        request_gmxpacked_record_builder_route &&
+        Clustered_Gmxpacked_Primary_Builder_Enabled();
+    const bool request_gmxpacked_record_builder_device_source_trace =
+        request_gmxpacked_record_builder_route &&
+        Clustered_Gmxpacked_Record_Builder_Compare_Enabled() &&
+        Clustered_Gmxpacked_Record_Builder_Compare_Stage_Trace_Enabled() &&
+        Clustered_Gmxpacked_Record_Builder_Compare_Source_Trace_Enabled() &&
+        Clustered_Gmxpacked_Record_Builder_Compare_Device_Source_Trace_Enabled();
+    const std::vector<int> record_builder_device_source_trace_focus_atoms =
+        request_gmxpacked_record_builder_device_source_trace
+            ? Parse_Gmxpacked_Record_Builder_Compare_Atoms()
+            : std::vector<int>();
+    const bool run_gmxpacked_record_builder_device_source_trace =
+        !record_builder_device_source_trace_focus_atoms.empty();
+    const bool record_builder_source_count_diagnostic_requested =
+        Clustered_Gmxpacked_Record_Builder_Compare_Enabled() ||
+        Clustered_Gmxpacked_Record_Builder_Compare_Stage_Trace_Enabled() ||
+        Clustered_Gmxpacked_Record_Builder_Compare_Source_Trace_Enabled() ||
+        Clustered_Gmxpacked_Record_Builder_Compare_Device_Source_Trace_Enabled() ||
+        Clustered_Gmxpacked_Record_Builder_Compare_Prune_Input_Trace_Enabled() ||
+        Clustered_Gmxpacked_Record_Builder_Compare_Prune_Contract_Trace_Enabled() ||
+        Clustered_Gmxpacked_Record_Builder_Compare_Raw_Coord_Pair_Context_Enabled() ||
+        Clustered_Gmxpacked_Record_Builder_Compare_Raw_Coord_Force_Context_Enabled() ||
+        Clustered_Gmxpacked_Record_Builder_Compare_Geometry_Route_Shift_Enabled();
+    const bool run_gmxpacked_primary_builder =
+        request_gmxpacked_primary_builder &&
+        !record_builder_source_count_diagnostic_requested &&
+        !Clustered_Microbench_Dump_Requested() &&
+        !need_aux_clustered_metadata && !build_warp_records &&
+        !Clustered_Gmxpacked_Direct_Candidate_Build_Enabled() &&
+        !Clustered_Gmxpacked_Reduced_Build_Enabled() &&
+        !Clustered_Gmxpacked_Early_Record_Analyze_Enabled();
+    const bool use_gmxpacked_incremental_cache =
+        request_gmxpacked_record_builder_route &&
+        Clustered_Gmxpacked_Incremental_Cache_Enabled();
+    const bool run_gmxpacked_incremental_refill_probe =
+        request_gmxpacked_record_builder_route && use_gmxpacked_incremental_cache &&
+        Clustered_Gmxpacked_Incremental_Device_Mask_Enabled() &&
+        Clustered_Gmxpacked_Incremental_Refill_Enabled() &&
+        current_layout_incremental_device_mask_ready;
+    const bool request_gmxpacked_incremental_merge =
+        request_gmxpacked_record_builder_route && run_gmxpacked_primary_builder &&
+        use_gmxpacked_incremental_cache &&
+        Clustered_Gmxpacked_Incremental_Device_Mask_Enabled() &&
+        Clustered_Gmxpacked_Incremental_Merge_Enabled() &&
+        current_layout_incremental_device_mask_ready &&
+        !run_gmxpacked_record_builder_device_source_trace;
+    bool gmxpacked_incremental_merge_used = false;
+    bool gmxpacked_incremental_stable_source_reuse_used = false;
+    int gmxpacked_incremental_merge_dirty_source_rows = 0;
+    int gmxpacked_incremental_merge_filled_dirty_rows = 0;
+    int gmxpacked_incremental_merge_overflow_rows = 0;
+    const bool use_gmxpacked_record_stream_outer_source =
+        request_gmxpacked_record_builder_route &&
+        Clustered_Gmxpacked_Record_Builder_Outer_Source_Enabled();
+    const bool use_gmxpacked_inner_active_payload =
+        use_gmxpacked_record_stream_outer_source &&
+        Clustered_Gmxpacked_Record_Builder_Inner_Active_Payload_Enabled() &&
+        !active_view_force_outer_payload_this_build;
+    const bool use_gmxpacked_one_pass_source_cache =
+        run_gmxpacked_primary_builder && use_gmxpacked_inner_active_payload &&
+        use_gmxpacked_incremental_cache &&
+        Clustered_Gmxpacked_Record_Builder_One_Pass_Source_Cache_Enabled();
+    const bool use_gmxpacked_record_stream_source_offsets =
+        request_gmxpacked_record_builder_route &&
+        ((!run_gmxpacked_primary_builder &&
+          Clustered_Gmxpacked_Record_Builder_Source_Offsets_Enabled()) ||
+         (use_gmxpacked_incremental_cache &&
+          !use_gmxpacked_one_pass_source_cache));
+    const bool accumulate_gmxpacked_record_stream_source_rows_by_candidate =
+        request_gmxpacked_record_builder_route &&
+        !run_gmxpacked_primary_builder &&
+        !use_gmxpacked_record_stream_source_offsets &&
+        Clustered_Gmxpacked_Record_Builder_Count_Accum_Enabled();
+    const bool defer_gmxpacked_record_stream_source_count =
+        (run_gmxpacked_primary_builder &&
+         !use_gmxpacked_record_stream_source_offsets) ||
+        (request_gmxpacked_record_builder_route &&
+         !use_gmxpacked_record_stream_source_offsets &&
+         Clustered_Gmxpacked_Record_Builder_Defer_Source_Count_Enabled() &&
+         !record_builder_source_count_diagnostic_requested);
+    if (request_gmxpacked_record_builder_device_source_trace)
+    {
+        Clear_Gmxpacked_Record_Builder_Device_Source_Trace_Snapshot();
+    }
+    const float gmxpacked_record_stream_cutoff =
+        use_gmxpacked_record_stream_outer_source ? build_cutoff : cutoff;
+    const VECTOR* gmxpacked_record_stream_prune_crd =
+        use_stable_source_contract ? target_layout_crd : crd;
+    int* d_gmxpacked_record_stream_source_rows = NULL;
+    int gmxpacked_record_stream_source_row_capacity = 0;
+    int* d_gmxpacked_record_stream_source_counts_by_candidate = NULL;
+    int gmxpacked_record_stream_source_count_capacity = 0;
+    int* d_gmxpacked_record_stream_source_offsets_by_candidate = NULL;
+    int gmxpacked_record_stream_source_offset_capacity = 0;
+    int gmxpacked_record_stream_filled_rows = 0;
+    int gmxpacked_record_stream_overflow_rows = 0;
+    int gmxpacked_record_stream_filled_aggregate_rows = 0;
+    bool built_gmxpacked_record_stream_compact = false;
+    bool route_gmxpacked_record_stream_compact = false;
+    bool reused_gmxpacked_record_stream_compact = false;
+    ClusteredGmxpackedRecordStreamCompactSummary
+        gmxpacked_record_stream_compact_summary = {};
+    if (run_gmxpacked_record_builder &&
+        !defer_gmxpacked_record_stream_source_count)
+    {
+        if (use_gmxpacked_record_stream_source_offsets)
+        {
+            Reserve_Device_Int_Buffer(
+                candidate_sci_numbers,
+                &d_gmxpacked_record_stream_source_counts_by_candidate,
+                &gmxpacked_record_stream_source_count_capacity);
+            Reserve_Device_Int_Buffer(
+                candidate_sci_numbers + 1,
+                &d_gmxpacked_record_stream_source_offsets_by_candidate,
+                &gmxpacked_record_stream_source_offset_capacity);
+            deviceMemset(d_gmxpacked_record_stream_source_counts_by_candidate, 0,
+                         sizeof(int) * candidate_sci_numbers);
+        }
+        else
+        {
+            Reserve_Device_Int_Buffer(1, &d_gmxpacked_record_stream_source_rows,
+                                      &gmxpacked_record_stream_source_row_capacity);
+            deviceMemset(d_gmxpacked_record_stream_source_rows, 0, sizeof(int));
+        }
+    }
 
-    Launch_Device_Kernel(
-        Count_Nbnxm_Payload_From_Candidate_Leaves,
-        candidate_sci_blocks, kClusteredBuilderBlockSize, 0, NULL,
-        candidate_sci_numbers,
-        sci_shift_numbers, cluster_size, super_cluster_clusters,
-        local_atom_numbers, build_cutoff, cell, rcell, d_sort_permutation,
-        d_cluster_offsets, d_leaf_cluster_starts, d_leaf_cluster_ends,
-        d_super_cluster_offsets, d_cluster_to_supercluster,
-        candidate_sci_supercluster_ids, d_super_cluster_centers,
-        candidate_shift_ids,
-        d_sci_candidate_leaf_offsets, d_sci_candidate_leaf_ids,
-        candidate_leaf_cluster_stride,
-        fixed_shift_leaf_screening ? d_candidate_leaf_reach_masks : NULL,
-        d_cluster_valid_masks, d_cluster_local_masks, d_cluster_centers,
-        d_cluster_extents, d_cluster_radii, cluster_molecule_signatures,
-        cluster_molecule_ids,
-        d_excluded_list_start, d_excluded_list, d_excluded_numbers,
-        fixed_shift_candidates,
-        d_sci_shift_flags, d_cjpacked_counts, d_exclusion_counts);
+    if (request_gmxpacked_incremental_merge &&
+        Clustered_Gmxpacked_Incremental_Stable_Source_Reuse_Enabled() &&
+        use_stable_source_contract &&
+        use_gmxpacked_record_stream_outer_source &&
+        previous_gmxpacked_incremental_source_cache_ready &&
+        previous_gmxpacked_incremental_candidate_sci_numbers ==
+            candidate_sci_numbers &&
+        previous_gmxpacked_incremental_source_numbers > 0 &&
+        use_gmxpacked_record_stream_source_offsets &&
+        d_gmxpacked_incremental_dirty_candidate_sci != NULL &&
+        d_gmxpacked_incremental_source_offsets_by_candidate != NULL &&
+        d_gmxpacked_incremental_record_stream_sources != NULL &&
+        d_gmxpacked_record_stream_source_offsets_by_candidate != NULL)
+    {
+        ClusteredGmxpackedRecordBuilderStageTimer stage_timer(
+            "incremental-stable-source-reuse", record_builder_stage_timers);
+        int* d_stable_reuse_expected_dirty_rows = NULL;
+        int stable_reuse_expected_dirty_capacity = 0;
+        Reserve_Device_Int_Buffer(1, &d_stable_reuse_expected_dirty_rows,
+                                  &stable_reuse_expected_dirty_capacity);
+        deviceMemset(d_stable_reuse_expected_dirty_rows, 0, sizeof(int));
+        Reserve_Device_Buffer(previous_gmxpacked_incremental_source_numbers,
+                              &d_gmxpacked_record_stream_sources,
+                              &gmxpacked_record_stream_source_capacity);
+        deviceMemcpy(
+            d_gmxpacked_record_stream_sources,
+            d_gmxpacked_incremental_record_stream_sources,
+            sizeof(LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE) *
+                static_cast<size_t>(
+                    previous_gmxpacked_incremental_source_numbers),
+            deviceMemcpyDeviceToDevice);
+        deviceMemcpy(
+            d_gmxpacked_record_stream_source_offsets_by_candidate,
+            d_gmxpacked_incremental_source_offsets_by_candidate,
+            sizeof(int) * (candidate_sci_numbers + 1),
+            deviceMemcpyDeviceToDevice);
+        Launch_Device_Kernel(
+            Count_Gmxpacked_Dirty_Source_Rows_From_Offsets,
+            (candidate_sci_numbers + CONTROLLER::device_max_thread - 1) /
+                CONTROLLER::device_max_thread,
+            CONTROLLER::device_max_thread, 0, NULL, candidate_sci_numbers,
+            d_gmxpacked_incremental_dirty_candidate_sci,
+            d_gmxpacked_incremental_source_offsets_by_candidate,
+            d_stable_reuse_expected_dirty_rows);
+        deviceMemcpy(&gmxpacked_incremental_merge_dirty_source_rows,
+                     d_stable_reuse_expected_dirty_rows, sizeof(int),
+                     deviceMemcpyDeviceToHost);
+        gmxpacked_incremental_merge_filled_dirty_rows =
+            gmxpacked_incremental_merge_dirty_source_rows;
+        gmxpacked_incremental_merge_overflow_rows = 0;
+        gmxpacked_record_stream_source_numbers =
+            previous_gmxpacked_incremental_source_numbers;
+        gmxpacked_record_stream_filled_rows =
+            gmxpacked_record_stream_source_numbers;
+        gmxpacked_record_stream_overflow_rows = 0;
+        gmxpacked_incremental_merge_used = true;
+        gmxpacked_incremental_stable_source_reuse_used = true;
+        gmxpacked_incremental_candidate_sci_numbers = candidate_sci_numbers;
+        gmxpacked_incremental_source_numbers =
+            gmxpacked_record_stream_source_numbers;
+        gmxpacked_incremental_source_offsets_ready = true;
+        gmxpacked_incremental_source_cache_ready = true;
+        if (record_builder_summary_trace)
+        {
+            fprintf(stderr,
+                    "[clustered gmxpacked incremental merge] step=%d used=%d "
+                    "prev_source_rows=%d dirty_source_rows=%d "
+                    "mixed_source_rows=%d filled_dirty_rows=%d "
+                    "overflow_rows=%d current_mask=%d j_leaf_scope=%d "
+                    "stable_target_layout=%d stable_source_contract=%d "
+                    "mode=stable-reuse\n",
+                    md_info.sys.steps,
+                    gmxpacked_incremental_merge_used ? 1 : 0,
+                    previous_gmxpacked_incremental_source_numbers,
+                    gmxpacked_incremental_merge_dirty_source_rows,
+                    gmxpacked_record_stream_source_numbers,
+                    gmxpacked_incremental_merge_filled_dirty_rows,
+                    gmxpacked_incremental_merge_overflow_rows,
+                    current_layout_incremental_device_mask_ready ? 1 : 0,
+                    current_layout_incremental_j_leaf_scope_ready ? 1 : 0,
+                    use_stable_target_layout ? 1 : 0,
+                    use_stable_source_contract ? 1 : 0);
+            fflush(stderr);
+        }
+        Free_Single_Device_Pointer(
+            (void**)&d_stable_reuse_expected_dirty_rows);
+    }
+
+    if (!gmxpacked_incremental_merge_used &&
+        request_gmxpacked_incremental_merge &&
+        use_stable_source_contract &&
+        previous_gmxpacked_incremental_source_cache_ready &&
+        previous_gmxpacked_incremental_candidate_sci_numbers ==
+            candidate_sci_numbers &&
+        previous_gmxpacked_incremental_source_numbers > 0 &&
+        use_gmxpacked_record_stream_source_offsets &&
+        d_gmxpacked_incremental_dirty_candidate_sci != NULL &&
+        d_gmxpacked_incremental_source_offsets_by_candidate != NULL &&
+        d_gmxpacked_incremental_record_stream_sources != NULL &&
+        d_gmxpacked_record_stream_source_offsets_by_candidate != NULL)
+    {
+        ClusteredGmxpackedRecordBuilderStageTimer stage_timer(
+            "incremental-stable-source-overwrite",
+            record_builder_stage_timers);
+        int* d_stable_overwrite_fill_cursor = NULL;
+        int stable_overwrite_fill_cursor_capacity = 0;
+        int* d_stable_overwrite_overflow_rows = NULL;
+        int stable_overwrite_overflow_capacity = 0;
+        int* d_stable_overwrite_expected_dirty_rows = NULL;
+        int stable_overwrite_expected_dirty_capacity = 0;
+        Reserve_Device_Int_Buffer(1, &d_stable_overwrite_fill_cursor,
+                                  &stable_overwrite_fill_cursor_capacity);
+        Reserve_Device_Int_Buffer(1, &d_stable_overwrite_overflow_rows,
+                                  &stable_overwrite_overflow_capacity);
+        Reserve_Device_Int_Buffer(1, &d_stable_overwrite_expected_dirty_rows,
+                                  &stable_overwrite_expected_dirty_capacity);
+        deviceMemset(d_stable_overwrite_fill_cursor, 0, sizeof(int));
+        deviceMemset(d_stable_overwrite_overflow_rows, 0, sizeof(int));
+        deviceMemset(d_stable_overwrite_expected_dirty_rows, 0, sizeof(int));
+        Reserve_Device_Buffer(previous_gmxpacked_incremental_source_numbers,
+                              &d_gmxpacked_record_stream_sources,
+                              &gmxpacked_record_stream_source_capacity);
+        deviceMemcpy(
+            d_gmxpacked_record_stream_sources,
+            d_gmxpacked_incremental_record_stream_sources,
+            sizeof(LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE) *
+                static_cast<size_t>(
+                    previous_gmxpacked_incremental_source_numbers),
+            deviceMemcpyDeviceToDevice);
+        deviceMemcpy(
+            d_gmxpacked_record_stream_source_offsets_by_candidate,
+            d_gmxpacked_incremental_source_offsets_by_candidate,
+            sizeof(int) * (candidate_sci_numbers + 1),
+            deviceMemcpyDeviceToDevice);
+        Launch_Device_Kernel(
+            Count_Gmxpacked_Dirty_Source_Rows_From_Offsets,
+            (candidate_sci_numbers + CONTROLLER::device_max_thread - 1) /
+                CONTROLLER::device_max_thread,
+            CONTROLLER::device_max_thread, 0, NULL, candidate_sci_numbers,
+            d_gmxpacked_incremental_dirty_candidate_sci,
+            d_gmxpacked_incremental_source_offsets_by_candidate,
+            d_stable_overwrite_expected_dirty_rows);
+        Launch_Device_Kernel(
+            Fill_Gmxpacked_Record_Stream_Sources_From_Candidate_Leaves,
+            candidate_sci_blocks, kClusteredBuilderBlockSize, 0, NULL,
+            candidate_sci_numbers, cluster_size, local_atom_numbers,
+            build_cutoff, cell, rcell, d_sort_permutation, d_cluster_offsets,
+            d_leaf_cluster_starts, d_leaf_cluster_ends,
+            d_super_cluster_offsets, d_cluster_to_supercluster,
+            candidate_sci_supercluster_ids, candidate_shift_ids,
+            d_sci_candidate_leaf_offsets, d_sci_candidate_leaf_ids,
+            candidate_leaf_cluster_stride,
+            fixed_shift_leaf_screening ? d_candidate_leaf_reach_masks : NULL,
+            d_cluster_valid_masks, d_cluster_local_masks, d_cluster_centers,
+            d_cluster_extents, cluster_molecule_signatures,
+            cluster_molecule_ids, d_excluded_list_start, d_excluded_list,
+            d_excluded_numbers, fixed_shift_candidates,
+            gmxpacked_record_stream_cutoff, gmxpacked_record_stream_prune_crd,
+            previous_gmxpacked_incremental_source_numbers,
+            d_gmxpacked_record_stream_source_offsets_by_candidate,
+            d_gmxpacked_record_stream_sources,
+            d_stable_overwrite_fill_cursor,
+            d_stable_overwrite_overflow_rows, 0, NULL, 0, NULL, NULL, NULL,
+            d_gmxpacked_incremental_dirty_candidate_sci);
+        deviceMemcpy(&gmxpacked_incremental_merge_dirty_source_rows,
+                     d_stable_overwrite_expected_dirty_rows, sizeof(int),
+                     deviceMemcpyDeviceToHost);
+        deviceMemcpy(&gmxpacked_incremental_merge_filled_dirty_rows,
+                     d_stable_overwrite_fill_cursor, sizeof(int),
+                     deviceMemcpyDeviceToHost);
+        deviceMemcpy(&gmxpacked_incremental_merge_overflow_rows,
+                     d_stable_overwrite_overflow_rows, sizeof(int),
+                     deviceMemcpyDeviceToHost);
+        if (gmxpacked_incremental_merge_dirty_source_rows ==
+                gmxpacked_incremental_merge_filled_dirty_rows &&
+            gmxpacked_incremental_merge_overflow_rows == 0)
+        {
+            gmxpacked_record_stream_source_numbers =
+                previous_gmxpacked_incremental_source_numbers;
+            gmxpacked_record_stream_filled_rows =
+                gmxpacked_record_stream_source_numbers;
+            gmxpacked_record_stream_overflow_rows = 0;
+            gmxpacked_incremental_merge_used = true;
+            Reserve_Device_Int_Buffer(
+                candidate_sci_numbers + 1,
+                &d_gmxpacked_incremental_source_offsets_by_candidate,
+                &gmxpacked_incremental_source_offset_capacity);
+            deviceMemcpy(
+                d_gmxpacked_incremental_source_offsets_by_candidate,
+                d_gmxpacked_record_stream_source_offsets_by_candidate,
+                sizeof(int) * (candidate_sci_numbers + 1),
+                deviceMemcpyDeviceToDevice);
+            Reserve_Device_Buffer(
+                gmxpacked_record_stream_source_numbers,
+                &d_gmxpacked_incremental_record_stream_sources,
+                &gmxpacked_incremental_source_cache_capacity);
+            deviceMemcpy(
+                d_gmxpacked_incremental_record_stream_sources,
+                d_gmxpacked_record_stream_sources,
+                sizeof(LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE) *
+                    static_cast<size_t>(gmxpacked_record_stream_source_numbers),
+                deviceMemcpyDeviceToDevice);
+            gmxpacked_incremental_candidate_sci_numbers =
+                candidate_sci_numbers;
+            gmxpacked_incremental_source_numbers =
+                gmxpacked_record_stream_source_numbers;
+            gmxpacked_incremental_source_offsets_ready = true;
+            gmxpacked_incremental_source_cache_ready = true;
+        }
+        if (record_builder_summary_trace)
+        {
+            fprintf(stderr,
+                    "[clustered gmxpacked incremental merge] step=%d used=%d "
+                    "prev_source_rows=%d dirty_source_rows=%d "
+                    "mixed_source_rows=%d filled_dirty_rows=%d "
+                    "overflow_rows=%d current_mask=%d j_leaf_scope=%d "
+                    "stable_target_layout=%d stable_source_contract=%d "
+                    "mode=stable-overwrite\n",
+                    md_info.sys.steps,
+                    gmxpacked_incremental_merge_used ? 1 : 0,
+                    previous_gmxpacked_incremental_source_numbers,
+                    gmxpacked_incremental_merge_dirty_source_rows,
+                    gmxpacked_record_stream_source_numbers,
+                    gmxpacked_incremental_merge_filled_dirty_rows,
+                    gmxpacked_incremental_merge_overflow_rows,
+                    current_layout_incremental_device_mask_ready ? 1 : 0,
+                    current_layout_incremental_j_leaf_scope_ready ? 1 : 0,
+                    use_stable_target_layout ? 1 : 0,
+                    use_stable_source_contract ? 1 : 0);
+            fflush(stderr);
+        }
+        Free_Single_Device_Pointer((void**)&d_stable_overwrite_fill_cursor);
+        Free_Single_Device_Pointer((void**)&d_stable_overwrite_overflow_rows);
+        Free_Single_Device_Pointer(
+            (void**)&d_stable_overwrite_expected_dirty_rows);
+    }
+
+    if (!gmxpacked_incremental_merge_used &&
+        request_gmxpacked_incremental_merge &&
+        Clustered_Gmxpacked_Incremental_Mixed_Source_Build_Enabled() &&
+        previous_gmxpacked_incremental_source_cache_ready &&
+        previous_gmxpacked_incremental_candidate_sci_numbers ==
+            candidate_sci_numbers &&
+        use_gmxpacked_record_stream_source_offsets &&
+        d_gmxpacked_incremental_dirty_candidate_sci != NULL &&
+        d_gmxpacked_record_stream_source_counts_by_candidate != NULL &&
+        d_gmxpacked_record_stream_source_offsets_by_candidate != NULL)
+    {
+        ClusteredGmxpackedRecordBuilderStageTimer stage_timer(
+            "incremental-mixed-source-build", record_builder_stage_timers);
+        int* d_merge_sci_shift_flags = NULL;
+        int merge_sci_shift_flag_capacity = 0;
+        int* d_merge_cjpacked_counts = NULL;
+        int merge_cjpacked_count_capacity = 0;
+        int* d_merge_exclusion_counts = NULL;
+        int merge_exclusion_count_capacity = 0;
+        int* d_merge_source_fill_cursor = NULL;
+        int merge_source_fill_cursor_capacity = 0;
+        int* d_merge_source_overflow_rows = NULL;
+        int merge_source_overflow_capacity = 0;
+        Reserve_Device_Int_Buffer(sci_shift_numbers, &d_merge_sci_shift_flags,
+                                  &merge_sci_shift_flag_capacity);
+        Reserve_Device_Int_Buffer(sci_shift_numbers, &d_merge_cjpacked_counts,
+                                  &merge_cjpacked_count_capacity);
+        Reserve_Device_Int_Buffer(sci_shift_numbers, &d_merge_exclusion_counts,
+                                  &merge_exclusion_count_capacity);
+        Reserve_Device_Int_Buffer(
+            candidate_sci_numbers,
+            &d_gmxpacked_incremental_replacement_source_counts_by_candidate,
+            &gmxpacked_incremental_replacement_source_count_capacity);
+        Reserve_Device_Int_Buffer(
+            candidate_sci_numbers + 1,
+            &d_gmxpacked_incremental_replacement_source_offsets_by_candidate,
+            &gmxpacked_incremental_replacement_source_offset_capacity);
+        Reserve_Device_Int_Buffer(1, &d_merge_source_fill_cursor,
+                                  &merge_source_fill_cursor_capacity);
+        Reserve_Device_Int_Buffer(1, &d_merge_source_overflow_rows,
+                                  &merge_source_overflow_capacity);
+        deviceMemset(d_merge_sci_shift_flags, 0,
+                     sizeof(int) * sci_shift_numbers);
+        deviceMemset(d_merge_cjpacked_counts, 0,
+                     sizeof(int) * sci_shift_numbers);
+        deviceMemset(d_merge_exclusion_counts, 0,
+                     sizeof(int) * sci_shift_numbers);
+        deviceMemset(d_gmxpacked_incremental_replacement_source_counts_by_candidate,
+                     0, sizeof(int) * candidate_sci_numbers);
+
+        Launch_Device_Kernel(
+            Count_Nbnxm_Payload_From_Candidate_Leaves, candidate_sci_blocks,
+            kClusteredBuilderBlockSize, 0, NULL, candidate_sci_numbers,
+            sci_shift_numbers, cluster_size, super_cluster_clusters,
+            local_atom_numbers, build_cutoff, cell, rcell, d_sort_permutation,
+            d_cluster_offsets, d_leaf_cluster_starts, d_leaf_cluster_ends,
+            d_super_cluster_offsets, d_cluster_to_supercluster,
+            candidate_sci_supercluster_ids, d_super_cluster_centers,
+            candidate_shift_ids, d_sci_candidate_leaf_offsets,
+            d_sci_candidate_leaf_ids, candidate_leaf_cluster_stride,
+            fixed_shift_leaf_screening ? d_candidate_leaf_reach_masks : NULL,
+            d_cluster_valid_masks, d_cluster_local_masks, d_cluster_centers,
+            d_cluster_extents, d_cluster_radii, cluster_molecule_signatures,
+            cluster_molecule_ids, d_excluded_list_start, d_excluded_list,
+            d_excluded_numbers, fixed_shift_candidates,
+            gmxpacked_record_stream_cutoff, gmxpacked_record_stream_prune_crd,
+            d_merge_sci_shift_flags, d_merge_cjpacked_counts,
+            d_merge_exclusion_counts, NULL,
+            d_gmxpacked_incremental_replacement_source_counts_by_candidate,
+            false, d_gmxpacked_incremental_dirty_candidate_sci);
+        gmxpacked_incremental_merge_dirty_source_rows = Exclusive_Scan_Counts(
+            this, candidate_sci_numbers,
+            d_gmxpacked_incremental_replacement_source_counts_by_candidate,
+            d_gmxpacked_incremental_replacement_source_offsets_by_candidate);
+
+        if (gmxpacked_incremental_merge_dirty_source_rows > 0)
+        {
+            Reserve_Device_Buffer(
+                gmxpacked_incremental_merge_dirty_source_rows,
+                &d_gmxpacked_incremental_replacement_sources,
+                &gmxpacked_incremental_replacement_source_capacity);
+            deviceMemset(d_merge_source_fill_cursor, 0, sizeof(int));
+            deviceMemset(d_merge_source_overflow_rows, 0, sizeof(int));
+            Launch_Device_Kernel(
+                Fill_Gmxpacked_Record_Stream_Sources_From_Candidate_Leaves,
+                candidate_sci_blocks, kClusteredBuilderBlockSize, 0, NULL,
+                candidate_sci_numbers, cluster_size, local_atom_numbers,
+                build_cutoff, cell, rcell, d_sort_permutation,
+                d_cluster_offsets, d_leaf_cluster_starts, d_leaf_cluster_ends,
+                d_super_cluster_offsets, d_cluster_to_supercluster,
+                candidate_sci_supercluster_ids, candidate_shift_ids,
+                d_sci_candidate_leaf_offsets, d_sci_candidate_leaf_ids,
+                candidate_leaf_cluster_stride,
+                fixed_shift_leaf_screening ? d_candidate_leaf_reach_masks : NULL,
+                d_cluster_valid_masks, d_cluster_local_masks,
+                d_cluster_centers, d_cluster_extents, cluster_molecule_signatures,
+                cluster_molecule_ids, d_excluded_list_start, d_excluded_list,
+                d_excluded_numbers, fixed_shift_candidates,
+                gmxpacked_record_stream_cutoff,
+                gmxpacked_record_stream_prune_crd,
+                gmxpacked_incremental_merge_dirty_source_rows,
+                d_gmxpacked_incremental_replacement_source_offsets_by_candidate,
+                d_gmxpacked_incremental_replacement_sources,
+                d_merge_source_fill_cursor, d_merge_source_overflow_rows, 0,
+                NULL, 0, NULL, NULL, NULL,
+                d_gmxpacked_incremental_dirty_candidate_sci);
+            deviceMemcpy(&gmxpacked_incremental_merge_filled_dirty_rows,
+                         d_merge_source_fill_cursor, sizeof(int),
+                         deviceMemcpyDeviceToHost);
+            deviceMemcpy(&gmxpacked_incremental_merge_overflow_rows,
+                         d_merge_source_overflow_rows, sizeof(int),
+                         deviceMemcpyDeviceToHost);
+        }
+
+        if (gmxpacked_incremental_merge_dirty_source_rows ==
+                gmxpacked_incremental_merge_filled_dirty_rows &&
+            gmxpacked_incremental_merge_overflow_rows == 0)
+        {
+            Launch_Device_Kernel(
+                Build_Gmxpacked_Incremental_Mixed_Source_Counts,
+                (candidate_sci_numbers + CONTROLLER::device_max_thread - 1) /
+                    CONTROLLER::device_max_thread,
+                CONTROLLER::device_max_thread, 0, NULL, candidate_sci_numbers,
+                d_gmxpacked_incremental_dirty_candidate_sci,
+                d_gmxpacked_incremental_source_offsets_by_candidate,
+                d_gmxpacked_incremental_replacement_source_offsets_by_candidate,
+                d_gmxpacked_record_stream_source_counts_by_candidate);
+            gmxpacked_record_stream_source_numbers = Exclusive_Scan_Counts(
+                this, candidate_sci_numbers,
+                d_gmxpacked_record_stream_source_counts_by_candidate,
+                d_gmxpacked_record_stream_source_offsets_by_candidate);
+            if (gmxpacked_record_stream_source_numbers > 0)
+            {
+                Reserve_Device_Buffer(gmxpacked_record_stream_source_numbers,
+                                      &d_gmxpacked_record_stream_sources,
+                                      &gmxpacked_record_stream_source_capacity);
+                Launch_Device_Kernel(
+                    Fill_Gmxpacked_Incremental_Mixed_Record_Stream_Sources,
+                    (candidate_sci_numbers + CONTROLLER::device_max_thread - 1) /
+                        CONTROLLER::device_max_thread,
+                    CONTROLLER::device_max_thread, 0, NULL,
+                    candidate_sci_numbers,
+                    d_gmxpacked_incremental_dirty_candidate_sci,
+                    d_gmxpacked_incremental_source_offsets_by_candidate,
+                    d_gmxpacked_incremental_record_stream_sources,
+                    d_gmxpacked_incremental_replacement_source_offsets_by_candidate,
+                    d_gmxpacked_incremental_replacement_sources,
+                    d_gmxpacked_record_stream_source_offsets_by_candidate,
+                    d_gmxpacked_record_stream_sources);
+                gmxpacked_record_stream_filled_rows =
+                    gmxpacked_record_stream_source_numbers;
+                gmxpacked_record_stream_overflow_rows = 0;
+                gmxpacked_incremental_merge_used = true;
+            }
+        }
+
+        if (record_builder_summary_trace)
+        {
+            fprintf(stderr,
+                    "[clustered gmxpacked incremental merge] step=%d used=%d "
+                    "prev_source_rows=%d dirty_source_rows=%d "
+                    "mixed_source_rows=%d filled_dirty_rows=%d "
+                    "overflow_rows=%d current_mask=%d j_leaf_scope=%d "
+                    "stable_target_layout=%d stable_source_contract=%d\n",
+                    md_info.sys.steps,
+                    gmxpacked_incremental_merge_used ? 1 : 0,
+                    previous_gmxpacked_incremental_source_numbers,
+                    gmxpacked_incremental_merge_dirty_source_rows,
+                    gmxpacked_record_stream_source_numbers,
+                    gmxpacked_incremental_merge_filled_dirty_rows,
+                    gmxpacked_incremental_merge_overflow_rows,
+                    current_layout_incremental_device_mask_ready ? 1 : 0,
+                    current_layout_incremental_j_leaf_scope_ready ? 1 : 0,
+                    use_stable_target_layout ? 1 : 0,
+                    use_stable_source_contract ? 1 : 0);
+            fflush(stderr);
+        }
+
+        if (gmxpacked_incremental_merge_used)
+        {
+            Reserve_Device_Int_Buffer(
+                candidate_sci_numbers + 1,
+                &d_gmxpacked_incremental_source_offsets_by_candidate,
+                &gmxpacked_incremental_source_offset_capacity);
+            deviceMemcpy(
+                d_gmxpacked_incremental_source_offsets_by_candidate,
+                d_gmxpacked_record_stream_source_offsets_by_candidate,
+                sizeof(int) * (candidate_sci_numbers + 1),
+                deviceMemcpyDeviceToDevice);
+            Reserve_Device_Buffer(
+                gmxpacked_record_stream_source_numbers,
+                &d_gmxpacked_incremental_record_stream_sources,
+                &gmxpacked_incremental_source_cache_capacity);
+            deviceMemcpy(
+                d_gmxpacked_incremental_record_stream_sources,
+                d_gmxpacked_record_stream_sources,
+                sizeof(LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE) *
+                    static_cast<size_t>(gmxpacked_record_stream_source_numbers),
+                deviceMemcpyDeviceToDevice);
+            gmxpacked_incremental_candidate_sci_numbers =
+                candidate_sci_numbers;
+            gmxpacked_incremental_source_numbers =
+                gmxpacked_record_stream_source_numbers;
+            gmxpacked_incremental_source_offsets_ready = true;
+            gmxpacked_incremental_source_cache_ready = true;
+        }
+
+        Free_Single_Device_Pointer((void**)&d_merge_sci_shift_flags);
+        Free_Single_Device_Pointer((void**)&d_merge_cjpacked_counts);
+        Free_Single_Device_Pointer((void**)&d_merge_exclusion_counts);
+        Free_Single_Device_Pointer((void**)&d_merge_source_fill_cursor);
+        Free_Single_Device_Pointer((void**)&d_merge_source_overflow_rows);
+    }
+
+    if (!gmxpacked_incremental_merge_used &&
+        d_gmxpacked_record_stream_source_counts_by_candidate != NULL)
+    {
+        deviceMemset(d_gmxpacked_record_stream_source_counts_by_candidate, 0,
+                     sizeof(int) * candidate_sci_numbers);
+    }
+
+    if (!gmxpacked_incremental_merge_used &&
+        (!run_gmxpacked_primary_builder ||
+         use_gmxpacked_record_stream_source_offsets))
+    {
+        ClusteredGmxpackedRecordBuilderStageTimer stage_timer(
+            run_gmxpacked_primary_builder
+                ? "primary-source-offset-count-scan"
+                : "native-count-scan",
+            record_builder_stage_timers);
+        Launch_Device_Kernel(
+            Count_Nbnxm_Payload_From_Candidate_Leaves,
+            candidate_sci_blocks, kClusteredBuilderBlockSize, 0, NULL,
+            candidate_sci_numbers,
+            sci_shift_numbers, cluster_size, super_cluster_clusters,
+            local_atom_numbers, build_cutoff, cell, rcell, d_sort_permutation,
+            d_cluster_offsets, d_leaf_cluster_starts, d_leaf_cluster_ends,
+            d_super_cluster_offsets, d_cluster_to_supercluster,
+            candidate_sci_supercluster_ids, d_super_cluster_centers,
+            candidate_shift_ids,
+            d_sci_candidate_leaf_offsets, d_sci_candidate_leaf_ids,
+            candidate_leaf_cluster_stride,
+            fixed_shift_leaf_screening ? d_candidate_leaf_reach_masks : NULL,
+            d_cluster_valid_masks, d_cluster_local_masks, d_cluster_centers,
+            d_cluster_extents, d_cluster_radii, cluster_molecule_signatures,
+            cluster_molecule_ids,
+            d_excluded_list_start, d_excluded_list, d_excluded_numbers,
+            fixed_shift_candidates, gmxpacked_record_stream_cutoff,
+            gmxpacked_record_stream_prune_crd,
+            d_sci_shift_flags, d_cjpacked_counts, d_exclusion_counts,
+            defer_gmxpacked_record_stream_source_count
+                ? NULL
+                : d_gmxpacked_record_stream_source_rows,
+            defer_gmxpacked_record_stream_source_count
+                ? NULL
+                : d_gmxpacked_record_stream_source_counts_by_candidate,
+            accumulate_gmxpacked_record_stream_source_rows_by_candidate, NULL);
 #ifndef USE_CPU
-    Clustered_Debug_Device_Sync_If_Tracing(
-        "Count_Nbnxm_Payload_From_Candidate_Leaves");
+        Clustered_Debug_Device_Sync_If_Tracing(
+            "Count_Nbnxm_Payload_From_Candidate_Leaves");
 #endif
 
-    sci_numbers = Exclusive_Scan_Counts(this, sci_shift_numbers,
-                                        d_sci_shift_flags,
-                                        d_sci_shift_offsets);
-    cjpacked_numbers = Exclusive_Scan_Counts(
-        this, sci_shift_numbers, d_cjpacked_counts,
-        d_cjpacked_group_offsets);
-    exclusion_pool_numbers =
-        Exclusive_Scan_Counts(this, sci_shift_numbers, d_exclusion_counts,
-                              d_exclusion_offsets);
+        sci_numbers = Exclusive_Scan_Counts(this, sci_shift_numbers,
+                                            d_sci_shift_flags,
+                                            d_sci_shift_offsets);
+        cjpacked_numbers = Exclusive_Scan_Counts(
+            this, sci_shift_numbers, d_cjpacked_counts,
+            d_cjpacked_group_offsets);
+        exclusion_pool_numbers =
+            Exclusive_Scan_Counts(this, sci_shift_numbers, d_exclusion_counts,
+                                  d_exclusion_offsets);
+        if (run_gmxpacked_record_builder)
+        {
+            if (defer_gmxpacked_record_stream_source_count)
+            {
+                gmxpacked_record_stream_source_numbers = 0;
+            }
+            else if (use_gmxpacked_record_stream_source_offsets)
+            {
+                gmxpacked_record_stream_source_numbers = Exclusive_Scan_Counts(
+                    this, candidate_sci_numbers,
+                    d_gmxpacked_record_stream_source_counts_by_candidate,
+                    d_gmxpacked_record_stream_source_offsets_by_candidate);
+            }
+            else
+            {
+                deviceMemcpy(&gmxpacked_record_stream_source_numbers,
+                             d_gmxpacked_record_stream_source_rows, sizeof(int),
+                             deviceMemcpyDeviceToHost);
+            }
+            gmxpacked_record_stream_aggregate_numbers = 0;
+            Free_Single_Device_Pointer(
+                (void**)&d_gmxpacked_record_stream_source_rows);
+        }
+    }
+    else if (!gmxpacked_incremental_merge_used)
+    {
+        sci_numbers = 0;
+        cjpacked_numbers = 0;
+        exclusion_pool_numbers = 0;
+        gmxpacked_record_stream_source_numbers = 0;
+        gmxpacked_record_stream_aggregate_numbers = 0;
+        if (record_builder_stage_timers || Clustered_Trace_Warp_Records_Enabled())
+        {
+            fprintf(stderr,
+                    "[clustered gmxpacked primary builder] step=%d "
+                    "stage=skip-native-count candidate_sci=%d "
+                    "candidate_leaves=%d\n",
+                    md_info.sys.steps, candidate_sci_numbers,
+                    candidate_leaf_numbers);
+            fflush(stderr);
+        }
+    }
     if (Clustered_Trace_Warp_Records_Enabled())
     {
         fprintf(stderr,
@@ -9897,9 +24346,14 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                 dense_shift_partitioned_candidates ? 1 : 0,
                 sparse_shift_candidates ? 1 : 0);
     }
-    if (sci_numbers <= 0 || cjpacked_numbers <= 0)
+    if (!run_gmxpacked_primary_builder &&
+        (sci_numbers <= 0 || cjpacked_numbers <= 0))
     {
-        Commit_Clustered_Build_Cache(this, crd, cutoff);
+        Free_Single_Device_Pointer(
+            (void**)&d_gmxpacked_record_stream_source_counts_by_candidate);
+        Free_Single_Device_Pointer(
+            (void**)&d_gmxpacked_record_stream_source_offsets_by_candidate);
+        Commit_Clustered_Build_Cache(this, commit_cache_crd, cutoff);
         return;
     }
 
@@ -9909,19 +24363,1216 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
     const bool build_gmxpacked_direct_candidate =
         need_gmxpacked_payload && runtime_gmxpacked_direct_requested &&
         Clustered_Gmxpacked_Direct_Candidate_Build_Enabled() &&
+        !request_gmxpacked_record_builder_route &&
         !run_reduced_staged_count;
     const bool run_early_record_analysis =
         Clustered_Gmxpacked_Early_Record_Analyze_Enabled();
 
-    Reserve_Device_Buffer(sci_numbers, &d_nbnxm_sci, &nbnxm_sci_capacity);
-    Reserve_Device_Buffer(cjpacked_numbers, &d_nbnxm_cjpacked,
-                          &nbnxm_cjpacked_capacity);
-    if (exclusion_pool_numbers > 0)
+    int* d_early_record_analysis_raw_count = NULL;
+    int early_record_analysis_count_capacity = 0;
+    ClusteredEarlyRecordAnalyzeEntry* d_early_record_analysis_entries = NULL;
+    int early_record_analysis_entry_capacity = 0;
+    const int early_record_analysis_capacity =
+        run_early_record_analysis ? cjpacked_numbers * kClusteredJGroupSize : 0;
+    if (early_record_analysis_capacity > 0)
     {
-        Reserve_Device_PairMask_Buffer(exclusion_pool_numbers,
-                                       &d_exclusion_mask_pool,
-                                       &exclusion_capacity);
+        Reserve_Device_Int_Buffer(1, &d_early_record_analysis_raw_count,
+                                  &early_record_analysis_count_capacity);
+        deviceMemset(d_early_record_analysis_raw_count, 0, sizeof(int));
+        Reserve_Device_Buffer(early_record_analysis_capacity,
+                              &d_early_record_analysis_entries,
+                              &early_record_analysis_entry_capacity);
     }
+
+    int* d_gmxpacked_record_stream_source_fill_cursor = NULL;
+    int gmxpacked_record_stream_source_fill_cursor_capacity = 0;
+    int* d_gmxpacked_record_stream_source_overflow_rows = NULL;
+    int gmxpacked_record_stream_source_overflow_capacity = 0;
+    int* d_gmxpacked_record_stream_source_trace_focus_atoms = NULL;
+    int gmxpacked_record_stream_source_trace_focus_atom_capacity = 0;
+    ClusteredGmxpackedDeviceSourceRowTrace* d_gmxpacked_device_source_trace_rows =
+        NULL;
+    int gmxpacked_device_source_trace_capacity = 0;
+    int* d_gmxpacked_device_source_trace_cursor = NULL;
+    int gmxpacked_device_source_trace_cursor_capacity = 0;
+    int* d_gmxpacked_device_source_trace_overflow_rows = NULL;
+    int gmxpacked_device_source_trace_overflow_capacity = 0;
+    int gmxpacked_device_source_trace_filled_rows = 0;
+    int gmxpacked_device_source_trace_overflow_rows = 0;
+    int gmxpacked_record_stream_source_capacity_request =
+        gmxpacked_record_stream_source_numbers;
+    if (defer_gmxpacked_record_stream_source_count)
+    {
+        gmxpacked_record_stream_source_capacity_request =
+            use_gmxpacked_one_pass_source_cache
+                ? Estimate_Gmxpacked_Primary_One_Pass_Source_Capacity(
+                      candidate_sci_numbers, candidate_leaf_numbers)
+            : run_gmxpacked_primary_builder
+                ? Estimate_Gmxpacked_Primary_Record_Stream_Source_Capacity(
+                      candidate_sci_numbers, candidate_leaf_numbers)
+                : Estimate_Gmxpacked_Record_Stream_Source_Capacity(
+                      cjpacked_numbers);
+    }
+    if (!gmxpacked_incremental_merge_used && run_gmxpacked_record_builder &&
+        gmxpacked_record_stream_source_capacity_request > 0)
+    {
+        ClusteredGmxpackedRecordBuilderStageTimer stage_timer(
+            "record-stream-source-row-generation",
+            record_builder_stage_timers);
+        Reserve_Device_Int_Buffer(1,
+                                  &d_gmxpacked_record_stream_source_fill_cursor,
+                                  &gmxpacked_record_stream_source_fill_cursor_capacity);
+        Reserve_Device_Int_Buffer(1,
+                                  &d_gmxpacked_record_stream_source_overflow_rows,
+                                  &gmxpacked_record_stream_source_overflow_capacity);
+        for (int source_fill_attempt = 0; source_fill_attempt < 2;
+             source_fill_attempt += 1)
+        {
+            Reserve_Device_Buffer(gmxpacked_record_stream_source_capacity_request,
+                                  &d_gmxpacked_record_stream_sources,
+                                  &gmxpacked_record_stream_source_capacity);
+            deviceMemset(d_gmxpacked_record_stream_source_fill_cursor, 0,
+                         sizeof(int));
+            deviceMemset(d_gmxpacked_record_stream_source_overflow_rows, 0,
+                         sizeof(int));
+            if (run_gmxpacked_record_builder_device_source_trace)
+            {
+                Reserve_Device_Int_Buffer(
+                    static_cast<int>(
+                        record_builder_device_source_trace_focus_atoms.size()),
+                    &d_gmxpacked_record_stream_source_trace_focus_atoms,
+                    &gmxpacked_record_stream_source_trace_focus_atom_capacity);
+                deviceMemcpy(
+                    d_gmxpacked_record_stream_source_trace_focus_atoms,
+                    record_builder_device_source_trace_focus_atoms.data(),
+                    sizeof(int) *
+                        record_builder_device_source_trace_focus_atoms.size(),
+                    deviceMemcpyHostToDevice);
+                const int requested_trace_capacity =
+                    gmxpacked_record_stream_source_capacity_request + 8192;
+                Reserve_Device_Buffer(requested_trace_capacity,
+                                      &d_gmxpacked_device_source_trace_rows,
+                                      &gmxpacked_device_source_trace_capacity);
+                Reserve_Device_Int_Buffer(
+                    1, &d_gmxpacked_device_source_trace_cursor,
+                    &gmxpacked_device_source_trace_cursor_capacity);
+                Reserve_Device_Int_Buffer(
+                    1, &d_gmxpacked_device_source_trace_overflow_rows,
+                    &gmxpacked_device_source_trace_overflow_capacity);
+                deviceMemset(d_gmxpacked_device_source_trace_cursor, 0,
+                             sizeof(int));
+                deviceMemset(d_gmxpacked_device_source_trace_overflow_rows, 0,
+                             sizeof(int));
+            }
+            Launch_Device_Kernel(
+                Fill_Gmxpacked_Record_Stream_Sources_From_Candidate_Leaves,
+                candidate_sci_blocks, kClusteredBuilderBlockSize, 0, NULL,
+                candidate_sci_numbers, cluster_size, local_atom_numbers,
+                build_cutoff, cell, rcell, d_sort_permutation, d_cluster_offsets,
+                d_leaf_cluster_starts, d_leaf_cluster_ends,
+                d_super_cluster_offsets, d_cluster_to_supercluster,
+                candidate_sci_supercluster_ids, candidate_shift_ids,
+                d_sci_candidate_leaf_offsets, d_sci_candidate_leaf_ids,
+                candidate_leaf_cluster_stride,
+                fixed_shift_leaf_screening ? d_candidate_leaf_reach_masks : NULL,
+                d_cluster_valid_masks, d_cluster_local_masks, d_cluster_centers,
+                d_cluster_extents, cluster_molecule_signatures,
+                cluster_molecule_ids,
+                d_excluded_list_start, d_excluded_list, d_excluded_numbers,
+                fixed_shift_candidates, gmxpacked_record_stream_cutoff,
+                gmxpacked_record_stream_prune_crd,
+                gmxpacked_record_stream_source_capacity_request,
+                d_gmxpacked_record_stream_source_offsets_by_candidate,
+                d_gmxpacked_record_stream_sources,
+                d_gmxpacked_record_stream_source_fill_cursor,
+                d_gmxpacked_record_stream_source_overflow_rows,
+                static_cast<int>(
+                    record_builder_device_source_trace_focus_atoms.size()),
+                d_gmxpacked_record_stream_source_trace_focus_atoms,
+                gmxpacked_device_source_trace_capacity,
+                d_gmxpacked_device_source_trace_rows,
+                d_gmxpacked_device_source_trace_cursor,
+                d_gmxpacked_device_source_trace_overflow_rows, NULL);
+#ifndef USE_CPU
+            Clustered_Debug_Device_Sync_If_Tracing(
+                "Fill_Gmxpacked_Record_Stream_Sources_From_Candidate_Leaves");
+#endif
+            deviceMemcpy(&gmxpacked_record_stream_filled_rows,
+                         d_gmxpacked_record_stream_source_fill_cursor,
+                         sizeof(int), deviceMemcpyDeviceToHost);
+            deviceMemcpy(&gmxpacked_record_stream_overflow_rows,
+                         d_gmxpacked_record_stream_source_overflow_rows,
+                         sizeof(int), deviceMemcpyDeviceToHost);
+            if (defer_gmxpacked_record_stream_source_count)
+            {
+                gmxpacked_record_stream_source_numbers =
+                    gmxpacked_record_stream_filled_rows;
+                if (gmxpacked_record_stream_overflow_rows > 0 &&
+                    gmxpacked_record_stream_filled_rows >
+                        gmxpacked_record_stream_source_capacity_request &&
+                    source_fill_attempt == 0)
+                {
+                    gmxpacked_record_stream_source_capacity_request =
+                        gmxpacked_record_stream_filled_rows;
+                    continue;
+                }
+            }
+            break;
+        }
+        if (run_gmxpacked_record_builder_device_source_trace)
+        {
+            deviceMemcpy(&gmxpacked_device_source_trace_filled_rows,
+                         d_gmxpacked_device_source_trace_cursor, sizeof(int),
+                         deviceMemcpyDeviceToHost);
+            deviceMemcpy(&gmxpacked_device_source_trace_overflow_rows,
+                         d_gmxpacked_device_source_trace_overflow_rows,
+                         sizeof(int), deviceMemcpyDeviceToHost);
+            const int copied_trace_rows = IntMin(
+                gmxpacked_device_source_trace_filled_rows,
+                gmxpacked_device_source_trace_capacity);
+            const std::vector<ClusteredGmxpackedDeviceSourceRowTrace>
+                host_device_source_trace_rows =
+                    copied_trace_rows > 0 &&
+                            d_gmxpacked_device_source_trace_rows != NULL
+                        ? Copy_Device_Buffer_To_Host(
+                              d_gmxpacked_device_source_trace_rows,
+                              static_cast<size_t>(copied_trace_rows))
+                        : std::vector<ClusteredGmxpackedDeviceSourceRowTrace>();
+            Capture_Gmxpacked_Record_Builder_Device_Source_Trace_Snapshot(
+                gmxpacked_device_source_trace_capacity,
+                gmxpacked_device_source_trace_overflow_rows,
+                host_device_source_trace_rows);
+            Free_Single_Device_Pointer(
+                (void**)&d_gmxpacked_record_stream_source_trace_focus_atoms);
+            Free_Single_Device_Pointer(
+                (void**)&d_gmxpacked_device_source_trace_rows);
+            Free_Single_Device_Pointer(
+                (void**)&d_gmxpacked_device_source_trace_cursor);
+            Free_Single_Device_Pointer(
+                (void**)&d_gmxpacked_device_source_trace_overflow_rows);
+        }
+        Free_Single_Device_Pointer(
+            (void**)&d_gmxpacked_record_stream_source_fill_cursor);
+        Free_Single_Device_Pointer(
+            (void**)&d_gmxpacked_record_stream_source_overflow_rows);
+        if (use_gmxpacked_one_pass_source_cache &&
+            gmxpacked_record_stream_overflow_rows == 0 &&
+            gmxpacked_record_stream_filled_rows ==
+                gmxpacked_record_stream_source_numbers &&
+            gmxpacked_record_stream_source_numbers > 1)
+        {
+            Sort_Gmxpacked_Record_Stream_Sources_For_Aggregate(
+                this, gmxpacked_record_stream_source_numbers,
+                record_builder_stage_timers,
+                "record-stream-one-pass-source-low-sort",
+                "record-stream-one-pass-source-high-sort",
+                "record-stream-one-pass-source-gather");
+        }
+        if (use_gmxpacked_incremental_cache)
+        {
+            const bool record_stream_source_rows_match =
+                gmxpacked_record_stream_filled_rows ==
+                gmxpacked_record_stream_source_numbers;
+            const bool record_stream_source_overflow_free =
+                gmxpacked_record_stream_overflow_rows == 0;
+            const bool record_stream_source_offsets_available =
+                d_gmxpacked_record_stream_source_offsets_by_candidate != NULL;
+            const bool source_cache_ready =
+                record_stream_source_rows_match &&
+                record_stream_source_overflow_free &&
+                gmxpacked_record_stream_source_numbers > 0 &&
+                d_gmxpacked_record_stream_sources != NULL &&
+                (record_stream_source_offsets_available ||
+                 use_gmxpacked_one_pass_source_cache);
+            if (run_gmxpacked_incremental_refill_probe &&
+                previous_gmxpacked_incremental_source_cache_ready &&
+                previous_gmxpacked_incremental_candidate_sci_numbers ==
+                    candidate_sci_numbers &&
+                current_layout_incremental_device_mask_ready &&
+                d_gmxpacked_incremental_dirty_candidate_sci != NULL &&
+                d_gmxpacked_record_stream_source_offsets_by_candidate != NULL)
+            {
+                std::vector<int> h_previous_source_offsets(
+                    static_cast<size_t>(candidate_sci_numbers) + 1);
+                std::vector<int> h_current_source_offsets(
+                    static_cast<size_t>(candidate_sci_numbers) + 1);
+                std::vector<int> h_dirty_candidate_sci(
+                    static_cast<size_t>(candidate_sci_numbers));
+                deviceMemcpy(
+                    h_previous_source_offsets.data(),
+                    d_gmxpacked_incremental_source_offsets_by_candidate,
+                    sizeof(int) * (candidate_sci_numbers + 1),
+                    deviceMemcpyDeviceToHost);
+                deviceMemcpy(h_current_source_offsets.data(),
+                             d_gmxpacked_record_stream_source_offsets_by_candidate,
+                             sizeof(int) * (candidate_sci_numbers + 1),
+                             deviceMemcpyDeviceToHost);
+                deviceMemcpy(h_dirty_candidate_sci.data(),
+                             d_gmxpacked_incremental_dirty_candidate_sci,
+                             sizeof(int) * candidate_sci_numbers,
+                             deviceMemcpyDeviceToHost);
+                const bool source_hash_probe_ready =
+                    previous_gmxpacked_incremental_source_numbers > 0 &&
+                    gmxpacked_record_stream_source_numbers > 0 &&
+                    d_gmxpacked_incremental_record_stream_sources != NULL &&
+                    d_gmxpacked_record_stream_sources != NULL;
+                std::vector<LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE>
+                    h_previous_sources;
+                std::vector<LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE>
+                    h_current_sources;
+                if (source_hash_probe_ready)
+                {
+                    h_previous_sources.resize(
+                        static_cast<size_t>(
+                            previous_gmxpacked_incremental_source_numbers));
+                    h_current_sources.resize(
+                        static_cast<size_t>(
+                            gmxpacked_record_stream_source_numbers));
+                    deviceMemcpy(
+                        h_previous_sources.data(),
+                        d_gmxpacked_incremental_record_stream_sources,
+                        sizeof(LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE) *
+                            h_previous_sources.size(),
+                        deviceMemcpyDeviceToHost);
+                    deviceMemcpy(
+                        h_current_sources.data(),
+                        d_gmxpacked_record_stream_sources,
+                        sizeof(LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE) *
+                            h_current_sources.size(),
+                        deviceMemcpyDeviceToHost);
+                }
+                int dirty_candidates = 0;
+                int clean_count_mismatches = 0;
+                int clean_hash_mismatches = 0;
+                int clean_equal_count_candidates = 0;
+                int clean_equal_count_hash_mismatches = 0;
+                long long dirty_previous_source_rows = 0;
+                long long dirty_current_source_rows = 0;
+                long long clean_previous_source_rows = 0;
+                long long clean_current_source_rows = 0;
+                long long clean_mismatch_previous_source_rows = 0;
+                long long clean_mismatch_current_source_rows = 0;
+                long long clean_hash_mismatch_previous_source_rows = 0;
+                long long clean_hash_mismatch_current_source_rows = 0;
+                long long clean_equal_count_source_rows = 0;
+                for (int candidate_sci = 0; candidate_sci < candidate_sci_numbers;
+                     candidate_sci += 1)
+                {
+                    const int previous_begin =
+                        h_previous_source_offsets[static_cast<size_t>(
+                            candidate_sci)];
+                    const int previous_end =
+                        h_previous_source_offsets[static_cast<size_t>(
+                            candidate_sci) +
+                                                  1];
+                    const int current_begin =
+                        h_current_source_offsets[static_cast<size_t>(
+                            candidate_sci)];
+                    const int current_end =
+                        h_current_source_offsets[static_cast<size_t>(
+                            candidate_sci) +
+                                                1];
+                    const int previous_rows = IntMax(
+                        0, previous_end - previous_begin);
+                    const int current_rows = IntMax(
+                        0, current_end - current_begin);
+                    if (h_dirty_candidate_sci
+                            [static_cast<size_t>(candidate_sci)] != 0)
+                    {
+                        dirty_candidates += 1;
+                        dirty_previous_source_rows += previous_rows;
+                        dirty_current_source_rows += current_rows;
+                    }
+                    else
+                    {
+                        clean_previous_source_rows += previous_rows;
+                        clean_current_source_rows += current_rows;
+                        if (previous_rows != current_rows)
+                        {
+                            clean_count_mismatches += 1;
+                            clean_mismatch_previous_source_rows += previous_rows;
+                            clean_mismatch_current_source_rows += current_rows;
+                        }
+                        if (source_hash_probe_ready)
+                        {
+                            const uint64_t previous_hash =
+                                Hash_Gmxpacked_Record_Stream_Source_Range_For_Layout_Probe(
+                                    h_previous_sources, previous_begin,
+                                    previous_end);
+                            const uint64_t current_hash =
+                                Hash_Gmxpacked_Record_Stream_Source_Range_For_Layout_Probe(
+                                    h_current_sources, current_begin,
+                                    current_end);
+                            if (previous_rows == current_rows)
+                            {
+                                clean_equal_count_candidates += 1;
+                                clean_equal_count_source_rows += previous_rows;
+                                if (previous_hash != current_hash)
+                                {
+                                    clean_equal_count_hash_mismatches += 1;
+                                }
+                            }
+                            if (previous_hash != current_hash)
+                            {
+                                clean_hash_mismatches += 1;
+                                clean_hash_mismatch_previous_source_rows +=
+                                    previous_rows;
+                                clean_hash_mismatch_current_source_rows +=
+                                    current_rows;
+                            }
+                        }
+                    }
+                }
+                fprintf(stderr,
+                        "[clustered gmxpacked incremental layout probe] "
+                        "step=%d candidate_sci=%d prev_source_rows=%d "
+                        "current_source_rows=%d dirty_candidates=%d "
+                        "clean_count_mismatches=%d clean_prev_rows=%lld "
+                        "clean_current_rows=%lld dirty_prev_rows=%lld "
+                        "dirty_current_rows=%lld clean_mismatch_prev_rows=%lld "
+                        "clean_mismatch_current_rows=%lld source_hash_probe=%d "
+                        "clean_hash_mismatches=%d "
+                        "clean_hash_mismatch_prev_rows=%lld "
+                        "clean_hash_mismatch_current_rows=%lld "
+                        "clean_equal_count_candidates=%d "
+                        "clean_equal_count_hash_mismatches=%d "
+                        "clean_equal_count_rows=%lld\n",
+                        md_info.sys.steps, candidate_sci_numbers,
+                        previous_gmxpacked_incremental_source_numbers,
+                        gmxpacked_record_stream_source_numbers,
+                        dirty_candidates, clean_count_mismatches,
+                        clean_previous_source_rows, clean_current_source_rows,
+                        dirty_previous_source_rows, dirty_current_source_rows,
+                        clean_mismatch_previous_source_rows,
+                        clean_mismatch_current_source_rows,
+                        source_hash_probe_ready ? 1 : 0,
+                        source_hash_probe_ready ? clean_hash_mismatches : -1,
+                        source_hash_probe_ready
+                            ? clean_hash_mismatch_previous_source_rows
+                            : -1ll,
+                        source_hash_probe_ready
+                            ? clean_hash_mismatch_current_source_rows
+                            : -1ll,
+                        source_hash_probe_ready
+                            ? clean_equal_count_candidates
+                            : -1,
+                        source_hash_probe_ready
+                            ? clean_equal_count_hash_mismatches
+                            : -1,
+                        source_hash_probe_ready
+                            ? clean_equal_count_source_rows
+                            : -1ll);
+                fflush(stderr);
+            }
+            else if (run_gmxpacked_incremental_refill_probe &&
+                     previous_gmxpacked_incremental_source_cache_ready)
+            {
+                fprintf(stderr,
+                        "[clustered gmxpacked incremental layout probe] "
+                        "step=%d status=unavailable prev_candidate_sci=%d "
+                        "current_candidate_sci=%d current_mask=%d\n",
+                        md_info.sys.steps,
+                        previous_gmxpacked_incremental_candidate_sci_numbers,
+                        candidate_sci_numbers,
+                        current_layout_incremental_device_mask_ready ? 1 : 0);
+                fflush(stderr);
+            }
+            if (source_cache_ready)
+            {
+                ClusteredGmxpackedRecordBuilderStageTimer cache_copy_timer(
+                    "incremental-source-cache-copy",
+                    record_builder_stage_timers);
+                if (record_stream_source_offsets_available)
+                {
+                    Reserve_Device_Int_Buffer(
+                        candidate_sci_numbers + 1,
+                        &d_gmxpacked_incremental_source_offsets_by_candidate,
+                        &gmxpacked_incremental_source_offset_capacity);
+                    deviceMemcpy(
+                        d_gmxpacked_incremental_source_offsets_by_candidate,
+                        d_gmxpacked_record_stream_source_offsets_by_candidate,
+                        sizeof(int) * (candidate_sci_numbers + 1),
+                        deviceMemcpyDeviceToDevice);
+                    gmxpacked_incremental_source_offsets_ready = true;
+                }
+                else
+                {
+                    gmxpacked_incremental_source_offsets_ready = false;
+                }
+                Reserve_Device_Buffer(
+                    gmxpacked_record_stream_source_numbers,
+                    &d_gmxpacked_incremental_record_stream_sources,
+                    &gmxpacked_incremental_source_cache_capacity);
+                deviceMemcpy(
+                    d_gmxpacked_incremental_record_stream_sources,
+                    d_gmxpacked_record_stream_sources,
+                    sizeof(LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE) *
+                        static_cast<size_t>(
+                            gmxpacked_record_stream_source_numbers),
+                    deviceMemcpyDeviceToDevice);
+                gmxpacked_incremental_candidate_sci_numbers =
+                    candidate_sci_numbers;
+                gmxpacked_incremental_source_numbers =
+                    gmxpacked_record_stream_source_numbers;
+                gmxpacked_incremental_source_cache_ready = true;
+                if (use_gmxpacked_inner_active_payload &&
+                    Clustered_Gmxpacked_Record_Builder_Inner_Active_Debug_Counts_Enabled() &&
+                    d_stable_target_layout_crd != NULL)
+                {
+                    const int cached_active_source_rows =
+                        Count_Gmxpacked_Record_Stream_Inner_Active_Source_Rows(
+                            this, gmxpacked_incremental_source_numbers,
+                            d_gmxpacked_incremental_record_stream_sources,
+                            d_stable_target_layout_crd, cell, rcell, cutoff,
+                            record_builder_stage_timers,
+                            "record-stream-inner-active-cache-debug-count",
+                            false);
+                    fprintf(stderr,
+                            "[clustered gmxpacked inner active debug] step=%d "
+                            "phase=post-cache-copy cached_source_rows=%d "
+                            "anchor_active_source_rows=%d\n",
+                            md_info.sys.steps,
+                            gmxpacked_incremental_source_numbers,
+                            cached_active_source_rows);
+                    fflush(stderr);
+                }
+            }
+            else
+            {
+                gmxpacked_incremental_source_offsets_ready = false;
+                gmxpacked_incremental_source_cache_ready = false;
+                gmxpacked_incremental_candidate_sci_numbers = 0;
+                gmxpacked_incremental_source_numbers = 0;
+            }
+        }
+    }
+    if (!gmxpacked_incremental_merge_used &&
+        run_gmxpacked_incremental_refill_probe &&
+        d_gmxpacked_incremental_dirty_candidate_sci != NULL &&
+        gmxpacked_record_stream_source_numbers > 0)
+    {
+        ClusteredGmxpackedRecordBuilderStageTimer stage_timer(
+            "incremental-refill-probe", record_builder_stage_timers);
+        int* d_refill_sci_shift_flags = NULL;
+        int refill_sci_shift_flag_capacity = 0;
+        int* d_refill_cjpacked_counts = NULL;
+        int refill_cjpacked_count_capacity = 0;
+        int* d_refill_exclusion_counts = NULL;
+        int refill_exclusion_count_capacity = 0;
+        int* d_refill_source_fill_cursor = NULL;
+        int refill_source_fill_cursor_capacity = 0;
+        int* d_refill_source_overflow_rows = NULL;
+        int refill_source_overflow_capacity = 0;
+        Reserve_Device_Int_Buffer(sci_shift_numbers, &d_refill_sci_shift_flags,
+                                  &refill_sci_shift_flag_capacity);
+        Reserve_Device_Int_Buffer(sci_shift_numbers, &d_refill_cjpacked_counts,
+                                  &refill_cjpacked_count_capacity);
+        Reserve_Device_Int_Buffer(sci_shift_numbers, &d_refill_exclusion_counts,
+                                  &refill_exclusion_count_capacity);
+        Reserve_Device_Int_Buffer(
+            candidate_sci_numbers,
+            &d_gmxpacked_incremental_replacement_source_counts_by_candidate,
+            &gmxpacked_incremental_replacement_source_count_capacity);
+        Reserve_Device_Int_Buffer(
+            candidate_sci_numbers + 1,
+            &d_gmxpacked_incremental_replacement_source_offsets_by_candidate,
+            &gmxpacked_incremental_replacement_source_offset_capacity);
+        Reserve_Device_Int_Buffer(1, &d_refill_source_fill_cursor,
+                                  &refill_source_fill_cursor_capacity);
+        Reserve_Device_Int_Buffer(1, &d_refill_source_overflow_rows,
+                                  &refill_source_overflow_capacity);
+        deviceMemset(d_refill_sci_shift_flags, 0,
+                     sizeof(int) * sci_shift_numbers);
+        deviceMemset(d_refill_cjpacked_counts, 0,
+                     sizeof(int) * sci_shift_numbers);
+        deviceMemset(d_refill_exclusion_counts, 0,
+                     sizeof(int) * sci_shift_numbers);
+        deviceMemset(d_gmxpacked_incremental_replacement_source_counts_by_candidate,
+                     0, sizeof(int) * candidate_sci_numbers);
+
+        Launch_Device_Kernel(
+            Count_Nbnxm_Payload_From_Candidate_Leaves, candidate_sci_blocks,
+            kClusteredBuilderBlockSize, 0, NULL, candidate_sci_numbers,
+            sci_shift_numbers, cluster_size, super_cluster_clusters,
+            local_atom_numbers, build_cutoff, cell, rcell, d_sort_permutation,
+            d_cluster_offsets, d_leaf_cluster_starts, d_leaf_cluster_ends,
+            d_super_cluster_offsets, d_cluster_to_supercluster,
+            candidate_sci_supercluster_ids, d_super_cluster_centers,
+            candidate_shift_ids, d_sci_candidate_leaf_offsets,
+            d_sci_candidate_leaf_ids, candidate_leaf_cluster_stride,
+            fixed_shift_leaf_screening ? d_candidate_leaf_reach_masks : NULL,
+            d_cluster_valid_masks, d_cluster_local_masks, d_cluster_centers,
+            d_cluster_extents, d_cluster_radii, cluster_molecule_signatures,
+            cluster_molecule_ids, d_excluded_list_start, d_excluded_list,
+            d_excluded_numbers, fixed_shift_candidates,
+            gmxpacked_record_stream_cutoff, gmxpacked_record_stream_prune_crd,
+            d_refill_sci_shift_flags,
+            d_refill_cjpacked_counts, d_refill_exclusion_counts, NULL,
+            d_gmxpacked_incremental_replacement_source_counts_by_candidate,
+            false, d_gmxpacked_incremental_dirty_candidate_sci);
+        const int refill_source_rows = Exclusive_Scan_Counts(
+            this, candidate_sci_numbers,
+            d_gmxpacked_incremental_replacement_source_counts_by_candidate,
+            d_gmxpacked_incremental_replacement_source_offsets_by_candidate);
+        int refill_filled_rows = 0;
+        int refill_overflow_rows = 0;
+        if (refill_source_rows > 0)
+        {
+            Reserve_Device_Buffer(
+                refill_source_rows,
+                &d_gmxpacked_incremental_replacement_sources,
+                &gmxpacked_incremental_replacement_source_capacity);
+            deviceMemset(d_refill_source_fill_cursor, 0, sizeof(int));
+            deviceMemset(d_refill_source_overflow_rows, 0, sizeof(int));
+            Launch_Device_Kernel(
+                Fill_Gmxpacked_Record_Stream_Sources_From_Candidate_Leaves,
+                candidate_sci_blocks, kClusteredBuilderBlockSize, 0, NULL,
+                candidate_sci_numbers, cluster_size, local_atom_numbers,
+                build_cutoff, cell, rcell, d_sort_permutation,
+                d_cluster_offsets, d_leaf_cluster_starts, d_leaf_cluster_ends,
+                d_super_cluster_offsets, d_cluster_to_supercluster,
+                candidate_sci_supercluster_ids, candidate_shift_ids,
+                d_sci_candidate_leaf_offsets, d_sci_candidate_leaf_ids,
+                candidate_leaf_cluster_stride,
+                fixed_shift_leaf_screening ? d_candidate_leaf_reach_masks : NULL,
+                d_cluster_valid_masks, d_cluster_local_masks,
+                d_cluster_centers, d_cluster_extents, cluster_molecule_signatures,
+                cluster_molecule_ids, d_excluded_list_start, d_excluded_list,
+                d_excluded_numbers, fixed_shift_candidates,
+                gmxpacked_record_stream_cutoff,
+                gmxpacked_record_stream_prune_crd, refill_source_rows,
+                d_gmxpacked_incremental_replacement_source_offsets_by_candidate,
+                d_gmxpacked_incremental_replacement_sources,
+                d_refill_source_fill_cursor, d_refill_source_overflow_rows, 0,
+                NULL, 0, NULL, NULL, NULL,
+                d_gmxpacked_incremental_dirty_candidate_sci);
+            deviceMemcpy(&refill_filled_rows, d_refill_source_fill_cursor,
+                         sizeof(int), deviceMemcpyDeviceToHost);
+            deviceMemcpy(&refill_overflow_rows, d_refill_source_overflow_rows,
+                         sizeof(int), deviceMemcpyDeviceToHost);
+        }
+        fprintf(stderr,
+                "[clustered gmxpacked incremental refill probe] step=%d "
+                "candidate_sci=%d source_rows=%d dirty_source_rows=%d "
+                "filled_rows=%d overflow_rows=%d current_mask=%d "
+                "j_leaf_scope=%d\n",
+                md_info.sys.steps, candidate_sci_numbers,
+                gmxpacked_record_stream_source_numbers, refill_source_rows,
+                refill_filled_rows, refill_overflow_rows,
+                current_layout_incremental_device_mask_ready ? 1 : 0,
+                current_layout_incremental_j_leaf_scope_ready ? 1 : 0);
+        if (refill_source_rows != refill_filled_rows ||
+            refill_overflow_rows != 0)
+        {
+            fprintf(stderr,
+                    "[clustered gmxpacked incremental refill mismatch] "
+                    "step=%d dirty_source_rows=%d filled_rows=%d "
+                    "overflow_rows=%d\n",
+                    md_info.sys.steps, refill_source_rows,
+                    refill_filled_rows, refill_overflow_rows);
+        }
+        fflush(stderr);
+        Free_Single_Device_Pointer((void**)&d_refill_sci_shift_flags);
+        Free_Single_Device_Pointer((void**)&d_refill_cjpacked_counts);
+        Free_Single_Device_Pointer((void**)&d_refill_exclusion_counts);
+        Free_Single_Device_Pointer((void**)&d_refill_source_fill_cursor);
+        Free_Single_Device_Pointer((void**)&d_refill_source_overflow_rows);
+    }
+#ifndef USE_CPU
+    const int live_builder_bench_iters =
+        Clustered_Gmxpacked_Record_Builder_Live_Bench_Iters();
+    if (request_gmxpacked_record_builder_route &&
+        live_builder_bench_iters > 0 &&
+        gmxpacked_record_stream_source_numbers > 0 &&
+        !run_gmxpacked_record_builder_device_source_trace)
+    {
+        int* d_bench_sci_shift_flags = NULL;
+        int bench_sci_shift_flag_capacity = 0;
+        int* d_bench_cjpacked_counts = NULL;
+        int bench_cjpacked_count_capacity = 0;
+        int* d_bench_exclusion_counts = NULL;
+        int bench_exclusion_count_capacity = 0;
+        int* d_bench_sci_shift_offsets = NULL;
+        int bench_sci_shift_offset_capacity = 0;
+        int* d_bench_cjpacked_group_offsets = NULL;
+        int bench_cjpacked_group_offset_capacity = 0;
+        int* d_bench_exclusion_offsets = NULL;
+        int bench_exclusion_offset_capacity = 0;
+        int* d_bench_source_rows = NULL;
+        int bench_source_row_capacity = 0;
+        int* d_bench_source_counts_by_candidate = NULL;
+        int bench_source_count_capacity = 0;
+        int* d_bench_source_offsets_by_candidate = NULL;
+        int bench_source_offset_capacity = 0;
+        int* d_bench_source_fill_cursor = NULL;
+        int bench_source_fill_cursor_capacity = 0;
+        int* d_bench_source_overflow_rows = NULL;
+        int bench_source_overflow_capacity = 0;
+        LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* d_bench_sources = NULL;
+        int bench_source_capacity = 0;
+
+        Reserve_Device_Int_Buffer(sci_shift_numbers,
+                                  &d_bench_sci_shift_flags,
+                                  &bench_sci_shift_flag_capacity);
+        Reserve_Device_Int_Buffer(sci_shift_numbers,
+                                  &d_bench_cjpacked_counts,
+                                  &bench_cjpacked_count_capacity);
+        Reserve_Device_Int_Buffer(sci_shift_numbers,
+                                  &d_bench_exclusion_counts,
+                                  &bench_exclusion_count_capacity);
+        Reserve_Device_Int_Buffer(sci_shift_numbers + 1,
+                                  &d_bench_sci_shift_offsets,
+                                  &bench_sci_shift_offset_capacity);
+        Reserve_Device_Int_Buffer(sci_shift_numbers + 1,
+                                  &d_bench_cjpacked_group_offsets,
+                                  &bench_cjpacked_group_offset_capacity);
+        Reserve_Device_Int_Buffer(sci_shift_numbers + 1,
+                                  &d_bench_exclusion_offsets,
+                                  &bench_exclusion_offset_capacity);
+        if (use_gmxpacked_record_stream_source_offsets)
+        {
+            Reserve_Device_Int_Buffer(candidate_sci_numbers,
+                                      &d_bench_source_counts_by_candidate,
+                                      &bench_source_count_capacity);
+            Reserve_Device_Int_Buffer(candidate_sci_numbers + 1,
+                                      &d_bench_source_offsets_by_candidate,
+                                      &bench_source_offset_capacity);
+        }
+        else
+        {
+            Reserve_Device_Int_Buffer(1, &d_bench_source_rows,
+                                      &bench_source_row_capacity);
+        }
+        Reserve_Device_Int_Buffer(1, &d_bench_source_fill_cursor,
+                                  &bench_source_fill_cursor_capacity);
+        Reserve_Device_Int_Buffer(1, &d_bench_source_overflow_rows,
+                                  &bench_source_overflow_capacity);
+        Reserve_Device_Buffer(gmxpacked_record_stream_source_numbers,
+                              &d_bench_sources, &bench_source_capacity);
+
+        double count_scan_seconds = 0.0;
+        double source_fill_seconds = 0.0;
+        int bench_sci_numbers = 0;
+        int bench_cjpacked_numbers = 0;
+        int bench_exclusion_pool_numbers = 0;
+        int bench_source_numbers = 0;
+        int bench_filled_rows = 0;
+        int bench_overflow_rows = 0;
+
+        for (int bench_iter = 0; bench_iter < live_builder_bench_iters;
+             bench_iter += 1)
+        {
+            deviceMemset(d_bench_sci_shift_flags, 0,
+                         sizeof(int) * sci_shift_numbers);
+            deviceMemset(d_bench_cjpacked_counts, 0,
+                         sizeof(int) * sci_shift_numbers);
+            deviceMemset(d_bench_exclusion_counts, 0,
+                         sizeof(int) * sci_shift_numbers);
+            if (use_gmxpacked_record_stream_source_offsets)
+            {
+                deviceMemset(d_bench_source_counts_by_candidate, 0,
+                             sizeof(int) * candidate_sci_numbers);
+            }
+            else
+            {
+                deviceMemset(d_bench_source_rows, 0, sizeof(int));
+            }
+
+            cudaDeviceSynchronize();
+            const double count_start = Clustered_Steady_Time_Seconds();
+            Launch_Device_Kernel(
+                Count_Nbnxm_Payload_From_Candidate_Leaves,
+                candidate_sci_blocks, kClusteredBuilderBlockSize, 0, NULL,
+                candidate_sci_numbers,
+                sci_shift_numbers, cluster_size, super_cluster_clusters,
+                local_atom_numbers, build_cutoff, cell, rcell,
+                d_sort_permutation, d_cluster_offsets, d_leaf_cluster_starts,
+                d_leaf_cluster_ends, d_super_cluster_offsets,
+                d_cluster_to_supercluster, candidate_sci_supercluster_ids,
+                d_super_cluster_centers, candidate_shift_ids,
+                d_sci_candidate_leaf_offsets, d_sci_candidate_leaf_ids,
+                candidate_leaf_cluster_stride,
+                fixed_shift_leaf_screening ? d_candidate_leaf_reach_masks : NULL,
+                d_cluster_valid_masks, d_cluster_local_masks,
+                d_cluster_centers, d_cluster_extents, d_cluster_radii,
+                cluster_molecule_signatures, cluster_molecule_ids,
+                d_excluded_list_start, d_excluded_list, d_excluded_numbers,
+                fixed_shift_candidates, gmxpacked_record_stream_cutoff,
+                gmxpacked_record_stream_prune_crd,
+                d_bench_sci_shift_flags, d_bench_cjpacked_counts,
+                d_bench_exclusion_counts,
+                use_gmxpacked_record_stream_source_offsets
+                    ? NULL
+                    : d_bench_source_rows,
+                d_bench_source_counts_by_candidate,
+                accumulate_gmxpacked_record_stream_source_rows_by_candidate,
+                NULL);
+            bench_sci_numbers = Exclusive_Scan_Counts(
+                this, sci_shift_numbers, d_bench_sci_shift_flags,
+                d_bench_sci_shift_offsets);
+            bench_cjpacked_numbers = Exclusive_Scan_Counts(
+                this, sci_shift_numbers, d_bench_cjpacked_counts,
+                d_bench_cjpacked_group_offsets);
+            bench_exclusion_pool_numbers = Exclusive_Scan_Counts(
+                this, sci_shift_numbers, d_bench_exclusion_counts,
+                d_bench_exclusion_offsets);
+            if (use_gmxpacked_record_stream_source_offsets)
+            {
+                bench_source_numbers = Exclusive_Scan_Counts(
+                    this, candidate_sci_numbers,
+                    d_bench_source_counts_by_candidate,
+                    d_bench_source_offsets_by_candidate);
+            }
+            else
+            {
+                deviceMemcpy(&bench_source_numbers, d_bench_source_rows,
+                             sizeof(int), deviceMemcpyDeviceToHost);
+            }
+            cudaDeviceSynchronize();
+            count_scan_seconds +=
+                Clustered_Steady_Time_Seconds() - count_start;
+
+            deviceMemset(d_bench_source_fill_cursor, 0, sizeof(int));
+            deviceMemset(d_bench_source_overflow_rows, 0, sizeof(int));
+            cudaDeviceSynchronize();
+            const double fill_start = Clustered_Steady_Time_Seconds();
+            Launch_Device_Kernel(
+                Fill_Gmxpacked_Record_Stream_Sources_From_Candidate_Leaves,
+                candidate_sci_blocks, kClusteredBuilderBlockSize, 0, NULL,
+                candidate_sci_numbers, cluster_size, local_atom_numbers,
+                build_cutoff, cell, rcell, d_sort_permutation,
+                d_cluster_offsets, d_leaf_cluster_starts, d_leaf_cluster_ends,
+                d_super_cluster_offsets, d_cluster_to_supercluster,
+                candidate_sci_supercluster_ids, candidate_shift_ids,
+                d_sci_candidate_leaf_offsets, d_sci_candidate_leaf_ids,
+                candidate_leaf_cluster_stride,
+                fixed_shift_leaf_screening ? d_candidate_leaf_reach_masks : NULL,
+                d_cluster_valid_masks, d_cluster_local_masks,
+                d_cluster_centers, d_cluster_extents, cluster_molecule_signatures,
+                cluster_molecule_ids,
+                d_excluded_list_start, d_excluded_list, d_excluded_numbers,
+                fixed_shift_candidates, gmxpacked_record_stream_cutoff,
+                gmxpacked_record_stream_prune_crd,
+                gmxpacked_record_stream_source_numbers,
+                use_gmxpacked_record_stream_source_offsets
+                    ? d_bench_source_offsets_by_candidate
+                    : NULL,
+                d_bench_sources, d_bench_source_fill_cursor,
+                d_bench_source_overflow_rows, 0, NULL, 0, NULL, NULL, NULL,
+                NULL);
+            deviceMemcpy(&bench_filled_rows, d_bench_source_fill_cursor,
+                         sizeof(int), deviceMemcpyDeviceToHost);
+            deviceMemcpy(&bench_overflow_rows, d_bench_source_overflow_rows,
+                         sizeof(int), deviceMemcpyDeviceToHost);
+            cudaDeviceSynchronize();
+            source_fill_seconds +=
+                Clustered_Steady_Time_Seconds() - fill_start;
+        }
+
+        fprintf(stderr,
+                "[clustered gmxpacked live builder microbench] step=%d "
+                "iters=%d candidate_sci=%d candidate_leaves=%d "
+                "count_scan_avg_ms=%.6f source_fill_avg_ms=%.6f "
+                "source_rows=%d filled_rows=%d overflow_rows=%d "
+                "sci=%d cjpacked=%d excl=%d route_source_rows=%d\n",
+                md_info.sys.steps, live_builder_bench_iters,
+                candidate_sci_numbers, candidate_leaf_numbers,
+                1000.0 * count_scan_seconds /
+                    static_cast<double>(live_builder_bench_iters),
+                1000.0 * source_fill_seconds /
+                    static_cast<double>(live_builder_bench_iters),
+                bench_source_numbers, bench_filled_rows, bench_overflow_rows,
+                bench_sci_numbers, bench_cjpacked_numbers,
+                bench_exclusion_pool_numbers,
+                gmxpacked_record_stream_source_numbers);
+        fflush(stderr);
+
+        Free_Single_Device_Pointer((void**)&d_bench_sci_shift_flags);
+        Free_Single_Device_Pointer((void**)&d_bench_cjpacked_counts);
+        Free_Single_Device_Pointer((void**)&d_bench_exclusion_counts);
+        Free_Single_Device_Pointer((void**)&d_bench_sci_shift_offsets);
+        Free_Single_Device_Pointer((void**)&d_bench_cjpacked_group_offsets);
+        Free_Single_Device_Pointer((void**)&d_bench_exclusion_offsets);
+        Free_Single_Device_Pointer((void**)&d_bench_source_rows);
+        Free_Single_Device_Pointer(
+            (void**)&d_bench_source_counts_by_candidate);
+        Free_Single_Device_Pointer(
+            (void**)&d_bench_source_offsets_by_candidate);
+        Free_Single_Device_Pointer((void**)&d_bench_source_fill_cursor);
+        Free_Single_Device_Pointer((void**)&d_bench_source_overflow_rows);
+        Free_Single_Device_Pointer((void**)&d_bench_sources);
+    }
+#endif
+    if (run_gmxpacked_record_builder && use_gmxpacked_inner_active_payload &&
+        gmxpacked_record_stream_source_numbers > 0 &&
+        gmxpacked_record_stream_filled_rows ==
+            gmxpacked_record_stream_source_numbers &&
+        gmxpacked_record_stream_overflow_rows == 0 &&
+        d_gmxpacked_record_stream_sources != NULL)
+    {
+        const int outer_source_rows = gmxpacked_record_stream_source_numbers;
+        const bool use_current_inner_active =
+            Clustered_Gmxpacked_Current_Inner_Active_Enabled();
+        const bool use_current_active_mask =
+            use_current_inner_active ||
+            Clustered_Gmxpacked_Active_View_Current_Mask_Enabled();
+        const float configured_guard_margin =
+            Clustered_Gmxpacked_Record_Builder_Inner_Active_Guard_Margin();
+        const float guard_margin =
+            use_current_inner_active
+                ? fminf(configured_guard_margin, 1.0f)
+                : configured_guard_margin;
+        float initial_active_cutoff =
+            fminf(gmxpacked_record_stream_cutoff, cutoff + guard_margin);
+        const VECTOR* initial_active_prune_crd =
+            use_current_active_mask
+                ? crd
+                : (use_stable_source_contract ? target_layout_crd : crd);
+        bool used_active_view_refresh = false;
+        int active_view_dirty_source_rows = -1;
+        int active_view_changed_source_rows = -1;
+        int active_source_rows = -1;
+        if (Clustered_Gmxpacked_Active_View_Partial_Refresh_Enabled() &&
+            gmxpacked_incremental_merge_used &&
+            gmxpacked_record_stream_source_numbers ==
+                previous_gmxpacked_incremental_source_numbers &&
+            d_gmxpacked_incremental_dirty_candidate_sci != NULL &&
+            d_gmxpacked_incremental_source_offsets_by_candidate != NULL &&
+            gmxpacked_inner_active_source_imasks_ready &&
+            gmxpacked_inner_active_source_imask_numbers ==
+                gmxpacked_record_stream_source_numbers &&
+            d_gmxpacked_inner_active_source_imasks != NULL)
+        {
+            active_source_rows =
+                Refresh_Gmxpacked_Record_Stream_Active_View_Sources(
+                    this, gmxpacked_record_stream_source_numbers,
+                    d_gmxpacked_record_stream_sources, candidate_sci_numbers,
+                    d_gmxpacked_incremental_dirty_candidate_sci,
+                    d_gmxpacked_incremental_source_offsets_by_candidate,
+                    initial_active_prune_crd, cell, rcell,
+                    initial_active_cutoff, NULL, 0.0f,
+                    record_builder_stage_timers,
+                    &active_view_dirty_source_rows,
+                    &active_view_changed_source_rows);
+            used_active_view_refresh = active_source_rows >= 0;
+        }
+        if (!used_active_view_refresh)
+        {
+            active_source_rows =
+                Prune_Gmxpacked_Record_Stream_To_Inner_Active_Sources(
+                    this, initial_active_prune_crd, cell, rcell,
+                    initial_active_cutoff, record_builder_stage_timers, true);
+        }
+        gmxpacked_inner_active_guard_cutoff = initial_active_cutoff;
+        if (use_current_active_mask)
+        {
+            Refresh_Gmxpacked_Inner_Active_Anchor_Crd(this, crd);
+        }
+        gmxpacked_record_stream_source_numbers = active_source_rows;
+        gmxpacked_record_stream_filled_rows = active_source_rows;
+        gmxpacked_record_stream_overflow_rows = 0;
+        gmxpacked_record_stream_filled_aggregate_rows = 0;
+        if (record_builder_summary_trace)
+        {
+            fprintf(stderr,
+                    "[clustered gmxpacked inner active payload] step=%d "
+                    "outer_source_rows=%d active_source_rows=%d "
+                    "outer_cutoff=%.4f inner_cutoff=%.4f guard_margin=%.4f "
+                    "stable_source_contract=%d current_inner=%d "
+                    "active_view=%d dirty_source_rows=%d "
+                    "changed_source_rows=%d\n",
+                    md_info.sys.steps, outer_source_rows, active_source_rows,
+                    gmxpacked_record_stream_cutoff, initial_active_cutoff,
+                    guard_margin,
+                    use_stable_source_contract ? 1 : 0,
+                    use_current_inner_active ? 1 : 0,
+                    used_active_view_refresh ? 1 : 0,
+                    active_view_dirty_source_rows,
+                    active_view_changed_source_rows);
+            fflush(stderr);
+        }
+    }
+    if (run_gmxpacked_record_builder)
+    {
+        const bool record_stream_source_rows_match =
+            gmxpacked_record_stream_filled_rows ==
+            gmxpacked_record_stream_source_numbers;
+        const bool record_stream_source_overflow_free =
+            gmxpacked_record_stream_overflow_rows == 0;
+        const bool build_record_stream_aggregates =
+            record_stream_source_rows_match &&
+            record_stream_source_overflow_free &&
+            gmxpacked_record_stream_source_numbers > 0;
+        const bool reuse_record_stream_compact_payload =
+            build_record_stream_aggregates &&
+            gmxpacked_incremental_stable_source_reuse_used &&
+            !use_gmxpacked_inner_active_payload &&
+            previous_gmxpacked_compact_payload_ready;
+        if (!record_stream_source_rows_match ||
+            !record_stream_source_overflow_free)
+        {
+            fprintf(stderr,
+                    "[clustered gmxpacked record builder mismatch] step=%d "
+                    "source_rows=%d filled_rows=%d overflow_rows=%d\n",
+                    md_info.sys.steps,
+                    gmxpacked_record_stream_source_numbers,
+                    gmxpacked_record_stream_filled_rows,
+                    gmxpacked_record_stream_overflow_rows);
+            fflush(stderr);
+        }
+        if (reuse_record_stream_compact_payload)
+        {
+            ClusteredGmxpackedRecordBuilderStageTimer stage_timer(
+                "record-stream-compact-payload-reuse",
+                record_builder_stage_timers);
+            gmxpacked_record_stream_aggregate_numbers =
+                previous_gmxpacked_record_stream_aggregate_numbers;
+            gmxpacked_record_stream_filled_aggregate_rows =
+                previous_gmxpacked_record_stream_aggregate_numbers;
+            gmxpacked_sci_numbers = previous_gmxpacked_sci_numbers;
+            gmxpacked_cjpacked_numbers = previous_gmxpacked_cjpacked_numbers;
+            gmxpacked_exclusion_numbers = previous_gmxpacked_exclusion_numbers;
+            gmxpacked_split_exclusion_numbers =
+                previous_gmxpacked_split_exclusion_numbers;
+            gmxpacked_record_stream_compact_summary.source_rows =
+                gmxpacked_record_stream_source_numbers;
+            gmxpacked_record_stream_compact_summary.aggregate_rows =
+                previous_gmxpacked_record_stream_aggregate_numbers;
+            gmxpacked_record_stream_compact_summary.compact_entries =
+                previous_gmxpacked_record_stream_aggregate_numbers;
+            gmxpacked_record_stream_compact_summary.compact_sci =
+                previous_gmxpacked_sci_numbers;
+            gmxpacked_record_stream_compact_summary.compact_cj =
+                previous_gmxpacked_cjpacked_numbers;
+            gmxpacked_record_stream_compact_summary.split_excl =
+                previous_gmxpacked_split_exclusion_numbers;
+            gmxpacked_record_stream_compact_summary.compact_excl =
+                previous_gmxpacked_exclusion_numbers;
+            built_gmxpacked_record_stream_compact = true;
+            reused_gmxpacked_record_stream_compact = true;
+        }
+        else if (build_record_stream_aggregates)
+        {
+            gmxpacked_record_stream_filled_aggregate_rows =
+                Build_Gmxpacked_Record_Stream_Aggregates(this);
+        }
+        if (build_record_stream_aggregates &&
+            (gmxpacked_record_stream_aggregate_numbers <= 0 ||
+             gmxpacked_record_stream_aggregate_numbers >
+                 gmxpacked_record_stream_source_numbers ||
+             gmxpacked_record_stream_filled_aggregate_rows !=
+                 gmxpacked_record_stream_aggregate_numbers))
+        {
+            fprintf(stderr,
+                    "[clustered gmxpacked record aggregate mismatch] "
+                    "step=%d source_rows=%d aggregate_rows=%d "
+                    "filled_aggregate_rows=%d\n",
+                    md_info.sys.steps,
+                    gmxpacked_record_stream_source_numbers,
+                    gmxpacked_record_stream_aggregate_numbers,
+                    gmxpacked_record_stream_filled_aggregate_rows);
+            fflush(stderr);
+        }
+        if (!reused_gmxpacked_record_stream_compact &&
+            build_record_stream_aggregates &&
+            gmxpacked_record_stream_aggregate_numbers > 0 &&
+            gmxpacked_record_stream_filled_aggregate_rows ==
+                gmxpacked_record_stream_aggregate_numbers)
+        {
+            gmxpacked_delta_sci_numbers = 0;
+            gmxpacked_delta_cjpacked_numbers = 0;
+            gmxpacked_delta_exclusion_numbers = 0;
+            gmxpacked_delta_split_exclusion_numbers = 0;
+            gmxpacked_record_stream_compact_summary =
+                Build_Gmxpacked_Record_Stream_Compact_Payload(this);
+            built_gmxpacked_record_stream_compact = true;
+            if (use_gmxpacked_inner_active_payload &&
+                gmxpacked_record_stream_compact_summary.compact_sci > 0 &&
+                gmxpacked_record_stream_compact_summary.compact_cj > 0 &&
+                gmxpacked_record_stream_compact_summary.compact_excl > 0)
+            {
+                Refresh_Gmxpacked_Active_View_Compact_Base_Imasks(this);
+#ifndef USE_CPU
+                Clustered_Gmxpacked_Active_View_Payload_Boundary_Sync(
+                    "initial-compact");
+#endif
+            }
+        }
+        if (record_builder_summary_trace)
+        {
+            fprintf(stderr,
+                    "[clustered gmxpacked record builder] step=%d "
+                    "candidate_sci=%d candidate_leaves=%d source_rows=%d "
+                    "filled_rows=%d aggregate_rows=%d "
+                    "filled_aggregate_rows=%d overflow_rows=%d fixed_shift=%d "
+                    "dense_shift=%d sparse_shift=%d source_offsets=%d "
+                    "source_cache=%d incremental_cache=%d "
+                    "source_cutoff=%.4f outer_source=%d "
+                    "stable_target_layout=%d stable_anchor_seeded=%d "
+                    "stable_source_contract=%d\n",
+                    md_info.sys.steps, candidate_sci_numbers,
+                    candidate_leaf_numbers,
+                    gmxpacked_record_stream_source_numbers,
+                    gmxpacked_record_stream_filled_rows,
+                    gmxpacked_record_stream_aggregate_numbers,
+                    gmxpacked_record_stream_filled_aggregate_rows,
+                    gmxpacked_record_stream_overflow_rows,
+                    fixed_shift_candidates ? 1 : 0,
+                    dense_shift_partitioned_candidates ? 1 : 0,
+                    sparse_shift_candidates ? 1 : 0,
+                    use_gmxpacked_record_stream_source_offsets ? 1 : 0,
+                    (use_gmxpacked_incremental_cache &&
+                     gmxpacked_incremental_source_cache_ready)
+                        ? 1
+                        : 0,
+                    use_gmxpacked_incremental_cache ? 1 : 0,
+                    gmxpacked_record_stream_cutoff,
+                    use_gmxpacked_record_stream_outer_source ? 1 : 0,
+                    use_stable_target_layout ? 1 : 0,
+                    stable_target_layout_anchor_seeded ? 1 : 0,
+                    use_stable_source_contract ? 1 : 0);
+            fflush(stderr);
+        }
+        if (built_gmxpacked_record_stream_compact)
+        {
+            route_gmxpacked_record_stream_compact =
+                request_gmxpacked_record_builder_route &&
+                gmxpacked_record_stream_compact_summary.compact_sci > 0 &&
+                gmxpacked_record_stream_compact_summary.compact_cj > 0 &&
+                gmxpacked_record_stream_compact_summary.compact_excl > 0 &&
+                gmxpacked_cjpacked_numbers > 0 && d_gmxpacked_sci != NULL &&
+                d_gmxpacked_cjpacked != NULL && d_gmxpacked_exclusions != NULL;
+            if (record_builder_summary_trace)
+            {
+                fprintf(stderr,
+                        "[clustered primary gmxpacked payload] step=%d "
+                        "source_rows=%d aggregate_rows=%d compact_entries=%d "
+                        "compact_sci=%d compact_cj=%d split_excl=%d "
+                        "compact_excl=%d route_ready=%d source=record-stream "
+                        "compact_reuse=%d\n",
+                        md_info.sys.steps,
+                        gmxpacked_record_stream_compact_summary.source_rows,
+                        gmxpacked_record_stream_compact_summary.aggregate_rows,
+                        gmxpacked_record_stream_compact_summary.compact_entries,
+                        gmxpacked_record_stream_compact_summary.compact_sci,
+                        gmxpacked_record_stream_compact_summary.compact_cj,
+                        gmxpacked_record_stream_compact_summary.split_excl,
+                        gmxpacked_record_stream_compact_summary.compact_excl,
+                        route_gmxpacked_record_stream_compact ? 1 : 0,
+                        reused_gmxpacked_record_stream_compact ? 1 : 0);
+                fflush(stderr);
+            }
+        }
+    }
+    Free_Single_Device_Pointer(
+        (void**)&d_gmxpacked_record_stream_source_counts_by_candidate);
+    Free_Single_Device_Pointer(
+        (void**)&d_gmxpacked_record_stream_source_offsets_by_candidate);
+
+    if (request_gmxpacked_record_builder_route &&
+        !route_gmxpacked_record_stream_compact)
+    {
+        fprintf(stderr,
+                "[clustered gmxpacked record builder route fallback] step=%d "
+                "reason=record-stream-compact-not-ready source_rows=%d "
+                "aggregate_rows=%d compact_sci=%d compact_cj=%d compact_excl=%d\n",
+                md_info.sys.steps, gmxpacked_record_stream_source_numbers,
+                gmxpacked_record_stream_aggregate_numbers,
+                gmxpacked_record_stream_compact_summary.compact_sci,
+                gmxpacked_record_stream_compact_summary.compact_cj,
+                gmxpacked_record_stream_compact_summary.compact_excl);
+        fflush(stderr);
+    }
+    if (run_gmxpacked_primary_builder &&
+        !route_gmxpacked_record_stream_compact)
+    {
+        deviceMemset(d_sci_shift_flags, 0, sizeof(int) * sci_shift_numbers);
+        deviceMemset(d_cjpacked_counts, 0, sizeof(int) * sci_shift_numbers);
+        deviceMemset(d_exclusion_counts, 0, sizeof(int) * sci_shift_numbers);
+        {
+            ClusteredGmxpackedRecordBuilderStageTimer stage_timer(
+                "primary-fallback-native-count-scan",
+                record_builder_stage_timers);
+            Launch_Device_Kernel(
+                Count_Nbnxm_Payload_From_Candidate_Leaves,
+                candidate_sci_blocks, kClusteredBuilderBlockSize, 0, NULL,
+                candidate_sci_numbers,
+                sci_shift_numbers, cluster_size, super_cluster_clusters,
+                local_atom_numbers, build_cutoff, cell, rcell,
+                d_sort_permutation, d_cluster_offsets, d_leaf_cluster_starts,
+                d_leaf_cluster_ends, d_super_cluster_offsets,
+                d_cluster_to_supercluster,
+                candidate_sci_supercluster_ids, d_super_cluster_centers,
+                candidate_shift_ids,
+                d_sci_candidate_leaf_offsets, d_sci_candidate_leaf_ids,
+                candidate_leaf_cluster_stride,
+                fixed_shift_leaf_screening ? d_candidate_leaf_reach_masks : NULL,
+                d_cluster_valid_masks, d_cluster_local_masks, d_cluster_centers,
+                d_cluster_extents, d_cluster_radii, cluster_molecule_signatures,
+                cluster_molecule_ids,
+                d_excluded_list_start, d_excluded_list, d_excluded_numbers,
+                fixed_shift_candidates, gmxpacked_record_stream_cutoff,
+                gmxpacked_record_stream_prune_crd,
+                d_sci_shift_flags, d_cjpacked_counts, d_exclusion_counts,
+                NULL, NULL, false, NULL);
+#ifndef USE_CPU
+            Clustered_Debug_Device_Sync_If_Tracing(
+                "Primary_Builder_Fallback_Count_Nbnxm_Payload");
+#endif
+        }
+        sci_numbers = Exclusive_Scan_Counts(this, sci_shift_numbers,
+                                            d_sci_shift_flags,
+                                            d_sci_shift_offsets);
+        cjpacked_numbers = Exclusive_Scan_Counts(
+            this, sci_shift_numbers, d_cjpacked_counts,
+            d_cjpacked_group_offsets);
+        exclusion_pool_numbers =
+            Exclusive_Scan_Counts(this, sci_shift_numbers, d_exclusion_counts,
+                                  d_exclusion_offsets);
+        if (sci_numbers <= 0 || cjpacked_numbers <= 0)
+        {
+            Commit_Clustered_Build_Cache(this, commit_cache_crd, cutoff);
+            return;
+        }
+    }
+
+    const bool record_builder_compare_enabled =
+        Clustered_Gmxpacked_Record_Builder_Compare_Enabled();
+    const bool record_builder_stage_trace_enabled =
+        Clustered_Gmxpacked_Record_Builder_Compare_Stage_Trace_Enabled();
+    const bool record_builder_source_trace_enabled =
+        Clustered_Gmxpacked_Record_Builder_Compare_Source_Trace_Enabled();
+    const bool record_builder_device_source_trace_enabled =
+        Clustered_Gmxpacked_Record_Builder_Compare_Device_Source_Trace_Enabled();
+    const bool record_builder_prune_input_trace_enabled =
+        Clustered_Gmxpacked_Record_Builder_Compare_Prune_Input_Trace_Enabled();
+    const bool record_builder_prune_contract_trace_enabled =
+        Clustered_Gmxpacked_Record_Builder_Compare_Prune_Contract_Trace_Enabled();
+    const bool record_builder_raw_pair_trace_enabled =
+        Clustered_Gmxpacked_Record_Builder_Compare_Raw_Coord_Pair_Context_Enabled();
+    const bool record_builder_raw_force_trace_enabled =
+        Clustered_Gmxpacked_Record_Builder_Compare_Raw_Coord_Force_Context_Enabled();
+    const bool record_builder_geometry_route_shift_enabled =
+        Clustered_Gmxpacked_Record_Builder_Compare_Geometry_Route_Shift_Enabled();
+    const bool record_builder_native_diagnostic_requested =
+        record_builder_compare_enabled || record_builder_stage_trace_enabled ||
+        record_builder_source_trace_enabled ||
+        record_builder_device_source_trace_enabled ||
+        record_builder_prune_input_trace_enabled ||
+        record_builder_prune_contract_trace_enabled ||
+        record_builder_raw_pair_trace_enabled ||
+        record_builder_raw_force_trace_enabled ||
+        record_builder_geometry_route_shift_enabled;
+    const bool route_only_native_payload_bypass =
+        native_payload_bypass_requested && route_gmxpacked_record_stream_compact &&
+        request_gmxpacked_record_builder_route && need_gmxpacked_payload &&
+        runtime_gmxpacked_direct_requested &&
+        !record_builder_native_diagnostic_requested &&
+        !Clustered_Microbench_Dump_Requested() &&
+        !need_aux_clustered_metadata && !build_warp_records &&
+        !build_gmxpacked_direct_candidate && !run_reduced_staged_count &&
+        !run_early_record_analysis;
+
     if (build_gmxpacked_direct_candidate)
     {
         gmxpacked_sci_numbers = sci_numbers;
@@ -9945,84 +25596,122 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
             d_gmxpacked_exclusions);
     }
 
-    int* d_early_record_analysis_raw_count = NULL;
-    int early_record_analysis_count_capacity = 0;
-    ClusteredEarlyRecordAnalyzeEntry* d_early_record_analysis_entries = NULL;
-    int early_record_analysis_entry_capacity = 0;
-    const int early_record_analysis_capacity =
-        run_early_record_analysis ? cjpacked_numbers * kClusteredJGroupSize : 0;
-    if (early_record_analysis_capacity > 0)
-    {
-        Reserve_Device_Int_Buffer(1, &d_early_record_analysis_raw_count,
-                                  &early_record_analysis_count_capacity);
-        deviceMemset(d_early_record_analysis_raw_count, 0, sizeof(int));
-        Reserve_Device_Buffer(early_record_analysis_capacity,
-                              &d_early_record_analysis_entries,
-                              &early_record_analysis_entry_capacity);
-    }
-
     const bool dedup_exclusion_masks =
         Clustered_Dedup_Exclusion_Masks_Enabled();
-    Launch_Device_Kernel(
-        Fill_Nbnxm_Payload_From_Candidate_Leaves,
-        candidate_sci_blocks, kClusteredBuilderBlockSize, 0, NULL,
-        candidate_sci_numbers,
-        sci_shift_numbers, cluster_size, super_cluster_clusters, cluster_numbers,
-        local_atom_numbers, build_cutoff, cell, rcell, d_sort_permutation,
-        d_cluster_offsets, d_leaf_cluster_starts, d_leaf_cluster_ends,
-        d_super_cluster_offsets, d_cluster_to_supercluster,
-        candidate_sci_supercluster_ids, d_super_cluster_centers,
-        candidate_shift_ids,
-        d_sci_candidate_leaf_offsets, d_sci_candidate_leaf_ids,
-        candidate_leaf_cluster_stride,
-        fixed_shift_leaf_screening ? d_candidate_leaf_reach_masks : NULL,
-        d_cluster_valid_masks, d_cluster_local_masks, d_cluster_centers,
-        d_cluster_extents, d_cluster_radii, cluster_molecule_signatures,
-        cluster_molecule_ids,
-        d_excluded_list_start, d_excluded_list, d_excluded_numbers,
-        fixed_shift_candidates, dedup_exclusion_masks,
-        d_sci_shift_flags, d_sci_shift_offsets, d_cjpacked_counts,
-        d_cjpacked_group_offsets, d_exclusion_offsets,
-        build_gmxpacked_direct_candidate, d_nbnxm_sci, d_nbnxm_cjpacked,
-        d_exclusion_mask_pool, d_gmxpacked_sci, d_gmxpacked_cjpacked,
-        d_gmxpacked_exclusions, early_record_analysis_capacity,
-        d_early_record_analysis_raw_count, d_early_record_analysis_entries);
+    // Wave 1 record-stream hook: candidate_sci_supercluster_ids,
+    // candidate_shift_ids, d_sci_candidate_leaf_offsets,
+    // d_sci_candidate_leaf_ids, fixed_shift_leaf_screening ?
+    // d_candidate_leaf_reach_masks : NULL, d_cluster_valid_masks,
+    // d_cluster_local_masks, and exclusion metadata form the last
+    // production-native candidate-stage inputs before finalized native
+    // d_nbnxm_sci / d_nbnxm_cjpacked materialization and before any later
+    // Build_Gmxpacked_Payload() compatibility rebuild.
+    if (route_only_native_payload_bypass)
+    {
+        Free_Single_Device_Pointer((void**)&d_nbnxm_sci);
+        Free_Single_Device_Pointer((void**)&d_nbnxm_cjpacked);
+        Free_Single_Device_Pointer((void**)&d_exclusion_mask_pool);
+        nbnxm_sci_capacity = 0;
+        nbnxm_cjpacked_capacity = 0;
+        exclusion_capacity = 0;
+        grouped_sci_ready = false;
+        if (record_builder_summary_trace)
+        {
+            fprintf(stderr,
+                    "[clustered primary gmxpacked payload route] step=%d "
+                    "compact_sci=%d compact_cj=%d compact_excl=%d "
+                    "split_excl=%d source=record-stream-routed "
+                    "skipped_native=1\n",
+                    md_info.sys.steps, gmxpacked_sci_numbers,
+                    gmxpacked_cjpacked_numbers, gmxpacked_exclusion_numbers,
+                    gmxpacked_split_exclusion_numbers);
+            fflush(stderr);
+        }
+    }
+    else
+    {
+        {
+            ClusteredGmxpackedRecordBuilderStageTimer stage_timer(
+                "native-materialization-fill", record_builder_stage_timers);
+            Reserve_Device_Buffer(sci_numbers, &d_nbnxm_sci,
+                                  &nbnxm_sci_capacity);
+            Reserve_Device_Buffer(cjpacked_numbers, &d_nbnxm_cjpacked,
+                                  &nbnxm_cjpacked_capacity);
+            if (exclusion_pool_numbers > 0)
+            {
+                Reserve_Device_PairMask_Buffer(exclusion_pool_numbers,
+                                               &d_exclusion_mask_pool,
+                                               &exclusion_capacity);
+            }
+            Launch_Device_Kernel(
+                Fill_Nbnxm_Payload_From_Candidate_Leaves,
+                candidate_sci_blocks, kClusteredBuilderBlockSize, 0, NULL,
+                candidate_sci_numbers,
+                sci_shift_numbers, cluster_size, super_cluster_clusters,
+                cluster_numbers, local_atom_numbers, build_cutoff, cell, rcell,
+                d_sort_permutation, d_cluster_offsets, d_leaf_cluster_starts,
+                d_leaf_cluster_ends, d_super_cluster_offsets,
+                d_cluster_to_supercluster, candidate_sci_supercluster_ids,
+                d_super_cluster_centers, candidate_shift_ids,
+                d_sci_candidate_leaf_offsets, d_sci_candidate_leaf_ids,
+                candidate_leaf_cluster_stride,
+                fixed_shift_leaf_screening ? d_candidate_leaf_reach_masks : NULL,
+                d_cluster_valid_masks, d_cluster_local_masks,
+                d_cluster_centers, d_cluster_extents, d_cluster_radii,
+                cluster_molecule_signatures, cluster_molecule_ids,
+                d_excluded_list_start, d_excluded_list, d_excluded_numbers,
+                fixed_shift_candidates, dedup_exclusion_masks,
+                d_sci_shift_flags, d_sci_shift_offsets, d_cjpacked_counts,
+                d_cjpacked_group_offsets, d_exclusion_offsets,
+                build_gmxpacked_direct_candidate, d_nbnxm_sci,
+                d_nbnxm_cjpacked, d_exclusion_mask_pool, d_gmxpacked_sci,
+                d_gmxpacked_cjpacked, d_gmxpacked_exclusions,
+                early_record_analysis_capacity, d_early_record_analysis_raw_count,
+                d_early_record_analysis_entries);
 #ifndef USE_CPU
-    Clustered_Debug_Device_Sync_If_Tracing(
-        "Fill_Nbnxm_Payload_From_Candidate_Leaves");
-    if (early_record_analysis_capacity > 0)
-    {
-        Analyze_Clustered_Early_Record_Stream(
-            this, early_record_analysis_capacity,
-            d_early_record_analysis_raw_count,
-            d_early_record_analysis_entries);
-        Free_Single_Device_Pointer((void**)&d_early_record_analysis_raw_count);
-        Free_Single_Device_Pointer((void**)&d_early_record_analysis_entries);
-    }
+            Clustered_Debug_Device_Sync_If_Tracing(
+                "Fill_Nbnxm_Payload_From_Candidate_Leaves");
+            if (early_record_analysis_capacity > 0)
+            {
+                Analyze_Clustered_Early_Record_Stream(
+                    this, early_record_analysis_capacity,
+                    d_early_record_analysis_raw_count,
+                    d_early_record_analysis_entries);
+                Free_Single_Device_Pointer(
+                    (void**)&d_early_record_analysis_raw_count);
+                Free_Single_Device_Pointer(
+                    (void**)&d_early_record_analysis_entries);
+            }
 #endif
-    if (Clustered_Block_Sort_J_Entries_Enabled())
-    {
-        Rebuild_Payload_From_Sorted_J_Entries(this, true);
-        sci_numbers = this->sci_numbers;
-        cjpacked_numbers = this->cjpacked_numbers;
-    }
-    else if (Clustered_Sort_J_Entries_Enabled())
-    {
-        Rebuild_Payload_From_Sorted_J_Entries(this, false);
-        sci_numbers = this->sci_numbers;
-        cjpacked_numbers = this->cjpacked_numbers;
-    }
-    if (Clustered_Sort_CjPacked_Enabled())
-    {
-        Reorder_CjPacked_By_Cluster_J(this);
-    }
-    Stable_Sort_Sci_By_Workload(sci_numbers, d_nbnxm_sci, d_sci_shift_flags,
-                                this);
+        }
+        {
+            ClusteredGmxpackedRecordBuilderStageTimer stage_timer(
+                "native-post-fill", record_builder_stage_timers);
+            if (Clustered_Block_Sort_J_Entries_Enabled())
+            {
+                Rebuild_Payload_From_Sorted_J_Entries(this, true);
+                sci_numbers = this->sci_numbers;
+                cjpacked_numbers = this->cjpacked_numbers;
+            }
+            else if (Clustered_Sort_J_Entries_Enabled())
+            {
+                Rebuild_Payload_From_Sorted_J_Entries(this, false);
+                sci_numbers = this->sci_numbers;
+                cjpacked_numbers = this->cjpacked_numbers;
+            }
+            if (Clustered_Sort_CjPacked_Enabled())
+            {
+                Reorder_CjPacked_By_Cluster_J(this);
+            }
+            Stable_Sort_Sci_By_Workload(sci_numbers, d_nbnxm_sci,
+                                        d_sci_shift_flags, this);
 
-    if (!runtime_gmxpacked_direct_requested && need_virial &&
-        !prefer_full_record_builder)
-    {
-        Build_Grouped_Sci_Metadata(this);
+            if (!runtime_gmxpacked_direct_requested && need_virial &&
+                !prefer_full_record_builder)
+            {
+                Build_Grouped_Sci_Metadata(this);
+            }
+        }
     }
 #endif
     if (!runtime_gmxpacked_direct_requested &&
@@ -10035,22 +25724,68 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
         Reserve_Device_U64_Buffer(cjpacked_numbers * kClusteredJGroupSize,
                                   &d_pair_shift_bits, &pair_shift_capacity);
     }
-    if (need_gmxpacked_payload && !build_gmxpacked_direct_candidate)
+    if (route_gmxpacked_record_stream_compact)
+    {
+        if (Clustered_Gmxpacked_Record_Builder_Compare_Enabled())
+        {
+            Compare_Gmxpacked_Record_Stream_With_Compat_Oracle(this, crd,
+                                                               cutoff, cell, rcell);
+        }
+        {
+            ClusteredGmxpackedRecordBuilderStageTimer stage_timer(
+                "record-stream-compact-pair-shift-refresh",
+                record_builder_stage_timers);
+            if (Clustered_Gmxpacked_Should_Refresh_Pair_Shift_Metadata(this,
+                                                                       rcell))
+            {
+                Reserve_Device_U64_Buffer(
+                    gmxpacked_cjpacked_numbers * kClusteredJGroupSize,
+                    &d_pair_shift_bits, &pair_shift_capacity);
+                Refresh_Gmxpacked_Pair_Shift_Metadata(this, rcell);
+            }
+            Clustered_Debug_Device_Sync_If_Tracing(
+                "record-stream gmxpacked route metadata");
+        }
+        if (Clustered_Trace_Warp_Records_Enabled())
+        {
+            fprintf(stderr,
+                    "[clustered primary gmxpacked payload route] step=%d "
+                    "compact_sci=%d compact_cj=%d compact_excl=%d "
+                    "split_excl=%d source=record-stream-routed\n",
+                    md_info.sys.steps, gmxpacked_sci_numbers,
+                    gmxpacked_cjpacked_numbers, gmxpacked_exclusion_numbers,
+                    gmxpacked_split_exclusion_numbers);
+            fflush(stderr);
+        }
+    }
+    else if (need_gmxpacked_payload && !build_gmxpacked_direct_candidate)
     {
         Build_Gmxpacked_Payload(this);
         if (runtime_gmxpacked_direct_requested && gmxpacked_cjpacked_numbers > 0)
         {
-            Reserve_Device_U64_Buffer(gmxpacked_cjpacked_numbers *
-                                          kClusteredJGroupSize,
-                                      &d_pair_shift_bits, &pair_shift_capacity);
-            Refresh_Gmxpacked_Pair_Shift_Metadata(this, rcell);
+            ClusteredGmxpackedRecordBuilderStageTimer stage_timer(
+                "compat-gmxpacked-pair-shift-refresh",
+                record_builder_stage_timers);
+            if (Clustered_Gmxpacked_Should_Refresh_Pair_Shift_Metadata(this,
+                                                                       rcell))
+            {
+                Reserve_Device_U64_Buffer(
+                    gmxpacked_cjpacked_numbers * kClusteredJGroupSize,
+                    &d_pair_shift_bits, &pair_shift_capacity);
+                Refresh_Gmxpacked_Pair_Shift_Metadata(this, rcell);
+            }
         }
     }
     else if (build_gmxpacked_direct_candidate && gmxpacked_cjpacked_numbers > 0)
     {
-        Reserve_Device_U64_Buffer(gmxpacked_cjpacked_numbers * kClusteredJGroupSize,
-                                  &d_pair_shift_bits, &pair_shift_capacity);
-        Refresh_Gmxpacked_Pair_Shift_Metadata(this, rcell);
+        if (Clustered_Gmxpacked_Should_Refresh_Pair_Shift_Metadata(this,
+                                                                   rcell))
+        {
+            Reserve_Device_U64_Buffer(
+                gmxpacked_cjpacked_numbers * kClusteredJGroupSize,
+                &d_pair_shift_bits, &pair_shift_capacity);
+            Refresh_Gmxpacked_Pair_Shift_Metadata(this, rcell);
+        }
         Clustered_Debug_Device_Sync_If_Tracing(
             "Fill_Nbnxm_Payload_From_Candidate_Leaves direct-gmxpacked");
         if (Clustered_Trace_Warp_Records_Enabled())
@@ -10085,7 +25820,7 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
         Analyze_Grouped_Clustered_J_Reuse(*this);
     }
     (void)leaf_atom_total;
-    Commit_Clustered_Build_Cache(this, crd, cutoff);
+    Commit_Clustered_Build_Cache(this, commit_cache_crd, cutoff);
 }
 
 void LJ_CLUSTER_LAYOUT::Clear()
@@ -10097,9 +25832,39 @@ void LJ_CLUSTER_LAYOUT::Clear()
     }
     Bind_Clustered_Working_Device(&working_device);
 #endif
+    if (Clustered_Gmxpacked_Inner_Active_Append_Summary_Enabled() &&
+        gmxpacked_inner_active_append_attempts > 0)
+    {
+        fprintf(stderr,
+                "[clustered gmxpacked inner active append summary] "
+                "attempts=%lld successes=%lld fallbacks=%lld "
+                "zero_rows=%lld rows_total=%lld overflow_rows_total=%lld "
+                "max_active_rows=%d max_limit_rows=%d "
+                "last_active_rows=%d\n",
+                gmxpacked_inner_active_append_attempts,
+                gmxpacked_inner_active_append_successes,
+                gmxpacked_inner_active_append_fallbacks,
+                gmxpacked_inner_active_append_zero_rows,
+                gmxpacked_inner_active_append_rows_total,
+                gmxpacked_inner_active_append_overflow_rows_total,
+                gmxpacked_inner_active_append_max_active_rows,
+                gmxpacked_inner_active_append_max_limit_rows,
+                gmxpacked_inner_active_append_last_active_rows);
+        fflush(stderr);
+    }
+    gmxpacked_inner_active_append_attempts = 0;
+    gmxpacked_inner_active_append_successes = 0;
+    gmxpacked_inner_active_append_fallbacks = 0;
+    gmxpacked_inner_active_append_zero_rows = 0;
+    gmxpacked_inner_active_append_rows_total = 0;
+    gmxpacked_inner_active_append_overflow_rows_total = 0;
+    gmxpacked_inner_active_append_max_active_rows = 0;
+    gmxpacked_inner_active_append_max_limit_rows = 0;
+    gmxpacked_inner_active_append_last_active_rows = 0;
     Free_Single_Device_Pointer((void**)&d_sort_permutation);
     Free_Single_Device_Pointer((void**)&d_sort_keys);
     Free_Single_Device_Pointer((void**)&d_cached_crd);
+    Free_Single_Device_Pointer((void**)&d_stable_target_layout_crd);
     Free_Single_Device_Pointer((void**)&d_need_rebuild);
     Free_Single_Device_Pointer((void**)&d_global_atom_to_molecule);
     Free_Single_Device_Pointer((void**)&d_local_atom_to_molecule);
@@ -10140,6 +25905,24 @@ void LJ_CLUSTER_LAYOUT::Clear()
     Free_Single_Device_Pointer((void**)&d_nbnxm_sci);
     Free_Single_Device_Pointer((void**)&d_nbnxm_cjpacked);
     Free_Gmxpacked_Payload(this);
+    Free_Single_Device_Pointer(
+        (void**)&d_gmxpacked_incremental_source_offsets_by_candidate);
+    Free_Single_Device_Pointer(
+        (void**)&d_gmxpacked_incremental_record_stream_sources);
+    Free_Single_Device_Pointer(
+        (void**)&d_gmxpacked_incremental_replacement_source_counts_by_candidate);
+    Free_Single_Device_Pointer(
+        (void**)&d_gmxpacked_incremental_replacement_source_offsets_by_candidate);
+    Free_Single_Device_Pointer(
+        (void**)&d_gmxpacked_incremental_replacement_sources);
+    Free_Single_Device_Pointer((void**)&d_gmxpacked_incremental_dirty_atoms);
+    Free_Single_Device_Pointer((void**)&d_gmxpacked_incremental_dirty_clusters);
+    Free_Single_Device_Pointer(
+        (void**)&d_gmxpacked_incremental_dirty_superclusters);
+    Free_Single_Device_Pointer(
+        (void**)&d_gmxpacked_incremental_dirty_i_candidate_sci);
+    Free_Single_Device_Pointer(
+        (void**)&d_gmxpacked_incremental_dirty_candidate_sci);
     Free_Single_Device_Pointer((void**)&d_cjpacked_sort_indices);
     Free_Single_Device_Pointer((void**)&d_cjpacked_sort_buffer);
     Free_Single_Device_Pointer((void**)&d_j_entries);
@@ -10152,6 +25935,8 @@ void LJ_CLUSTER_LAYOUT::Clear()
     Free_Single_Device_Pointer((void**)&d_forceonly_warp_record_offsets);
     Free_Single_Device_Pointer((void**)&d_forceonly_warp_j_records);
     Free_Single_Device_Pointer((void**)&d_pair_shift_bits);
+    Free_Single_Device_Pointer(
+        (void**)&d_gmxpacked_pair_shift_sci_only_flag);
     Free_Single_Device_Pointer((void**)&d_sort_key_buffer);
     Free_Single_Device_Pointer((void**)&d_sort_value_buffer);
     Free_Single_Device_Pointer((void**)&d_sort_temp_storage);
@@ -10200,6 +25985,22 @@ void LJ_CLUSTER_LAYOUT::Clear()
     gmxpacked_sci_capacity = 0;
     gmxpacked_cjpacked_capacity = 0;
     gmxpacked_exclusion_capacity = 0;
+    gmxpacked_delta_sci_capacity = 0;
+    gmxpacked_delta_cjpacked_capacity = 0;
+    gmxpacked_delta_exclusion_capacity = 0;
+    gmxpacked_delta_pair_shift_capacity = 0;
+    gmxpacked_record_stream_source_capacity = 0;
+    gmxpacked_record_stream_aggregate_capacity = 0;
+    gmxpacked_incremental_source_offset_capacity = 0;
+    gmxpacked_incremental_source_cache_capacity = 0;
+    gmxpacked_incremental_replacement_source_count_capacity = 0;
+    gmxpacked_incremental_replacement_source_offset_capacity = 0;
+    gmxpacked_incremental_replacement_source_capacity = 0;
+    gmxpacked_incremental_dirty_atom_capacity = 0;
+    gmxpacked_incremental_dirty_cluster_capacity = 0;
+    gmxpacked_incremental_dirty_supercluster_capacity = 0;
+    gmxpacked_incremental_dirty_i_candidate_capacity = 0;
+    gmxpacked_incremental_dirty_candidate_capacity = 0;
     cjpacked_sort_index_capacity = 0;
     cjpacked_sort_buffer_capacity = 0;
     jentry_capacity = 0;
@@ -10213,11 +26014,18 @@ void LJ_CLUSTER_LAYOUT::Clear()
     forceonly_warp_record_count_capacity = 0;
     forceonly_warp_record_offset_capacity = 0;
     pair_shift_capacity = 0;
+    gmxpacked_pair_shift_sci_safe_flag_capacity = 0;
     outer_imask_capacity = 0;
     global_atom_to_molecule_capacity = 0;
     local_atom_to_molecule_capacity = 0;
     cluster_molecule_signature_capacity = 0;
     cluster_molecule_id_capacity = 0;
+    cluster_to_supercluster_capacity = 0;
+    stable_target_layout_crd_capacity = 0;
+    gmxpacked_inner_active_anchor_crd_capacity = 0;
+    gmxpacked_inner_active_source_imask_capacity = 0;
+    gmxpacked_inner_active_compact_base_imask_capacity = 0;
+    gmxpacked_inner_active_compact_delta_source_flag_capacity = 0;
     sort_key_buffer_bytes = 0;
     sort_value_buffer_bytes = 0;
     sort_temp_storage_bytes = 0;
@@ -10239,10 +26047,30 @@ void LJ_CLUSTER_LAYOUT::Clear()
     gmxpacked_cjpacked_numbers = 0;
     gmxpacked_exclusion_numbers = 0;
     gmxpacked_split_exclusion_numbers = 0;
+    gmxpacked_record_stream_source_numbers = 0;
+    gmxpacked_record_stream_aggregate_numbers = 0;
+    gmxpacked_inner_active_guard_cutoff = -1.0f;
+    gmxpacked_incremental_source_numbers = 0;
+    gmxpacked_incremental_candidate_sci_numbers = 0;
+    gmxpacked_pair_shift_sci_only_compatible = false;
+    gmxpacked_pair_shift_metadata_ready = false;
+    gmxpacked_pair_shift_metadata_sci_numbers = 0;
+    gmxpacked_pair_shift_metadata_cjpacked_numbers = 0;
+    gmxpacked_pair_shift_metadata_exclusion_numbers = 0;
+    gmxpacked_pair_shift_metadata_rcell = {};
     candidate_leaf_numbers = 0;
     candidate_leaf_cluster_stride = 0;
     exclusion_pool_numbers = 0;
     grouped_sci_ready = false;
+    gmxpacked_incremental_source_offsets_ready = false;
+    gmxpacked_incremental_source_cache_ready = false;
+    stable_target_layout_anchor_ready = false;
+    gmxpacked_inner_active_anchor_ready = false;
+    gmxpacked_inner_active_source_imasks_ready = false;
+    gmxpacked_inner_active_compact_base_imasks_ready = false;
+    gmxpacked_inner_active_source_imask_numbers = 0;
+    gmxpacked_inner_active_compact_base_imask_numbers = 0;
+    gmxpacked_inner_active_source_rows_baseline = 0;
     rebuild_dirty = true;
     cache_ready = false;
     cached_cutoff = -1.0f;
@@ -10368,10 +26196,33 @@ void LJ_CLUSTERED_DIRECT_CACHE::Initial(CONTROLLER* controller,
     }
     initialized = true;
     layout.Initial(controller, module_name, ordered_layout_enabled);
-    payload_gather_time_recorder =
-        controller->Get_Time_Recorder("clustered coordinate gather");
-    direct_kernel_time_recorder =
-        controller->Get_Time_Recorder("clustered direct kernel");
+    if (Clustered_Fine_Timers_Enabled())
+    {
+        payload_gather_time_recorder =
+            controller->Get_Time_Recorder("clustered coordinate gather");
+        direct_kernel_time_recorder =
+            controller->Get_Time_Recorder("clustered direct kernel");
+        gmxpacked_force_scratch_memset_time_recorder =
+            controller->Get_Time_Recorder("clustered gmxpacked force scratch memset");
+        gmxpacked_kernel_launch_time_recorder =
+            controller->Get_Time_Recorder("clustered gmxpacked kernel launch");
+        gmxpacked_sorted_force_scatter_time_recorder =
+            controller->Get_Time_Recorder("clustered gmxpacked sorted force scatter");
+        gmxpacked_full_output_snapshot_time_recorder =
+            controller->Get_Time_Recorder("clustered gmxpacked full-output snapshot");
+    }
+    else
+    {
+        payload_gather_time_recorder = NULL;
+        direct_kernel_time_recorder = NULL;
+        gmxpacked_force_scratch_memset_time_recorder = NULL;
+        gmxpacked_kernel_launch_time_recorder = NULL;
+        gmxpacked_sorted_force_scatter_time_recorder = NULL;
+        gmxpacked_full_output_snapshot_time_recorder = NULL;
+    }
+    gmxpacked_sorted_force_clean = false;
+    gmxpacked_sorted_force_clean_float4 = false;
+    gmxpacked_sorted_force_clean_capacity = 0;
     coordinate_gather_step = -1;
     coordinate_gather_count_this_step = 0;
     coordinate_gather_count_total = 0;
@@ -10414,7 +26265,8 @@ void LJ_CLUSTERED_DIRECT_CACHE::Build(const VECTOR* crd, LTMatrix3 cell,
 void LJ_CLUSTERED_DIRECT_CACHE::Gather_Plain(const VECTOR* crd,
                                              const float* charge,
                                              const VECTOR_LJ* lj_type_src,
-                                             LTMatrix3 cell, LTMatrix3 rcell)
+                                             LTMatrix3 cell, LTMatrix3 rcell,
+                                             const float2* lj_ab_packed)
 {
     if (!initialized || !layout.Use_Clustered_Direct() ||
         layout.total_atom_numbers <= 0 || crd == NULL || charge == NULL ||
@@ -10458,12 +26310,13 @@ void LJ_CLUSTERED_DIRECT_CACHE::Gather_Plain(const VECTOR* crd,
         layout.cluster_numbers, layout.d_sort_permutation,
         layout.d_cluster_offsets, layout.d_cluster_centers, cell, rcell, crd,
         charge, lj_type_src, d_sorted_atom_ids, d_sorted_xq,
-        d_sorted_lj_type);
+        d_sorted_lj_type, lj_ab_packed, d_sorted_lj_comb);
     Refresh_Plain_Gather_Dependent_Metadata(this, cell, rcell);
 }
 
 void LJ_CLUSTERED_DIRECT_CACHE::Gather_Plain(const VECTOR_LJ* src,
-                                             LTMatrix3 cell, LTMatrix3 rcell)
+                                             LTMatrix3 cell, LTMatrix3 rcell,
+                                             const float2* lj_ab_packed)
 {
     if (!initialized || !layout.Use_Clustered_Direct() ||
         layout.total_atom_numbers <= 0 || src == NULL)
@@ -10505,7 +26358,8 @@ void LJ_CLUSTERED_DIRECT_CACHE::Gather_Plain(const VECTOR_LJ* src,
         CONTROLLER::device_max_thread, 0, NULL, layout.total_atom_numbers,
         layout.cluster_numbers, layout.d_sort_permutation,
         layout.d_cluster_offsets, layout.d_cluster_centers, cell, rcell, src,
-        d_sorted_atom_ids, d_sorted_xq, d_sorted_lj_type);
+        d_sorted_atom_ids, d_sorted_xq, d_sorted_lj_type, lj_ab_packed,
+        d_sorted_lj_comb);
     Refresh_Plain_Gather_Dependent_Metadata(this, cell, rcell);
 }
 
@@ -10557,7 +26411,9 @@ void LJ_CLUSTERED_DIRECT_CACHE::Clear()
     Free_Single_Device_Pointer((void**)&d_sorted_atom_ids);
     Free_Single_Device_Pointer((void**)&d_sorted_xq);
     Free_Single_Device_Pointer((void**)&d_sorted_lj_type);
+    Free_Single_Device_Pointer((void**)&d_sorted_lj_comb);
     Free_Single_Device_Pointer((void**)&d_sorted_frc);
+    Free_Single_Device_Pointer((void**)&d_sorted_frc4);
     Free_Single_Device_Pointer((void**)&d_sorted_frc_x);
     Free_Single_Device_Pointer((void**)&d_sorted_frc_y);
     Free_Single_Device_Pointer((void**)&d_sorted_frc_z);
@@ -10565,6 +26421,13 @@ void LJ_CLUSTERED_DIRECT_CACHE::Clear()
     scratch_capacity = 0;
     payload_gather_time_recorder = NULL;
     direct_kernel_time_recorder = NULL;
+    gmxpacked_force_scratch_memset_time_recorder = NULL;
+    gmxpacked_kernel_launch_time_recorder = NULL;
+    gmxpacked_sorted_force_scatter_time_recorder = NULL;
+    gmxpacked_full_output_snapshot_time_recorder = NULL;
+    gmxpacked_sorted_force_clean = false;
+    gmxpacked_sorted_force_clean_float4 = false;
+    gmxpacked_sorted_force_clean_capacity = 0;
     coordinate_gather_step = -1;
     coordinate_gather_count_this_step = 0;
     coordinate_gather_count_total = 0;

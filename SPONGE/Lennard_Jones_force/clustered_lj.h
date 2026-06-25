@@ -84,6 +84,41 @@ static_assert(sizeof(LJ_CLUSTERED_GMXPACKED_EXCLUSION) ==
                   sizeof(unsigned int) * kClusteredGmxpackedExclusionPairCount,
               "Unexpected clustered gmxpacked exclusion size.");
 
+// Future production-owned gmxpacked record-stream contract. Hook this stream
+// after cornerstone-sorted atoms already have cluster/supercluster/
+// candidate-leaf, shift, and exclusion metadata, but before finalized native
+// LJ_CLUSTERED_SCI / LJ_CLUSTERED_CJ_PACKED materialization and before
+// Build_Gmxpacked_Payload(). This path must consume candidate-stage metadata
+// directly and must not accept finalized native CJ payload as input.
+struct LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE
+{
+    int sci_id = -1;
+    int shift_id = kClusteredCentralShiftId;
+    int supercluster_id = -1;
+    int cluster_j = -1;
+    int split_id = 0;
+    unsigned int imask = 0u;
+    unsigned int valid_mask_j = 0u;
+    unsigned int local_mask_j = 0u;
+    unsigned int pair_exclusion_words[kClusteredGmxpackedExclusionPairCount] = {};
+    int source_order = 0;
+};
+
+struct LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_AGGREGATE
+{
+    int sci_id = -1;
+    int shift_id = kClusteredCentralShiftId;
+    int supercluster_id = -1;
+    int cluster_j = -1;
+    unsigned int split_imask[kClusteredWarpSplitCount] = {};
+    unsigned int valid_mask_j = 0u;
+    unsigned int local_mask_j = 0u;
+    unsigned int pair_exclusion_words[kClusteredWarpSplitCount]
+                                      [kClusteredGmxpackedExclusionPairCount] = {};
+    int source_order_begin = 0;
+    int source_order_end = 0;
+};
+
 struct LJ_CLUSTERED_J_ENTRY
 {
     int supercluster_id = 0;
@@ -246,10 +281,43 @@ struct LJ_CLUSTER_LAYOUT
     int gmxpacked_cjpacked_numbers = 0;
     int gmxpacked_exclusion_numbers = 0;
     int gmxpacked_split_exclusion_numbers = 0;
+    int gmxpacked_delta_sci_numbers = 0;
+    int gmxpacked_delta_cjpacked_numbers = 0;
+    int gmxpacked_delta_exclusion_numbers = 0;
+    int gmxpacked_delta_split_exclusion_numbers = 0;
+    int gmxpacked_record_stream_source_numbers = 0;
+    int gmxpacked_record_stream_aggregate_numbers = 0;
+    float gmxpacked_inner_active_guard_cutoff = -1.0f;
+    int gmxpacked_incremental_source_numbers = 0;
+    int gmxpacked_incremental_candidate_sci_numbers = 0;
+    bool gmxpacked_pair_shift_sci_only_compatible = false;
+    bool gmxpacked_pair_shift_metadata_ready = false;
+    int gmxpacked_pair_shift_metadata_sci_numbers = 0;
+    int gmxpacked_pair_shift_metadata_cjpacked_numbers = 0;
+    int gmxpacked_pair_shift_metadata_exclusion_numbers = 0;
+    LTMatrix3 gmxpacked_pair_shift_metadata_rcell = {};
     int candidate_leaf_numbers = 0;
     int candidate_leaf_cluster_stride = 0;
     int exclusion_pool_numbers = 0;
     bool grouped_sci_ready = false;
+    bool gmxpacked_incremental_source_offsets_ready = false;
+    bool gmxpacked_incremental_source_cache_ready = false;
+    bool stable_target_layout_anchor_ready = false;
+    bool gmxpacked_inner_active_anchor_ready = false;
+    bool gmxpacked_inner_active_source_imasks_ready = false;
+    bool gmxpacked_inner_active_compact_base_imasks_ready = false;
+    int gmxpacked_inner_active_source_imask_numbers = 0;
+    int gmxpacked_inner_active_compact_base_imask_numbers = 0;
+    int gmxpacked_inner_active_source_rows_baseline = 0;
+    long long gmxpacked_inner_active_append_attempts = 0;
+    long long gmxpacked_inner_active_append_successes = 0;
+    long long gmxpacked_inner_active_append_fallbacks = 0;
+    long long gmxpacked_inner_active_append_zero_rows = 0;
+    long long gmxpacked_inner_active_append_rows_total = 0;
+    long long gmxpacked_inner_active_append_overflow_rows_total = 0;
+    int gmxpacked_inner_active_append_max_active_rows = 0;
+    int gmxpacked_inner_active_append_max_limit_rows = 0;
+    int gmxpacked_inner_active_append_last_active_rows = 0;
 
     int permutation_capacity = 0;
     int sort_key_capacity = 0;
@@ -293,6 +361,22 @@ struct LJ_CLUSTER_LAYOUT
     int gmxpacked_sci_capacity = 0;
     int gmxpacked_cjpacked_capacity = 0;
     int gmxpacked_exclusion_capacity = 0;
+    int gmxpacked_delta_sci_capacity = 0;
+    int gmxpacked_delta_cjpacked_capacity = 0;
+    int gmxpacked_delta_exclusion_capacity = 0;
+    int gmxpacked_delta_pair_shift_capacity = 0;
+    int gmxpacked_record_stream_source_capacity = 0;
+    int gmxpacked_record_stream_aggregate_capacity = 0;
+    int gmxpacked_incremental_source_offset_capacity = 0;
+    int gmxpacked_incremental_source_cache_capacity = 0;
+    int gmxpacked_incremental_replacement_source_count_capacity = 0;
+    int gmxpacked_incremental_replacement_source_offset_capacity = 0;
+    int gmxpacked_incremental_replacement_source_capacity = 0;
+    int gmxpacked_incremental_dirty_atom_capacity = 0;
+    int gmxpacked_incremental_dirty_cluster_capacity = 0;
+    int gmxpacked_incremental_dirty_supercluster_capacity = 0;
+    int gmxpacked_incremental_dirty_i_candidate_capacity = 0;
+    int gmxpacked_incremental_dirty_candidate_capacity = 0;
     int cjpacked_sort_index_capacity = 0;
     int cjpacked_sort_buffer_capacity = 0;
     int jentry_capacity = 0;
@@ -306,16 +390,27 @@ struct LJ_CLUSTER_LAYOUT
     int forceonly_warp_record_count_capacity = 0;
     int forceonly_warp_record_offset_capacity = 0;
     int pair_shift_capacity = 0;
+    int gmxpacked_pair_shift_sci_safe_flag_capacity = 0;
     int outer_imask_capacity = 0;
     int global_atom_to_molecule_capacity = 0;
     int local_atom_to_molecule_capacity = 0;
     int cluster_molecule_signature_capacity = 0;
     int cluster_molecule_id_capacity = 0;
     int cluster_to_supercluster_capacity = 0;
+    int stable_target_layout_crd_capacity = 0;
+    int gmxpacked_inner_active_anchor_crd_capacity = 0;
+    int gmxpacked_inner_active_source_imask_capacity = 0;
+    int gmxpacked_inner_active_compact_base_imask_capacity = 0;
+    int gmxpacked_inner_active_compact_delta_source_flag_capacity = 0;
 
     int* d_sort_permutation = NULL;
     uint64_t* d_sort_keys = NULL;
     VECTOR* d_cached_crd = NULL;
+    VECTOR* d_stable_target_layout_crd = NULL;
+    VECTOR* d_gmxpacked_inner_active_anchor_crd = NULL;
+    unsigned int* d_gmxpacked_inner_active_source_imasks = NULL;
+    unsigned int* d_gmxpacked_inner_active_compact_base_imasks = NULL;
+    int* d_gmxpacked_inner_active_compact_delta_source_flags = NULL;
     int* d_need_rebuild = NULL;
     const int* d_atom_local = NULL;
     int* d_global_atom_to_molecule = NULL;
@@ -361,6 +456,26 @@ struct LJ_CLUSTER_LAYOUT
     LJ_CLUSTERED_GMXPACKED_SCI* d_gmxpacked_sci = NULL;
     LJ_CLUSTERED_GMXPACKED_CJ* d_gmxpacked_cjpacked = NULL;
     LJ_CLUSTERED_GMXPACKED_EXCLUSION* d_gmxpacked_exclusions = NULL;
+    LJ_CLUSTERED_GMXPACKED_SCI* d_gmxpacked_delta_sci = NULL;
+    LJ_CLUSTERED_GMXPACKED_CJ* d_gmxpacked_delta_cjpacked = NULL;
+    LJ_CLUSTERED_GMXPACKED_EXCLUSION* d_gmxpacked_delta_exclusions = NULL;
+    uint64_t* d_gmxpacked_delta_pair_shift_bits = NULL;
+    LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE*
+        d_gmxpacked_record_stream_sources = NULL;
+    LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_AGGREGATE*
+        d_gmxpacked_record_stream_aggregates = NULL;
+    int* d_gmxpacked_incremental_source_offsets_by_candidate = NULL;
+    LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE*
+        d_gmxpacked_incremental_record_stream_sources = NULL;
+    int* d_gmxpacked_incremental_replacement_source_counts_by_candidate = NULL;
+    int* d_gmxpacked_incremental_replacement_source_offsets_by_candidate = NULL;
+    LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE*
+        d_gmxpacked_incremental_replacement_sources = NULL;
+    int* d_gmxpacked_incremental_dirty_atoms = NULL;
+    int* d_gmxpacked_incremental_dirty_clusters = NULL;
+    int* d_gmxpacked_incremental_dirty_superclusters = NULL;
+    int* d_gmxpacked_incremental_dirty_i_candidate_sci = NULL;
+    int* d_gmxpacked_incremental_dirty_candidate_sci = NULL;
     int* d_cjpacked_sort_indices = NULL;
     LJ_CLUSTERED_CJ_PACKED* d_cjpacked_sort_buffer = NULL;
     LJ_CLUSTERED_J_ENTRY* d_j_entries = NULL;
@@ -373,6 +488,8 @@ struct LJ_CLUSTER_LAYOUT
     int* d_forceonly_warp_record_offsets = NULL;
     LJ_CLUSTERED_WARP_J_RECORD* d_forceonly_warp_j_records = NULL;
     uint64_t* d_pair_shift_bits = NULL;
+    int* d_gmxpacked_pair_shift_sci_only_flag = NULL;
+    int* d_gmxpacked_pair_shift_sci_safe_flags = NULL;
     unsigned char* d_sort_key_buffer = NULL;
     unsigned char* d_sort_value_buffer = NULL;
     void* d_sort_temp_storage = NULL;
@@ -414,6 +531,13 @@ struct LJ_CLUSTERED_DIRECT_CACHE
     LJ_CLUSTER_LAYOUT layout;
     TIME_RECORDER* payload_gather_time_recorder = NULL;
     TIME_RECORDER* direct_kernel_time_recorder = NULL;
+    TIME_RECORDER* gmxpacked_force_scratch_memset_time_recorder = NULL;
+    TIME_RECORDER* gmxpacked_kernel_launch_time_recorder = NULL;
+    TIME_RECORDER* gmxpacked_sorted_force_scatter_time_recorder = NULL;
+    TIME_RECORDER* gmxpacked_full_output_snapshot_time_recorder = NULL;
+    bool gmxpacked_sorted_force_clean = false;
+    bool gmxpacked_sorted_force_clean_float4 = false;
+    int gmxpacked_sorted_force_clean_capacity = 0;
     int coordinate_gather_step = -1;
     int coordinate_gather_count_this_step = 0;
     long long coordinate_gather_count_total = 0;
@@ -422,7 +546,9 @@ struct LJ_CLUSTERED_DIRECT_CACHE
     int* d_sorted_atom_ids = NULL;
     float4* d_sorted_xq = NULL;
     int* d_sorted_lj_type = NULL;
+    float2* d_sorted_lj_comb = NULL;
     VECTOR* d_sorted_frc = NULL;
+    float4* d_sorted_frc4 = NULL;
     float* d_sorted_frc_x = NULL;
     float* d_sorted_frc_y = NULL;
     float* d_sorted_frc_z = NULL;
@@ -443,8 +569,9 @@ struct LJ_CLUSTERED_DIRECT_CACHE
                bool runtime_gmxpacked_direct_requested);
     void Gather_Plain(const VECTOR* crd, const float* charge,
                       const VECTOR_LJ* lj_type_src, LTMatrix3 cell,
-                      LTMatrix3 rcell);
-    void Gather_Plain(const VECTOR_LJ* src, LTMatrix3 cell, LTMatrix3 rcell);
+                      LTMatrix3 rcell, const float2* lj_ab_packed = NULL);
+    void Gather_Plain(const VECTOR_LJ* src, LTMatrix3 cell, LTMatrix3 rcell,
+                      const float2* lj_ab_packed = NULL);
     void Gather_Soft_Core(const VECTOR_LJ_SOFT_TYPE* src);
     bool Coordinate_Gather_Ready_For_Current_Step() const;
     void Clear();
@@ -456,6 +583,11 @@ LJ_CLUSTERED_DIRECT_CACHE* Acquire_Shared_LJ_Clustered_Direct_Cache(
     CONTROLLER* controller, const char* module_name,
     bool ordered_layout_enabled = false);
 void Release_Shared_LJ_Clustered_Direct_Cache();
+
+void Compare_Gmxpacked_Record_Stream_Focus_Pair_Forces(
+    LJ_CLUSTERED_DIRECT_CACHE* cache, const float2* d_LJ_AB_packed,
+    size_t lj_param_numbers, float cutoff, float pme_beta, LTMatrix3 cell,
+    LTMatrix3 rcell);
 
 bool Ensure_Legacy_Neighbor_View_From_Clustered_Payload(
     LJ_CLUSTERED_DIRECT_CACHE* cache,

@@ -109,6 +109,7 @@ struct LENNARD_JONES_INFORMATION
     float* d_LJ_A = NULL;  // LJ的A系数
     float* d_LJ_B = NULL;  // LJ的B系数
     float2* d_LJ_AB_packed = NULL;  // clustered record kernels use packed A/B
+    bool gmxpacked_lj_comb_table_compatible = false;
 
     float* h_LJ_energy_atom = NULL;  // 每个原子的LJ的能量
     float h_LJ_energy_sum = 0;       // 所有原子的LJ能量和

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <bit>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -141,6 +142,32 @@ struct VectorLj
     int lj_type;
     float charge;
 };
+
+struct SnapshotRecordBuilderStats
+{
+    size_t sourceRecords = 0;
+    size_t aggregateRows = 0;
+    size_t compactSci = 0;
+    size_t compactCjPacked = 0;
+    size_t compactExcl = 0;
+};
+
+void ClearGromacsPairlistSnapshotPreserveCapacity(
+    GromacsPairlistSnapshot* snapshot)
+{
+    snapshot->header = {};
+    snapshot->cluster_offsets.clear();
+    snapshot->cluster_valid_masks.clear();
+    snapshot->cluster_local_masks.clear();
+    snapshot->sci.clear();
+    snapshot->cjpacked.clear();
+    snapshot->excl.clear();
+    snapshot->sorted_atom_ids.clear();
+    snapshot->sorted_xq.clear();
+    snapshot->sorted_lj_type.clear();
+    snapshot->sorted_lj_comb.clear();
+    snapshot->lj_ab.clear();
+}
 
 template <typename T>
 inline void CheckCuda(T code, const char* what)
@@ -848,10 +875,27 @@ GromacsPairlistSnapshot ConvertSpongeSnapshotToGromacs(
     const SpongeForceOnlySnapshot& snapshot,
     SpongeGmxTransformMode transformMode,
     const GromacsPairlistSnapshot* referenceSnapshot = nullptr,
-    double exactImaskRadiusScale = 1.0)
+    double exactImaskRadiusScale = 1.0,
+    SnapshotRecordBuilderStats* builderStats = nullptr,
+    GromacsPairlistSnapshot* builderWorkspace = nullptr)
 {
-    GromacsPairlistSnapshot converted = {};
+    GromacsPairlistSnapshot localConverted = {};
+    GromacsPairlistSnapshot& converted =
+        builderWorkspace != nullptr ? *builderWorkspace : localConverted;
+    if (builderWorkspace != nullptr)
+    {
+        ClearGromacsPairlistSnapshotPreserveCapacity(builderWorkspace);
+    }
+    const bool builderStatsOnly = builderWorkspace != nullptr &&
+                                  transformMode == SpongeGmxTransformMode::baseline &&
+                                  referenceSnapshot == nullptr &&
+                                  exactImaskRadiusScale == 1.0;
     const size_t superClusterCount = snapshot.super_cluster_offsets.size() - 1;
+    if (builderStats != nullptr)
+    {
+        *builderStats = {};
+        builderStats->sourceRecords = snapshot.records.size();
+    }
     converted.header.file = nbnxm_microbench::MakeFileHeader(
         nbnxm_microbench::SnapshotKind::gromacsPairlist);
     converted.header.cluster_size = snapshot.header.cluster_size;
@@ -878,28 +922,32 @@ GromacsPairlistSnapshot ConvertSpongeSnapshotToGromacs(
     converted.header.epsfac = 1.0f;
     converted.header.cell = snapshot.header.cell;
 
-    converted.cluster_offsets.resize(
-        static_cast<size_t>(converted.header.cluster_numbers), 0);
-    converted.cluster_valid_masks.resize(
-        static_cast<size_t>(converted.header.cluster_numbers), 0u);
-    converted.cluster_local_masks.resize(
-        static_cast<size_t>(converted.header.cluster_numbers), 0u);
-    converted.sorted_atom_ids.resize(
-        static_cast<size_t>(converted.header.total_atom_numbers), -1);
     std::vector<int> denseClusterIndexForOriginalCluster(
         snapshot.cluster_offsets.size(), -1);
     std::vector<int> superClusterForOriginalCluster(
         snapshot.cluster_offsets.size(), -1);
     std::vector<int> localClusterForOriginalCluster(
         snapshot.cluster_offsets.size(), -1);
-    converted.sorted_xq.resize(
-        static_cast<size_t>(converted.header.total_atom_numbers));
-    converted.sorted_lj_type.resize(
-        static_cast<size_t>(converted.header.total_atom_numbers), 0);
-    converted.sorted_lj_comb.resize(
-        static_cast<size_t>(converted.header.total_atom_numbers), {});
-    const std::vector<Float2POD> sortedLjComb =
-        BuildSortedLjCombFromSpongeSnapshot(snapshot);
+    if (!builderStatsOnly)
+    {
+        converted.cluster_offsets.resize(
+            static_cast<size_t>(converted.header.cluster_numbers), 0);
+        converted.cluster_valid_masks.resize(
+            static_cast<size_t>(converted.header.cluster_numbers), 0u);
+        converted.cluster_local_masks.resize(
+            static_cast<size_t>(converted.header.cluster_numbers), 0u);
+        converted.sorted_atom_ids.resize(
+            static_cast<size_t>(converted.header.total_atom_numbers), -1);
+        converted.sorted_xq.resize(
+            static_cast<size_t>(converted.header.total_atom_numbers));
+        converted.sorted_lj_type.resize(
+            static_cast<size_t>(converted.header.total_atom_numbers), 0);
+        converted.sorted_lj_comb.resize(
+            static_cast<size_t>(converted.header.total_atom_numbers), {});
+    }
+    const std::vector<Float2POD> sortedLjComb = builderStatsOnly
+        ? std::vector<Float2POD>{}
+        : BuildSortedLjCombFromSpongeSnapshot(snapshot);
     for (size_t superI = 0; superI < superClusterCount; ++superI)
     {
         const int clusterBegin = snapshot.super_cluster_offsets[superI];
@@ -920,8 +968,13 @@ GromacsPairlistSnapshot ConvertSpongeSnapshotToGromacs(
                 static_cast<int>(superI);
             localClusterForOriginalCluster[static_cast<size_t>(clusterI)] =
                 iLocal;
-            converted.cluster_offsets[denseIndex] =
+            const int dstAtomBase =
                 static_cast<int>(denseIndex * static_cast<size_t>(kClusterSize));
+            if (builderStatsOnly)
+            {
+                continue;
+            }
+            converted.cluster_offsets[denseIndex] = dstAtomBase;
             const unsigned int validMask =
                 snapshot.cluster_valid_masks[static_cast<size_t>(clusterI)];
             const unsigned int localMask =
@@ -930,7 +983,6 @@ GromacsPairlistSnapshot ConvertSpongeSnapshotToGromacs(
             converted.cluster_local_masks[denseIndex] = localMask;
             const int srcAtomBase =
                 snapshot.cluster_offsets[static_cast<size_t>(clusterI)];
-            const int dstAtomBase = converted.cluster_offsets[denseIndex];
             for (int lane = 0; lane < kClusterSize; ++lane)
             {
                 if ((validMask & (1u << static_cast<unsigned int>(lane))) == 0u)
@@ -949,28 +1001,34 @@ GromacsPairlistSnapshot ConvertSpongeSnapshotToGromacs(
         }
     }
 
-    int numTypes = 0;
-    for (int type : converted.sorted_lj_type)
+    if (!builderStatsOnly)
     {
-        numTypes = std::max(numTypes, type + 1);
-    }
-    converted.header.num_types = static_cast<uint32_t>(numTypes);
-    converted.lj_ab.resize(static_cast<size_t>(numTypes * numTypes));
-    for (int i = 0; i < numTypes; ++i)
-    {
-        for (int j = 0; j < numTypes; ++j)
+        int numTypes = 0;
+        for (int type : converted.sorted_lj_type)
         {
-            converted.lj_ab[static_cast<size_t>(i * numTypes + j)] =
-                snapshot.lj_ab[static_cast<size_t>(GetLjType(i, j))];
+            numTypes = std::max(numTypes, type + 1);
         }
+        converted.header.num_types = static_cast<uint32_t>(numTypes);
+        converted.lj_ab.resize(static_cast<size_t>(numTypes * numTypes));
+        for (int i = 0; i < numTypes; ++i)
+        {
+            for (int j = 0; j < numTypes; ++j)
+            {
+                converted.lj_ab[static_cast<size_t>(i * numTypes + j)] =
+                    snapshot.lj_ab[static_cast<size_t>(GetLjType(i, j))];
+            }
+        }
+        converted.header.lj_param_numbers = converted.lj_ab.size();
     }
-    converted.header.lj_param_numbers = converted.lj_ab.size();
 
-    for (int shift = 0; shift < 27; ++shift)
+    if (!builderStatsOnly)
     {
-        const Vec3 shiftVec = ShiftVectorFromId(shift, MakeMatrix(snapshot.header.cell));
-        converted.header.shiftvec[static_cast<size_t>(shift)] = {
-            shiftVec.x, shiftVec.y, shiftVec.z, 0.0f};
+        for (int shift = 0; shift < 27; ++shift)
+        {
+            const Vec3 shiftVec = ShiftVectorFromId(shift, MakeMatrix(snapshot.header.cell));
+            converted.header.shiftvec[static_cast<size_t>(shift)] = {
+                shiftVec.x, shiftVec.y, shiftVec.z, 0.0f};
+        }
     }
 
     converted.sci.clear();
@@ -1049,60 +1107,67 @@ GromacsPairlistSnapshot ConvertSpongeSnapshotToGromacs(
         }
     }
 
-    std::vector<Vec3> clusterCenters(snapshot.cluster_offsets.size(),
-                                     Vec3{0.0f, 0.0f, 0.0f});
-    std::vector<int> clusterCenterCounts(snapshot.cluster_offsets.size(), 0);
-    for (size_t clusterIdx = 0; clusterIdx < snapshot.cluster_offsets.size();
-         ++clusterIdx)
+    const bool needsGeometryShiftCenters =
+        transformMode == SpongeGmxTransformMode::geometryShiftBucket;
+    std::vector<Vec3> clusterCenters;
+    std::vector<Vec3> superCenters;
+    if (needsGeometryShiftCenters)
     {
-        const unsigned int validMask = snapshot.cluster_valid_masks[clusterIdx];
-        const int atomBase = snapshot.cluster_offsets[clusterIdx];
-        Vec3 sum{0.0f, 0.0f, 0.0f};
-        int count = 0;
-        for (int lane = 0; lane < kClusterSize; ++lane)
+        clusterCenters.assign(snapshot.cluster_offsets.size(),
+                              Vec3{0.0f, 0.0f, 0.0f});
+        std::vector<int> clusterCenterCounts(snapshot.cluster_offsets.size(), 0);
+        for (size_t clusterIdx = 0; clusterIdx < snapshot.cluster_offsets.size();
+             ++clusterIdx)
         {
-            if ((validMask & (1u << static_cast<unsigned int>(lane))) == 0u)
+            const unsigned int validMask = snapshot.cluster_valid_masks[clusterIdx];
+            const int atomBase = snapshot.cluster_offsets[clusterIdx];
+            Vec3 sum{0.0f, 0.0f, 0.0f};
+            int count = 0;
+            for (int lane = 0; lane < kClusterSize; ++lane)
             {
-                continue;
+                if ((validMask & (1u << static_cast<unsigned int>(lane))) == 0u)
+                {
+                    continue;
+                }
+                const Float4POD& xq =
+                    snapshot.sorted_xq[static_cast<size_t>(atomBase + lane)];
+                sum = sum + Vec3{xq.x, xq.y, xq.z};
+                ++count;
             }
-            const Float4POD& xq =
-                snapshot.sorted_xq[static_cast<size_t>(atomBase + lane)];
-            sum = sum + Vec3{xq.x, xq.y, xq.z};
-            ++count;
+            if (count > 0)
+            {
+                const float invCount = 1.0f / static_cast<float>(count);
+                clusterCenters[clusterIdx] =
+                    Vec3{sum.x * invCount, sum.y * invCount, sum.z * invCount};
+                clusterCenterCounts[clusterIdx] = count;
+            }
         }
-        if (count > 0)
-        {
-            const float invCount = 1.0f / static_cast<float>(count);
-            clusterCenters[clusterIdx] =
-                Vec3{sum.x * invCount, sum.y * invCount, sum.z * invCount};
-            clusterCenterCounts[clusterIdx] = count;
-        }
-    }
 
-    std::vector<Vec3> superCenters(superClusterCount, Vec3{0.0f, 0.0f, 0.0f});
-    for (size_t superI = 0; superI < superClusterCount; ++superI)
-    {
-        Vec3 sum{0.0f, 0.0f, 0.0f};
-        int count = 0;
-        for (int clusterI = snapshot.super_cluster_offsets[superI];
-             clusterI < snapshot.super_cluster_offsets[superI + 1]; ++clusterI)
+        superCenters.assign(superClusterCount, Vec3{0.0f, 0.0f, 0.0f});
+        for (size_t superI = 0; superI < superClusterCount; ++superI)
         {
-            const int clusterCount =
-                clusterCenterCounts[static_cast<size_t>(clusterI)];
-            if (clusterCount == 0)
+            Vec3 sum{0.0f, 0.0f, 0.0f};
+            int count = 0;
+            for (int clusterI = snapshot.super_cluster_offsets[superI];
+                 clusterI < snapshot.super_cluster_offsets[superI + 1]; ++clusterI)
             {
-                continue;
+                const int clusterCount =
+                    clusterCenterCounts[static_cast<size_t>(clusterI)];
+                if (clusterCount == 0)
+                {
+                    continue;
+                }
+                sum = sum +
+                      static_cast<float>(clusterCount) *
+                          clusterCenters[static_cast<size_t>(clusterI)];
+                count += clusterCount;
             }
-            sum = sum +
-                  static_cast<float>(clusterCount) *
-                      clusterCenters[static_cast<size_t>(clusterI)];
-            count += clusterCount;
-        }
-        if (count > 0)
-        {
-            const float invCount = 1.0f / static_cast<float>(count);
-            superCenters[superI] =
-                Vec3{sum.x * invCount, sum.y * invCount, sum.z * invCount};
+            if (count > 0)
+            {
+                const float invCount = 1.0f / static_cast<float>(count);
+                superCenters[superI] =
+                    Vec3{sum.x * invCount, sum.y * invCount, sum.z * invCount};
+            }
         }
     }
     const LTMatrix3 cell = MakeMatrix(snapshot.header.cell);
@@ -1375,16 +1440,30 @@ GromacsPairlistSnapshot ConvertSpongeSnapshotToGromacs(
     uint64_t totalExactImaskBits = 0;
     uint64_t keptExactImaskBits = 0;
     uint64_t droppedExactRecords = 0;
+    std::vector<AggregatedCluster> aggregated;
+    std::unordered_map<int, size_t> clusterToIndex;
 
     for (size_t orderedIdx = 0; orderedIdx < sciOrder.size(); ++orderedIdx)
     {
         const size_t sciIdx = sciOrder[orderedIdx];
         const auto& sci = snapshot.sci[sciIdx];
 
-        std::vector<AggregatedCluster> aggregated;
-        std::unordered_map<int, size_t> clusterToIndex;
+        aggregated.clear();
+        clusterToIndex.clear();
         const int recordBegin = snapshot.record_offsets[sciIdx];
         const int recordEnd = snapshot.record_offsets[sciIdx + 1];
+        const size_t recordCount =
+            static_cast<size_t>(std::max(recordEnd - recordBegin, 0));
+        if (recordCount > aggregated.capacity())
+        {
+            aggregated.reserve(recordCount);
+        }
+        if (static_cast<float>(recordCount) >
+            static_cast<float>(clusterToIndex.bucket_count()) *
+                clusterToIndex.max_load_factor())
+        {
+            clusterToIndex.reserve(recordCount);
+        }
         for (int recordIdx = recordBegin; recordIdx < recordEnd; ++recordIdx)
         {
             const auto& record = snapshot.records[static_cast<size_t>(recordIdx)];
@@ -1476,6 +1555,10 @@ GromacsPairlistSnapshot ConvertSpongeSnapshotToGromacs(
                 entry.pairExcl[static_cast<size_t>(split)][i] |=
                     record.pair_excl[i];
             }
+        }
+        if (builderStats != nullptr)
+        {
+            builderStats->aggregateRows += aggregated.size();
         }
 
         auto shouldReorderBlocks = [&](int shiftId,
@@ -2366,6 +2449,16 @@ GromacsPairlistSnapshot ConvertSpongeSnapshotToGromacs(
     converted.header.sci_numbers = converted.sci.size();
     converted.header.cjpacked_numbers = converted.cjpacked.size();
     converted.header.excl_numbers = converted.excl.size();
+    if (builderStats != nullptr)
+    {
+        builderStats->compactSci = converted.header.sci_numbers;
+        builderStats->compactCjPacked = converted.header.cjpacked_numbers;
+        builderStats->compactExcl = converted.header.excl_numbers;
+    }
+    if (builderWorkspace != nullptr)
+    {
+        return {};
+    }
     return converted;
 }
 
@@ -4805,6 +4898,16 @@ struct Arguments
     bool analyze = false;
 };
 
+void PrintUsage(const char* argv0)
+{
+    std::fprintf(stderr,
+                 "Usage: %s (--kernel sponge|gmx|builder | --builder) --snapshot PATH "
+                 "[--sponge-lj-mode fulloutput|comb-gmxpacked] "
+                 "[--sponge-gmx-transform baseline] "
+                 "[--warmup N] [--iters N] [--analyze]\n",
+                 argv0);
+}
+
 SpongeGmxTransformMode ParseSpongeGmxTransform(const std::string& value)
 {
     if (value == "baseline")
@@ -4832,6 +4935,10 @@ Arguments ParseArguments(int argc, char** argv)
         if (flag == "--kernel" && i + 1 < argc)
         {
             args.kernel = argv[++i];
+        }
+        else if (flag == "--builder")
+        {
+            args.kernel = "builder";
         }
         else if (flag == "--snapshot" && i + 1 < argc)
         {
@@ -4867,23 +4974,13 @@ Arguments ParseArguments(int argc, char** argv)
         }
         else
         {
-            std::fprintf(stderr,
-                         "Usage: %s --kernel sponge|gmx --snapshot PATH "
-                         "[--sponge-lj-mode fulloutput|comb-gmxpacked] "
-                         "[--sponge-gmx-transform baseline] "
-                         "[--warmup N] [--iters N] [--analyze]\n",
-                         argv[0]);
+            PrintUsage(argv[0]);
             std::exit(1);
         }
     }
     if (args.kernel.empty() || args.snapshot.empty())
     {
-        std::fprintf(stderr,
-                     "Usage: %s --kernel sponge|gmx --snapshot PATH "
-                     "[--sponge-lj-mode fulloutput|comb-gmxpacked] "
-                     "[--sponge-gmx-transform baseline] "
-                     "[--warmup N] [--iters N] [--analyze]\n",
-                     argv[0]);
+        PrintUsage(argv[0]);
         std::exit(1);
     }
     return args;
@@ -8147,6 +8244,60 @@ void RunGromacs(const GromacsPairlistSnapshot& snapshot, int warmup, int iters)
     RunGromacsProduction(snapshot, warmup, iters, "native");
 }
 
+void RunSnapshotRecordBuilderMicrobench(
+    const SpongeForceOnlySnapshot& snapshot,
+    SpongeGmxTransformMode transformMode,
+    double exactImaskRadiusScale,
+    int warmup,
+    int iters,
+    const char* snapshotLabel)
+{
+    size_t builderSink = 0;
+    GromacsPairlistSnapshot builderWorkspace;
+    for (int i = 0; i < warmup; ++i)
+    {
+        SnapshotRecordBuilderStats stats;
+        ConvertSpongeSnapshotToGromacs(snapshot, transformMode, nullptr,
+                                       exactImaskRadiusScale, &stats,
+                                       &builderWorkspace);
+        builderSink = builderSink * 1315423911u + builderWorkspace.sci.size() +
+                      builderWorkspace.cjpacked.size() +
+                      builderWorkspace.excl.size() +
+                      stats.aggregateRows;
+    }
+
+    SnapshotRecordBuilderStats finalStats;
+    double totalMs = 0.0;
+    for (int i = 0; i < iters; ++i)
+    {
+        SnapshotRecordBuilderStats stats;
+        const auto start = std::chrono::steady_clock::now();
+        ConvertSpongeSnapshotToGromacs(snapshot, transformMode, nullptr,
+                                       exactImaskRadiusScale, &stats,
+                                       &builderWorkspace);
+        const auto stop = std::chrono::steady_clock::now();
+        totalMs += std::chrono::duration<double, std::milli>(stop - start).count();
+        builderSink = builderSink * 1315423911u + builderWorkspace.sci.size() +
+                      builderWorkspace.cjpacked.size() +
+                      builderWorkspace.excl.size() +
+                      stats.aggregateRows;
+        finalStats = stats;
+    }
+
+    if (builderSink == std::numeric_limits<size_t>::max())
+    {
+        std::fprintf(stderr, "builder sink overflowed unexpectedly\n");
+        std::exit(1);
+    }
+
+    std::printf(
+        "kernel=builder snapshot=%s avg_ms=%.6f iters=%d records=%zu aggregates=%zu sci=%zu cjpacked=%zu excl=%zu\n",
+        snapshotLabel, totalMs / static_cast<double>(iters), iters,
+        finalStats.sourceRecords, finalStats.aggregateRows,
+        finalStats.compactSci, finalStats.compactCjPacked,
+        finalStats.compactExcl);
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -8154,6 +8305,46 @@ int main(int argc, char** argv)
     const Arguments args = ParseArguments(argc, argv);
     const SpongeGmxTransformMode spongeGmxTransform =
         ParseSpongeGmxTransform(args.spongeGmxTransform);
+    if (args.kernel == "builder")
+    {
+        SpongeClusteredFullOutputSnapshot fullOutputSnapshot;
+        if (nbnxm_microbench::ReadSpongeClusteredFullOutputSnapshot(
+                args.snapshot, &fullOutputSnapshot))
+        {
+            const SpongeForceOnlySnapshot payload =
+                ExtractPayloadFromFullOutputSnapshot(fullOutputSnapshot);
+            if (args.analyze)
+            {
+                AnalyzeSpongeSnapshot(payload);
+                return 0;
+            }
+            RunSnapshotRecordBuilderMicrobench(
+                payload, spongeGmxTransform, args.exactImaskRadiusScale,
+                args.warmup, args.iters, args.snapshot.c_str());
+            return 0;
+        }
+
+        SpongeForceOnlySnapshot snapshot;
+        if (nbnxm_microbench::ReadSpongeForceOnlySnapshot(args.snapshot,
+                                                          &snapshot))
+        {
+            if (args.analyze)
+            {
+                AnalyzeSpongeSnapshot(snapshot);
+                return 0;
+            }
+            RunSnapshotRecordBuilderMicrobench(
+                snapshot, spongeGmxTransform, args.exactImaskRadiusScale,
+                args.warmup, args.iters, args.snapshot.c_str());
+            return 0;
+        }
+
+        std::fprintf(
+            stderr,
+            "builder kernel requires a SPONGE force-only or full-output snapshot: %s\n",
+            args.snapshot.c_str());
+        return 1;
+    }
     if (args.kernel == "sponge")
     {
         SpongeClusteredFullOutputSnapshot fullOutputSnapshot;
