@@ -93,3 +93,52 @@ source/active-payload contract untouched (no NaN/coverage risk).
 - Subgroup count kernel exists as a verbatim clone (compile + compare scaffold
   validated). The inner-loop subgroup transform is the next edit.
 - Probes (work-dist, leaf-order) are read-only and will be reverted before final.
+
+## Update 2026-06-29: S_max-bounded dedup + PME NaN finding
+
+### S_max early-stop (replaced magic 8)
+
+The fixed `kDedupLookback=8` window was replaced with a provably-correct
+S_max-bounded backward scan. Hilbert SFC (the default, NOT Morton) makes
+candidate leaves structurally cluster-start-sorted per SCI (cstone::singleTraversal
+visits octants in SFC-key order + the shared atom-sort key). The early-stop
+condition `start[b] + S_max <= running_max_end` is derived from that invariant;
+S_max is NECESSARY (no per-leaf span bound => scan to leaf_begin => O(n^2)).
+
+S_max = exact max per-leaf cluster span, computed once/rebuild by
+`Reduce_Max_Leaf_Cluster_Span` (single-pass atomicMax over leaf_cluster_ends).
+No magic number; holds for any system / cornerstone_leaf_size / density.
+
+### Universality (verified)
+
+- wat160k 2000-step: 2 rebuilds, 0 mismatch (69417 shifts each)
+- wat600k 2000-step: 2 rebuilds, 0 mismatch (277668 shifts each)
+- wat160k 10000-step verify: 6 rebuilds, 0 mismatch
+
+### REGRESSION: opt-in subgroup long-run NaN (PME, timing-nondeterministic)
+
+Opt-in subgroup 10000-step runs **reproducibly NaN** (2/2 print1000 in the
+2026-06-29 session; onset step nondeterministic ~7000-10000), while baseline
+10000-step is 6/6 stable in the same session. The NaN characteristics:
+
+- **LJ stays finite and correct throughout** the NaN runs (LJ=82-92k while
+  PM/temperature go NaN). LJ is gated by the count kernel payload; LJ correct
+  => count output correct.
+- Count output is verified **bit-exact** (0 mismatch across all rebuilds).
+- Onset is **sudden** (PM and temperature NaN together at one step), not a drift.
+
+An isolation test proved the NaN is **timing-nondeterminism**, not a count-kernel
+correctness bug: with an identical S_max value and identical subgroup kernel,
+adding a no-op host assignment changed the NaN behavior. Conclusion: the
+subgroup kernel's faster count execution changes PME timing and exposes a
+**pre-existing latent PME instability** (PME long-runs to NaN under certain
+timings), which the slower baseline timing masks.
+
+### Status / disposition
+
+- S_max-bounded dedup is correct, universal, and committed (62f060f).
+- The count subgroup kernel output is verified bit-exact and LJ-correct.
+- Default path (subgroup off) is unaffected.
+- Subgroup stays opt-in: short benchmarks (1000-step) are safe and faster;
+  long runs (10000-step) may NaN due to the exposed PME instability.
+- The PME NaN is a **separate issue** to investigate independently of Phase A.
