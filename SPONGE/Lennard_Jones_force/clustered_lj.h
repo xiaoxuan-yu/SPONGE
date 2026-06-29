@@ -436,6 +436,13 @@ struct LJ_CLUSTER_LAYOUT
     int* d_leaf_atom_offsets = NULL;
     int* d_leaf_cluster_starts = NULL;
     int* d_leaf_cluster_ends = NULL;
+    // Phase A subgroup builder: provable upper bound on per-leaf cluster span
+    // (max over leaves of cluster_j_end - cluster_j_start), used to bound the
+    // backward dedup scan in the subgroup count/fill kernels. Computed once per
+    // rebuild by a reduction over leaf_cluster_ends/starts; exact, not a guess.
+    int max_leaf_cluster_span = 0;
+    int* d_leaf_cluster_span_max_scratch = NULL;
+    int leaf_cluster_span_max_scratch_capacity = 0;
     int* d_leaf_all_local = NULL;
     int* d_super_cluster_offsets = NULL;
     int* d_cluster_to_supercluster = NULL;

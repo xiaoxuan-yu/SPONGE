@@ -3645,6 +3645,25 @@ static __global__ void Build_Leaf_Cluster_Ranges(const int leaf_numbers,
     }
 }
 
+// Phase A subgroup builder: compute the exact per-leaf cluster-span upper bound
+// (max over leaves of cluster_j_end - cluster_j_start) in one pass. This is the
+// provable S_max the subgroup dedup backward scan uses for its early-stop bound;
+// it is recomputed each rebuild from the live leaf ranges, so it holds for any
+// system / cornerstone_leaf_size / density (no magic number).
+static __global__ void Reduce_Max_Leaf_Cluster_Span(const int leaf_numbers,
+                                                    const int* leaf_cluster_starts,
+                                                    const int* leaf_cluster_ends,
+                                                    int* d_max_span)
+{
+    int local_max = 0;
+    SIMPLE_DEVICE_FOR(leaf_i, leaf_numbers)
+    {
+        const int span = leaf_cluster_ends[leaf_i] - leaf_cluster_starts[leaf_i];
+        if (span > local_max) { local_max = span; }
+    }
+    atomicMax(d_max_span, local_max);
+}
+
 static __global__ void Build_Leaf_All_Local_Flags(
     const int leaf_numbers, const int* leaf_cluster_starts,
     const int* leaf_cluster_ends, const unsigned int* cluster_local_masks,
@@ -4253,8 +4272,10 @@ static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves(
     int* record_stream_source_rows,
     int* record_stream_source_counts_by_candidate,
     const bool accumulate_record_stream_source_rows_by_candidate,
-    const int* active_candidate_sci_mask)
+    const int* active_candidate_sci_mask,
+    const int max_leaf_cluster_span)
 {
+    (void)max_leaf_cluster_span;
     const int lane_id = threadIdx.x & (warpSize - 1);
     const int warp_id = threadIdx.x / warpSize;
     const int warps_per_block = blockDim.x / warpSize;
@@ -4800,7 +4821,8 @@ static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup(
     int* record_stream_source_rows,
     int* record_stream_source_counts_by_candidate,
     const bool accumulate_record_stream_source_rows_by_candidate,
-    const int* active_candidate_sci_mask)
+    const int* active_candidate_sci_mask,
+    const int max_leaf_cluster_span)
 {
     constexpr int kSubgroupSize = kClusteredClusterSize;            // 8
     constexpr int kCountSubgroups = kClusteredBuilderWarpSize / kSubgroupSize; // 4
@@ -4966,12 +4988,17 @@ static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup(
     // Each subgroup walks a strided slice of the candidate-leaf list. The
     // baseline dedups via a serial running max of cluster_j_end over all prior
     // leaves; deduped_start = max(this leaf start, that running max). Candidate
-    // leaves are cluster-start-sorted per SCI, so cluster_j_end is *almost*
-    // monotonic and the running max sits within a few leaves back (measured max
-    // lookback depth = 3 over 10.9M leaves). We reconstruct the exact running max
-    // with a fixed backward window; the bit-exact compare validates the window is
-    // wide enough.
-    constexpr int kDedupLookback = 8;
+    // leaves are cluster-start-sorted per SCI (Hilbert SFC default; structurally
+    // guaranteed by cstone::singleTraversal visiting octants in SFC-key order and
+    // the shared atom-sort key). We reconstruct the exact running max by a
+    // backward scan with a PROVABLY-CORRECT early stop: since starts are
+    // non-decreasing along the list, going back starts are non-increasing, so
+    // any earlier leaf b' < b has end[b'] <= start[b'] + S_max <= start[b] + S_max.
+    // Once start[b] + S_max <= cur_max, no still-earlier leaf can raise the max, so
+    // we stop. S_max = max_leaf_cluster_span is the exact per-leaf cluster-span
+    // upper bound computed at rebuild (no magic number; holds for any system /
+    // cornerstone_leaf_size / density).
+    const int s_max = max_leaf_cluster_span;
     for (int candidate_idx = leaf_begin + subgroup; candidate_idx < leaf_end;
          candidate_idx += kCountSubgroups)
     {
@@ -4979,14 +5006,21 @@ static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup(
         const int cluster_j_start = leaf_cluster_starts[leaf_j];
         const int cluster_j_end = leaf_cluster_ends[leaf_j];
         int prev_running_max_end = 0;
-        const int scan_stop =
-            IntMax(leaf_begin, candidate_idx - kDedupLookback);
-        for (int b = candidate_idx - 1; b >= scan_stop; b -= 1)
+        for (int b = candidate_idx - 1; b >= leaf_begin; b -= 1)
         {
-            const int b_end = leaf_cluster_ends[candidate_leaf_ids[b]];
+            const int b_leaf = candidate_leaf_ids[b];
+            const int b_start = leaf_cluster_starts[b_leaf];
+            const int b_end = leaf_cluster_ends[b_leaf];
             if (b_end > prev_running_max_end)
             {
                 prev_running_max_end = b_end;
+            }
+            // Provable stop: any still-earlier leaf b' has start[b'] <= b_start, so
+            // end[b'] <= start[b'] + S_max <= b_start + S_max. If that cannot exceed
+            // the running max we have, the running max is settled.
+            if (b_start + s_max <= prev_running_max_end)
+            {
+                break;
             }
         }
         const int leaf_mask_base =
@@ -24247,6 +24281,29 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                          CONTROLLER::device_max_thread, 0, NULL,
                          leaf_numbers, cluster_size, d_leaf_atom_offsets,
                          d_leaf_cluster_starts, d_leaf_cluster_ends);
+    // Phase A subgroup builder: compute the exact max per-leaf cluster span used
+    // as the provable S_max bound for the subgroup dedup backward scan. Cheap
+    // single-pass atomicMax; only the host-side max_leaf_cluster_span is read at
+    // the count/fill launch. Falls back gracefully (span 0) if the subgroup
+    // builder is never enabled.
+    if (Clustered_Gmxpacked_Subgroup_Builder_Enabled() ||
+        Clustered_Gmxpacked_Subgroup_Builder_Verify_Enabled())
+    {
+        Reserve_Device_Int_Buffer(1, &d_leaf_cluster_span_max_scratch,
+                                  &leaf_cluster_span_max_scratch_capacity);
+        int zero = 0;
+        deviceMemcpy(d_leaf_cluster_span_max_scratch, &zero, sizeof(int),
+                     deviceMemcpyHostToDevice);
+        Launch_Device_Kernel(Reduce_Max_Leaf_Cluster_Span,
+                             (leaf_numbers + CONTROLLER::device_max_thread - 1) /
+                                 CONTROLLER::device_max_thread,
+                             CONTROLLER::device_max_thread, 0, NULL,
+                             leaf_numbers, d_leaf_cluster_starts,
+                             d_leaf_cluster_ends, d_leaf_cluster_span_max_scratch);
+        deviceMemcpy(&max_leaf_cluster_span, d_leaf_cluster_span_max_scratch,
+                     sizeof(int), deviceMemcpyDeviceToHost);
+        if (max_leaf_cluster_span < 1) { max_leaf_cluster_span = 1; }
+    }
 
     Reserve_Device_Int_Buffer(cluster_numbers + 1, &d_cluster_offsets,
                               &cluster_capacity);
@@ -25201,7 +25258,8 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
             defer_gmxpacked_record_stream_source_count
                 ? NULL
                 : d_gmxpacked_record_stream_source_counts_by_candidate,
-            accumulate_gmxpacked_record_stream_source_rows_by_candidate, NULL);
+            accumulate_gmxpacked_record_stream_source_rows_by_candidate, NULL,
+            max_leaf_cluster_span);
 #ifndef USE_CPU
         Clustered_Debug_Device_Sync_If_Tracing(
             "Count_Nbnxm_Payload_From_Candidate_Leaves");
@@ -25255,7 +25313,8 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                 d_excluded_numbers, fixed_shift_candidates,
                 gmxpacked_record_stream_cutoff, gmxpacked_record_stream_prune_crd,
                 d_subgroup_verify_shift_flags, d_subgroup_verify_cjpacked_counts,
-                d_subgroup_verify_exclusion_counts, NULL, NULL, false, NULL);
+                d_subgroup_verify_exclusion_counts, NULL, NULL, false, NULL,
+                max_leaf_cluster_span);
             hostDeviceSynchronize();
             const std::vector<int> base_flags = Copy_Device_Buffer_To_Host(
                 d_sci_shift_flags, static_cast<size_t>(sci_shift_numbers));
@@ -25936,7 +25995,7 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
             d_refill_sci_shift_flags,
             d_refill_cjpacked_counts, d_refill_exclusion_counts, NULL,
             d_gmxpacked_incremental_replacement_source_counts_by_candidate,
-            false, d_gmxpacked_incremental_dirty_candidate_sci);
+            false, d_gmxpacked_incremental_dirty_candidate_sci, 0);
         const int refill_source_rows = Exclusive_Scan_Counts(
             this, candidate_sci_numbers,
             d_gmxpacked_incremental_replacement_source_counts_by_candidate,
@@ -26133,7 +26192,7 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                     : d_bench_source_rows,
                 d_bench_source_counts_by_candidate,
                 accumulate_gmxpacked_record_stream_source_rows_by_candidate,
-                NULL);
+                NULL, 0);
             bench_sci_numbers = Exclusive_Scan_Counts(
                 this, sci_shift_numbers, d_bench_sci_shift_flags,
                 d_bench_sci_shift_offsets);
@@ -26544,7 +26603,7 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                 fixed_shift_candidates, gmxpacked_record_stream_cutoff,
                 gmxpacked_record_stream_prune_crd,
                 d_sci_shift_flags, d_cjpacked_counts, d_exclusion_counts,
-                NULL, NULL, false, NULL);
+                NULL, NULL, false, NULL, 0);
 #ifndef USE_CPU
             Clustered_Debug_Device_Sync_If_Tracing(
                 "Primary_Builder_Fallback_Count_Nbnxm_Payload");
