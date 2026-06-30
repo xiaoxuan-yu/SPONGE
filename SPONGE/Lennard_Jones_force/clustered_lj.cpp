@@ -4795,6 +4795,7 @@ static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves(
 // shared data stays per-warp (read-only, shared by all subgroups); j-side scratch
 // and the j-signature get a per-subgroup dimension. Validated bit-for-bit against
 // the baseline count kernel before it is allowed to feed the build.
+template <bool kParallelAccum>
 static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup(
     const int candidate_sci_numbers, const int sci_shift_numbers,
     const int cluster_size, const int super_cluster_clusters,
@@ -5249,86 +5250,190 @@ static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup(
                 const unsigned int group_record_imask =
                     group_lane_mask_local & active_i_lane_mask;
                 remaining_lane_mask &= ~group_lane_mask_local;
+                const bool use_parallel_group_accum =
+                    kParallelAccum && fixed_shift_candidates &&
+                    candidate_leaf_reach_masks != NULL;
+                int parallel_source_rows_for_group = 0;
+                if (use_parallel_group_accum &&
+                    count_record_stream_source_rows &&
+                    group_record_imask != 0u)
+                {
+                    bool split_has_source_row = false;
+                    if (sublane < kClusteredWarpSplitCount)
+                    {
+                        const unsigned int split_local_imask =
+                            Prune_Gmxpacked_Record_Stream_Source_Imask(
+                                sublane, group_record_imask, valid_mask_j,
+                                fixed_shift_id, cell, rcell, crd,
+                                shared_i_center_x[warp_id],
+                                shared_i_center_y[warp_id],
+                                shared_i_center_z[warp_id], center_j,
+                                shared_i_atom_ids[warp_id],
+                                shared_j_atom_ids[warp_id][subgroup],
+                                shared_i_local_masks[warp_id],
+                                record_stream_cutoff * record_stream_cutoff);
+                        split_has_source_row =
+                            Clustered_Split_Has_Atoms(valid_mask_j, sublane) &&
+                            split_local_imask != 0u;
+                    }
+                    const unsigned int source_row_lane_mask =
+                        (deviceBallot(subgroup_mask, split_has_source_row) >>
+                         (subgroup * kSubgroupSize)) &
+                        0xFFu;
+                    parallel_source_rows_for_group =
+                        __popc(source_row_lane_mask);
+                }
+                int parallel_exclusion_count_for_group = 0;
+                if (use_parallel_group_accum && need_j_cached_atoms)
+                {
+                    const unsigned int group_exclusion_imask =
+                        (exclusion_candidate_lane_mask >>
+                         (subgroup * kSubgroupSize)) &
+                        group_record_imask;
+                    bool has_lane_exclusion = false;
+                    if (sublane < active_cluster_count &&
+                        (group_exclusion_imask &
+                         (1u << static_cast<unsigned int>(sublane))) != 0u)
+                    {
+                        const unsigned int local_mask_i =
+                            shared_i_local_masks[warp_id][sublane];
+                        const unsigned long long exclusion_mask =
+                            Build_Exclusion_Mask_From_Cached_Atoms(
+                                shared_i_atom_ids[warp_id][sublane],
+                                shared_j_atom_ids[warp_id][subgroup],
+                                shared_i_molecule_ids[warp_id][sublane],
+                                shared_j_molecule_ids[warp_id][subgroup],
+                                shared_i_signatures[warp_id][sublane],
+                                shared_j_signature[warp_id][subgroup],
+                                has_molecule_metadata, local_mask_i,
+                                valid_mask_j, cluster_size,
+                                local_atom_numbers, excluded_list_start,
+                                excluded_list, excluded_numbers);
+                        has_lane_exclusion = exclusion_mask != 0ull;
+                    }
+                    const unsigned int exclusion_lane_mask =
+                        (deviceBallot(subgroup_mask, has_lane_exclusion) >>
+                         (subgroup * kSubgroupSize)) &
+                        0xFFu;
+                    parallel_exclusion_count_for_group =
+                        __popc(exclusion_lane_mask);
+                }
                 if (sublane == leader_sublane)
                 {
                     const int output_shift_idx =
                         fixed_shift_candidates ? 0 : group_shift_id;
-                    if (count_record_stream_source_rows && group_record_imask != 0u)
+                    if (use_parallel_group_accum)
                     {
-                        int source_rows_for_group = 0;
-#pragma unroll
-                        for (int split = 0; split < kClusteredWarpSplitCount;
-                             split += 1)
-                        {
-                            const unsigned int split_local_imask =
-                                Prune_Gmxpacked_Record_Stream_Source_Imask(
-                                    split, group_record_imask, valid_mask_j,
-                                    fixed_shift_candidates ? fixed_shift_id
-                                                            : group_shift_id,
-                                    cell, rcell, crd,
-                                    shared_i_center_x[warp_id],
-                                    shared_i_center_y[warp_id],
-                                    shared_i_center_z[warp_id], center_j,
-                                    shared_i_atom_ids[warp_id],
-                                    shared_j_atom_ids[warp_id][subgroup],
-                                    shared_i_local_masks[warp_id],
-                                    record_stream_cutoff * record_stream_cutoff);
-                            if (Clustered_Split_Has_Atoms(valid_mask_j, split) &&
-                                split_local_imask != 0u)
-                            {
-                                source_rows_for_group += 1;
-                            }
-                        }
-                        if (source_rows_for_group > 0)
+                        if (parallel_source_rows_for_group > 0)
                         {
                             if (use_candidate_record_stream_source_count)
                             {
                                 atomicAdd(
                                     &shared_record_stream_source_counts[warp_id],
-                                    source_rows_for_group);
+                                    parallel_source_rows_for_group);
                             }
                             else if (record_stream_source_rows != NULL)
                             {
                                 atomicAdd(record_stream_source_rows,
-                                          source_rows_for_group);
+                                          parallel_source_rows_for_group);
                             }
                         }
-                    }
-                    atomicAdd(&shared_shift_record_counts[warp_id][output_shift_idx],
-                              1);
-                    if (need_j_cached_atoms)
-                    {
-                        const unsigned int group_exclusion_imask =
-                            (exclusion_candidate_lane_mask >>
-                             (subgroup * kSubgroupSize)) &
-                            group_record_imask;
-                        int exclusion_count_for_group = 0;
-                        unsigned int remaining_i = group_exclusion_imask;
-                        while (remaining_i != 0u)
+                        atomicAdd(
+                            &shared_shift_record_counts[warp_id][output_shift_idx],
+                            1);
+                        if (need_j_cached_atoms &&
+                            parallel_exclusion_count_for_group > 0)
                         {
-                            const int i_local =
-                                __ffs(static_cast<int>(remaining_i)) - 1;
-                            remaining_i &= (remaining_i - 1u);
-                            const unsigned int local_mask_i =
-                                shared_i_local_masks[warp_id][i_local];
-                            const unsigned long long exclusion_mask =
-                                Build_Exclusion_Mask_From_Cached_Atoms(
-                                    shared_i_atom_ids[warp_id][i_local],
-                                    shared_j_atom_ids[warp_id][subgroup],
-                                    shared_i_molecule_ids[warp_id][i_local],
-                                    shared_j_molecule_ids[warp_id][subgroup],
-                                    shared_i_signatures[warp_id][i_local],
-                                    shared_j_signature[warp_id][subgroup],
-                                    has_molecule_metadata, local_mask_i,
-                                    valid_mask_j, cluster_size,
-                                    local_atom_numbers, excluded_list_start,
-                                    excluded_list, excluded_numbers);
-                            exclusion_count_for_group +=
-                                exclusion_mask != 0ull ? 1 : 0;
+                            atomicAdd(
+                                &shared_shift_exclusion_counts[warp_id]
+                                                              [output_shift_idx],
+                                parallel_exclusion_count_for_group);
+                        }
+                    }
+                    else
+                    {
+                        if (count_record_stream_source_rows &&
+                            group_record_imask != 0u)
+                        {
+                            int source_rows_for_group = 0;
+#pragma unroll
+                            for (int split = 0;
+                                 split < kClusteredWarpSplitCount; split += 1)
+                            {
+                                const unsigned int split_local_imask =
+                                    Prune_Gmxpacked_Record_Stream_Source_Imask(
+                                        split, group_record_imask, valid_mask_j,
+                                        fixed_shift_candidates ? fixed_shift_id
+                                                                : group_shift_id,
+                                        cell, rcell, crd,
+                                        shared_i_center_x[warp_id],
+                                        shared_i_center_y[warp_id],
+                                        shared_i_center_z[warp_id], center_j,
+                                        shared_i_atom_ids[warp_id],
+                                        shared_j_atom_ids[warp_id][subgroup],
+                                        shared_i_local_masks[warp_id],
+                                        record_stream_cutoff *
+                                            record_stream_cutoff);
+                                if (Clustered_Split_Has_Atoms(valid_mask_j,
+                                                              split) &&
+                                    split_local_imask != 0u)
+                                {
+                                    source_rows_for_group += 1;
+                                }
+                            }
+                            if (source_rows_for_group > 0)
+                            {
+                                if (use_candidate_record_stream_source_count)
+                                {
+                                    atomicAdd(
+                                        &shared_record_stream_source_counts[warp_id],
+                                        source_rows_for_group);
+                                }
+                                else if (record_stream_source_rows != NULL)
+                                {
+                                    atomicAdd(record_stream_source_rows,
+                                              source_rows_for_group);
+                                }
+                            }
                         }
                         atomicAdd(
-                            &shared_shift_exclusion_counts[warp_id][output_shift_idx],
-                            exclusion_count_for_group);
+                            &shared_shift_record_counts[warp_id][output_shift_idx],
+                            1);
+                        if (need_j_cached_atoms)
+                        {
+                            const unsigned int group_exclusion_imask =
+                                (exclusion_candidate_lane_mask >>
+                                 (subgroup * kSubgroupSize)) &
+                                group_record_imask;
+                            int exclusion_count_for_group = 0;
+                            unsigned int remaining_i = group_exclusion_imask;
+                            while (remaining_i != 0u)
+                            {
+                                const int i_local =
+                                    __ffs(static_cast<int>(remaining_i)) - 1;
+                                remaining_i &= (remaining_i - 1u);
+                                const unsigned int local_mask_i =
+                                    shared_i_local_masks[warp_id][i_local];
+                                const unsigned long long exclusion_mask =
+                                    Build_Exclusion_Mask_From_Cached_Atoms(
+                                        shared_i_atom_ids[warp_id][i_local],
+                                        shared_j_atom_ids[warp_id][subgroup],
+                                        shared_i_molecule_ids[warp_id][i_local],
+                                        shared_j_molecule_ids[warp_id][subgroup],
+                                        shared_i_signatures[warp_id][i_local],
+                                        shared_j_signature[warp_id][subgroup],
+                                        has_molecule_metadata, local_mask_i,
+                                        valid_mask_j, cluster_size,
+                                        local_atom_numbers, excluded_list_start,
+                                        excluded_list, excluded_numbers);
+                                exclusion_count_for_group +=
+                                    exclusion_mask != 0ull ? 1 : 0;
+                            }
+                            atomicAdd(
+                                &shared_shift_exclusion_counts[warp_id]
+                                                              [output_shift_idx],
+                                exclusion_count_for_group);
+                        }
                     }
                 }
                 deviceSyncWarp(subgroup_mask);
@@ -10128,6 +10233,12 @@ static bool Clustered_Gmxpacked_Subgroup_Builder_Verify_Enabled()
 {
     return Clustered_Gmxpacked_Env_Flag_Enabled(
         "SPONGE_CLUSTERED_GMXPACKED_SUBGROUP_BUILDER_VERIFY");
+}
+
+static bool Clustered_Gmxpacked_Count_Parallel_Accum_Enabled()
+{
+    return Clustered_Gmxpacked_Env_Flag_Enabled(
+        "SPONGE_CLUSTERED_GMXPACKED_COUNT_PARALLEL_ACCUM");
 }
 
 static bool
@@ -25855,10 +25966,17 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                 ? "primary-source-offset-count-scan"
                 : "native-count-scan",
             record_builder_stage_timers);
+        const bool use_gmxpacked_count_parallel_accum =
+            Clustered_Gmxpacked_Count_Parallel_Accum_Enabled() &&
+            fixed_shift_candidates && fixed_shift_leaf_screening;
+        auto* subgroup_count_kernel =
+            use_gmxpacked_count_parallel_accum
+                ? Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup<true>
+                : Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup<false>;
         auto* count_kernel =
             (Clustered_Gmxpacked_Subgroup_Builder_Enabled() &&
              run_gmxpacked_primary_builder)
-                ? Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup
+                ? subgroup_count_kernel
                 : Count_Nbnxm_Payload_From_Candidate_Leaves;
         Launch_Device_Kernel(
             count_kernel,
@@ -25924,7 +26042,7 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
             deviceMemset(d_subgroup_verify_exclusion_counts, 0,
                          sizeof(int) * sci_shift_numbers);
             Launch_Device_Kernel(
-                Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup,
+                subgroup_count_kernel,
                 candidate_sci_blocks, kClusteredBuilderBlockSize, 0, NULL,
                 candidate_sci_numbers, sci_shift_numbers, cluster_size,
                 super_cluster_clusters, local_atom_numbers, build_cutoff, cell,
