@@ -1083,12 +1083,25 @@ static void Gromacs_Load_Gro(System* system, CONTROLLER* controller)
                 Gromacs_To_Angstrom(std::stof(line.substr(28, 8)));
             system->atoms.coordinate[3 * i + 2] =
                 Gromacs_To_Angstrom(std::stof(line.substr(36, 8)));
+            if (line.size() >= 68)
+            {
+                system->atoms.velocity[3 * i] =
+                    Gromacs_To_Angstrom(std::stof(line.substr(44, 8))) /
+                    CONSTANT_TIME_CONVERTION;
+                system->atoms.velocity[3 * i + 1] =
+                    Gromacs_To_Angstrom(std::stof(line.substr(52, 8))) /
+                    CONSTANT_TIME_CONVERTION;
+                system->atoms.velocity[3 * i + 2] =
+                    Gromacs_To_Angstrom(std::stof(line.substr(60, 8))) /
+                    CONSTANT_TIME_CONVERTION;
+            }
         }
         catch (const std::exception&)
         {
             controller->Throw_SPONGE_Error(
                 spongeErrorBadFileFormat, error_by,
-                "Reason:\n\tinvalid coordinate field in GROMACS gro file\n");
+                "Reason:\n\tinvalid coordinate or velocity field in GROMACS "
+                "gro file\n");
         }
     }
 
