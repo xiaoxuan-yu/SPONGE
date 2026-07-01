@@ -61,6 +61,20 @@ constexpr int kClusteredMaxJGroupSize = kClusteredJGroupSize;
 constexpr int kClusteredForceonlyLocalSortCapacity = 2048;
 constexpr unsigned int kClusteredForceonlyInvalidSortKey = 0xffffffffu;
 
+struct LJ_CLUSTERED_GMXPACKED_COUNT_SOURCE_FRAGMENT
+{
+    int sci_id = -1;
+    int shift_id = kClusteredCentralShiftId;
+    int supercluster_id = -1;
+    int cluster_j = -1;
+    int split_id = 0;
+    unsigned int imask = 0u;
+    unsigned int valid_mask_j = 0u;
+    unsigned int local_mask_j = 0u;
+    int source_order = 0;
+    unsigned long long exclusion_masks[kClusteredMaxSuperClusterClusters] = {};
+};
+
 static bool Clustered_Fine_Timers_Enabled()
 {
     const char* disabled = std::getenv("SPONGE_CLUSTERED_DISABLE_FINE_TIMERS");
@@ -3331,7 +3345,12 @@ static __global__ void Mark_Gmxpacked_Incremental_Dirty_J_Candidates(
     const int* leaf_cluster_ends, const int* dirty_clusters,
     int* dirty_candidate_sci)
 {
-    SIMPLE_DEVICE_FOR(candidate_sci, candidate_sci_numbers)
+    const int candidate_sci = blockIdx.x;
+    if (candidate_sci >= candidate_sci_numbers)
+    {
+        return;
+    }
+    if (threadIdx.x == 0)
     {
         if (dirty_candidate_sci[candidate_sci] == 0)
         {
@@ -4273,9 +4292,19 @@ static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves(
     int* record_stream_source_counts_by_candidate,
     const bool accumulate_record_stream_source_rows_by_candidate,
     const int* active_candidate_sci_mask,
-    const int max_leaf_cluster_span)
+    const int max_leaf_cluster_span,
+    LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* count_source_fragments,
+    LJ_CLUSTERED_GMXPACKED_COUNT_SOURCE_FRAGMENT* count_light_source_fragments,
+    const int count_source_fragment_capacity,
+    int* count_source_fragment_cursor,
+    int* count_source_fragment_overflow_rows)
 {
     (void)max_leaf_cluster_span;
+    (void)count_source_fragments;
+    (void)count_light_source_fragments;
+    (void)count_source_fragment_capacity;
+    (void)count_source_fragment_cursor;
+    (void)count_source_fragment_overflow_rows;
     const int lane_id = threadIdx.x & (warpSize - 1);
     const int warp_id = threadIdx.x / warpSize;
     const int warps_per_block = blockDim.x / warpSize;
@@ -4823,7 +4852,12 @@ static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup(
     int* record_stream_source_counts_by_candidate,
     const bool accumulate_record_stream_source_rows_by_candidate,
     const int* active_candidate_sci_mask,
-    const int max_leaf_cluster_span)
+    const int max_leaf_cluster_span,
+    LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* count_source_fragments,
+    LJ_CLUSTERED_GMXPACKED_COUNT_SOURCE_FRAGMENT* count_light_source_fragments,
+    const int count_source_fragment_capacity,
+    int* count_source_fragment_cursor,
+    int* count_source_fragment_overflow_rows)
 {
     constexpr int kSubgroupSize = kClusteredClusterSize;            // 8
     constexpr int kCountSubgroups = kClusteredBuilderWarpSize / kSubgroupSize; // 4
@@ -4907,9 +4941,21 @@ static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup(
         record_stream_source_counts_by_candidate != NULL ||
         (accumulate_record_stream_source_rows_by_candidate &&
          record_stream_source_rows != NULL);
+    const bool emit_count_source_fragments =
+        count_source_fragments != NULL && count_source_fragment_capacity > 0 &&
+        count_source_fragment_cursor != NULL &&
+        count_source_fragment_overflow_rows != NULL;
+    const bool emit_count_light_source_fragments =
+        count_light_source_fragments != NULL &&
+        count_source_fragment_capacity > 0 &&
+        count_source_fragment_cursor != NULL &&
+        count_source_fragment_overflow_rows != NULL;
+    const bool emit_any_count_source_fragments =
+        emit_count_source_fragments || emit_count_light_source_fragments;
     const bool count_record_stream_source_rows =
         record_stream_source_rows != NULL ||
-        record_stream_source_counts_by_candidate != NULL;
+        record_stream_source_counts_by_candidate != NULL ||
+        emit_any_count_source_fragments;
     // Load i-cluster metadata (per-warp, all 32 lanes cooperate).
     if (lane_id < kClusteredMaxSuperClusterClusters)
     {
@@ -5252,7 +5298,8 @@ static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup(
                 remaining_lane_mask &= ~group_lane_mask_local;
                 const bool use_parallel_group_accum =
                     kParallelAccum && fixed_shift_candidates &&
-                    candidate_leaf_reach_masks != NULL;
+                    candidate_leaf_reach_masks != NULL &&
+                    !emit_any_count_source_fragments;
                 int parallel_source_rows_for_group = 0;
                 if (use_parallel_group_accum &&
                     count_record_stream_source_rows &&
@@ -5322,7 +5369,159 @@ static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup(
                 {
                     const int output_shift_idx =
                         fixed_shift_candidates ? 0 : group_shift_id;
-                    if (use_parallel_group_accum)
+                    if (emit_any_count_source_fragments)
+                    {
+                        unsigned long long
+                            exclusion_masks[kClusteredMaxSuperClusterClusters] =
+                                {};
+                        int exclusion_count_for_group = 0;
+                        if (need_j_cached_atoms)
+                        {
+                            const unsigned int group_exclusion_imask =
+                                (exclusion_candidate_lane_mask >>
+                                 (subgroup * kSubgroupSize)) &
+                                group_record_imask;
+                            unsigned int remaining_i = group_exclusion_imask;
+                            while (remaining_i != 0u)
+                            {
+                                const int i_local =
+                                    __ffs(static_cast<int>(remaining_i)) - 1;
+                                remaining_i &= (remaining_i - 1u);
+                                const unsigned int local_mask_i =
+                                    shared_i_local_masks[warp_id][i_local];
+                                const unsigned long long exclusion_mask =
+                                    Build_Exclusion_Mask_From_Cached_Atoms(
+                                        shared_i_atom_ids[warp_id][i_local],
+                                        shared_j_atom_ids[warp_id][subgroup],
+                                        shared_i_molecule_ids[warp_id][i_local],
+                                        shared_j_molecule_ids[warp_id][subgroup],
+                                        shared_i_signatures[warp_id][i_local],
+                                        shared_j_signature[warp_id][subgroup],
+                                        has_molecule_metadata, local_mask_i,
+                                        valid_mask_j, cluster_size,
+                                        local_atom_numbers, excluded_list_start,
+                                        excluded_list, excluded_numbers);
+                                exclusion_masks[i_local] = exclusion_mask;
+                                exclusion_count_for_group +=
+                                    exclusion_mask != 0ull ? 1 : 0;
+                            }
+                        }
+                        if (group_record_imask != 0u)
+                        {
+                            int source_rows_for_group = 0;
+                            const int source_shift_id =
+                                fixed_shift_candidates ? fixed_shift_id
+                                                       : group_shift_id;
+#pragma unroll
+                            for (int split = 0; split < kClusteredWarpSplitCount;
+                                 split += 1)
+                            {
+                                const unsigned int split_local_imask =
+                                    Prune_Gmxpacked_Record_Stream_Source_Imask(
+                                        split, group_record_imask, valid_mask_j,
+                                        source_shift_id, cell, rcell, crd,
+                                        shared_i_center_x[warp_id],
+                                        shared_i_center_y[warp_id],
+                                        shared_i_center_z[warp_id], center_j,
+                                        shared_i_atom_ids[warp_id],
+                                        shared_j_atom_ids[warp_id][subgroup],
+                                        shared_i_local_masks[warp_id],
+                                        record_stream_cutoff *
+                                            record_stream_cutoff);
+                                if (Clustered_Split_Has_Atoms(valid_mask_j,
+                                                              split) &&
+                                    split_local_imask != 0u)
+                                {
+                                    source_rows_for_group += 1;
+                                    const int fragment_idx =
+                                        atomicAdd(count_source_fragment_cursor, 1);
+                                    if (fragment_idx <
+                                        count_source_fragment_capacity)
+                                    {
+                                        if (emit_count_light_source_fragments)
+                                        {
+                                            LJ_CLUSTERED_GMXPACKED_COUNT_SOURCE_FRAGMENT
+                                                fragment = {};
+                                            fragment.sci_id = candidate_sci;
+                                            fragment.shift_id = source_shift_id;
+                                            fragment.supercluster_id = super_i;
+                                            fragment.cluster_j = cluster_j;
+                                            fragment.split_id = split;
+                                            fragment.imask = split_local_imask;
+                                            fragment.valid_mask_j = valid_mask_j;
+                                            fragment.local_mask_j = local_mask_j;
+                                            fragment.source_order = fragment_idx;
+#pragma unroll
+                                            for (int i_local = 0;
+                                                 i_local <
+                                                 kClusteredMaxSuperClusterClusters;
+                                                 i_local += 1)
+                                            {
+                                                fragment.exclusion_masks[i_local] =
+                                                    exclusion_masks[i_local];
+                                            }
+                                            count_light_source_fragments[fragment_idx] =
+                                                fragment;
+                                        }
+                                        else
+                                        {
+                                            LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE
+                                                source = {};
+                                            source.sci_id = candidate_sci;
+                                            source.shift_id = source_shift_id;
+                                            source.supercluster_id = super_i;
+                                            source.cluster_j = cluster_j;
+                                            source.split_id = split;
+                                            source.imask = split_local_imask;
+                                            source.valid_mask_j = valid_mask_j;
+                                            source.local_mask_j = local_mask_j;
+                                            source.source_order = fragment_idx;
+                                            Fill_Gmxpacked_Record_Stream_Source_Pair_Words(
+                                                &source, cluster_i_start,
+                                                cluster_j, source_shift_id,
+                                                split, valid_mask_j,
+                                                local_mask_j, split_local_imask,
+                                                shared_i_local_masks[warp_id],
+                                                exclusion_masks);
+                                            count_source_fragments[fragment_idx] =
+                                                source;
+                                        }
+                                    }
+                                    else
+                                    {
+                                        atomicAdd(
+                                            count_source_fragment_overflow_rows,
+                                            1);
+                                    }
+                                }
+                            }
+                            if (source_rows_for_group > 0)
+                            {
+                                if (use_candidate_record_stream_source_count)
+                                {
+                                    atomicAdd(
+                                        &shared_record_stream_source_counts[warp_id],
+                                        source_rows_for_group);
+                                }
+                                else if (record_stream_source_rows != NULL)
+                                {
+                                    atomicAdd(record_stream_source_rows,
+                                              source_rows_for_group);
+                                }
+                            }
+                        }
+                        atomicAdd(&shared_shift_record_counts[warp_id]
+                                                             [output_shift_idx],
+                                  1);
+                        if (need_j_cached_atoms)
+                        {
+                            atomicAdd(
+                                &shared_shift_exclusion_counts[warp_id]
+                                                              [output_shift_idx],
+                                exclusion_count_for_group);
+                        }
+                    }
+                    else if (use_parallel_group_accum)
                     {
                         if (parallel_source_rows_for_group > 0)
                         {
@@ -5357,14 +5556,14 @@ static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup(
                         {
                             int source_rows_for_group = 0;
 #pragma unroll
-                            for (int split = 0;
-                                 split < kClusteredWarpSplitCount; split += 1)
+                            for (int split = 0; split < kClusteredWarpSplitCount;
+                                 split += 1)
                             {
                                 const unsigned int split_local_imask =
                                     Prune_Gmxpacked_Record_Stream_Source_Imask(
                                         split, group_record_imask, valid_mask_j,
                                         fixed_shift_candidates ? fixed_shift_id
-                                                                : group_shift_id,
+                                                               : group_shift_id,
                                         cell, rcell, crd,
                                         shared_i_center_x[warp_id],
                                         shared_i_center_y[warp_id],
@@ -5396,9 +5595,9 @@ static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup(
                                 }
                             }
                         }
-                        atomicAdd(
-                            &shared_shift_record_counts[warp_id][output_shift_idx],
-                            1);
+                        atomicAdd(&shared_shift_record_counts[warp_id]
+                                                             [output_shift_idx],
+                                  1);
                         if (need_j_cached_atoms)
                         {
                             const unsigned int group_exclusion_imask =
@@ -6735,6 +6934,187 @@ static __global__ void Fill_Gmxpacked_Record_Stream_Sources_From_Candidate_Leave
         atomicAdd(record_stream_fill_cursor,
                   shared_record_stream_source_written_rows[warp_id]);
     }
+}
+
+static __global__ void
+Materialize_Gmxpacked_Record_Stream_Sources_From_Count_Fragments(
+    const int fragment_numbers,
+    const int candidate_sci_numbers,
+    const int record_stream_source_capacity,
+    const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* count_source_fragments,
+    const int* record_stream_source_offsets_by_candidate,
+    int* record_stream_source_write_cursors_by_candidate,
+    LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* record_stream_sources,
+    int* record_stream_fill_cursor, int* record_stream_overflow_rows)
+{
+    if (fragment_numbers <= 0 || candidate_sci_numbers <= 0 ||
+        record_stream_source_capacity <= 0 || count_source_fragments == NULL ||
+        record_stream_source_offsets_by_candidate == NULL ||
+        record_stream_source_write_cursors_by_candidate == NULL ||
+        record_stream_sources == NULL || record_stream_fill_cursor == NULL ||
+        record_stream_overflow_rows == NULL)
+    {
+        return;
+    }
+    SIMPLE_DEVICE_FOR(fragment_idx, fragment_numbers)
+    {
+        LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE source =
+            count_source_fragments[fragment_idx];
+        const int candidate_sci = source.sci_id;
+        if (candidate_sci < 0 || candidate_sci >= candidate_sci_numbers)
+        {
+            atomicAdd(record_stream_overflow_rows, 1);
+        }
+        else
+        {
+            const int write_idx = atomicAdd(
+                record_stream_source_write_cursors_by_candidate + candidate_sci,
+                1);
+            const int write_end =
+                record_stream_source_offsets_by_candidate[candidate_sci + 1];
+            if (write_idx >= 0 && write_idx < write_end &&
+                write_idx < record_stream_source_capacity)
+            {
+                source.source_order = write_idx;
+                record_stream_sources[write_idx] = source;
+                atomicAdd(record_stream_fill_cursor, 1);
+            }
+            else
+            {
+                atomicAdd(record_stream_overflow_rows, 1);
+            }
+        }
+    }
+}
+
+static __global__ void
+Materialize_Gmxpacked_Record_Stream_Sources_From_Light_Count_Fragments(
+    const int fragment_numbers,
+    const int candidate_sci_numbers,
+    const int record_stream_source_capacity,
+    const LJ_CLUSTERED_GMXPACKED_COUNT_SOURCE_FRAGMENT* count_source_fragments,
+    const int* record_stream_source_offsets_by_candidate,
+    int* record_stream_source_write_cursors_by_candidate,
+    const int* super_cluster_offsets,
+    const unsigned int* cluster_local_masks,
+    LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* record_stream_sources,
+    int* record_stream_fill_cursor, int* record_stream_overflow_rows)
+{
+    if (fragment_numbers <= 0 || candidate_sci_numbers <= 0 ||
+        record_stream_source_capacity <= 0 || count_source_fragments == NULL ||
+        record_stream_source_offsets_by_candidate == NULL ||
+        record_stream_source_write_cursors_by_candidate == NULL ||
+        super_cluster_offsets == NULL || cluster_local_masks == NULL ||
+        record_stream_sources == NULL || record_stream_fill_cursor == NULL ||
+        record_stream_overflow_rows == NULL)
+    {
+        return;
+    }
+
+    const int lane_id = threadIdx.x & (warpSize - 1);
+    const int warp_id = threadIdx.x / warpSize;
+    const int warps_per_block = blockDim.x / warpSize;
+    const int fragment_idx = blockIdx.x * warps_per_block + warp_id;
+    if (fragment_idx >= fragment_numbers)
+    {
+        return;
+    }
+
+    const LJ_CLUSTERED_GMXPACKED_COUNT_SOURCE_FRAGMENT fragment =
+        count_source_fragments[fragment_idx];
+    int write_idx = -1;
+    int write_valid = 0;
+    if (lane_id == 0)
+    {
+        const int candidate_sci = fragment.sci_id;
+        if (candidate_sci < 0 || candidate_sci >= candidate_sci_numbers)
+        {
+            atomicAdd(record_stream_overflow_rows, 1);
+        }
+        else
+        {
+            write_idx = atomicAdd(
+                record_stream_source_write_cursors_by_candidate + candidate_sci,
+                1);
+            const int write_end =
+                record_stream_source_offsets_by_candidate[candidate_sci + 1];
+            if (write_idx >= 0 && write_idx < write_end &&
+                write_idx < record_stream_source_capacity)
+            {
+                LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* source =
+                    record_stream_sources + write_idx;
+                source->sci_id = candidate_sci;
+                source->shift_id = fragment.shift_id;
+                source->supercluster_id = fragment.supercluster_id;
+                source->cluster_j = fragment.cluster_j;
+                source->split_id = fragment.split_id;
+                source->imask = fragment.imask;
+                source->valid_mask_j = fragment.valid_mask_j;
+                source->local_mask_j = fragment.local_mask_j;
+                source->source_order = write_idx;
+                atomicAdd(record_stream_fill_cursor, 1);
+                write_valid = 1;
+            }
+            else
+            {
+                atomicAdd(record_stream_overflow_rows, 1);
+            }
+        }
+    }
+    write_idx = deviceShfl(FULL_MASK, write_idx, 0, warpSize);
+    write_valid = deviceShfl(FULL_MASK, write_valid, 0, warpSize);
+    if (write_valid == 0)
+    {
+        return;
+    }
+
+    const int pair_idx = lane_id;
+    const int split_j_lane = pair_idx / kClusteredClusterSize;
+    const int i_lane = pair_idx - split_j_lane * kClusteredClusterSize;
+    const int j_lane =
+        fragment.split_id * kClusteredSplitJClusterSize + split_j_lane;
+    const bool valid_j =
+        (fragment.valid_mask_j &
+         (1u << static_cast<unsigned int>(j_lane))) != 0u;
+    const bool local_j =
+        (fragment.local_mask_j &
+         (1u << static_cast<unsigned int>(j_lane))) != 0u;
+    const int cluster_i_start =
+        super_cluster_offsets[fragment.supercluster_id];
+    unsigned int pair_word = 0u;
+#pragma unroll
+    for (int i_local = 0; i_local < kClusteredMaxSuperClusterClusters;
+         i_local += 1)
+    {
+        const unsigned int source_imask_bit =
+            1u << static_cast<unsigned int>(i_local);
+        if ((fragment.imask & source_imask_bit) == 0u)
+        {
+            continue;
+        }
+        const int cluster_i = cluster_i_start + i_local;
+        const unsigned int local_mask_i = cluster_local_masks[cluster_i];
+        const bool local_i =
+            (local_mask_i & (1u << static_cast<unsigned int>(i_lane))) != 0u;
+        bool allow_pair = valid_j && local_i;
+        if (allow_pair && fragment.shift_id == kClusteredCentralShiftId &&
+            cluster_i == fragment.cluster_j && local_j && j_lane <= i_lane)
+        {
+            allow_pair = false;
+        }
+        if (allow_pair &&
+            (fragment.exclusion_masks[i_local] &
+             (1ull << static_cast<unsigned int>(
+                  i_lane * kClusteredClusterSize + j_lane))) != 0ull)
+        {
+            allow_pair = false;
+        }
+        if (allow_pair)
+        {
+            pair_word |= source_imask_bit;
+        }
+    }
+    record_stream_sources[write_idx].pair_exclusion_words[pair_idx] = pair_word;
 }
 
 #ifndef USE_CPU
@@ -10241,6 +10621,18 @@ static bool Clustered_Gmxpacked_Count_Parallel_Accum_Enabled()
         "SPONGE_CLUSTERED_GMXPACKED_COUNT_PARALLEL_ACCUM");
 }
 
+static bool Clustered_Gmxpacked_Fill_Prune_Reuse_Enabled()
+{
+    return Clustered_Gmxpacked_Env_Flag_Enabled(
+        "SPONGE_CLUSTERED_GMXPACKED_FILL_PRUNE_REUSE");
+}
+
+static bool Clustered_Gmxpacked_Fill_Prune_Reuse_Light_Enabled()
+{
+    return Clustered_Gmxpacked_Env_Flag_Enabled(
+        "SPONGE_CLUSTERED_GMXPACKED_FILL_PRUNE_REUSE_LIGHT");
+}
+
 static bool
 Clustered_Gmxpacked_Record_Builder_Rolling_Outer_Source_Reuse_Enabled()
 {
@@ -10414,6 +10806,13 @@ static bool Clustered_Gmxpacked_Active_View_Rolling_Source_Cache_Enabled()
         return enabled[0] != '0';
     }
     return Clustered_Gmxpacked_Active_View_Enabled();
+}
+
+static bool
+Clustered_Gmxpacked_Active_View_Zero_Dirty_Source_Reuse_Enabled()
+{
+    return Clustered_Gmxpacked_Env_Flag_Enabled(
+        "SPONGE_CLUSTERED_GMXPACKED_ACTIVE_VIEW_ZERO_DIRTY_SOURCE_REUSE");
 }
 
 static float Clustered_Gmxpacked_Active_View_Source_Cache_Skin(
@@ -10633,6 +11032,26 @@ static int Estimate_Gmxpacked_Primary_Record_Stream_Source_Capacity(
     const long long estimate =
         static_cast<long long>(candidate_leaf_numbers) / 8ll +
         static_cast<long long>(candidate_sci_numbers) * 16ll + 65536ll;
+    const long long max_int = 0x7fffffffll;
+    return static_cast<int>(estimate > max_int ? max_int : estimate);
+}
+
+static int Estimate_Gmxpacked_Primary_Fill_Prune_Reuse_Source_Capacity(
+    int candidate_sci_numbers, int candidate_leaf_numbers)
+{
+    if (candidate_sci_numbers <= 0 || candidate_leaf_numbers <= 0)
+    {
+        return 0;
+    }
+    const long long primary_estimate =
+        static_cast<long long>(
+            Estimate_Gmxpacked_Primary_Record_Stream_Source_Capacity(
+                candidate_sci_numbers, candidate_leaf_numbers));
+    const long long reuse_estimate =
+        static_cast<long long>(candidate_leaf_numbers) / 2ll +
+        static_cast<long long>(candidate_sci_numbers) * 32ll + 65536ll;
+    const long long estimate =
+        primary_estimate > reuse_estimate ? primary_estimate : reuse_estimate;
     const long long max_int = 0x7fffffffll;
     return static_cast<int>(estimate > max_int ? max_int : estimate);
 }
@@ -12737,9 +13156,8 @@ static bool Build_Gmxpacked_Incremental_Dirty_Device_Mask(
     {
         Launch_Device_Kernel(
             Mark_Gmxpacked_Incremental_Dirty_J_Candidates,
-            (layout->candidate_sci_numbers + CONTROLLER::device_max_thread - 1) /
-                CONTROLLER::device_max_thread,
-            CONTROLLER::device_max_thread, 0, NULL,
+            layout->candidate_sci_numbers,
+            64, 0, NULL,
             layout->candidate_sci_numbers, layout->candidate_leaf_numbers,
             layout->cluster_numbers, layout->d_sci_candidate_leaf_offsets,
             layout->d_sci_candidate_leaf_ids, layout->d_leaf_cluster_starts,
@@ -12849,9 +13267,8 @@ static bool Build_Gmxpacked_Inner_Active_Dirty_Device_Mask(
     {
         Launch_Device_Kernel(
             Mark_Gmxpacked_Incremental_Dirty_J_Candidates,
-            (layout->candidate_sci_numbers + CONTROLLER::device_max_thread - 1) /
-                CONTROLLER::device_max_thread,
-            CONTROLLER::device_max_thread, 0, NULL,
+            layout->candidate_sci_numbers,
+            64, 0, NULL,
             layout->candidate_sci_numbers, layout->candidate_leaf_numbers,
             layout->cluster_numbers, layout->d_sci_candidate_leaf_offsets,
             layout->d_sci_candidate_leaf_ids, layout->d_leaf_cluster_starts,
@@ -23124,6 +23541,9 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                 ? Clustered_Gmxpacked_Active_View_Payload_Guard_Margin(
                       guard_margin)
                 : guard_margin;
+        const bool active_view_fixed_cutoff =
+            use_active_view_current_mask &&
+            Clustered_Gmxpacked_Active_View_Fixed_Cutoff_Enabled();
         const bool use_current_inner_adaptive_lease =
             use_current_inner_active &&
             Clustered_Gmxpacked_Current_Inner_Adaptive_Lease_Enabled();
@@ -23165,11 +23585,28 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
         }
         current_inner_target_guard_cutoff =
             fmaxf(cutoff, current_inner_target_guard_cutoff);
+        float rolling_source_target_cutoff = cutoff;
+        if (use_current_inner_active)
+        {
+            rolling_source_target_cutoff = current_inner_target_guard_cutoff;
+        }
+        else if (use_active_view_current_mask)
+        {
+            rolling_source_target_cutoff =
+                active_view_fixed_cutoff
+                    ? cutoff + active_view_payload_guard_margin
+                    : cutoff + guard_margin;
+            if (!active_view_fixed_cutoff &&
+                gmxpacked_inner_active_guard_cutoff > cutoff)
+            {
+                rolling_source_target_cutoff =
+                    fmaxf(rolling_source_target_cutoff,
+                          gmxpacked_inner_active_guard_cutoff);
+            }
+        }
         const float source_coverage_cutoff =
-            use_current_inner_active
-                ? fmaxf(cutoff, current_inner_target_guard_cutoff +
-                                    2.0f * anchor_max_displacement)
-                : fmaxf(cutoff, cutoff + 2.0f * anchor_max_displacement);
+            fmaxf(cutoff, rolling_source_target_cutoff +
+                              2.0f * anchor_max_displacement);
         const float requested_active_cutoff =
             use_current_active_mask && current_inner_active_anchor_ready
                 ? fmaxf(cutoff,
@@ -23261,9 +23698,6 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
             return false;
         }
         ClusteredRecorderScope payload_build_scope(payload_build_time_recorder);
-        const bool active_view_fixed_cutoff =
-            use_active_view_current_mask &&
-            Clustered_Gmxpacked_Active_View_Fixed_Cutoff_Enabled();
         float target_guard_cutoff =
             use_current_inner_active
                 ? current_inner_target_guard_cutoff
@@ -23945,6 +24379,10 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                     candidate_sci_numbers &&
                 d_gmxpacked_incremental_dirty_candidate_sci != NULL)
             {
+                const int zero_dirty_reuse_source_rows =
+                    Clustered_Gmxpacked_Active_View_Zero_Dirty_Source_Reuse_Enabled()
+                        ? gmxpacked_record_stream_source_numbers
+                        : 0;
                 active_source_rows =
                     Refresh_Gmxpacked_Record_Stream_Active_View_Sources(
                         this, previous_gmxpacked_incremental_source_numbers,
@@ -23959,7 +24397,7 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                         fmaxf(0.0f, target_guard_cutoff - cutoff),
                         refresh_stage_timers, &active_view_dirty_source_rows,
                         &active_view_changed_source_rows,
-                        gmxpacked_record_stream_source_numbers);
+                        zero_dirty_reuse_source_rows);
                 used_active_view_refresh = active_source_rows >= 0;
                 if (used_active_view_refresh &&
                     Clustered_Gmxpacked_Active_View_Verify_Coverage_Enabled())
@@ -25739,6 +26177,15 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
           Clustered_Gmxpacked_Record_Builder_Source_Offsets_Enabled()) ||
          (use_gmxpacked_incremental_cache &&
           !use_gmxpacked_one_pass_source_cache));
+    const bool use_gmxpacked_fill_prune_reuse =
+        request_gmxpacked_record_builder_route && run_gmxpacked_primary_builder &&
+        use_gmxpacked_record_stream_source_offsets &&
+        Clustered_Gmxpacked_Subgroup_Builder_Enabled() &&
+        Clustered_Gmxpacked_Fill_Prune_Reuse_Enabled() &&
+        !run_gmxpacked_record_builder_device_source_trace;
+    const bool use_gmxpacked_fill_prune_reuse_light =
+        use_gmxpacked_fill_prune_reuse &&
+        Clustered_Gmxpacked_Fill_Prune_Reuse_Light_Enabled();
     const bool accumulate_gmxpacked_record_stream_source_rows_by_candidate =
         request_gmxpacked_record_builder_route &&
         !run_gmxpacked_primary_builder &&
@@ -25764,6 +26211,21 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
         use_stable_source_contract ? target_layout_crd : crd;
     int* d_gmxpacked_record_stream_source_rows = NULL;
     int gmxpacked_record_stream_source_row_capacity = 0;
+    LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE*
+        d_gmxpacked_count_source_fragments = NULL;
+    int gmxpacked_count_source_fragment_capacity = 0;
+    LJ_CLUSTERED_GMXPACKED_COUNT_SOURCE_FRAGMENT*
+        d_gmxpacked_count_light_source_fragments = NULL;
+    int gmxpacked_count_light_source_fragment_capacity = 0;
+    int gmxpacked_count_source_fragment_capacity_request = 0;
+    int* d_gmxpacked_count_source_fragment_cursor = NULL;
+    int gmxpacked_count_source_fragment_cursor_capacity = 0;
+    int* d_gmxpacked_count_source_fragment_overflow_rows = NULL;
+    int gmxpacked_count_source_fragment_overflow_capacity = 0;
+    int* d_gmxpacked_count_source_materialize_cursors = NULL;
+    int gmxpacked_count_source_materialize_cursor_capacity = 0;
+    int gmxpacked_count_source_fragment_rows = 0;
+    int gmxpacked_count_source_fragment_overflow_rows = 0;
     int* d_gmxpacked_record_stream_source_counts_by_candidate = NULL;
     int gmxpacked_record_stream_source_count_capacity = 0;
     int* d_gmxpacked_record_stream_source_offsets_by_candidate = NULL;
@@ -25966,9 +26428,44 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                 ? "primary-source-offset-count-scan"
                 : "native-count-scan",
             record_builder_stage_timers);
+        const bool capture_fill_prune_reuse_sources =
+            use_gmxpacked_fill_prune_reuse && run_gmxpacked_record_builder &&
+            run_gmxpacked_primary_builder &&
+            d_gmxpacked_record_stream_source_counts_by_candidate != NULL;
+        if (capture_fill_prune_reuse_sources)
+        {
+            gmxpacked_count_source_fragment_capacity_request =
+                Estimate_Gmxpacked_Primary_Fill_Prune_Reuse_Source_Capacity(
+                    candidate_sci_numbers, candidate_leaf_numbers);
+            if (use_gmxpacked_fill_prune_reuse_light)
+            {
+                Reserve_Device_Buffer(
+                    gmxpacked_count_source_fragment_capacity_request,
+                    &d_gmxpacked_count_light_source_fragments,
+                    &gmxpacked_count_light_source_fragment_capacity);
+            }
+            else
+            {
+                Reserve_Device_Buffer(
+                    gmxpacked_count_source_fragment_capacity_request,
+                    &d_gmxpacked_count_source_fragments,
+                    &gmxpacked_count_source_fragment_capacity);
+            }
+            Reserve_Device_Int_Buffer(
+                1, &d_gmxpacked_count_source_fragment_cursor,
+                &gmxpacked_count_source_fragment_cursor_capacity);
+            Reserve_Device_Int_Buffer(
+                1, &d_gmxpacked_count_source_fragment_overflow_rows,
+                &gmxpacked_count_source_fragment_overflow_capacity);
+            deviceMemset(d_gmxpacked_count_source_fragment_cursor, 0,
+                         sizeof(int));
+            deviceMemset(d_gmxpacked_count_source_fragment_overflow_rows, 0,
+                         sizeof(int));
+        }
         const bool use_gmxpacked_count_parallel_accum =
             Clustered_Gmxpacked_Count_Parallel_Accum_Enabled() &&
-            fixed_shift_candidates && fixed_shift_leaf_screening;
+            fixed_shift_candidates && fixed_shift_leaf_screening &&
+            !capture_fill_prune_reuse_sources;
         auto* subgroup_count_kernel =
             use_gmxpacked_count_parallel_accum
                 ? Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup<true>
@@ -26005,11 +26502,37 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                 ? NULL
                 : d_gmxpacked_record_stream_source_counts_by_candidate,
             accumulate_gmxpacked_record_stream_source_rows_by_candidate, NULL,
-            max_leaf_cluster_span);
+            max_leaf_cluster_span,
+            capture_fill_prune_reuse_sources &&
+                    !use_gmxpacked_fill_prune_reuse_light
+                ? d_gmxpacked_count_source_fragments
+                : NULL,
+            capture_fill_prune_reuse_sources &&
+                    use_gmxpacked_fill_prune_reuse_light
+                ? d_gmxpacked_count_light_source_fragments
+                : NULL,
+            capture_fill_prune_reuse_sources
+                ? gmxpacked_count_source_fragment_capacity_request
+                : 0,
+            capture_fill_prune_reuse_sources
+                ? d_gmxpacked_count_source_fragment_cursor
+                : NULL,
+            capture_fill_prune_reuse_sources
+                ? d_gmxpacked_count_source_fragment_overflow_rows
+                : NULL);
 #ifndef USE_CPU
         Clustered_Debug_Device_Sync_If_Tracing(
             "Count_Nbnxm_Payload_From_Candidate_Leaves");
 #endif
+        if (capture_fill_prune_reuse_sources)
+        {
+            deviceMemcpy(&gmxpacked_count_source_fragment_rows,
+                         d_gmxpacked_count_source_fragment_cursor, sizeof(int),
+                         deviceMemcpyDeviceToHost);
+            deviceMemcpy(&gmxpacked_count_source_fragment_overflow_rows,
+                         d_gmxpacked_count_source_fragment_overflow_rows,
+                         sizeof(int), deviceMemcpyDeviceToHost);
+        }
 
 #ifndef USE_CPU
         // Phase A subgroup-builder bit-exact verification. Launch the subgroup
@@ -26060,7 +26583,7 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                 gmxpacked_record_stream_cutoff, gmxpacked_record_stream_prune_crd,
                 d_subgroup_verify_shift_flags, d_subgroup_verify_cjpacked_counts,
                 d_subgroup_verify_exclusion_counts, NULL, NULL, false, NULL,
-                max_leaf_cluster_span);
+                max_leaf_cluster_span, NULL, NULL, 0, NULL, NULL);
             hostDeviceSynchronize();
             const std::vector<int> base_flags = Copy_Device_Buffer_To_Host(
                 d_sci_shift_flags, static_cast<size_t>(sci_shift_numbers));
@@ -26256,9 +26779,11 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
         Reserve_Device_Int_Buffer(1,
                                   &d_gmxpacked_record_stream_source_overflow_rows,
                                   &gmxpacked_record_stream_source_overflow_capacity);
+        bool fill_prune_reuse_materialize_failed = false;
         for (int source_fill_attempt = 0; source_fill_attempt < 2;
              source_fill_attempt += 1)
         {
+            bool materialized_count_fragments = false;
             Reserve_Device_Buffer(gmxpacked_record_stream_source_capacity_request,
                                   &d_gmxpacked_record_stream_sources,
                                   &gmxpacked_record_stream_source_capacity);
@@ -26295,41 +26820,110 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                 deviceMemset(d_gmxpacked_device_source_trace_overflow_rows, 0,
                              sizeof(int));
             }
-            auto* fill_kernel =
-                (Clustered_Gmxpacked_Subgroup_Builder_Enabled() &&
-                 use_gmxpacked_record_stream_source_offsets)
-                    ? Fill_Gmxpacked_Record_Stream_Sources_From_Candidate_Leaves_Subgroup
-                    : Fill_Gmxpacked_Record_Stream_Sources_From_Candidate_Leaves;
-            Launch_Device_Kernel(
-                fill_kernel,
-                candidate_sci_blocks, kClusteredBuilderBlockSize, 0, NULL,
-                candidate_sci_numbers, cluster_size, local_atom_numbers,
-                build_cutoff, cell, rcell, d_sort_permutation, d_cluster_offsets,
-                d_leaf_cluster_starts, d_leaf_cluster_ends,
-                d_super_cluster_offsets, d_cluster_to_supercluster,
-                candidate_sci_supercluster_ids, candidate_shift_ids,
-                d_sci_candidate_leaf_offsets, d_sci_candidate_leaf_ids,
-                candidate_leaf_cluster_stride,
-                fixed_shift_leaf_screening ? d_candidate_leaf_reach_masks : NULL,
-                d_cluster_valid_masks, d_cluster_local_masks, d_cluster_centers,
-                d_cluster_extents, cluster_molecule_signatures,
-                cluster_molecule_ids,
-                d_excluded_list_start, d_excluded_list, d_excluded_numbers,
-                fixed_shift_candidates, gmxpacked_record_stream_cutoff,
-                gmxpacked_record_stream_prune_crd,
-                gmxpacked_record_stream_source_capacity_request,
-                d_gmxpacked_record_stream_source_offsets_by_candidate,
-                d_gmxpacked_record_stream_sources,
-                d_gmxpacked_record_stream_source_fill_cursor,
-                d_gmxpacked_record_stream_source_overflow_rows,
-                static_cast<int>(
-                    record_builder_device_source_trace_focus_atoms.size()),
-                d_gmxpacked_record_stream_source_trace_focus_atoms,
-                gmxpacked_device_source_trace_capacity,
-                d_gmxpacked_device_source_trace_rows,
-                d_gmxpacked_device_source_trace_cursor,
-                d_gmxpacked_device_source_trace_overflow_rows, NULL,
-                max_leaf_cluster_span);
+            const bool can_materialize_count_fragments =
+                use_gmxpacked_fill_prune_reuse &&
+                !fill_prune_reuse_materialize_failed &&
+                ((use_gmxpacked_fill_prune_reuse_light &&
+                  d_gmxpacked_count_light_source_fragments != NULL) ||
+                 (!use_gmxpacked_fill_prune_reuse_light &&
+                  d_gmxpacked_count_source_fragments != NULL)) &&
+                d_gmxpacked_record_stream_source_offsets_by_candidate != NULL &&
+                gmxpacked_count_source_fragment_overflow_rows == 0 &&
+                gmxpacked_count_source_fragment_rows ==
+                    gmxpacked_record_stream_source_numbers &&
+                gmxpacked_count_source_fragment_rows ==
+                    gmxpacked_record_stream_source_capacity_request;
+            if (can_materialize_count_fragments)
+            {
+                Reserve_Device_Int_Buffer(
+                    candidate_sci_numbers,
+                    &d_gmxpacked_count_source_materialize_cursors,
+                    &gmxpacked_count_source_materialize_cursor_capacity);
+                deviceMemcpy(
+                    d_gmxpacked_count_source_materialize_cursors,
+                    d_gmxpacked_record_stream_source_offsets_by_candidate,
+                    sizeof(int) * candidate_sci_numbers,
+                    deviceMemcpyDeviceToDevice);
+                if (use_gmxpacked_fill_prune_reuse_light)
+                {
+                    constexpr int kLightMaterializeWarpsPerBlock =
+                        kClusteredBuilderBlockSize / kClusteredBuilderWarpSize;
+                    Launch_Device_Kernel(
+                        Materialize_Gmxpacked_Record_Stream_Sources_From_Light_Count_Fragments,
+                        (gmxpacked_count_source_fragment_rows +
+                         kLightMaterializeWarpsPerBlock - 1) /
+                            kLightMaterializeWarpsPerBlock,
+                        kClusteredBuilderBlockSize, 0, NULL,
+                        gmxpacked_count_source_fragment_rows,
+                        candidate_sci_numbers,
+                        gmxpacked_record_stream_source_capacity_request,
+                        d_gmxpacked_count_light_source_fragments,
+                        d_gmxpacked_record_stream_source_offsets_by_candidate,
+                        d_gmxpacked_count_source_materialize_cursors,
+                        d_super_cluster_offsets, d_cluster_local_masks,
+                        d_gmxpacked_record_stream_sources,
+                        d_gmxpacked_record_stream_source_fill_cursor,
+                        d_gmxpacked_record_stream_source_overflow_rows);
+                }
+                else
+                {
+                    Launch_Device_Kernel(
+                        Materialize_Gmxpacked_Record_Stream_Sources_From_Count_Fragments,
+                        (gmxpacked_count_source_fragment_rows +
+                         CONTROLLER::device_max_thread - 1) /
+                            CONTROLLER::device_max_thread,
+                        CONTROLLER::device_max_thread, 0, NULL,
+                        gmxpacked_count_source_fragment_rows,
+                        candidate_sci_numbers,
+                        gmxpacked_record_stream_source_capacity_request,
+                        d_gmxpacked_count_source_fragments,
+                        d_gmxpacked_record_stream_source_offsets_by_candidate,
+                        d_gmxpacked_count_source_materialize_cursors,
+                        d_gmxpacked_record_stream_sources,
+                        d_gmxpacked_record_stream_source_fill_cursor,
+                        d_gmxpacked_record_stream_source_overflow_rows);
+                }
+                materialized_count_fragments = true;
+            }
+            else
+            {
+                auto* fill_kernel =
+                    (Clustered_Gmxpacked_Subgroup_Builder_Enabled() &&
+                     use_gmxpacked_record_stream_source_offsets)
+                        ? Fill_Gmxpacked_Record_Stream_Sources_From_Candidate_Leaves_Subgroup
+                        : Fill_Gmxpacked_Record_Stream_Sources_From_Candidate_Leaves;
+                Launch_Device_Kernel(
+                    fill_kernel,
+                    candidate_sci_blocks, kClusteredBuilderBlockSize, 0, NULL,
+                    candidate_sci_numbers, cluster_size, local_atom_numbers,
+                    build_cutoff, cell, rcell, d_sort_permutation,
+                    d_cluster_offsets, d_leaf_cluster_starts,
+                    d_leaf_cluster_ends, d_super_cluster_offsets,
+                    d_cluster_to_supercluster, candidate_sci_supercluster_ids,
+                    candidate_shift_ids, d_sci_candidate_leaf_offsets,
+                    d_sci_candidate_leaf_ids, candidate_leaf_cluster_stride,
+                    fixed_shift_leaf_screening ? d_candidate_leaf_reach_masks
+                                                : NULL,
+                    d_cluster_valid_masks, d_cluster_local_masks,
+                    d_cluster_centers, d_cluster_extents,
+                    cluster_molecule_signatures, cluster_molecule_ids,
+                    d_excluded_list_start, d_excluded_list, d_excluded_numbers,
+                    fixed_shift_candidates, gmxpacked_record_stream_cutoff,
+                    gmxpacked_record_stream_prune_crd,
+                    gmxpacked_record_stream_source_capacity_request,
+                    d_gmxpacked_record_stream_source_offsets_by_candidate,
+                    d_gmxpacked_record_stream_sources,
+                    d_gmxpacked_record_stream_source_fill_cursor,
+                    d_gmxpacked_record_stream_source_overflow_rows,
+                    static_cast<int>(
+                        record_builder_device_source_trace_focus_atoms.size()),
+                    d_gmxpacked_record_stream_source_trace_focus_atoms,
+                    gmxpacked_device_source_trace_capacity,
+                    d_gmxpacked_device_source_trace_rows,
+                    d_gmxpacked_device_source_trace_cursor,
+                    d_gmxpacked_device_source_trace_overflow_rows, NULL,
+                    max_leaf_cluster_span);
+            }
 #ifndef USE_CPU
             Clustered_Debug_Device_Sync_If_Tracing(
                 "Fill_Gmxpacked_Record_Stream_Sources_From_Candidate_Leaves");
@@ -26457,6 +27051,46 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
             deviceMemcpy(&gmxpacked_record_stream_overflow_rows,
                          d_gmxpacked_record_stream_source_overflow_rows,
                          sizeof(int), deviceMemcpyDeviceToHost);
+            if (use_gmxpacked_fill_prune_reuse &&
+                source_fill_attempt == 0 &&
+                (record_builder_summary_trace || record_builder_stage_timers))
+            {
+                fprintf(stderr,
+                        "[clustered gmxpacked fill prune reuse] step=%d "
+                        "materialized=%d light=%d source_rows=%d "
+                        "fragment_rows=%d fragment_capacity=%d "
+                        "fragment_overflow=%d filled_rows=%d "
+                        "overflow_rows=%d\n",
+                        md_info.sys.steps,
+                        materialized_count_fragments ? 1 : 0,
+                        use_gmxpacked_fill_prune_reuse_light ? 1 : 0,
+                        gmxpacked_record_stream_source_numbers,
+                        gmxpacked_count_source_fragment_rows,
+                        gmxpacked_count_source_fragment_capacity_request,
+                        gmxpacked_count_source_fragment_overflow_rows,
+                        gmxpacked_record_stream_filled_rows,
+                        gmxpacked_record_stream_overflow_rows);
+                fflush(stderr);
+            }
+            if (materialized_count_fragments &&
+                (gmxpacked_record_stream_filled_rows !=
+                     gmxpacked_record_stream_source_numbers ||
+                 gmxpacked_record_stream_overflow_rows != 0) &&
+                source_fill_attempt == 0)
+            {
+                fprintf(stderr,
+                        "[clustered gmxpacked fill prune reuse fallback] "
+                        "step=%d source_rows=%d fragment_rows=%d "
+                        "filled_rows=%d overflow_rows=%d\n",
+                        md_info.sys.steps,
+                        gmxpacked_record_stream_source_numbers,
+                        gmxpacked_count_source_fragment_rows,
+                        gmxpacked_record_stream_filled_rows,
+                        gmxpacked_record_stream_overflow_rows);
+                fflush(stderr);
+                fill_prune_reuse_materialize_failed = true;
+                continue;
+            }
             if (defer_gmxpacked_record_stream_source_count)
             {
                 gmxpacked_record_stream_source_numbers =
@@ -26864,7 +27498,8 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
             d_refill_sci_shift_flags,
             d_refill_cjpacked_counts, d_refill_exclusion_counts, NULL,
             d_gmxpacked_incremental_replacement_source_counts_by_candidate,
-            false, d_gmxpacked_incremental_dirty_candidate_sci, 0);
+            false, d_gmxpacked_incremental_dirty_candidate_sci, 0, NULL, NULL,
+            0, NULL, NULL);
         const int refill_source_rows = Exclusive_Scan_Counts(
             this, candidate_sci_numbers,
             d_gmxpacked_incremental_replacement_source_counts_by_candidate,
@@ -27061,7 +27696,7 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                     : d_bench_source_rows,
                 d_bench_source_counts_by_candidate,
                 accumulate_gmxpacked_record_stream_source_rows_by_candidate,
-                NULL, 0);
+                NULL, 0, NULL, NULL, 0, NULL, NULL);
             bench_sci_numbers = Exclusive_Scan_Counts(
                 this, sci_shift_numbers, d_bench_sci_shift_flags,
                 d_bench_sci_shift_offsets);
@@ -27426,6 +28061,15 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
         (void**)&d_gmxpacked_record_stream_source_counts_by_candidate);
     Free_Single_Device_Pointer(
         (void**)&d_gmxpacked_record_stream_source_offsets_by_candidate);
+    Free_Single_Device_Pointer((void**)&d_gmxpacked_count_source_fragments);
+    Free_Single_Device_Pointer(
+        (void**)&d_gmxpacked_count_light_source_fragments);
+    Free_Single_Device_Pointer(
+        (void**)&d_gmxpacked_count_source_fragment_cursor);
+    Free_Single_Device_Pointer(
+        (void**)&d_gmxpacked_count_source_fragment_overflow_rows);
+    Free_Single_Device_Pointer(
+        (void**)&d_gmxpacked_count_source_materialize_cursors);
 
     if (request_gmxpacked_record_builder_route &&
         !route_gmxpacked_record_stream_compact)
@@ -27472,7 +28116,7 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                 fixed_shift_candidates, gmxpacked_record_stream_cutoff,
                 gmxpacked_record_stream_prune_crd,
                 d_sci_shift_flags, d_cjpacked_counts, d_exclusion_counts,
-                NULL, NULL, false, NULL, 0);
+                NULL, NULL, false, NULL, 0, NULL, NULL, 0, NULL, NULL);
 #ifndef USE_CPU
             Clustered_Debug_Device_Sync_If_Tracing(
                 "Primary_Builder_Fallback_Count_Nbnxm_Payload");
