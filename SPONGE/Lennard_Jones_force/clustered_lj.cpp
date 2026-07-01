@@ -3437,6 +3437,68 @@ static __global__ void Mark_Gmxpacked_Incremental_Dirty_J_Candidates(
     }
 }
 
+static __global__ void Mark_Gmxpacked_Incremental_Dirty_J_Candidates_Parallel(
+    const int candidate_sci_numbers, const int candidate_leaf_numbers,
+    const int cluster_numbers, const int* candidate_leaf_offsets,
+    const int* candidate_leaf_ids, const int* leaf_cluster_starts,
+    const int* leaf_cluster_ends, const int* dirty_clusters,
+    int* dirty_candidate_sci)
+{
+    const int candidate_sci = blockIdx.x;
+    if (candidate_sci >= candidate_sci_numbers)
+    {
+        return;
+    }
+    __shared__ int shared_dirty;
+    if (threadIdx.x == 0)
+    {
+        shared_dirty = dirty_candidate_sci[candidate_sci] != 0 ? 1 : 0;
+    }
+    __syncthreads();
+    if (shared_dirty == 0)
+    {
+        const int candidate_begin = candidate_leaf_offsets[candidate_sci];
+        const int candidate_end = candidate_leaf_offsets[candidate_sci + 1];
+        bool local_dirty = false;
+        for (int candidate_idx = candidate_begin + threadIdx.x;
+             candidate_idx < candidate_end && !local_dirty;
+             candidate_idx += blockDim.x)
+        {
+            if (candidate_idx < 0 || candidate_idx >= candidate_leaf_numbers)
+            {
+                continue;
+            }
+            const int leaf = candidate_leaf_ids[candidate_idx];
+            if (leaf < 0)
+            {
+                continue;
+            }
+            const int cluster_begin = leaf_cluster_starts[leaf];
+            const int cluster_end = leaf_cluster_ends[leaf];
+            for (int cluster = cluster_begin; cluster < cluster_end;
+                 cluster += 1)
+            {
+                if (cluster >= 0 && cluster < cluster_numbers &&
+                    dirty_clusters[cluster] != 0)
+                {
+                    local_dirty = true;
+                    atomicExch(&shared_dirty, 1);
+                    break;
+                }
+            }
+            if (shared_dirty != 0)
+            {
+                break;
+            }
+        }
+    }
+    __syncthreads();
+    if (threadIdx.x == 0 && shared_dirty != 0)
+    {
+        dirty_candidate_sci[candidate_sci] = 1;
+    }
+}
+
 static __global__ void Build_Cornerstone_Sort_Keys(const int atom_numbers,
                                                    const VECTOR* crd,
                                                    const LTMatrix3 rcell,
@@ -5235,7 +5297,7 @@ static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves(
 // shared data stays per-warp (read-only, shared by all subgroups); j-side scratch
 // and the j-signature get a per-subgroup dimension. Validated bit-for-bit against
 // the baseline count kernel before it is allowed to feed the build.
-template <bool kParallelAccum>
+template <bool kParallelAccum, bool kParallelFragmentEmit>
 static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup(
     const int candidate_sci_numbers, const int sci_shift_numbers,
     const int cluster_size, const int super_cluster_clusters,
@@ -5806,7 +5868,110 @@ static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup(
                     }
                     deviceSyncWarp(subgroup_mask);
                 }
-                if (sublane == leader_sublane)
+                const bool use_parallel_fragment_emit =
+                    kParallelFragmentEmit && use_parallel_group_accum &&
+                    emit_count_light_source_fragments &&
+                    group_record_imask != 0u;
+                if (use_parallel_fragment_emit)
+                {
+                    unsigned int split_local_imask = 0u;
+                    bool split_has_source_row = false;
+                    if (sublane < kClusteredWarpSplitCount)
+                    {
+                        split_local_imask =
+                            shared_parallel_split_imasks[warp_id][subgroup]
+                                                        [sublane];
+                        split_has_source_row =
+                            Clustered_Split_Has_Atoms(valid_mask_j, sublane) &&
+                            split_local_imask != 0u;
+                    }
+                    const unsigned int source_row_lane_mask =
+                        (deviceBallot(subgroup_mask, split_has_source_row) >>
+                         (subgroup * kSubgroupSize)) &
+                        0xFFu;
+                    const int source_rows_for_group =
+                        __popc(source_row_lane_mask);
+                    int fragment_base = -1;
+                    if (sublane == leader_sublane &&
+                        source_rows_for_group > 0)
+                    {
+                        fragment_base = atomicAdd(
+                            count_source_fragment_cursor,
+                            source_rows_for_group);
+                    }
+                    fragment_base = deviceShfl(
+                        subgroup_mask, fragment_base,
+                        subgroup * kSubgroupSize + leader_sublane, warpSize);
+                    if (split_has_source_row)
+                    {
+                        const unsigned int lower_source_rows =
+                            source_row_lane_mask &
+                            ((1u << static_cast<unsigned int>(sublane)) - 1u);
+                        const int fragment_idx =
+                            fragment_base + __popc(lower_source_rows);
+                        if (fragment_idx < count_source_fragment_capacity)
+                        {
+                            LJ_CLUSTERED_GMXPACKED_COUNT_SOURCE_FRAGMENT*
+                                fragment =
+                                    count_light_source_fragments + fragment_idx;
+                            fragment->sci_id = candidate_sci;
+                            fragment->shift_id = source_shift_id;
+                            fragment->supercluster_id = super_i;
+                            fragment->cluster_j = cluster_j;
+                            fragment->split_id = sublane;
+                            fragment->imask = split_local_imask;
+                            fragment->valid_mask_j = valid_mask_j;
+                            fragment->local_mask_j = local_mask_j;
+                            fragment->source_order = fragment_idx;
+#pragma unroll
+                            for (int i_local = 0;
+                                 i_local < kClusteredMaxSuperClusterClusters;
+                                 i_local += 1)
+                            {
+                                fragment->exclusion_masks[i_local] =
+                                    shared_parallel_exclusion_masks[warp_id]
+                                                                   [subgroup]
+                                                                   [i_local];
+                            }
+                        }
+                        else
+                        {
+                            atomicAdd(count_source_fragment_overflow_rows, 1);
+                        }
+                    }
+                    if (sublane == leader_sublane)
+                    {
+                        const int output_shift_idx =
+                            fixed_shift_candidates ? 0 : group_shift_id;
+                        if (source_rows_for_group > 0)
+                        {
+                            if (use_candidate_record_stream_source_count)
+                            {
+                                atomicAdd(
+                                    &shared_record_stream_source_counts[warp_id],
+                                    source_rows_for_group);
+                            }
+                            else if (record_stream_source_rows != NULL)
+                            {
+                                atomicAdd(record_stream_source_rows,
+                                          source_rows_for_group);
+                            }
+                        }
+                        atomicAdd(
+                            &shared_shift_record_counts[warp_id]
+                                                       [output_shift_idx],
+                            1);
+                        if (need_j_cached_atoms &&
+                            parallel_exclusion_count_for_group > 0)
+                        {
+                            atomicAdd(
+                                &shared_shift_exclusion_counts[warp_id]
+                                                              [output_shift_idx],
+                                parallel_exclusion_count_for_group);
+                        }
+                    }
+                }
+                if (sublane == leader_sublane && !use_parallel_fragment_emit)
                 {
                     const int output_shift_idx =
                         fixed_shift_candidates ? 0 : group_shift_id;
@@ -11096,6 +11261,18 @@ static bool Clustered_Gmxpacked_Count_Parallel_Accum_Enabled()
         "SPONGE_CLUSTERED_GMXPACKED_COUNT_PARALLEL_ACCUM");
 }
 
+static bool Clustered_Gmxpacked_Count_Fragment_Parallel_Emit_Enabled()
+{
+    return Clustered_Gmxpacked_Env_Flag_Enabled(
+        "SPONGE_CLUSTERED_GMXPACKED_COUNT_FRAGMENT_PARALLEL_EMIT");
+}
+
+static bool Clustered_Gmxpacked_Dirty_J_Parallel_Scan_Enabled()
+{
+    return Clustered_Gmxpacked_Env_Flag_Enabled(
+        "SPONGE_CLUSTERED_GMXPACKED_DIRTY_J_PARALLEL_SCAN");
+}
+
 static bool Clustered_Fixed_Shift_Candidate_Leaf_Parallel_Enabled()
 {
     return Clustered_Gmxpacked_Env_Flag_Enabled(
@@ -13641,8 +13818,12 @@ static bool Build_Gmxpacked_Incremental_Dirty_Device_Mask(
         layout->d_leaf_cluster_ends != NULL;
     if (has_j_leaf_scope)
     {
+        auto* dirty_j_kernel =
+            Clustered_Gmxpacked_Dirty_J_Parallel_Scan_Enabled()
+                ? Mark_Gmxpacked_Incremental_Dirty_J_Candidates_Parallel
+                : Mark_Gmxpacked_Incremental_Dirty_J_Candidates;
         Launch_Device_Kernel(
-            Mark_Gmxpacked_Incremental_Dirty_J_Candidates,
+            dirty_j_kernel,
             layout->candidate_sci_numbers,
             64, 0, NULL,
             layout->candidate_sci_numbers, layout->candidate_leaf_numbers,
@@ -13752,8 +13933,12 @@ static bool Build_Gmxpacked_Inner_Active_Dirty_Device_Mask(
         layout->d_leaf_cluster_ends != NULL;
     if (has_j_leaf_scope)
     {
+        auto* dirty_j_kernel =
+            Clustered_Gmxpacked_Dirty_J_Parallel_Scan_Enabled()
+                ? Mark_Gmxpacked_Incremental_Dirty_J_Candidates_Parallel
+                : Mark_Gmxpacked_Incremental_Dirty_J_Candidates;
         Launch_Device_Kernel(
-            Mark_Gmxpacked_Incremental_Dirty_J_Candidates,
+            dirty_j_kernel,
             layout->candidate_sci_numbers,
             64, 0, NULL,
             layout->candidate_sci_numbers, layout->candidate_leaf_numbers,
@@ -27117,10 +27302,19 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
         const bool use_gmxpacked_count_parallel_accum =
             Clustered_Gmxpacked_Count_Parallel_Accum_Enabled() &&
             fixed_shift_candidates && fixed_shift_leaf_screening;
+        const bool use_gmxpacked_count_fragment_parallel_emit =
+            Clustered_Gmxpacked_Count_Fragment_Parallel_Emit_Enabled() &&
+            use_gmxpacked_count_parallel_accum &&
+            capture_fill_prune_reuse_sources &&
+            use_gmxpacked_fill_prune_reuse_light;
         auto* subgroup_count_kernel =
-            use_gmxpacked_count_parallel_accum
-                ? Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup<true>
-                : Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup<false>;
+            use_gmxpacked_count_fragment_parallel_emit
+                ? Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup<true, true>
+                : (use_gmxpacked_count_parallel_accum
+                       ? Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup<true,
+                                                                            false>
+                       : Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup<false,
+                                                                            false>);
         auto* count_kernel =
             (Clustered_Gmxpacked_Subgroup_Builder_Enabled() &&
              run_gmxpacked_primary_builder)
