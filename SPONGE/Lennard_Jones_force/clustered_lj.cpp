@@ -5305,7 +5305,9 @@ static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves(
 // shared data stays per-warp (read-only, shared by all subgroups); j-side scratch
 // and the j-signature get a per-subgroup dimension. Validated bit-for-bit against
 // the baseline count kernel before it is allowed to feed the build.
-template <bool kParallelAccum, bool kParallelFragmentEmit>
+template <bool kParallelAccum, bool kParallelFragmentEmit,
+          bool kFixedShiftLeafScreenedSpecialized = false,
+          bool kLightFragmentOnly = false>
 static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup(
     const int candidate_sci_numbers, const int sci_shift_numbers,
     const int cluster_size, const int super_cluster_clusters,
@@ -5364,18 +5366,24 @@ static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup(
     (void)cluster_radii;
 
     const int sci_base =
-        (fixed_shift_candidates && candidate_shift_ids == NULL)
+        kFixedShiftLeafScreenedSpecialized
             ? candidate_sci / kClusteredShiftCount
-            : candidate_sci;
+            : ((fixed_shift_candidates && candidate_shift_ids == NULL)
+                   ? candidate_sci / kClusteredShiftCount
+                   : candidate_sci);
     const int fixed_shift_id =
-        !fixed_shift_candidates
-            ? -1
-            : (candidate_shift_ids != NULL ? candidate_shift_ids[candidate_sci]
-                                           : (candidate_sci % kClusteredShiftCount));
+        kFixedShiftLeafScreenedSpecialized
+            ? candidate_sci % kClusteredShiftCount
+            : (!fixed_shift_candidates
+                   ? -1
+                   : (candidate_shift_ids != NULL
+                          ? candidate_shift_ids[candidate_sci]
+                          : (candidate_sci % kClusteredShiftCount)));
     const VECTOR fixed_shift_vec =
-        fixed_shift_candidates
-            ? Shift_Vector_From_Id(fixed_shift_id, cell)
-            : VECTOR{0.0f, 0.0f, 0.0f};
+        kFixedShiftLeafScreenedSpecialized
+            ? VECTOR{0.0f, 0.0f, 0.0f}
+            : (fixed_shift_candidates ? Shift_Vector_From_Id(fixed_shift_id, cell)
+                                      : VECTOR{0.0f, 0.0f, 0.0f});
     const int super_i = sci_supercluster_ids[sci_base];
     const int cluster_i_start = super_cluster_offsets[super_i];
     const int cluster_i_end = super_cluster_offsets[super_i + 1];
@@ -5429,7 +5437,8 @@ static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup(
         (accumulate_record_stream_source_rows_by_candidate &&
          record_stream_source_rows != NULL);
     const bool emit_count_source_fragments =
-        count_source_fragments != NULL && count_source_fragment_capacity > 0 &&
+        !kLightFragmentOnly && count_source_fragments != NULL &&
+        count_source_fragment_capacity > 0 &&
         count_source_fragment_cursor != NULL &&
         count_source_fragment_overflow_rows != NULL;
     const bool emit_count_light_source_fragments =
@@ -5498,9 +5507,10 @@ static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup(
             shared_i_molecule_ids[warp_id][i_local][atom_lane] = -1;
         }
     }
-    const int sci_shift_base = fixed_shift_candidates
-                                   ? candidate_sci
-                                   : candidate_sci * kClusteredShiftCount;
+    const int sci_shift_base =
+        (kFixedShiftLeafScreenedSpecialized || fixed_shift_candidates)
+            ? candidate_sci
+            : candidate_sci * kClusteredShiftCount;
     if (lane_id < kClusteredShiftCount)
     {
         shared_shift_record_counts[warp_id][lane_id] = 0;
@@ -5558,7 +5568,8 @@ static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup(
             }
         }
         const int leaf_mask_base =
-            candidate_leaf_reach_masks != NULL
+            kFixedShiftLeafScreenedSpecialized ||
+                    candidate_leaf_reach_masks != NULL
                 ? candidate_idx * candidate_leaf_cluster_stride
                 : 0;
 
@@ -5568,7 +5579,24 @@ static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup(
              cluster_j += 1)
         {
             unsigned int precomputed_i_mask = 0u;
-            if (candidate_leaf_reach_masks != NULL)
+            if constexpr (kFixedShiftLeafScreenedSpecialized)
+            {
+                if (sublane == 0)
+                {
+                    precomputed_i_mask =
+                        candidate_leaf_reach_masks[leaf_mask_base +
+                                                   (cluster_j - cluster_j_start)];
+                }
+                precomputed_i_mask =
+                    deviceShfl(subgroup_mask, precomputed_i_mask,
+                               subgroup * kSubgroupSize, warpSize) &
+                    active_i_lane_mask;
+                if (precomputed_i_mask == 0u)
+                {
+                    continue;
+                }
+            }
+            else if (candidate_leaf_reach_masks != NULL)
             {
                 if (sublane == 0)
                 {
@@ -5657,7 +5685,18 @@ static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup(
             if (sublane < active_cluster_count)
             {
                 const int i_local = sublane;
-                if (candidate_leaf_reach_masks != NULL)
+                if constexpr (kFixedShiftLeafScreenedSpecialized)
+                {
+                    if ((precomputed_i_mask &
+                         (1u << static_cast<unsigned int>(i_local))) != 0u)
+                    {
+                        exclusion_candidate =
+                            !has_molecule_metadata ||
+                            (shared_i_signatures[warp_id][i_local] &
+                             signature_j) != 0ull;
+                    }
+                }
+                else if (candidate_leaf_reach_masks != NULL)
                 {
                     if ((precomputed_i_mask &
                          (1u << static_cast<unsigned int>(i_local))) != 0u)
@@ -5720,7 +5759,8 @@ static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup(
             }
 
             const unsigned int active_pair_lane_mask =
-                candidate_leaf_reach_masks != NULL
+                kFixedShiftLeafScreenedSpecialized ||
+                        candidate_leaf_reach_masks != NULL
                     ? (precomputed_i_mask << (subgroup * kSubgroupSize))
                     : deviceBallot(subgroup_mask,
                                    sublane < active_cluster_count &&
@@ -5772,22 +5812,38 @@ static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup(
                 const int leader_sublane =
                     __ffs(static_cast<int>(remaining_lane_mask)) - 1;
                 const int group_shift_id =
-                    deviceShfl(subgroup_mask, pair_shift_id,
-                               subgroup * kSubgroupSize + leader_sublane,
-                               warpSize);
+                    kFixedShiftLeafScreenedSpecialized
+                        ? fixed_shift_id
+                        : deviceShfl(subgroup_mask, pair_shift_id,
+                                     subgroup * kSubgroupSize + leader_sublane,
+                                     warpSize);
                 const unsigned int group_lane_mask_local =
-                    deviceBallot(subgroup_mask,
-                                 sublane < active_cluster_count &&
-                                     pair_shift_id == group_shift_id) >>
-                    (subgroup * kSubgroupSize) & 0xFFu;
+                    kFixedShiftLeafScreenedSpecialized
+                        ? remaining_lane_mask
+                        : ((deviceBallot(subgroup_mask,
+                                         sublane < active_cluster_count &&
+                                             pair_shift_id == group_shift_id) >>
+                            (subgroup * kSubgroupSize)) &
+                           0xFFu);
                 const unsigned int group_record_imask =
                     group_lane_mask_local & active_i_lane_mask;
-                remaining_lane_mask &= ~group_lane_mask_local;
+                if constexpr (kFixedShiftLeafScreenedSpecialized)
+                {
+                    remaining_lane_mask = 0u;
+                }
+                else
+                {
+                    remaining_lane_mask &= ~group_lane_mask_local;
+                }
                 const bool use_parallel_group_accum =
-                    kParallelAccum && fixed_shift_candidates &&
-                    candidate_leaf_reach_masks != NULL;
+                    kParallelAccum &&
+                    (kFixedShiftLeafScreenedSpecialized ||
+                     (fixed_shift_candidates &&
+                      candidate_leaf_reach_masks != NULL));
                 const int source_shift_id =
-                    fixed_shift_candidates ? fixed_shift_id : group_shift_id;
+                    (kFixedShiftLeafScreenedSpecialized || fixed_shift_candidates)
+                        ? fixed_shift_id
+                        : group_shift_id;
                 unsigned int parallel_split_local_imask = 0u;
                 int parallel_source_rows_for_group = 0;
                 if (use_parallel_group_accum &&
@@ -5877,9 +5933,11 @@ static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup(
                     deviceSyncWarp(subgroup_mask);
                 }
                 const bool use_parallel_fragment_emit =
-                    kParallelFragmentEmit && use_parallel_group_accum &&
-                    emit_count_light_source_fragments &&
-                    group_record_imask != 0u;
+                    kLightFragmentOnly
+                        ? true
+                        : (kParallelFragmentEmit && use_parallel_group_accum &&
+                           emit_count_light_source_fragments &&
+                           group_record_imask != 0u);
                 if (use_parallel_fragment_emit)
                 {
                     unsigned int split_local_imask = 0u;
@@ -5950,7 +6008,10 @@ static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup(
                     if (sublane == leader_sublane)
                     {
                         const int output_shift_idx =
-                            fixed_shift_candidates ? 0 : group_shift_id;
+                            (kFixedShiftLeafScreenedSpecialized ||
+                             fixed_shift_candidates)
+                                ? 0
+                                : group_shift_id;
                         if (source_rows_for_group > 0)
                         {
                             if (use_candidate_record_stream_source_count)
@@ -5982,7 +6043,10 @@ static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup(
                 if (sublane == leader_sublane && !use_parallel_fragment_emit)
                 {
                     const int output_shift_idx =
-                        fixed_shift_candidates ? 0 : group_shift_id;
+                        (kFixedShiftLeafScreenedSpecialized ||
+                         fixed_shift_candidates)
+                            ? 0
+                            : group_shift_id;
                     if (emit_any_count_source_fragments)
                     {
                         unsigned long long
@@ -6210,8 +6274,10 @@ static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup(
                                 const unsigned int split_local_imask =
                                     Prune_Gmxpacked_Record_Stream_Source_Imask(
                                         split, group_record_imask, valid_mask_j,
-                                        fixed_shift_candidates ? fixed_shift_id
-                                                               : group_shift_id,
+                                        (kFixedShiftLeafScreenedSpecialized ||
+                                         fixed_shift_candidates)
+                                            ? fixed_shift_id
+                                            : group_shift_id,
                                         cell, rcell, crd,
                                         shared_i_center_x[warp_id],
                                         shared_i_center_y[warp_id],
@@ -6306,7 +6372,7 @@ static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup(
                       candidate_record_stream_source_count);
         }
     }
-    if (fixed_shift_candidates)
+    if (kFixedShiftLeafScreenedSpecialized || fixed_shift_candidates)
     {
         if (lane_id == 0)
         {
@@ -11360,6 +11426,12 @@ static bool Clustered_Gmxpacked_Count_Fragment_Parallel_Emit_Enabled()
 {
     return Clustered_Gmxpacked_Env_Flag_Enabled(
         "SPONGE_CLUSTERED_GMXPACKED_COUNT_FRAGMENT_PARALLEL_EMIT");
+}
+
+static bool Clustered_Gmxpacked_Fixed_Shift_Builder_Specialized_Enabled()
+{
+    return Clustered_Gmxpacked_Env_Flag_Enabled(
+        "SPONGE_CLUSTERED_GMXPACKED_FIXED_SHIFT_BUILDER_SPECIALIZED");
 }
 
 static bool Clustered_Gmxpacked_Dirty_J_Parallel_Scan_Enabled()
@@ -27414,14 +27486,37 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
             use_gmxpacked_count_parallel_accum &&
             capture_fill_prune_reuse_sources &&
             use_gmxpacked_fill_prune_reuse_light;
+        const bool use_gmxpacked_fixed_shift_builder_specialized =
+            Clustered_Gmxpacked_Fixed_Shift_Builder_Specialized_Enabled() &&
+            runtime_gmxpacked_direct_requested &&
+            Clustered_Gmxpacked_Lifecycle_Policy_Is("outer") &&
+            Clustered_Gmxpacked_Active_View_Enabled() &&
+            Clustered_Gmxpacked_Active_View_Rolling_Source_Cache_Enabled() &&
+            dense_shift_partitioned_candidates && candidate_shift_ids == NULL &&
+            fixed_shift_candidates && fixed_shift_leaf_screening &&
+            candidate_leaf_onepass_used && run_gmxpacked_primary_builder &&
+            Clustered_Gmxpacked_Subgroup_Builder_Enabled() &&
+            use_gmxpacked_count_parallel_accum &&
+            use_gmxpacked_count_fragment_parallel_emit &&
+            use_gmxpacked_fill_prune_reuse_light &&
+            d_candidate_leaf_reach_masks != NULL;
         auto* subgroup_count_kernel =
-            use_gmxpacked_count_fragment_parallel_emit
-                ? Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup<true, true>
-                : (use_gmxpacked_count_parallel_accum
+            use_gmxpacked_fixed_shift_builder_specialized
+                ? Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup<true, true,
+                                                                     true, true>
+                : (use_gmxpacked_count_fragment_parallel_emit
                        ? Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup<true,
-                                                                            false>
-                       : Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup<false,
-                                                                            false>);
+                                                                            true>
+                       : (use_gmxpacked_count_parallel_accum
+                              ? Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup<
+                                    true, false>
+                              : Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup<
+                                    false, false>));
+        auto* subgroup_verify_kernel =
+            use_gmxpacked_fixed_shift_builder_specialized
+                ? Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup<true, true,
+                                                                     false>
+                : subgroup_count_kernel;
         auto* count_kernel =
             (Clustered_Gmxpacked_Subgroup_Builder_Enabled() &&
              run_gmxpacked_primary_builder)
@@ -27451,9 +27546,9 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                 ? NULL
                 : d_gmxpacked_record_stream_source_rows,
             defer_gmxpacked_record_stream_source_count
-            ? NULL
-            : d_gmxpacked_record_stream_source_counts_by_candidate,
-        accumulate_gmxpacked_record_stream_source_rows_by_candidate, NULL,
+                ? NULL
+                : d_gmxpacked_record_stream_source_counts_by_candidate,
+            accumulate_gmxpacked_record_stream_source_rows_by_candidate, NULL,
             max_leaf_cluster_span,
             capture_fill_prune_reuse_sources &&
                     !use_gmxpacked_fill_prune_reuse_light
@@ -27487,11 +27582,10 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
         }
 
 #ifndef USE_CPU
-        // Phase A subgroup-builder bit-exact verification. Launch the subgroup
-        // count kernel into separate scratch and compare against the baseline
-        // outputs the simulation actually consumes. Counts are order-independent
-        // sums, so a correct subgroup reorder must be bit-identical. The compare
-        // never feeds the build, so a buggy subgroup kernel cannot poison state.
+        // Phase A subgroup-builder bit-exact verification. Launch the selected
+        // verify kernel into separate scratch and compare against the outputs the
+        // simulation actually consumes. Counts are order-independent sums, so a
+        // correct subgroup reorder or specialization must be bit-identical.
         if (Clustered_Gmxpacked_Subgroup_Builder_Verify_Enabled() &&
             run_gmxpacked_primary_builder && sci_shift_numbers > 0)
         {
@@ -27517,7 +27611,7 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
             deviceMemset(d_subgroup_verify_exclusion_counts, 0,
                          sizeof(int) * sci_shift_numbers);
             Launch_Device_Kernel(
-                subgroup_count_kernel,
+                subgroup_verify_kernel,
                 candidate_sci_blocks, kClusteredBuilderBlockSize, 0, NULL,
                 candidate_sci_numbers, sci_shift_numbers, cluster_size,
                 super_cluster_clusters, local_atom_numbers, build_cutoff, cell,
