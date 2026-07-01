@@ -5306,7 +5306,8 @@ static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves(
 // and the j-signature get a per-subgroup dimension. Validated bit-for-bit against
 // the baseline count kernel before it is allowed to feed the build.
 template <bool kParallelAccum, bool kParallelFragmentEmit,
-          bool kFixedShiftLeafScreenedSpecialized = false>
+          bool kFixedShiftLeafScreenedSpecialized = false,
+          bool kLightFragmentOnly = false>
 static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup(
     const int candidate_sci_numbers, const int sci_shift_numbers,
     const int cluster_size, const int super_cluster_clusters,
@@ -5436,7 +5437,8 @@ static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup(
         (accumulate_record_stream_source_rows_by_candidate &&
          record_stream_source_rows != NULL);
     const bool emit_count_source_fragments =
-        count_source_fragments != NULL && count_source_fragment_capacity > 0 &&
+        !kLightFragmentOnly && count_source_fragments != NULL &&
+        count_source_fragment_capacity > 0 &&
         count_source_fragment_cursor != NULL &&
         count_source_fragment_overflow_rows != NULL;
     const bool emit_count_light_source_fragments =
@@ -5688,7 +5690,6 @@ static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup(
                     if ((precomputed_i_mask &
                          (1u << static_cast<unsigned int>(i_local))) != 0u)
                     {
-                        pair_shift_id = fixed_shift_id;
                         exclusion_candidate =
                             !has_molecule_metadata ||
                             (shared_i_signatures[warp_id][i_local] &
@@ -5811,17 +5812,29 @@ static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup(
                 const int leader_sublane =
                     __ffs(static_cast<int>(remaining_lane_mask)) - 1;
                 const int group_shift_id =
-                    deviceShfl(subgroup_mask, pair_shift_id,
-                               subgroup * kSubgroupSize + leader_sublane,
-                               warpSize);
+                    kFixedShiftLeafScreenedSpecialized
+                        ? fixed_shift_id
+                        : deviceShfl(subgroup_mask, pair_shift_id,
+                                     subgroup * kSubgroupSize + leader_sublane,
+                                     warpSize);
                 const unsigned int group_lane_mask_local =
-                    deviceBallot(subgroup_mask,
-                                 sublane < active_cluster_count &&
-                                     pair_shift_id == group_shift_id) >>
-                    (subgroup * kSubgroupSize) & 0xFFu;
+                    kFixedShiftLeafScreenedSpecialized
+                        ? remaining_lane_mask
+                        : ((deviceBallot(subgroup_mask,
+                                         sublane < active_cluster_count &&
+                                             pair_shift_id == group_shift_id) >>
+                            (subgroup * kSubgroupSize)) &
+                           0xFFu);
                 const unsigned int group_record_imask =
                     group_lane_mask_local & active_i_lane_mask;
-                remaining_lane_mask &= ~group_lane_mask_local;
+                if constexpr (kFixedShiftLeafScreenedSpecialized)
+                {
+                    remaining_lane_mask = 0u;
+                }
+                else
+                {
+                    remaining_lane_mask &= ~group_lane_mask_local;
+                }
                 const bool use_parallel_group_accum =
                     kParallelAccum &&
                     (kFixedShiftLeafScreenedSpecialized ||
@@ -5920,9 +5933,11 @@ static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup(
                     deviceSyncWarp(subgroup_mask);
                 }
                 const bool use_parallel_fragment_emit =
-                    kParallelFragmentEmit && use_parallel_group_accum &&
-                    emit_count_light_source_fragments &&
-                    group_record_imask != 0u;
+                    kLightFragmentOnly
+                        ? true
+                        : (kParallelFragmentEmit && use_parallel_group_accum &&
+                           emit_count_light_source_fragments &&
+                           group_record_imask != 0u);
                 if (use_parallel_fragment_emit)
                 {
                     unsigned int split_local_imask = 0u;
@@ -27488,7 +27503,7 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
         auto* subgroup_count_kernel =
             use_gmxpacked_fixed_shift_builder_specialized
                 ? Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup<true, true,
-                                                                     true>
+                                                                     true, true>
                 : (use_gmxpacked_count_fragment_parallel_emit
                        ? Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup<true,
                                                                             true>
