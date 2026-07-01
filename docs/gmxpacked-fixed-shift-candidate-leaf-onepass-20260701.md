@@ -13,9 +13,25 @@ This is not candidate-leaf deduplication. The candidate leaf list semantics,
 ordering, and downstream `processed_cluster_end` cluster-span dedup remain
 unchanged.
 
+## Current decision
+
+Use one-pass candidate leaf collection as the default path for the current
+accepted peak-performance configuration.
+
+This means the run harness / benchmark env should include:
+
+```sh
+SPONGE_CLUSTERED_FIXED_SHIFT_CANDIDATE_LEAF_ONEPASS=1
+SPONGE_CLUSTERED_FIXED_SHIFT_CANDIDATE_LEAF_PARALLEL=1
+```
+
+The code-level switch remains env-gated so broad fallback paths stay
+unchanged. The accepted default here is the project performance default for the
+fixed-shift + leaf-screened + gmxpacked fill-prune-reuse-light path.
+
 ## Gate
 
-Default off:
+Code gate:
 
 ```sh
 SPONGE_CLUSTERED_FIXED_SHIFT_CANDIDATE_LEAF_ONEPASS=1
@@ -51,19 +67,99 @@ After the traversal:
 The per-SCI rank is assigned in traversal order, so the final candidate leaf list
 preserves the original fill order.
 
+## Current accepted peak path
+
+Common env for the current best 160k force-only path:
+
+```sh
+SPONGE_CLUSTERED_DISABLE_FINE_TIMERS=1
+SPONGE_CLUSTERED_USE_GMXPACKED_DIRECT=1
+SPONGE_CLUSTERED_GMXPACKED_LIFECYCLE_POLICY=outer
+SPONGE_CLUSTERED_GMXPACKED_ACTIVE_VIEW=1
+SPONGE_CLUSTERED_GMXPACKED_ACTIVE_VIEW_ROLLING_SOURCE_CACHE=1
+SPONGE_CLUSTERED_GMXPACKED_SUBGROUP_BUILDER=1
+SPONGE_CLUSTERED_SHIFT_PARTITIONED_BUILDER=1
+SPONGE_CLUSTERED_FIXED_SHIFT_LEAF_SCREENING=1
+SPONGE_CLUSTERED_GMXPACKED_FILL_PRUNE_REUSE=1
+SPONGE_CLUSTERED_GMXPACKED_FILL_PRUNE_REUSE_LIGHT=1
+SPONGE_CLUSTERED_GMXPACKED_COUNT_PARALLEL_ACCUM=1
+SPONGE_CLUSTERED_FIXED_SHIFT_CANDIDATE_LEAF_PARALLEL=1
+SPONGE_CLUSTERED_FIXED_SHIFT_CANDIDATE_LEAF_ONEPASS=1
+```
+
+Case:
+
+```text
+/tmp/sponge-onepass-capacity-check/mdin_dedupon_current_10000.spg.toml
+```
+
+The current best path is the one-pass-on row below. Run-to-run noise is visible,
+so the decision is based on repeated same-binary comparisons, not one isolated
+number.
+
+| run | speed | core wall | `Calculate_Force` | final T |
+|---|---:|---:|---:|---:|
+| best observed one-pass on | `87.843224 ns/day` | `9.836689 s` | `9.175779 s` | `294.34 K` |
+| same-binary clean one-pass on | `86.356201 ns/day` | `10.006073 s` | `9.351746 s` | `294.51 K` |
+| latest post-cleanup one-pass on | `83.206787 ns/day` | `10.384807 s` | `9.559313 s` | `295.20 K` |
+| latest post-cleanup one-pass off | `78.153923 ns/day` | `11.056213 s` | `10.244457 s` | `293.84 K` |
+
+The latest clean post-cleanup pair gives:
+
+- speed: one-pass on is `+6.07%` versus one-pass off;
+- core wall: one-pass on is `-6.07%` versus one-pass off;
+- force time: one-pass on is `-6.69%` versus one-pass off.
+
+The nsys comparison confirms the intended kernel replacement:
+
+| path | candidate leaf kernels | total over 10000 steps |
+|---|---|---:|
+| one-pass on | `Collect_Supercluster_Candidate_Leaves_Fixed_Shift_Subgroup_Onepass` + `Scatter_Candidate_Leaves_From_Onepass` | `807.1 ms` |
+| one-pass off | `Count_Supercluster_Candidate_Leaves_Fixed_Shift_Subgroup` + `Fill_Supercluster_Candidate_Leaves_Fixed_Shift_Subgroup` | `1683.8 ms` |
+
+So the candidate leaf stage itself is about `2.09x` faster with one-pass, saving
+about `876.7 ms` over 10000 steps.
+
+## Memory comparison
+
+Process GPU memory was sampled with:
+
+```sh
+nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader,nounits
+```
+
+at roughly 50 ms intervals during each 10000-step run. This is process-level
+resident GPU memory, not a per-buffer cudaMalloc breakdown.
+
+| configuration | skin | peak GPU memory | speed | note |
+|---|---:|---:|---:|---|
+| clustered one-pass on | `10` | `3642 MiB` | `85.395683 ns/day` | accepted peak path |
+| clustered one-pass off | `10` | `3634 MiB` | `78.863144 ns/day` | candidate leaf count+fill fallback |
+| original SPONGE baseline | `2` | `1470 MiB` | `64.775650 ns/day` | original default cell-list skin |
+| original SPONGE baseline | `10` | `1412 MiB` | `43.311314 ns/day` | diagnostic only; step-10000 temperature was NaN |
+
+Observed one-pass memory cost in this case is only `+8 MiB` over one-pass off.
+The multi-GiB memory gap is the clustered/gmxpacked layout itself, not the
+candidate leaf one-pass scratch. Therefore one-pass should stay enabled in the
+current peak path; disabling it would trade about 6-8% speed for only about
+8 MiB of actual peak-memory reduction on this case.
+
 ## Capacity and fallback
 
-The first implementation intentionally avoids allocating a worst-case
-`candidate_sci_numbers * leaf_numbers` scratch buffer. It uses the previous
-`candidate_leaf_capacity` as the temporary record capacity.
+The current implementation intentionally avoids allocating a worst-case
+`candidate_sci_numbers * leaf_numbers` scratch buffer.
 
-- First build, or no existing capacity: old count + scan + fill path.
-- One-pass scratch overflow: old count + scan + fill path.
-- Successful one-pass: skips the fill traversal and only runs scan + scatter.
+It uses a bounded dynamic record capacity:
 
-This keeps memory bounded and correctness conservative while allowing repeated
-rebuild benchmarks to measure whether eliminating the duplicate traversal is
-worth a more aggressive capacity estimator.
+- initial target: `128` temporary records per candidate SCI;
+- slack from observed capacity / high-water mark;
+- growth on overflow;
+- hard scratch byte cap: `256 MiB` across the three temporary int arrays;
+- overflow fallback: old count + scan + fill path.
+
+Successful one-pass skips the duplicate fill traversal and only runs scan +
+scatter. Overflow remains correctness-safe because it falls back to the old
+path.
 
 ## Validation status
 
@@ -178,27 +274,12 @@ Relative to the current one-pass-off run:
 Both current force-only 10000-step runs had empty stderr and no NaN, mismatch,
 overflow, or error text.
 
-## Required follow-up
+## Status
 
-Run with the existing stable performance flag set plus:
+Accepted for the current peak/default performance path.
 
-```sh
-SPONGE_CLUSTERED_FIXED_SHIFT_CANDIDATE_LEAF_ONEPASS=1
-SPONGE_CLUSTERED_FIXED_SHIFT_CANDIDATE_LEAF_PARALLEL=1
-```
-
-Correctness:
-
-- 2000-step finite run.
-- 2000-step
-  `SPONGE_CLUSTERED_GMXPACKED_SUBGROUP_BUILDER_VERIFY=1`.
-- Confirm count/fill mismatches remain zero.
-
-Performance:
-
-- 10000-step nsys off/on comparison.
-- Check whether `Fill_Supercluster_Candidate_Leaves_Fixed_Shift_Subgroup`
-  disappears on successful one-pass rebuilds.
-- Compare replacement cost:
-  `Collect_Supercluster_Candidate_Leaves_Fixed_Shift*_Onepass` +
-  `Scatter_Candidate_Leaves_From_Onepass` versus old count + fill.
+Keep the env gate in code for now, but all 160k force-only peak comparisons
+should include `SPONGE_CLUSTERED_FIXED_SHIFT_CANDIDATE_LEAF_ONEPASS=1` unless
+the explicit purpose is an ablation. The next optimization target is no longer
+candidate leaf count/fill traversal; it is source fill / source fragment
+emission and broader clustered/gmxpacked memory footprint.

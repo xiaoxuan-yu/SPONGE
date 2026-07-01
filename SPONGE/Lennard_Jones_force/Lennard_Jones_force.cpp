@@ -84,6 +84,9 @@ static VECTOR Wrap_To_Box_Fractional(VECTOR crd, LTMatrix3 rcell,
 //                                               uses a microbench-style float4
 //                                               sorted force target with the
 //                                               fused sorted-force path
+//   SPONGE_CLUSTERED_GMXPACKED_FORCE_KERNEL_GATE_TRACE
+//                                               prints production gmxpacked
+//                                               force-kernel gate decisions
 //   SPONGE_CLUSTERED_GMXPACKED_ASSUME_SCI_SHIFT skips per-pair shift words in
 //                                               full-local fast gmxpacked mode
 //                                               and uses SCI shift directly
@@ -165,6 +168,12 @@ static bool Clustered_Gmxpacked_Fused_Sorted_Force_Enabled()
 static bool Clustered_Gmxpacked_Float4_Sorted_Force_Enabled()
 {
     return Env_Flag_Enabled("SPONGE_CLUSTERED_GMXPACKED_FLOAT4_SORTED_FORCE");
+}
+
+static bool Clustered_Gmxpacked_Force_Kernel_Gate_Trace_Enabled()
+{
+    return Env_Flag_Enabled(
+        "SPONGE_CLUSTERED_GMXPACKED_FORCE_KERNEL_GATE_TRACE");
 }
 
 static bool Clustered_Gmxpacked_Shift_Analyze_Enabled()
@@ -6995,6 +7004,86 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
                 requested_gmxpacked_float4_sorted_force &&
                 gmxpacked_fast_full_local_dense_compatible &&
                 has_sorted_force_float4_scratch;
+            if (Clustered_Gmxpacked_Force_Kernel_Gate_Trace_Enabled())
+            {
+                const int trace_key = (need_atom_energy ? 2 : 0) |
+                                      (need_virial ? 1 : 0);
+                static bool printed_gate_trace[4] = {false, false, false,
+                                                     false};
+                if (!printed_gate_trace[trace_key])
+                {
+                    fprintf(
+                        stderr,
+                        "[clustered gmxpacked force-kernel gate] call=%d "
+                        "need_energy=%d need_virial=%d "
+                        "opt_in=%d fallback_native=%d has_payload=%d "
+                        "payload_words sci=%d cj=%d excl=%d "
+                        "sorted atom=%d xq=%d lj_type=%d lj_comb=%d "
+                        "frc=%d frc4=%d soa=%d "
+                        "requested lj_comb=%d fast=%d force_scratch=%d "
+                        "fused=%d float4=%d "
+                        "use direct=%d lj_comb=%d fast=%d compact=%d "
+                        "fused=%d float4=%d "
+                        "layout cluster_size=%d super_clusters=%d "
+                        "clusters=%d total_atoms=%d local_atoms=%d "
+                        "direct_local_atoms=%d ghosts=%d "
+                        "dense total_eq_clusters=%d clusters_mod_super=%d "
+                        "full_local_dense=%d "
+                        "sci_shift only=%d split=%d runtime=%d flags=%d\n",
+                        lj_call, need_atom_energy ? 1 : 0,
+                        need_virial ? 1 : 0, gmxpacked_direct_opt_in ? 1 : 0,
+                        native_gmxpacked_fallback ? 1 : 0,
+                        has_gmxpacked_payload ? 1 : 0,
+                        clustered_layout.gmxpacked_sci_numbers,
+                        clustered_layout.gmxpacked_cjpacked_numbers,
+                        clustered_layout.gmxpacked_exclusion_numbers,
+                        clustered_direct_cache->d_sorted_atom_ids != NULL ? 1
+                                                                          : 0,
+                        clustered_direct_cache->d_sorted_xq != NULL ? 1 : 0,
+                        clustered_direct_cache->d_sorted_lj_type != NULL ? 1
+                                                                         : 0,
+                        clustered_direct_cache->d_sorted_lj_comb != NULL ? 1
+                                                                         : 0,
+                        has_sorted_force_scratch ? 1 : 0,
+                        has_sorted_force_float4_scratch ? 1 : 0,
+                        has_sorted_force_soa_scratch ? 1 : 0,
+                        requested_gmxpacked_lj_comb_kernel ? 1 : 0,
+                        requested_gmxpacked_fast_kernel ? 1 : 0,
+                        requested_gmxpacked_force_sorted_scratch ? 1 : 0,
+                        requested_gmxpacked_fused_sorted_force ? 1 : 0,
+                        requested_gmxpacked_float4_sorted_force ? 1 : 0,
+                        use_gmxpacked_direct ? 1 : 0,
+                        use_gmxpacked_lj_comb_kernel ? 1 : 0,
+                        use_gmxpacked_fast_kernel ? 1 : 0,
+                        use_gmxpacked_compact_force_scratch ? 1 : 0,
+                        use_gmxpacked_fused_sorted_force ? 1 : 0,
+                        use_gmxpacked_float4_sorted_force ? 1 : 0,
+                        clustered_layout.cluster_size,
+                        clustered_layout.super_cluster_clusters,
+                        clustered_layout.cluster_numbers,
+                        clustered_layout.total_atom_numbers,
+                        clustered_layout.local_atom_numbers,
+                        clustered_layout.direct_local_atom_numbers,
+                        clustered_layout.ghost_numbers,
+                        clustered_layout.total_atom_numbers ==
+                                clustered_layout.cluster_numbers *
+                                    kClusteredClusterSize
+                            ? 1
+                            : 0,
+                        clustered_layout.cluster_numbers %
+                            kClusteredSuperClusterClusters,
+                        gmxpacked_fast_full_local_dense_compatible ? 1 : 0,
+                        use_gmxpacked_sci_shift_only ? 1 : 0,
+                        use_gmxpacked_sci_shift_split ? 1 : 0,
+                        use_gmxpacked_sci_shift_runtime ? 1 : 0,
+                        clustered_layout.d_gmxpacked_pair_shift_sci_safe_flags !=
+                                NULL
+                            ? 1
+                            : 0);
+                    fflush(stderr);
+                    printed_gate_trace[trace_key] = true;
+                }
+            }
             const bool use_total_output_warp_record =
                 !use_gmxpacked_direct && !native_gmxpacked_fallback &&
                 need_atom_energy && need_virial &&
