@@ -57,6 +57,8 @@ constexpr int kClusteredBuilderWarpSize = 32;
 constexpr int kClusteredPruneBlockSize = 64;
 constexpr int kClusteredGmxpackedExclusionBlockSize = 64;
 constexpr int kClusteredMaxSuperClusterClusters = kClusteredSuperClusterClusters;
+constexpr int kFixedShiftCandidateLeafSubgroupSize =
+    kClusteredMaxSuperClusterClusters;
 constexpr int kClusteredMaxJGroupSize = kClusteredJGroupSize;
 constexpr int kClusteredForceonlyLocalSortCapacity = 2048;
 constexpr unsigned int kClusteredForceonlyInvalidSortKey = 0xffffffffu;
@@ -922,6 +924,50 @@ Leaf_Has_Fixed_Shift_Candidate_Overlap(
     }
     return false;
 }
+
+#ifndef USE_CPU
+static __device__ __forceinline__ bool
+Leaf_Has_Fixed_Shift_Candidate_Overlap_Subgroup(
+    int cluster_i_start, int cluster_i_end, int leaf_cluster_start,
+    int leaf_cluster_end, int fixed_shift_id, float cutoff, VECTOR shift_vec,
+    const unsigned int* cluster_valid_masks,
+    const unsigned int* cluster_local_masks, const VECTOR* cluster_centers,
+    const VECTOR* cluster_extents, int sublane, device_mask_t subgroup_mask)
+{
+    bool leaf_overlap = false;
+    for (int cluster_j = leaf_cluster_start; cluster_j < leaf_cluster_end;
+         cluster_j += 1)
+    {
+        bool lane_overlap = false;
+        if (cluster_valid_masks[cluster_j] != 0u)
+        {
+            const int cluster_i = cluster_i_start + sublane;
+            if (cluster_i < cluster_i_end &&
+                cluster_local_masks[cluster_i] != 0u)
+            {
+                const bool central_self_pair =
+                    fixed_shift_id == kClusteredCentralShiftId &&
+                    cluster_j >= cluster_i_start &&
+                    cluster_j < cluster_i_end && cluster_i > cluster_j;
+                if (!central_self_pair)
+                {
+                    lane_overlap = Cluster_Aabb_Overlaps_Shifted(
+                        cluster_centers[cluster_i],
+                        cluster_extents[cluster_i],
+                        cluster_centers[cluster_j],
+                        cluster_extents[cluster_j], cutoff, shift_vec);
+                }
+            }
+        }
+        if (deviceBallot(subgroup_mask, lane_overlap) != 0u)
+        {
+            leaf_overlap = true;
+            break;
+        }
+    }
+    return leaf_overlap;
+}
+#endif
 
 static __host__ __device__ __forceinline__ LJ_CLUSTERED_IMEI
 Make_Empty_Clustered_Imei()
@@ -4184,6 +4230,371 @@ static __global__ void Fill_Supercluster_Candidate_Leaves_Fixed_Shift(
             }
         };
         cstone::singleTraversal(child_offsets, parents, overlaps, endpoint);
+    }
+}
+
+static __global__ void
+Count_Supercluster_Candidate_Leaves_Fixed_Shift_Subgroup(
+    const int sci_numbers, const int* sci_supercluster_ids,
+    const VECTOR* super_cluster_centers, const VECTOR* super_cluster_sizes,
+    const int* super_cluster_offsets, const int* leaf_cluster_starts,
+    const int* leaf_cluster_ends, const int* leaf_all_local,
+    const LTMatrix3 cell, const float cutoff, const VECTOR* cluster_centers,
+    const VECTOR* cluster_extents, const unsigned int* cluster_valid_masks,
+    const unsigned int* cluster_local_masks, const CornerstoneKey* node_prefixes,
+    const CornerstoneNodeIndex* child_offsets,
+    const CornerstoneNodeIndex* parents,
+    const CornerstoneNodeIndex* internal_to_leaf,
+    const int* candidate_shift_ids, const bool central_halfshell_culling,
+    const bool use_morton_sfc, int* candidate_leaf_counts)
+{
+    static_assert(kFixedShiftCandidateLeafSubgroupSize <=
+                      kClusteredMaxSuperClusterClusters,
+                  "candidate leaf subgroup must cover i clusters by stride");
+    static_assert(kClusteredBuilderWarpSize %
+                          kFixedShiftCandidateLeafSubgroupSize ==
+                      0,
+                  "candidate leaf subgroup must divide a warp");
+    static_assert(kFixedShiftCandidateLeafSubgroupSize < kClusteredBuilderWarpSize,
+                  "candidate leaf subgroup mask assumes size < warp");
+    constexpr int kGroupsPerBlock =
+        kClusteredBuilderBlockSize / kFixedShiftCandidateLeafSubgroupSize;
+    const int group_id = threadIdx.x / kFixedShiftCandidateLeafSubgroupSize;
+    const int sublane = threadIdx.x % kFixedShiftCandidateLeafSubgroupSize;
+    const int lane_id = threadIdx.x & (kClusteredBuilderWarpSize - 1);
+    const int subgroup_lane_base = lane_id - sublane;
+    const device_mask_t subgroup_mask =
+        (((device_mask_t)1 << kFixedShiftCandidateLeafSubgroupSize) - 1u)
+        << subgroup_lane_base;
+    const int sci = blockIdx.x * kGroupsPerBlock + group_id;
+    if (sci >= sci_numbers)
+    {
+        return;
+    }
+
+    const int sci_base =
+        candidate_shift_ids == NULL ? sci / kClusteredShiftCount : sci;
+    const int candidate_shift_id =
+        candidate_shift_ids != NULL ? candidate_shift_ids[sci]
+                                    : (sci % kClusteredShiftCount);
+    const int super_i = sci_supercluster_ids[sci_base];
+    const VECTOR target_center = super_cluster_centers[super_i];
+    const VECTOR target_size = super_cluster_sizes[super_i];
+    const int cluster_i_start = super_cluster_offsets[super_i];
+    const int cluster_i_end = super_cluster_offsets[super_i + 1];
+    const VECTOR shift_vec = Shift_Vector_From_Id(candidate_shift_id, cell);
+    int count = 0;
+
+    auto overlaps = [=](CornerstoneNodeIndex node)
+    {
+        return Cornerstone_Node_Overlaps_Shifted_Box(
+            node_prefixes[node], target_center, target_size,
+            candidate_shift_id, use_morton_sfc);
+    };
+    auto endpoint = [&](CornerstoneNodeIndex node)
+    {
+        const int leaf_j = internal_to_leaf[node];
+        if (leaf_j >= 0)
+        {
+            if (central_halfshell_culling &&
+                candidate_shift_id == kClusteredCentralShiftId &&
+                leaf_all_local[leaf_j] != 0 &&
+                leaf_cluster_ends[leaf_j] <= cluster_i_start)
+            {
+                return;
+            }
+            if (!Leaf_Has_Fixed_Shift_Candidate_Overlap_Subgroup(
+                    cluster_i_start, cluster_i_end,
+                    leaf_cluster_starts[leaf_j], leaf_cluster_ends[leaf_j],
+                    candidate_shift_id, cutoff, shift_vec, cluster_valid_masks,
+                    cluster_local_masks, cluster_centers, cluster_extents,
+                    sublane, subgroup_mask))
+            {
+                return;
+            }
+            if (sublane == 0)
+            {
+                count += 1;
+            }
+        }
+    };
+    cstone::singleTraversal(child_offsets, parents, overlaps, endpoint);
+    if (sublane == 0)
+    {
+        candidate_leaf_counts[sci] = count;
+    }
+}
+
+static __global__ void
+Fill_Supercluster_Candidate_Leaves_Fixed_Shift_Subgroup(
+    const int sci_numbers, const int* sci_supercluster_ids,
+    const VECTOR* super_cluster_centers, const VECTOR* super_cluster_sizes,
+    const int* super_cluster_offsets, const int* leaf_cluster_starts,
+    const int* leaf_cluster_ends, const int* leaf_all_local,
+    const LTMatrix3 cell, const float cutoff, const VECTOR* cluster_centers,
+    const VECTOR* cluster_extents, const unsigned int* cluster_valid_masks,
+    const unsigned int* cluster_local_masks, const CornerstoneKey* node_prefixes,
+    const CornerstoneNodeIndex* child_offsets,
+    const CornerstoneNodeIndex* parents,
+    const CornerstoneNodeIndex* internal_to_leaf,
+    const int* candidate_shift_ids, const int* candidate_leaf_offsets,
+    const bool central_halfshell_culling, const bool use_morton_sfc,
+    int* candidate_leaf_ids)
+{
+    constexpr int kGroupsPerBlock =
+        kClusteredBuilderBlockSize / kFixedShiftCandidateLeafSubgroupSize;
+    const int group_id = threadIdx.x / kFixedShiftCandidateLeafSubgroupSize;
+    const int sublane = threadIdx.x % kFixedShiftCandidateLeafSubgroupSize;
+    const int lane_id = threadIdx.x & (kClusteredBuilderWarpSize - 1);
+    const int subgroup_lane_base = lane_id - sublane;
+    const device_mask_t subgroup_mask =
+        (((device_mask_t)1 << kFixedShiftCandidateLeafSubgroupSize) - 1u)
+        << subgroup_lane_base;
+    const int sci = blockIdx.x * kGroupsPerBlock + group_id;
+    if (sci >= sci_numbers)
+    {
+        return;
+    }
+
+    const int sci_base =
+        candidate_shift_ids == NULL ? sci / kClusteredShiftCount : sci;
+    const int candidate_shift_id =
+        candidate_shift_ids != NULL ? candidate_shift_ids[sci]
+                                    : (sci % kClusteredShiftCount);
+    const int super_i = sci_supercluster_ids[sci_base];
+    const VECTOR target_center = super_cluster_centers[super_i];
+    const VECTOR target_size = super_cluster_sizes[super_i];
+    const int cluster_i_start = super_cluster_offsets[super_i];
+    const int cluster_i_end = super_cluster_offsets[super_i + 1];
+    const VECTOR shift_vec = Shift_Vector_From_Id(candidate_shift_id, cell);
+    int write_offset = candidate_leaf_offsets[sci];
+
+    auto overlaps = [=](CornerstoneNodeIndex node)
+    {
+        return Cornerstone_Node_Overlaps_Shifted_Box(
+            node_prefixes[node], target_center, target_size,
+            candidate_shift_id, use_morton_sfc);
+    };
+    auto endpoint = [&](CornerstoneNodeIndex node)
+    {
+        const int leaf_j = internal_to_leaf[node];
+        if (leaf_j >= 0)
+        {
+            if (central_halfshell_culling &&
+                candidate_shift_id == kClusteredCentralShiftId &&
+                leaf_all_local[leaf_j] != 0 &&
+                leaf_cluster_ends[leaf_j] <= cluster_i_start)
+            {
+                return;
+            }
+            if (!Leaf_Has_Fixed_Shift_Candidate_Overlap_Subgroup(
+                    cluster_i_start, cluster_i_end,
+                    leaf_cluster_starts[leaf_j], leaf_cluster_ends[leaf_j],
+                    candidate_shift_id, cutoff, shift_vec, cluster_valid_masks,
+                    cluster_local_masks, cluster_centers, cluster_extents,
+                    sublane, subgroup_mask))
+            {
+                return;
+            }
+            if (sublane == 0)
+            {
+                candidate_leaf_ids[write_offset] = leaf_j;
+                write_offset += 1;
+            }
+        }
+    };
+    cstone::singleTraversal(child_offsets, parents, overlaps, endpoint);
+}
+
+static __global__ void
+Collect_Supercluster_Candidate_Leaves_Fixed_Shift_Onepass(
+    const int sci_numbers, const int* sci_supercluster_ids,
+    const VECTOR* super_cluster_centers, const VECTOR* super_cluster_sizes,
+    const int* super_cluster_offsets, const int* leaf_cluster_starts,
+    const int* leaf_cluster_ends, const int* leaf_all_local,
+    const LTMatrix3 cell, const float cutoff, const VECTOR* cluster_centers,
+    const VECTOR* cluster_extents, const unsigned int* cluster_valid_masks,
+    const unsigned int* cluster_local_masks,
+    const CornerstoneKey* node_prefixes,
+    const CornerstoneNodeIndex* child_offsets,
+    const CornerstoneNodeIndex* parents,
+    const CornerstoneNodeIndex* internal_to_leaf,
+    const int* candidate_shift_ids, const bool central_halfshell_culling,
+    const bool use_morton_sfc, const int onepass_capacity,
+    int* candidate_leaf_counts, int* onepass_sci_ids, int* onepass_ranks,
+    int* onepass_leaf_ids, int* onepass_cursor, int* onepass_overflow)
+{
+    SIMPLE_DEVICE_FOR(sci, sci_numbers)
+    {
+        const int sci_base =
+            candidate_shift_ids == NULL ? sci / kClusteredShiftCount : sci;
+        const int candidate_shift_id =
+            candidate_shift_ids != NULL ? candidate_shift_ids[sci]
+                                        : (sci % kClusteredShiftCount);
+        const int super_i = sci_supercluster_ids[sci_base];
+        const VECTOR target_center = super_cluster_centers[super_i];
+        const VECTOR target_size = super_cluster_sizes[super_i];
+        const int cluster_i_start = super_cluster_offsets[super_i];
+        const int cluster_i_end = super_cluster_offsets[super_i + 1];
+        const VECTOR shift_vec = Shift_Vector_From_Id(candidate_shift_id, cell);
+        int count = 0;
+
+        auto overlaps = [=](CornerstoneNodeIndex node)
+        {
+            return Cornerstone_Node_Overlaps_Shifted_Box(
+                node_prefixes[node], target_center, target_size,
+                candidate_shift_id, use_morton_sfc);
+        };
+        auto endpoint = [&](CornerstoneNodeIndex node)
+        {
+            const int leaf_j = internal_to_leaf[node];
+            if (leaf_j >= 0)
+            {
+                if (central_halfshell_culling &&
+                    candidate_shift_id == kClusteredCentralShiftId &&
+                    leaf_all_local[leaf_j] != 0 &&
+                    leaf_cluster_ends[leaf_j] <= cluster_i_start)
+                {
+                    return;
+                }
+                if (!Leaf_Has_Fixed_Shift_Candidate_Overlap(
+                        cluster_i_start, cluster_i_end,
+                        leaf_cluster_starts[leaf_j], leaf_cluster_ends[leaf_j],
+                        candidate_shift_id, cutoff, shift_vec,
+                        cluster_valid_masks, cluster_local_masks,
+                        cluster_centers, cluster_extents))
+                {
+                    return;
+                }
+                const int rank = count;
+                count += 1;
+                const int write_idx = atomicAdd(onepass_cursor, 1);
+                if (write_idx < onepass_capacity)
+                {
+                    onepass_sci_ids[write_idx] = sci;
+                    onepass_ranks[write_idx] = rank;
+                    onepass_leaf_ids[write_idx] = leaf_j;
+                }
+                else
+                {
+                    atomicAdd(onepass_overflow, 1);
+                }
+            }
+        };
+        cstone::singleTraversal(child_offsets, parents, overlaps, endpoint);
+        candidate_leaf_counts[sci] = count;
+    }
+}
+
+static __global__ void
+Collect_Supercluster_Candidate_Leaves_Fixed_Shift_Subgroup_Onepass(
+    const int sci_numbers, const int* sci_supercluster_ids,
+    const VECTOR* super_cluster_centers, const VECTOR* super_cluster_sizes,
+    const int* super_cluster_offsets, const int* leaf_cluster_starts,
+    const int* leaf_cluster_ends, const int* leaf_all_local,
+    const LTMatrix3 cell, const float cutoff, const VECTOR* cluster_centers,
+    const VECTOR* cluster_extents, const unsigned int* cluster_valid_masks,
+    const unsigned int* cluster_local_masks,
+    const CornerstoneKey* node_prefixes,
+    const CornerstoneNodeIndex* child_offsets,
+    const CornerstoneNodeIndex* parents,
+    const CornerstoneNodeIndex* internal_to_leaf,
+    const int* candidate_shift_ids, const bool central_halfshell_culling,
+    const bool use_morton_sfc, const int onepass_capacity,
+    int* candidate_leaf_counts, int* onepass_sci_ids, int* onepass_ranks,
+    int* onepass_leaf_ids, int* onepass_cursor, int* onepass_overflow)
+{
+    constexpr int kGroupsPerBlock =
+        kClusteredBuilderBlockSize / kFixedShiftCandidateLeafSubgroupSize;
+    const int group_id = threadIdx.x / kFixedShiftCandidateLeafSubgroupSize;
+    const int sublane = threadIdx.x % kFixedShiftCandidateLeafSubgroupSize;
+    const int lane_id = threadIdx.x & (kClusteredBuilderWarpSize - 1);
+    const int subgroup_lane_base = lane_id - sublane;
+    const device_mask_t subgroup_mask =
+        (((device_mask_t)1 << kFixedShiftCandidateLeafSubgroupSize) - 1u)
+        << subgroup_lane_base;
+    const int sci = blockIdx.x * kGroupsPerBlock + group_id;
+    if (sci >= sci_numbers)
+    {
+        return;
+    }
+
+    const int sci_base =
+        candidate_shift_ids == NULL ? sci / kClusteredShiftCount : sci;
+    const int candidate_shift_id =
+        candidate_shift_ids != NULL ? candidate_shift_ids[sci]
+                                    : (sci % kClusteredShiftCount);
+    const int super_i = sci_supercluster_ids[sci_base];
+    const VECTOR target_center = super_cluster_centers[super_i];
+    const VECTOR target_size = super_cluster_sizes[super_i];
+    const int cluster_i_start = super_cluster_offsets[super_i];
+    const int cluster_i_end = super_cluster_offsets[super_i + 1];
+    const VECTOR shift_vec = Shift_Vector_From_Id(candidate_shift_id, cell);
+    int count = 0;
+
+    auto overlaps = [=](CornerstoneNodeIndex node)
+    {
+        return Cornerstone_Node_Overlaps_Shifted_Box(
+            node_prefixes[node], target_center, target_size,
+            candidate_shift_id, use_morton_sfc);
+    };
+    auto endpoint = [&](CornerstoneNodeIndex node)
+    {
+        const int leaf_j = internal_to_leaf[node];
+        if (leaf_j >= 0)
+        {
+            if (central_halfshell_culling &&
+                candidate_shift_id == kClusteredCentralShiftId &&
+                leaf_all_local[leaf_j] != 0 &&
+                leaf_cluster_ends[leaf_j] <= cluster_i_start)
+            {
+                return;
+            }
+            if (!Leaf_Has_Fixed_Shift_Candidate_Overlap_Subgroup(
+                    cluster_i_start, cluster_i_end,
+                    leaf_cluster_starts[leaf_j], leaf_cluster_ends[leaf_j],
+                    candidate_shift_id, cutoff, shift_vec, cluster_valid_masks,
+                    cluster_local_masks, cluster_centers, cluster_extents,
+                    sublane, subgroup_mask))
+            {
+                return;
+            }
+            if (sublane == 0)
+            {
+                const int rank = count;
+                count += 1;
+                const int write_idx = atomicAdd(onepass_cursor, 1);
+                if (write_idx < onepass_capacity)
+                {
+                    onepass_sci_ids[write_idx] = sci;
+                    onepass_ranks[write_idx] = rank;
+                    onepass_leaf_ids[write_idx] = leaf_j;
+                }
+                else
+                {
+                    atomicAdd(onepass_overflow, 1);
+                }
+            }
+        }
+    };
+    cstone::singleTraversal(child_offsets, parents, overlaps, endpoint);
+    if (sublane == 0)
+    {
+        candidate_leaf_counts[sci] = count;
+    }
+}
+
+static __global__ void Scatter_Candidate_Leaves_From_Onepass(
+    const int candidate_leaf_numbers, const int* candidate_leaf_offsets,
+    const int* onepass_sci_ids, const int* onepass_ranks,
+    const int* onepass_leaf_ids, int* candidate_leaf_ids)
+{
+    SIMPLE_DEVICE_FOR(index, candidate_leaf_numbers)
+    {
+        const int sci = onepass_sci_ids[index];
+        const int rank = onepass_ranks[index];
+        candidate_leaf_ids[candidate_leaf_offsets[sci] + rank] =
+            onepass_leaf_ids[index];
     }
 }
 
@@ -10683,6 +11094,18 @@ static bool Clustered_Gmxpacked_Count_Parallel_Accum_Enabled()
 {
     return Clustered_Gmxpacked_Env_Flag_Enabled(
         "SPONGE_CLUSTERED_GMXPACKED_COUNT_PARALLEL_ACCUM");
+}
+
+static bool Clustered_Fixed_Shift_Candidate_Leaf_Parallel_Enabled()
+{
+    return Clustered_Gmxpacked_Env_Flag_Enabled(
+        "SPONGE_CLUSTERED_FIXED_SHIFT_CANDIDATE_LEAF_PARALLEL");
+}
+
+static bool Clustered_Fixed_Shift_Candidate_Leaf_Onepass_Enabled()
+{
+    return Clustered_Gmxpacked_Env_Flag_Enabled(
+        "SPONGE_CLUSTERED_FIXED_SHIFT_CANDIDATE_LEAF_ONEPASS");
 }
 
 static bool Clustered_Gmxpacked_Fill_Prune_Reuse_Enabled()
@@ -25722,6 +26145,15 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
         Clustered_Use_Central_Candidate_Halfshell_Culling();
     const bool fixed_shift_leaf_screening =
         fixed_shift_candidates && Clustered_Use_Fixed_Shift_Leaf_Screening();
+    const bool use_fixed_shift_candidate_leaf_parallel =
+        fixed_shift_candidates && fixed_shift_leaf_screening &&
+        Clustered_Fixed_Shift_Candidate_Leaf_Parallel_Enabled() &&
+        Clustered_Gmxpacked_Subgroup_Builder_Enabled() &&
+        Clustered_Gmxpacked_Fill_Prune_Reuse_Enabled() &&
+        Clustered_Gmxpacked_Fill_Prune_Reuse_Light_Enabled();
+    const bool use_fixed_shift_candidate_leaf_onepass =
+        fixed_shift_candidates && fixed_shift_leaf_screening &&
+        Clustered_Fixed_Shift_Candidate_Leaf_Onepass_Enabled();
     candidate_leaf_cluster_stride =
         fixed_shift_leaf_screening
             ? (cornerstone_leaf_size + 2 * cluster_size - 2) / cluster_size
@@ -25829,28 +26261,150 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
     Reserve_Device_Int_Buffer(candidate_sci_numbers + 1,
                               &d_sci_candidate_leaf_offsets,
                               &sci_candidate_leaf_offset_capacity);
-    if (fixed_shift_candidates)
+    bool candidate_leaf_onepass_used = false;
+    if (use_fixed_shift_candidate_leaf_onepass && candidate_leaf_capacity > 0)
     {
-        Launch_Device_Kernel(
-            Count_Supercluster_Candidate_Leaves_Fixed_Shift,
-            (candidate_sci_numbers + CONTROLLER::device_max_thread - 1) /
-                CONTROLLER::device_max_thread,
-            CONTROLLER::device_max_thread, 0, NULL, candidate_sci_numbers,
-            candidate_sci_supercluster_ids, d_super_cluster_centers,
-            d_super_cluster_sizes, d_super_cluster_offsets,
-            d_leaf_cluster_starts, d_leaf_cluster_ends, d_leaf_all_local,
-            cell,
-            build_cutoff, d_cluster_centers, d_cluster_extents,
-            d_cluster_valid_masks, d_cluster_local_masks,
-            rawPtr(cornerstone_state->octree.prefixes),
-            rawPtr(cornerstone_state->octree.childOffsets),
-            rawPtr(cornerstone_state->octree.parents),
-            rawPtr(cornerstone_state->octree.internalToLeaf),
-            candidate_shift_ids, central_candidate_halfshell_culling,
-            fixed_shift_leaf_screening, use_morton_sfc,
-            d_sci_candidate_leaf_counts);
+        const int onepass_capacity = candidate_leaf_capacity;
+        Reserve_Device_Int_Buffer(onepass_capacity,
+                                  &d_candidate_leaf_onepass_sci_ids,
+                                  &candidate_leaf_onepass_sci_capacity);
+        Reserve_Device_Int_Buffer(onepass_capacity,
+                                  &d_candidate_leaf_onepass_ranks,
+                                  &candidate_leaf_onepass_rank_capacity);
+        Reserve_Device_Int_Buffer(onepass_capacity,
+                                  &d_candidate_leaf_onepass_leaf_ids,
+                                  &candidate_leaf_onepass_leaf_capacity);
+        Reserve_Device_Int_Buffer(2, &d_candidate_leaf_onepass_cursor,
+                                  &candidate_leaf_onepass_cursor_capacity);
+        deviceMemset(d_sci_candidate_leaf_counts, 0,
+                     sizeof(int) * candidate_sci_numbers);
+        deviceMemset(d_candidate_leaf_onepass_cursor, 0, sizeof(int) * 2);
+        if (use_fixed_shift_candidate_leaf_parallel)
+        {
+            const int candidate_leaf_groups_per_block =
+                kClusteredBuilderBlockSize /
+                kFixedShiftCandidateLeafSubgroupSize;
+            Launch_Device_Kernel(
+                Collect_Supercluster_Candidate_Leaves_Fixed_Shift_Subgroup_Onepass,
+                (candidate_sci_numbers + candidate_leaf_groups_per_block - 1) /
+                    candidate_leaf_groups_per_block,
+                kClusteredBuilderBlockSize, 0, NULL, candidate_sci_numbers,
+                candidate_sci_supercluster_ids, d_super_cluster_centers,
+                d_super_cluster_sizes, d_super_cluster_offsets,
+                d_leaf_cluster_starts, d_leaf_cluster_ends, d_leaf_all_local,
+                cell, build_cutoff, d_cluster_centers, d_cluster_extents,
+                d_cluster_valid_masks, d_cluster_local_masks,
+                rawPtr(cornerstone_state->octree.prefixes),
+                rawPtr(cornerstone_state->octree.childOffsets),
+                rawPtr(cornerstone_state->octree.parents),
+                rawPtr(cornerstone_state->octree.internalToLeaf),
+                candidate_shift_ids, central_candidate_halfshell_culling,
+                use_morton_sfc, onepass_capacity, d_sci_candidate_leaf_counts,
+                d_candidate_leaf_onepass_sci_ids,
+                d_candidate_leaf_onepass_ranks,
+                d_candidate_leaf_onepass_leaf_ids,
+                d_candidate_leaf_onepass_cursor,
+                d_candidate_leaf_onepass_cursor + 1);
+        }
+        else
+        {
+            Launch_Device_Kernel(
+                Collect_Supercluster_Candidate_Leaves_Fixed_Shift_Onepass,
+                (candidate_sci_numbers + CONTROLLER::device_max_thread - 1) /
+                    CONTROLLER::device_max_thread,
+                CONTROLLER::device_max_thread, 0, NULL, candidate_sci_numbers,
+                candidate_sci_supercluster_ids, d_super_cluster_centers,
+                d_super_cluster_sizes, d_super_cluster_offsets,
+                d_leaf_cluster_starts, d_leaf_cluster_ends, d_leaf_all_local,
+                cell, build_cutoff, d_cluster_centers, d_cluster_extents,
+                d_cluster_valid_masks, d_cluster_local_masks,
+                rawPtr(cornerstone_state->octree.prefixes),
+                rawPtr(cornerstone_state->octree.childOffsets),
+                rawPtr(cornerstone_state->octree.parents),
+                rawPtr(cornerstone_state->octree.internalToLeaf),
+                candidate_shift_ids, central_candidate_halfshell_culling,
+                use_morton_sfc, onepass_capacity, d_sci_candidate_leaf_counts,
+                d_candidate_leaf_onepass_sci_ids,
+                d_candidate_leaf_onepass_ranks,
+                d_candidate_leaf_onepass_leaf_ids,
+                d_candidate_leaf_onepass_cursor,
+                d_candidate_leaf_onepass_cursor + 1);
+        }
+        int h_onepass_cursor[2] = {0, 0};
+        deviceMemcpy(h_onepass_cursor, d_candidate_leaf_onepass_cursor,
+                     sizeof(int) * 2, deviceMemcpyDeviceToHost);
+        if (h_onepass_cursor[1] == 0 &&
+            h_onepass_cursor[0] <= onepass_capacity)
+        {
+            candidate_leaf_numbers = h_onepass_cursor[0];
+            Exclusive_Scan_Counts(this, candidate_sci_numbers,
+                                  d_sci_candidate_leaf_counts,
+                                  d_sci_candidate_leaf_offsets);
+            if (candidate_leaf_numbers > 0)
+            {
+                Reserve_Device_Int_Buffer(candidate_leaf_numbers,
+                                          &d_sci_candidate_leaf_ids,
+                                          &candidate_leaf_capacity);
+                Launch_Device_Kernel(
+                    Scatter_Candidate_Leaves_From_Onepass,
+                    (candidate_leaf_numbers + CONTROLLER::device_max_thread - 1) /
+                        CONTROLLER::device_max_thread,
+                    CONTROLLER::device_max_thread, 0, NULL,
+                    candidate_leaf_numbers, d_sci_candidate_leaf_offsets,
+                    d_candidate_leaf_onepass_sci_ids,
+                    d_candidate_leaf_onepass_ranks,
+                    d_candidate_leaf_onepass_leaf_ids,
+                    d_sci_candidate_leaf_ids);
+                candidate_leaf_onepass_used = true;
+            }
+        }
     }
-    else
+    if (!candidate_leaf_onepass_used && fixed_shift_candidates)
+    {
+        if (use_fixed_shift_candidate_leaf_parallel)
+        {
+            const int candidate_leaf_groups_per_block =
+                kClusteredBuilderBlockSize /
+                kFixedShiftCandidateLeafSubgroupSize;
+            Launch_Device_Kernel(
+                Count_Supercluster_Candidate_Leaves_Fixed_Shift_Subgroup,
+                (candidate_sci_numbers + candidate_leaf_groups_per_block - 1) /
+                    candidate_leaf_groups_per_block,
+                kClusteredBuilderBlockSize, 0, NULL, candidate_sci_numbers,
+                candidate_sci_supercluster_ids, d_super_cluster_centers,
+                d_super_cluster_sizes, d_super_cluster_offsets,
+                d_leaf_cluster_starts, d_leaf_cluster_ends, d_leaf_all_local,
+                cell, build_cutoff, d_cluster_centers, d_cluster_extents,
+                d_cluster_valid_masks, d_cluster_local_masks,
+                rawPtr(cornerstone_state->octree.prefixes),
+                rawPtr(cornerstone_state->octree.childOffsets),
+                rawPtr(cornerstone_state->octree.parents),
+                rawPtr(cornerstone_state->octree.internalToLeaf),
+                candidate_shift_ids, central_candidate_halfshell_culling,
+                use_morton_sfc, d_sci_candidate_leaf_counts);
+        }
+        else
+        {
+            Launch_Device_Kernel(
+                Count_Supercluster_Candidate_Leaves_Fixed_Shift,
+                (candidate_sci_numbers + CONTROLLER::device_max_thread - 1) /
+                    CONTROLLER::device_max_thread,
+                CONTROLLER::device_max_thread, 0, NULL, candidate_sci_numbers,
+                candidate_sci_supercluster_ids, d_super_cluster_centers,
+                d_super_cluster_sizes, d_super_cluster_offsets,
+                d_leaf_cluster_starts, d_leaf_cluster_ends, d_leaf_all_local,
+                cell, build_cutoff, d_cluster_centers, d_cluster_extents,
+                d_cluster_valid_masks, d_cluster_local_masks,
+                rawPtr(cornerstone_state->octree.prefixes),
+                rawPtr(cornerstone_state->octree.childOffsets),
+                rawPtr(cornerstone_state->octree.parents),
+                rawPtr(cornerstone_state->octree.internalToLeaf),
+                candidate_shift_ids, central_candidate_halfshell_culling,
+                fixed_shift_leaf_screening, use_morton_sfc,
+                d_sci_candidate_leaf_counts);
+        }
+    }
+    else if (!candidate_leaf_onepass_used)
     {
         Launch_Device_Kernel(
             Count_Supercluster_Candidate_Leaves,
@@ -25869,9 +26423,12 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
     Clustered_Debug_Device_Sync_If_Tracing(
         "Count_Supercluster_Candidate_Leaves");
 #endif
-    candidate_leaf_numbers = Exclusive_Scan_Counts(
-        this, candidate_sci_numbers, d_sci_candidate_leaf_counts,
-        d_sci_candidate_leaf_offsets);
+    if (!candidate_leaf_onepass_used)
+    {
+        candidate_leaf_numbers = Exclusive_Scan_Counts(
+            this, candidate_sci_numbers, d_sci_candidate_leaf_counts,
+            d_sci_candidate_leaf_offsets);
+    }
     if (candidate_leaf_numbers <= 0)
     {
         cjpacked_numbers = 0;
@@ -25886,30 +26443,58 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
         return;
     }
 
-    Reserve_Device_Int_Buffer(candidate_leaf_numbers, &d_sci_candidate_leaf_ids,
-                              &candidate_leaf_capacity);
-    if (fixed_shift_candidates)
+    if (!candidate_leaf_onepass_used)
     {
-        Launch_Device_Kernel(
-            Fill_Supercluster_Candidate_Leaves_Fixed_Shift,
-            (candidate_sci_numbers + CONTROLLER::device_max_thread - 1) /
-                CONTROLLER::device_max_thread,
-            CONTROLLER::device_max_thread, 0, NULL, candidate_sci_numbers,
-            candidate_sci_supercluster_ids, d_super_cluster_centers,
-            d_super_cluster_sizes, d_super_cluster_offsets,
-            d_leaf_cluster_starts, d_leaf_cluster_ends, d_leaf_all_local,
-            cell,
-            build_cutoff, d_cluster_centers, d_cluster_extents,
-            d_cluster_valid_masks, d_cluster_local_masks,
-            rawPtr(cornerstone_state->octree.prefixes),
-            rawPtr(cornerstone_state->octree.childOffsets),
-            rawPtr(cornerstone_state->octree.parents),
-            rawPtr(cornerstone_state->octree.internalToLeaf),
-            candidate_shift_ids, d_sci_candidate_leaf_offsets,
-            central_candidate_halfshell_culling, fixed_shift_leaf_screening,
-            use_morton_sfc, d_sci_candidate_leaf_ids);
+        Reserve_Device_Int_Buffer(candidate_leaf_numbers, &d_sci_candidate_leaf_ids,
+                                  &candidate_leaf_capacity);
     }
-    else
+    if (!candidate_leaf_onepass_used && fixed_shift_candidates)
+    {
+        if (use_fixed_shift_candidate_leaf_parallel)
+        {
+            const int candidate_leaf_groups_per_block =
+                kClusteredBuilderBlockSize /
+                kFixedShiftCandidateLeafSubgroupSize;
+            Launch_Device_Kernel(
+                Fill_Supercluster_Candidate_Leaves_Fixed_Shift_Subgroup,
+                (candidate_sci_numbers + candidate_leaf_groups_per_block - 1) /
+                    candidate_leaf_groups_per_block,
+                kClusteredBuilderBlockSize, 0, NULL, candidate_sci_numbers,
+                candidate_sci_supercluster_ids, d_super_cluster_centers,
+                d_super_cluster_sizes, d_super_cluster_offsets,
+                d_leaf_cluster_starts, d_leaf_cluster_ends, d_leaf_all_local,
+                cell, build_cutoff, d_cluster_centers, d_cluster_extents,
+                d_cluster_valid_masks, d_cluster_local_masks,
+                rawPtr(cornerstone_state->octree.prefixes),
+                rawPtr(cornerstone_state->octree.childOffsets),
+                rawPtr(cornerstone_state->octree.parents),
+                rawPtr(cornerstone_state->octree.internalToLeaf),
+                candidate_shift_ids, d_sci_candidate_leaf_offsets,
+                central_candidate_halfshell_culling, use_morton_sfc,
+                d_sci_candidate_leaf_ids);
+        }
+        else
+        {
+            Launch_Device_Kernel(
+                Fill_Supercluster_Candidate_Leaves_Fixed_Shift,
+                (candidate_sci_numbers + CONTROLLER::device_max_thread - 1) /
+                    CONTROLLER::device_max_thread,
+                CONTROLLER::device_max_thread, 0, NULL, candidate_sci_numbers,
+                candidate_sci_supercluster_ids, d_super_cluster_centers,
+                d_super_cluster_sizes, d_super_cluster_offsets,
+                d_leaf_cluster_starts, d_leaf_cluster_ends, d_leaf_all_local,
+                cell, build_cutoff, d_cluster_centers, d_cluster_extents,
+                d_cluster_valid_masks, d_cluster_local_masks,
+                rawPtr(cornerstone_state->octree.prefixes),
+                rawPtr(cornerstone_state->octree.childOffsets),
+                rawPtr(cornerstone_state->octree.parents),
+                rawPtr(cornerstone_state->octree.internalToLeaf),
+                candidate_shift_ids, d_sci_candidate_leaf_offsets,
+                central_candidate_halfshell_culling, fixed_shift_leaf_screening,
+                use_morton_sfc, d_sci_candidate_leaf_ids);
+        }
+    }
+    else if (!candidate_leaf_onepass_used)
     {
         Launch_Device_Kernel(
             Fill_Supercluster_Candidate_Leaves,
@@ -25926,8 +26511,11 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
             d_sci_candidate_leaf_ids);
     }
 #ifndef USE_CPU
-    Clustered_Debug_Device_Sync_If_Tracing(
-        "Fill_Supercluster_Candidate_Leaves");
+    if (!candidate_leaf_onepass_used)
+    {
+        Clustered_Debug_Device_Sync_If_Tracing(
+            "Fill_Supercluster_Candidate_Leaves");
+    }
 #endif
     if (fixed_shift_leaf_screening)
     {
@@ -28555,6 +29143,10 @@ void LJ_CLUSTER_LAYOUT::Clear()
     Free_Single_Device_Pointer((void**)&d_sci_candidate_leaf_counts);
     Free_Single_Device_Pointer((void**)&d_sci_candidate_leaf_offsets);
     Free_Single_Device_Pointer((void**)&d_sci_candidate_leaf_ids);
+    Free_Single_Device_Pointer((void**)&d_candidate_leaf_onepass_sci_ids);
+    Free_Single_Device_Pointer((void**)&d_candidate_leaf_onepass_ranks);
+    Free_Single_Device_Pointer((void**)&d_candidate_leaf_onepass_leaf_ids);
+    Free_Single_Device_Pointer((void**)&d_candidate_leaf_onepass_cursor);
     Free_Single_Device_Pointer((void**)&d_candidate_leaf_reach_masks);
     Free_Single_Device_Pointer((void**)&d_candidate_sci_offsets);
     Free_Single_Device_Pointer((void**)&d_candidate_shift_ids);
