@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <numeric>
 #include <span>
 #include <type_traits>
@@ -62,6 +63,13 @@ constexpr int kFixedShiftCandidateLeafSubgroupSize =
 constexpr int kClusteredMaxJGroupSize = kClusteredJGroupSize;
 constexpr int kClusteredForceonlyLocalSortCapacity = 2048;
 constexpr unsigned int kClusteredForceonlyInvalidSortKey = 0xffffffffu;
+constexpr int kCandidateLeafOnepassInitialLeavesPerCandidateSci = 128;
+constexpr long long kCandidateLeafOnepassScratchByteLimit =
+    256ll * 1024ll * 1024ll;
+constexpr int kCandidateLeafOnepassSlackNumerator = 5;
+constexpr int kCandidateLeafOnepassSlackDenominator = 4;
+constexpr int kCandidateLeafOnepassGrowNumerator = 3;
+constexpr int kCandidateLeafOnepassGrowDenominator = 2;
 
 struct LJ_CLUSTERED_GMXPACKED_COUNT_SOURCE_FRAGMENT
 {
@@ -10664,6 +10672,93 @@ static void Reserve_Device_Int_Buffer(int capacity, int** pointer,
     Clustered_Device_Malloc_Safely((void**)pointer, sizeof(int) * capacity,
                                    "reserve-int-buffer");
     *current_capacity = capacity;
+}
+
+static int Candidate_Leaf_Onepass_Max_Record_Capacity()
+{
+    const long long max_by_bytes =
+        kCandidateLeafOnepassScratchByteLimit / (3ll * sizeof(int));
+    const long long max_by_int = std::numeric_limits<int>::max();
+    return static_cast<int>(
+        max_by_bytes < max_by_int ? max_by_bytes : max_by_int);
+}
+
+static int Candidate_Leaf_Onepass_Clamp_Record_Capacity(long long capacity)
+{
+    if (capacity <= 0)
+    {
+        return 0;
+    }
+    const int max_capacity = Candidate_Leaf_Onepass_Max_Record_Capacity();
+    if (capacity > static_cast<long long>(max_capacity))
+    {
+        return max_capacity;
+    }
+    return static_cast<int>(capacity);
+}
+
+static long long Candidate_Leaf_Onepass_Ceil_Ratio(int value, int numerator,
+                                                   int denominator)
+{
+    if (value <= 0)
+    {
+        return 0;
+    }
+    return (static_cast<long long>(value) * numerator + denominator - 1) /
+           denominator;
+}
+
+static int Candidate_Leaf_Onepass_Target_Capacity(
+    int candidate_sci_numbers, int candidate_leaf_capacity,
+    int candidate_leaf_onepass_high_water,
+    int candidate_leaf_onepass_record_capacity)
+{
+    long long target =
+        static_cast<long long>(candidate_sci_numbers) *
+        kCandidateLeafOnepassInitialLeavesPerCandidateSci;
+    const int observed_capacity =
+        IntMax(candidate_leaf_capacity, candidate_leaf_onepass_high_water);
+    if (observed_capacity > 0)
+    {
+        target = std::max(target, Candidate_Leaf_Onepass_Ceil_Ratio(
+                                      observed_capacity,
+                                      kCandidateLeafOnepassSlackNumerator,
+                                      kCandidateLeafOnepassSlackDenominator));
+    }
+    target = std::max(target,
+                      static_cast<long long>(
+                          candidate_leaf_onepass_record_capacity));
+    return Candidate_Leaf_Onepass_Clamp_Record_Capacity(target);
+}
+
+static int Candidate_Leaf_Onepass_Grown_Capacity(int current_capacity,
+                                                 int required_capacity)
+{
+    long long target = Candidate_Leaf_Onepass_Ceil_Ratio(
+        current_capacity, kCandidateLeafOnepassGrowNumerator,
+        kCandidateLeafOnepassGrowDenominator);
+    target = std::max(target, static_cast<long long>(required_capacity));
+    return Candidate_Leaf_Onepass_Clamp_Record_Capacity(target);
+}
+
+static void Reserve_Candidate_Leaf_Onepass_Scratch(
+    LJ_CLUSTER_LAYOUT* layout, int capacity)
+{
+    capacity = Candidate_Leaf_Onepass_Clamp_Record_Capacity(capacity);
+    if (layout == NULL || capacity <= 0)
+    {
+        return;
+    }
+    Reserve_Device_Int_Buffer(capacity,
+                              &layout->d_candidate_leaf_onepass_sci_ids,
+                              &layout->candidate_leaf_onepass_sci_capacity);
+    Reserve_Device_Int_Buffer(capacity,
+                              &layout->d_candidate_leaf_onepass_ranks,
+                              &layout->candidate_leaf_onepass_rank_capacity);
+    Reserve_Device_Int_Buffer(capacity,
+                              &layout->d_candidate_leaf_onepass_leaf_ids,
+                              &layout->candidate_leaf_onepass_leaf_capacity);
+    layout->candidate_leaf_onepass_record_capacity = capacity;
 }
 
 static void Reserve_Device_U64_Buffer(int capacity, uint64_t** pointer,
@@ -26447,18 +26542,13 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                               &d_sci_candidate_leaf_offsets,
                               &sci_candidate_leaf_offset_capacity);
     bool candidate_leaf_onepass_used = false;
-    if (use_fixed_shift_candidate_leaf_onepass && candidate_leaf_capacity > 0)
+    if (use_fixed_shift_candidate_leaf_onepass)
     {
-        const int onepass_capacity = candidate_leaf_capacity;
-        Reserve_Device_Int_Buffer(onepass_capacity,
-                                  &d_candidate_leaf_onepass_sci_ids,
-                                  &candidate_leaf_onepass_sci_capacity);
-        Reserve_Device_Int_Buffer(onepass_capacity,
-                                  &d_candidate_leaf_onepass_ranks,
-                                  &candidate_leaf_onepass_rank_capacity);
-        Reserve_Device_Int_Buffer(onepass_capacity,
-                                  &d_candidate_leaf_onepass_leaf_ids,
-                                  &candidate_leaf_onepass_leaf_capacity);
+        const int onepass_capacity = Candidate_Leaf_Onepass_Target_Capacity(
+            candidate_sci_numbers, candidate_leaf_capacity,
+            candidate_leaf_onepass_high_water,
+            candidate_leaf_onepass_record_capacity);
+        Reserve_Candidate_Leaf_Onepass_Scratch(this, onepass_capacity);
         Reserve_Device_Int_Buffer(2, &d_candidate_leaf_onepass_cursor,
                                   &candidate_leaf_onepass_cursor_capacity);
         deviceMemset(d_sci_candidate_leaf_counts, 0,
@@ -26522,6 +26612,8 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
             h_onepass_cursor[0] <= onepass_capacity)
         {
             candidate_leaf_numbers = h_onepass_cursor[0];
+            candidate_leaf_onepass_high_water = IntMax(
+                candidate_leaf_onepass_high_water, candidate_leaf_numbers);
             Exclusive_Scan_Counts(this, candidate_sci_numbers,
                                   d_sci_candidate_leaf_counts,
                                   d_sci_candidate_leaf_offsets);
@@ -26541,6 +26633,21 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                     d_candidate_leaf_onepass_leaf_ids,
                     d_sci_candidate_leaf_ids);
                 candidate_leaf_onepass_used = true;
+            }
+        }
+        else
+        {
+            candidate_leaf_onepass_overflow_count += 1;
+            const int required_capacity = h_onepass_cursor[0] > 0
+                                              ? h_onepass_cursor[0]
+                                              : onepass_capacity + 1;
+            candidate_leaf_onepass_high_water = IntMax(
+                candidate_leaf_onepass_high_water, required_capacity);
+            const int grown_capacity = Candidate_Leaf_Onepass_Grown_Capacity(
+                onepass_capacity, required_capacity);
+            if (grown_capacity > candidate_leaf_onepass_record_capacity)
+            {
+                Reserve_Candidate_Leaf_Onepass_Scratch(this, grown_capacity);
             }
         }
     }
@@ -27344,9 +27451,9 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                 ? NULL
                 : d_gmxpacked_record_stream_source_rows,
             defer_gmxpacked_record_stream_source_count
-                ? NULL
-                : d_gmxpacked_record_stream_source_counts_by_candidate,
-            accumulate_gmxpacked_record_stream_source_rows_by_candidate, NULL,
+            ? NULL
+            : d_gmxpacked_record_stream_source_counts_by_candidate,
+        accumulate_gmxpacked_record_stream_source_rows_by_candidate, NULL,
             max_leaf_cluster_span,
             capture_fill_prune_reuse_sources &&
                     !use_gmxpacked_fill_prune_reuse_light
@@ -28380,7 +28487,8 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                 d_gmxpacked_incremental_replacement_sources,
                 d_refill_source_fill_cursor, d_refill_source_overflow_rows, 0,
                 NULL, 0, NULL, NULL, NULL,
-                d_gmxpacked_incremental_dirty_candidate_sci, max_leaf_cluster_span);
+                d_gmxpacked_incremental_dirty_candidate_sci,
+                max_leaf_cluster_span);
             deviceMemcpy(&refill_filled_rows, d_refill_source_fill_cursor,
                          sizeof(int), deviceMemcpyDeviceToHost);
             deviceMemcpy(&refill_overflow_rows, d_refill_source_overflow_rows,
@@ -29421,6 +29529,13 @@ void LJ_CLUSTER_LAYOUT::Clear()
     sci_candidate_leaf_count_capacity = 0;
     sci_candidate_leaf_offset_capacity = 0;
     candidate_leaf_capacity = 0;
+    candidate_leaf_onepass_sci_capacity = 0;
+    candidate_leaf_onepass_rank_capacity = 0;
+    candidate_leaf_onepass_leaf_capacity = 0;
+    candidate_leaf_onepass_cursor_capacity = 0;
+    candidate_leaf_onepass_record_capacity = 0;
+    candidate_leaf_onepass_high_water = 0;
+    candidate_leaf_onepass_overflow_count = 0;
     candidate_leaf_mask_capacity = 0;
     cjpacked_capacity = 0;
     exclusion_scan_capacity = 0;

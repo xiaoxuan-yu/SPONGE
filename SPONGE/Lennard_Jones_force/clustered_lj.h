@@ -348,6 +348,9 @@ struct LJ_CLUSTER_LAYOUT
     int candidate_leaf_onepass_rank_capacity = 0;
     int candidate_leaf_onepass_leaf_capacity = 0;
     int candidate_leaf_onepass_cursor_capacity = 0;
+    int candidate_leaf_onepass_record_capacity = 0;
+    int candidate_leaf_onepass_high_water = 0;
+    int candidate_leaf_onepass_overflow_count = 0;
     int candidate_leaf_mask_capacity = 0;
     int cjpacked_capacity = 0;
     int exclusion_scan_capacity = 0;
