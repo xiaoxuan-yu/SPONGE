@@ -296,9 +296,12 @@ struct LJ_CLUSTER_LAYOUT
     int gmxpacked_incremental_source_patch_fallbacks = 0;
     bool gmxpacked_pair_shift_sci_only_compatible = false;
     bool gmxpacked_pair_shift_metadata_ready = false;
+    bool gmxpacked_pair_shift_sci_safe_counts_ready = false;
     int gmxpacked_pair_shift_metadata_sci_numbers = 0;
     int gmxpacked_pair_shift_metadata_cjpacked_numbers = 0;
     int gmxpacked_pair_shift_metadata_exclusion_numbers = 0;
+    int gmxpacked_pair_shift_safe_sci_numbers = 0;
+    int gmxpacked_pair_shift_unsafe_sci_numbers = 0;
     LTMatrix3 gmxpacked_pair_shift_metadata_rcell = {};
     int candidate_leaf_numbers = 0;
     int candidate_leaf_cluster_stride = 0;
@@ -517,6 +520,7 @@ struct LJ_CLUSTER_LAYOUT
     uint64_t* d_pair_shift_bits = NULL;
     int* d_gmxpacked_pair_shift_sci_only_flag = NULL;
     int* d_gmxpacked_pair_shift_sci_safe_flags = NULL;
+    int* d_gmxpacked_pair_shift_safe_sci_count = NULL;
     unsigned char* d_sort_key_buffer = NULL;
     unsigned char* d_sort_value_buffer = NULL;
     void* d_sort_temp_storage = NULL;
@@ -573,6 +577,7 @@ struct LJ_CLUSTERED_DIRECT_CACHE
     int* d_sorted_atom_ids = NULL;
     float4* d_sorted_xq = NULL;
     int* d_sorted_lj_type = NULL;
+    int* d_sorted_cluster_ids = NULL;
     float2* d_sorted_lj_comb = NULL;
     VECTOR* d_sorted_frc = NULL;
     float4* d_sorted_frc4 = NULL;

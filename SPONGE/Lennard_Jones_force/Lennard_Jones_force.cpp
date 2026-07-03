@@ -94,6 +94,9 @@ static VECTOR Wrap_To_Box_Fractional(VECTOR crd, LTMatrix3 rcell,
 //                                              SCI-shift fast kernel and unsafe
 //                                              SCI through the pair-shift kernel
 //                                              without host-side classification
+//   SPONGE_CLUSTERED_GMXPACKED_SCI_SHIFT_SPLIT_SKIP_EMPTY
+//                                              host-counts split classes and
+//                                              skips empty fast/slow launches
 //
 // Default production path when none of the experimental flags are set:
 //   base native clustered direct kernel
@@ -253,6 +256,12 @@ static bool Clustered_Gmxpacked_Sci_Shift_Split_Enabled()
 static bool Clustered_Gmxpacked_Sci_Shift_Runtime_Enabled()
 {
     return Env_Flag_Enabled("SPONGE_CLUSTERED_GMXPACKED_SCI_SHIFT_RUNTIME");
+}
+
+static bool Clustered_Gmxpacked_Sci_Shift_Split_Skip_Empty_Enabled()
+{
+    return Env_Flag_Enabled(
+        "SPONGE_CLUSTERED_GMXPACKED_SCI_SHIFT_SPLIT_SKIP_EMPTY");
 }
 
 static bool LJ_Coordinate_Diagnostics_Enabled()
@@ -1058,6 +1067,35 @@ static nbnxm_microbench::SpongeWarpJRecordPOD To_Microbench_Record_POD(
     return pod;
 }
 
+static nbnxm_microbench::SpongeGmxpackedSciPOD To_Microbench_Gmxpacked_Sci_POD(
+    const LJ_CLUSTERED_GMXPACKED_SCI& sci)
+{
+    return {sci.supercluster_id, sci.shift_id, sci.cjpacked_begin,
+            sci.cjpacked_end};
+}
+
+static nbnxm_microbench::SpongeGmxpackedCjPOD To_Microbench_Gmxpacked_Cj_POD(
+    const LJ_CLUSTERED_GMXPACKED_CJ& cj)
+{
+    nbnxm_microbench::SpongeGmxpackedCjPOD pod = {};
+    std::memcpy(pod.cj, cj.cj, sizeof(pod.cj));
+    for (int split = 0; split < kClusteredWarpSplitCount; split += 1)
+    {
+        pod.split[split].imask = cj.split[split].imask;
+        pod.split[split].exclusion_index = cj.split[split].exclusion_index;
+    }
+    return pod;
+}
+
+static nbnxm_microbench::SpongeGmxpackedExclusionPOD
+To_Microbench_Gmxpacked_Exclusion_POD(
+    const LJ_CLUSTERED_GMXPACKED_EXCLUSION& exclusion)
+{
+    nbnxm_microbench::SpongeGmxpackedExclusionPOD pod = {};
+    std::memcpy(pod.pair, exclusion.pair, sizeof(pod.pair));
+    return pod;
+}
+
 static void Maybe_Dump_Clustered_Microbench_Diagnostic_Snapshot(
     const LJ_CLUSTERED_DIRECT_CACHE* clustered_direct_cache,
     const float2* d_LJ_AB_packed, size_t lj_param_numbers, float cutoff,
@@ -1190,6 +1228,308 @@ static void Maybe_Dump_Clustered_Microbench_Diagnostic_Snapshot(
             "[clustered microbench dump] wrote %s sci=%d records=%d atoms=%d\n",
             snapshot_path.string().c_str(), layout.sci_numbers,
             layout.forceonly_warp_record_numbers, layout.total_atom_numbers);
+
+    if (layout.gmxpacked_sci_numbers > 0 &&
+        layout.gmxpacked_cjpacked_numbers > 0 &&
+        layout.gmxpacked_exclusion_numbers > 0 &&
+        layout.d_gmxpacked_sci != NULL &&
+        layout.d_gmxpacked_cjpacked != NULL &&
+        layout.d_gmxpacked_exclusions != NULL &&
+        layout.d_gmxpacked_pair_shift_sci_safe_flags != NULL &&
+        layout.d_pair_shift_bits != NULL &&
+        clustered_direct_cache->d_sorted_lj_comb != NULL)
+    {
+        nbnxm_microbench::SpongeGmxpackedForceOnlySnapshot gmxpacked_snapshot =
+            {};
+        gmxpacked_snapshot.header.file =
+            nbnxm_microbench::MakeFileHeader(
+                nbnxm_microbench::SnapshotKind::spongeGmxpackedForceOnly);
+        gmxpacked_snapshot.header.cluster_size =
+            static_cast<uint32_t>(layout.cluster_size);
+        gmxpacked_snapshot.header.super_cluster_clusters =
+            static_cast<uint32_t>(layout.super_cluster_clusters);
+        gmxpacked_snapshot.header.warp_split_count =
+            kClusteredWarpSplitCount;
+        gmxpacked_snapshot.header.j_group_size = kClusteredJGroupSize;
+        gmxpacked_snapshot.header.force_storage_sorted = 1u;
+        gmxpacked_snapshot.header.use_lj_comb = 1u;
+        gmxpacked_snapshot.header.cluster_numbers =
+            static_cast<uint64_t>(layout.cluster_numbers);
+        gmxpacked_snapshot.header.super_cluster_numbers =
+            static_cast<uint64_t>(layout.super_cluster_numbers);
+        gmxpacked_snapshot.header.sci_numbers =
+            static_cast<uint64_t>(layout.gmxpacked_sci_numbers);
+        gmxpacked_snapshot.header.cjpacked_numbers =
+            static_cast<uint64_t>(layout.gmxpacked_cjpacked_numbers);
+        gmxpacked_snapshot.header.excl_numbers =
+            static_cast<uint64_t>(layout.gmxpacked_exclusion_numbers);
+        gmxpacked_snapshot.header.pair_shift_word_numbers =
+            static_cast<uint64_t>(layout.gmxpacked_cjpacked_numbers *
+                                  kClusteredJGroupSize);
+        gmxpacked_snapshot.header.total_atom_numbers =
+            static_cast<uint64_t>(layout.total_atom_numbers);
+        gmxpacked_snapshot.header.local_atom_numbers =
+            static_cast<uint64_t>(layout.local_atom_numbers);
+        gmxpacked_snapshot.header.lj_param_numbers =
+            static_cast<uint64_t>(lj_param_numbers);
+        gmxpacked_snapshot.header.cutoff = cutoff;
+        gmxpacked_snapshot.header.pme_beta = pme_beta;
+        gmxpacked_snapshot.header.cell = To_Microbench_Matrix_POD(cell);
+
+        gmxpacked_snapshot.cluster_offsets =
+            Copy_Device_Vector_To_Host(
+                layout.d_cluster_offsets,
+                static_cast<size_t>(layout.cluster_numbers));
+        gmxpacked_snapshot.cluster_valid_masks = Copy_Device_Vector_To_Host(
+            layout.d_cluster_valid_masks,
+            static_cast<size_t>(layout.cluster_numbers));
+        gmxpacked_snapshot.cluster_local_masks = Copy_Device_Vector_To_Host(
+            layout.d_cluster_local_masks,
+            static_cast<size_t>(layout.cluster_numbers));
+        gmxpacked_snapshot.super_cluster_offsets =
+            Copy_Device_Vector_To_Host(
+                layout.d_super_cluster_offsets,
+                static_cast<size_t>(layout.super_cluster_numbers + 1));
+
+        const auto host_gmxpacked_sci = Copy_Device_Vector_To_Host(
+            layout.d_gmxpacked_sci,
+            static_cast<size_t>(layout.gmxpacked_sci_numbers));
+        gmxpacked_snapshot.sci.reserve(host_gmxpacked_sci.size());
+        for (const LJ_CLUSTERED_GMXPACKED_SCI& sci : host_gmxpacked_sci)
+        {
+            gmxpacked_snapshot.sci.push_back(
+                To_Microbench_Gmxpacked_Sci_POD(sci));
+        }
+
+        const auto host_gmxpacked_cj = Copy_Device_Vector_To_Host(
+            layout.d_gmxpacked_cjpacked,
+            static_cast<size_t>(layout.gmxpacked_cjpacked_numbers));
+        gmxpacked_snapshot.cjpacked.reserve(host_gmxpacked_cj.size());
+        for (const LJ_CLUSTERED_GMXPACKED_CJ& cj : host_gmxpacked_cj)
+        {
+            gmxpacked_snapshot.cjpacked.push_back(
+                To_Microbench_Gmxpacked_Cj_POD(cj));
+        }
+
+        const auto host_gmxpacked_exclusions = Copy_Device_Vector_To_Host(
+            layout.d_gmxpacked_exclusions,
+            static_cast<size_t>(layout.gmxpacked_exclusion_numbers));
+        gmxpacked_snapshot.excl.reserve(host_gmxpacked_exclusions.size());
+        for (const LJ_CLUSTERED_GMXPACKED_EXCLUSION& exclusion :
+             host_gmxpacked_exclusions)
+        {
+            gmxpacked_snapshot.excl.push_back(
+                To_Microbench_Gmxpacked_Exclusion_POD(exclusion));
+        }
+
+        gmxpacked_snapshot.pair_shift_bits = Copy_Device_Vector_To_Host(
+            layout.d_pair_shift_bits,
+            static_cast<size_t>(layout.gmxpacked_cjpacked_numbers *
+                                kClusteredJGroupSize));
+        gmxpacked_snapshot.sci_shift_safe_flags =
+            Copy_Device_Vector_To_Host(
+                layout.d_gmxpacked_pair_shift_sci_safe_flags,
+                static_cast<size_t>(layout.gmxpacked_sci_numbers));
+        gmxpacked_snapshot.sorted_atom_ids = snapshot.sorted_atom_ids;
+        gmxpacked_snapshot.sorted_xq = snapshot.sorted_xq;
+        gmxpacked_snapshot.sorted_lj_type = snapshot.sorted_lj_type;
+        const auto host_sorted_lj_comb = Copy_Device_Vector_To_Host(
+            clustered_direct_cache->d_sorted_lj_comb,
+            static_cast<size_t>(layout.total_atom_numbers));
+        gmxpacked_snapshot.sorted_lj_comb.reserve(host_sorted_lj_comb.size());
+        for (const float2& value : host_sorted_lj_comb)
+        {
+            gmxpacked_snapshot.sorted_lj_comb.push_back(
+                To_Microbench_Float2_POD(value));
+        }
+        gmxpacked_snapshot.lj_ab = snapshot.lj_ab;
+
+        const fs::path gmxpacked_snapshot_path =
+            prefix_path.string() + ".sponge_gmxpacked_forceonly.bin";
+        if (!nbnxm_microbench::WriteSpongeGmxpackedForceOnlySnapshot(
+                gmxpacked_snapshot_path.string(), gmxpacked_snapshot))
+        {
+            fprintf(stderr,
+                    "[clustered microbench dump] failed to write %s\n",
+                    gmxpacked_snapshot_path.string().c_str());
+            return;
+        }
+        fprintf(stderr,
+                "[clustered microbench dump] wrote %s sci=%d cjpacked=%d "
+                "excl=%d atoms=%d\n",
+                gmxpacked_snapshot_path.string().c_str(),
+                layout.gmxpacked_sci_numbers, layout.gmxpacked_cjpacked_numbers,
+                layout.gmxpacked_exclusion_numbers, layout.total_atom_numbers);
+    }
+    dumped = true;
+}
+
+static void Maybe_Dump_Clustered_Gmxpacked_Microbench_Diagnostic_Snapshot(
+    const LJ_CLUSTERED_DIRECT_CACHE* clustered_direct_cache,
+    const float2* d_LJ_AB_packed, size_t lj_param_numbers, float cutoff,
+    float pme_beta, const LTMatrix3& cell)
+{
+    const char* dump_prefix = Clustered_Microbench_Dump_Prefix();
+    static bool dumped = false;
+    if (dump_prefix == NULL || dumped ||
+        clustered_direct_cache == NULL ||
+        clustered_direct_cache->layout.total_atom_numbers <= 0)
+    {
+        return;
+    }
+    const auto& layout = clustered_direct_cache->layout;
+    if (layout.gmxpacked_sci_numbers <= 0 ||
+        layout.gmxpacked_cjpacked_numbers <= 0 ||
+        layout.gmxpacked_exclusion_numbers <= 0 ||
+        layout.d_gmxpacked_sci == NULL ||
+        layout.d_gmxpacked_cjpacked == NULL ||
+        layout.d_gmxpacked_exclusions == NULL ||
+        layout.d_gmxpacked_pair_shift_sci_safe_flags == NULL ||
+        layout.d_pair_shift_bits == NULL ||
+        layout.d_cluster_offsets == NULL ||
+        layout.d_cluster_valid_masks == NULL ||
+        layout.d_cluster_local_masks == NULL ||
+        layout.d_super_cluster_offsets == NULL ||
+        clustered_direct_cache->d_sorted_atom_ids == NULL ||
+        clustered_direct_cache->d_sorted_xq == NULL ||
+        clustered_direct_cache->d_sorted_lj_type == NULL ||
+        clustered_direct_cache->d_sorted_lj_comb == NULL ||
+        d_LJ_AB_packed == NULL)
+    {
+        return;
+    }
+
+    nbnxm_microbench::SpongeGmxpackedForceOnlySnapshot snapshot = {};
+    snapshot.header.file = nbnxm_microbench::MakeFileHeader(
+        nbnxm_microbench::SnapshotKind::spongeGmxpackedForceOnly);
+    snapshot.header.cluster_size = static_cast<uint32_t>(layout.cluster_size);
+    snapshot.header.super_cluster_clusters =
+        static_cast<uint32_t>(layout.super_cluster_clusters);
+    snapshot.header.warp_split_count = kClusteredWarpSplitCount;
+    snapshot.header.j_group_size = kClusteredJGroupSize;
+    snapshot.header.force_storage_sorted = 1u;
+    snapshot.header.use_lj_comb = 1u;
+    snapshot.header.cluster_numbers =
+        static_cast<uint64_t>(layout.cluster_numbers);
+    snapshot.header.super_cluster_numbers =
+        static_cast<uint64_t>(layout.super_cluster_numbers);
+    snapshot.header.sci_numbers =
+        static_cast<uint64_t>(layout.gmxpacked_sci_numbers);
+    snapshot.header.cjpacked_numbers =
+        static_cast<uint64_t>(layout.gmxpacked_cjpacked_numbers);
+    snapshot.header.excl_numbers =
+        static_cast<uint64_t>(layout.gmxpacked_exclusion_numbers);
+    snapshot.header.pair_shift_word_numbers =
+        static_cast<uint64_t>(layout.gmxpacked_cjpacked_numbers *
+                              kClusteredJGroupSize);
+    snapshot.header.total_atom_numbers =
+        static_cast<uint64_t>(layout.total_atom_numbers);
+    snapshot.header.local_atom_numbers =
+        static_cast<uint64_t>(layout.local_atom_numbers);
+    snapshot.header.lj_param_numbers = static_cast<uint64_t>(lj_param_numbers);
+    snapshot.header.cutoff = cutoff;
+    snapshot.header.pme_beta = pme_beta;
+    snapshot.header.cell = To_Microbench_Matrix_POD(cell);
+
+    snapshot.cluster_offsets =
+        Copy_Device_Vector_To_Host(layout.d_cluster_offsets,
+                                   static_cast<size_t>(layout.cluster_numbers));
+    snapshot.cluster_valid_masks = Copy_Device_Vector_To_Host(
+        layout.d_cluster_valid_masks,
+        static_cast<size_t>(layout.cluster_numbers));
+    snapshot.cluster_local_masks = Copy_Device_Vector_To_Host(
+        layout.d_cluster_local_masks,
+        static_cast<size_t>(layout.cluster_numbers));
+    snapshot.super_cluster_offsets = Copy_Device_Vector_To_Host(
+        layout.d_super_cluster_offsets,
+        static_cast<size_t>(layout.super_cluster_numbers + 1));
+
+    const auto host_sci = Copy_Device_Vector_To_Host(
+        layout.d_gmxpacked_sci,
+        static_cast<size_t>(layout.gmxpacked_sci_numbers));
+    snapshot.sci.reserve(host_sci.size());
+    for (const LJ_CLUSTERED_GMXPACKED_SCI& sci : host_sci)
+    {
+        snapshot.sci.push_back(To_Microbench_Gmxpacked_Sci_POD(sci));
+    }
+
+    const auto host_cj = Copy_Device_Vector_To_Host(
+        layout.d_gmxpacked_cjpacked,
+        static_cast<size_t>(layout.gmxpacked_cjpacked_numbers));
+    snapshot.cjpacked.reserve(host_cj.size());
+    for (const LJ_CLUSTERED_GMXPACKED_CJ& cj : host_cj)
+    {
+        snapshot.cjpacked.push_back(To_Microbench_Gmxpacked_Cj_POD(cj));
+    }
+
+    const auto host_exclusions = Copy_Device_Vector_To_Host(
+        layout.d_gmxpacked_exclusions,
+        static_cast<size_t>(layout.gmxpacked_exclusion_numbers));
+    snapshot.excl.reserve(host_exclusions.size());
+    for (const LJ_CLUSTERED_GMXPACKED_EXCLUSION& exclusion : host_exclusions)
+    {
+        snapshot.excl.push_back(
+            To_Microbench_Gmxpacked_Exclusion_POD(exclusion));
+    }
+
+    snapshot.pair_shift_bits = Copy_Device_Vector_To_Host(
+        layout.d_pair_shift_bits,
+        static_cast<size_t>(layout.gmxpacked_cjpacked_numbers *
+                            kClusteredJGroupSize));
+    snapshot.sci_shift_safe_flags = Copy_Device_Vector_To_Host(
+        layout.d_gmxpacked_pair_shift_sci_safe_flags,
+        static_cast<size_t>(layout.gmxpacked_sci_numbers));
+    snapshot.sorted_atom_ids = Copy_Device_Vector_To_Host(
+        clustered_direct_cache->d_sorted_atom_ids,
+        static_cast<size_t>(layout.total_atom_numbers));
+    const auto host_sorted_xq = Copy_Device_Vector_To_Host(
+        clustered_direct_cache->d_sorted_xq,
+        static_cast<size_t>(layout.total_atom_numbers));
+    snapshot.sorted_xq.reserve(host_sorted_xq.size());
+    for (const float4& value : host_sorted_xq)
+    {
+        snapshot.sorted_xq.push_back(To_Microbench_Float4_POD(value));
+    }
+    snapshot.sorted_lj_type = Copy_Device_Vector_To_Host(
+        clustered_direct_cache->d_sorted_lj_type,
+        static_cast<size_t>(layout.total_atom_numbers));
+    const auto host_sorted_lj_comb = Copy_Device_Vector_To_Host(
+        clustered_direct_cache->d_sorted_lj_comb,
+        static_cast<size_t>(layout.total_atom_numbers));
+    snapshot.sorted_lj_comb.reserve(host_sorted_lj_comb.size());
+    for (const float2& value : host_sorted_lj_comb)
+    {
+        snapshot.sorted_lj_comb.push_back(To_Microbench_Float2_POD(value));
+    }
+    const auto host_lj_ab =
+        Copy_Device_Vector_To_Host(d_LJ_AB_packed, lj_param_numbers);
+    snapshot.lj_ab.reserve(host_lj_ab.size());
+    for (const float2& value : host_lj_ab)
+    {
+        snapshot.lj_ab.push_back(To_Microbench_Float2_POD(value));
+    }
+
+    const fs::path prefix_path(dump_prefix);
+    if (!prefix_path.parent_path().empty())
+    {
+        fs::create_directories(prefix_path.parent_path());
+    }
+    const fs::path snapshot_path =
+        prefix_path.string() + ".sponge_gmxpacked_forceonly.bin";
+    if (!nbnxm_microbench::WriteSpongeGmxpackedForceOnlySnapshot(
+            snapshot_path.string(), snapshot))
+    {
+        fprintf(stderr,
+                "[clustered microbench dump] failed to write %s\n",
+                snapshot_path.string().c_str());
+        return;
+    }
+    fprintf(stderr,
+            "[clustered microbench dump] wrote %s sci=%d cjpacked=%d "
+            "excl=%d atoms=%d\n",
+            snapshot_path.string().c_str(), layout.gmxpacked_sci_numbers,
+            layout.gmxpacked_cjpacked_numbers,
+            layout.gmxpacked_exclusion_numbers, layout.total_atom_numbers);
     dumped = true;
 }
 
@@ -2914,7 +3254,15 @@ Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb_ForceOnly_Warp_Record_Device(
         }
         const int exclusion_index = packed->split[split].exclusion_index;
         unsigned int pair_bits = 0xffffffffu;
-        if (exclusion_index != 0 && exclusion_entries != NULL)
+        if constexpr (sci_shift_only)
+        {
+            if (exclusion_index != 0)
+            {
+                pair_bits = exclusion_entries[exclusion_index]
+                                .pair[split_j_lane * cluster_stride + i_lane];
+            }
+        }
+        else if (exclusion_index != 0 && exclusion_entries != NULL)
         {
             pair_bits = exclusion_entries[exclusion_index]
                             .pair[split_j_lane * cluster_stride + i_lane];
@@ -6742,6 +7090,10 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
                 rcell);
             if (want_full_output_snapshot)
             {
+                Maybe_Dump_Clustered_Gmxpacked_Microbench_Diagnostic_Snapshot(
+                    clustered_direct_cache, d_LJ_AB_packed,
+                    static_cast<size_t>(pair_type_numbers), cutoff, pme_beta,
+                    cell);
                 have_full_output_snapshot =
                     Capture_Clustered_Microbench_Full_Output_Diagnostic_View(
                         clustered_direct_cache, d_LJ_AB_packed,
@@ -6750,6 +7102,10 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
             }
             else
             {
+                Maybe_Dump_Clustered_Gmxpacked_Microbench_Diagnostic_Snapshot(
+                    clustered_direct_cache, d_LJ_AB_packed,
+                    static_cast<size_t>(pair_type_numbers), cutoff, pme_beta,
+                    cell);
                 Maybe_Dump_Clustered_Microbench_Diagnostic_Snapshot(
                     clustered_direct_cache, d_LJ_AB_packed,
                     static_cast<size_t>(pair_type_numbers), cutoff, pme_beta,
@@ -6939,6 +7295,23 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
                 requested_gmxpacked_sci_shift_split &&
                 gmxpacked_fast_full_local_dense_compatible &&
                 clustered_layout.d_gmxpacked_pair_shift_sci_safe_flags != NULL;
+            const bool use_gmxpacked_sci_shift_split_skip_empty =
+                use_gmxpacked_sci_shift_split &&
+                Clustered_Gmxpacked_Sci_Shift_Split_Skip_Empty_Enabled();
+            const bool gmxpacked_sci_shift_split_counts_valid =
+                use_gmxpacked_sci_shift_split_skip_empty &&
+                clustered_layout.gmxpacked_pair_shift_sci_safe_counts_ready &&
+                clustered_layout.gmxpacked_pair_shift_safe_sci_numbers >= 0 &&
+                clustered_layout.gmxpacked_pair_shift_unsafe_sci_numbers >= 0 &&
+                clustered_layout.gmxpacked_pair_shift_safe_sci_numbers +
+                        clustered_layout.gmxpacked_pair_shift_unsafe_sci_numbers ==
+                    clustered_layout.gmxpacked_sci_numbers;
+            const bool gmxpacked_sci_shift_split_has_safe =
+                !gmxpacked_sci_shift_split_counts_valid ||
+                clustered_layout.gmxpacked_pair_shift_safe_sci_numbers > 0;
+            const bool gmxpacked_sci_shift_split_has_unsafe =
+                !gmxpacked_sci_shift_split_counts_valid ||
+                clustered_layout.gmxpacked_pair_shift_unsafe_sci_numbers > 0;
             const bool use_gmxpacked_sci_shift_runtime =
                 requested_gmxpacked_sci_shift_runtime &&
                 gmxpacked_fast_full_local_dense_compatible &&
@@ -7029,7 +7402,9 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
                         "direct_local_atoms=%d ghosts=%d "
                         "dense total_eq_clusters=%d clusters_mod_super=%d "
                         "full_local_dense=%d "
-                        "sci_shift only=%d split=%d runtime=%d flags=%d\n",
+                        "sci_shift only=%d split=%d runtime=%d flags=%d "
+                        "split_skip_empty=%d split_counts_valid=%d "
+                        "split_safe=%d split_unsafe=%d\n",
                         lj_call, need_atom_energy ? 1 : 0,
                         need_virial ? 1 : 0, gmxpacked_direct_opt_in ? 1 : 0,
                         native_gmxpacked_fallback ? 1 : 0,
@@ -7079,7 +7454,11 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
                         clustered_layout.d_gmxpacked_pair_shift_sci_safe_flags !=
                                 NULL
                             ? 1
-                            : 0);
+                            : 0,
+                        use_gmxpacked_sci_shift_split_skip_empty ? 1 : 0,
+                        gmxpacked_sci_shift_split_counts_valid ? 1 : 0,
+                        clustered_layout.gmxpacked_pair_shift_safe_sci_numbers,
+                        clustered_layout.gmxpacked_pair_shift_unsafe_sci_numbers);
                     fflush(stderr);
                     printed_gate_trace[trace_key] = true;
                 }
@@ -7341,6 +7720,11 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
                         const int* sci_shift_flags =
                             clustered_layout
                                 .d_gmxpacked_pair_shift_sci_safe_flags;
+                        const int* fast_sci_shift_flags =
+                            gmxpacked_sci_shift_split_counts_valid &&
+                                    !gmxpacked_sci_shift_split_has_unsafe
+                                ? NULL
+                                : sci_shift_flags;
                         if (use_gmxpacked_float4_sorted_force)
                         {
                             auto gmxpacked_f4_fast =
@@ -7351,53 +7735,59 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
                                 Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb_ForceOnly_Warp_Record_Device<
                                     false, false, false, true, true, true,
                                     true, false, float4>;
-                            Launch_Device_Kernel(
-                                gmxpacked_f4_fast, gmxpackedGridSize,
-                                blockSize, 0, NULL,
-                                clustered_layout.gmxpacked_sci_numbers,
-                                clustered_layout.cluster_size,
-                                clustered_layout.super_cluster_clusters,
-                                clustered_layout.cluster_numbers,
-                                clustered_layout.d_cluster_offsets,
-                                clustered_layout.d_cluster_valid_masks,
-                                clustered_layout.d_cluster_local_masks,
-                                clustered_layout.d_super_cluster_offsets,
-                                clustered_layout.d_gmxpacked_sci,
-                                clustered_layout.d_gmxpacked_cjpacked,
-                                clustered_layout.d_gmxpacked_exclusions,
-                                NULL, sci_shift_flags, 1,
-                                clustered_direct_cache->d_sorted_atom_ids,
-                                clustered_direct_cache->d_sorted_xq,
-                                clustered_direct_cache->d_sorted_lj_type,
-                                clustered_direct_cache->d_sorted_lj_comb, cell,
-                                d_LJ_AB_packed, cutoff,
-                                clustered_direct_cache->d_sorted_frc4,
-                                pme_beta, atom_energy, atom_virial,
-                                atom_direct_pme_energy, d_LJ_energy_atom);
-                            Launch_Device_Kernel(
-                                gmxpacked_f4_slow, gmxpackedGridSize,
-                                blockSize, 0, NULL,
-                                clustered_layout.gmxpacked_sci_numbers,
-                                clustered_layout.cluster_size,
-                                clustered_layout.super_cluster_clusters,
-                                clustered_layout.cluster_numbers,
-                                clustered_layout.d_cluster_offsets,
-                                clustered_layout.d_cluster_valid_masks,
-                                clustered_layout.d_cluster_local_masks,
-                                clustered_layout.d_super_cluster_offsets,
-                                clustered_layout.d_gmxpacked_sci,
-                                clustered_layout.d_gmxpacked_cjpacked,
-                                clustered_layout.d_gmxpacked_exclusions,
-                                clustered_layout.d_pair_shift_bits,
-                                sci_shift_flags, 0,
-                                clustered_direct_cache->d_sorted_atom_ids,
-                                clustered_direct_cache->d_sorted_xq,
-                                clustered_direct_cache->d_sorted_lj_type,
-                                clustered_direct_cache->d_sorted_lj_comb, cell,
-                                d_LJ_AB_packed, cutoff,
-                                clustered_direct_cache->d_sorted_frc4,
-                                pme_beta, atom_energy, atom_virial,
-                                atom_direct_pme_energy, d_LJ_energy_atom);
+                            if (gmxpacked_sci_shift_split_has_safe)
+                            {
+                                Launch_Device_Kernel(
+                                    gmxpacked_f4_fast, gmxpackedGridSize,
+                                    blockSize, 0, NULL,
+                                    clustered_layout.gmxpacked_sci_numbers,
+                                    clustered_layout.cluster_size,
+                                    clustered_layout.super_cluster_clusters,
+                                    clustered_layout.cluster_numbers,
+                                    clustered_layout.d_cluster_offsets,
+                                    clustered_layout.d_cluster_valid_masks,
+                                    clustered_layout.d_cluster_local_masks,
+                                    clustered_layout.d_super_cluster_offsets,
+                                    clustered_layout.d_gmxpacked_sci,
+                                    clustered_layout.d_gmxpacked_cjpacked,
+                                    clustered_layout.d_gmxpacked_exclusions,
+                                    NULL, fast_sci_shift_flags, 1,
+                                    clustered_direct_cache->d_sorted_atom_ids,
+                                    clustered_direct_cache->d_sorted_xq,
+                                    clustered_direct_cache->d_sorted_lj_type,
+                                    clustered_direct_cache->d_sorted_lj_comb,
+                                    cell, d_LJ_AB_packed, cutoff,
+                                    clustered_direct_cache->d_sorted_frc4,
+                                    pme_beta, atom_energy, atom_virial,
+                                    atom_direct_pme_energy, d_LJ_energy_atom);
+                            }
+                            if (gmxpacked_sci_shift_split_has_unsafe)
+                            {
+                                Launch_Device_Kernel(
+                                    gmxpacked_f4_slow, gmxpackedGridSize,
+                                    blockSize, 0, NULL,
+                                    clustered_layout.gmxpacked_sci_numbers,
+                                    clustered_layout.cluster_size,
+                                    clustered_layout.super_cluster_clusters,
+                                    clustered_layout.cluster_numbers,
+                                    clustered_layout.d_cluster_offsets,
+                                    clustered_layout.d_cluster_valid_masks,
+                                    clustered_layout.d_cluster_local_masks,
+                                    clustered_layout.d_super_cluster_offsets,
+                                    clustered_layout.d_gmxpacked_sci,
+                                    clustered_layout.d_gmxpacked_cjpacked,
+                                    clustered_layout.d_gmxpacked_exclusions,
+                                    clustered_layout.d_pair_shift_bits,
+                                    sci_shift_flags, 0,
+                                    clustered_direct_cache->d_sorted_atom_ids,
+                                    clustered_direct_cache->d_sorted_xq,
+                                    clustered_direct_cache->d_sorted_lj_type,
+                                    clustered_direct_cache->d_sorted_lj_comb,
+                                    cell, d_LJ_AB_packed, cutoff,
+                                    clustered_direct_cache->d_sorted_frc4,
+                                    pme_beta, atom_energy, atom_virial,
+                                    atom_direct_pme_energy, d_LJ_energy_atom);
+                            }
                         }
                         else
                         {
@@ -7447,51 +7837,59 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
                                         false, true, true, true, false);
                             }
 #undef CLUSTERED_GMXPACKED_SPLIT_FULL_DENSE_KERNEL
-                            Launch_Device_Kernel(
-                                gmxpacked_fast_f, gmxpackedGridSize, blockSize,
-                                0, NULL,
-                                clustered_layout.gmxpacked_sci_numbers,
-                                clustered_layout.cluster_size,
-                                clustered_layout.super_cluster_clusters,
-                                clustered_layout.cluster_numbers,
-                                clustered_layout.d_cluster_offsets,
-                                clustered_layout.d_cluster_valid_masks,
-                                clustered_layout.d_cluster_local_masks,
-                                clustered_layout.d_super_cluster_offsets,
-                                clustered_layout.d_gmxpacked_sci,
-                                clustered_layout.d_gmxpacked_cjpacked,
-                                clustered_layout.d_gmxpacked_exclusions,
-                                NULL, sci_shift_flags, 1,
-                                clustered_direct_cache->d_sorted_atom_ids,
-                                clustered_direct_cache->d_sorted_xq,
-                                clustered_direct_cache->d_sorted_lj_type,
-                                clustered_direct_cache->d_sorted_lj_comb, cell,
-                                d_LJ_AB_packed, cutoff, clustered_force_target,
-                                pme_beta, atom_energy, atom_virial,
-                                atom_direct_pme_energy, d_LJ_energy_atom);
-                            Launch_Device_Kernel(
-                                gmxpacked_slow_f, gmxpackedGridSize, blockSize,
-                                0, NULL,
-                                clustered_layout.gmxpacked_sci_numbers,
-                                clustered_layout.cluster_size,
-                                clustered_layout.super_cluster_clusters,
-                                clustered_layout.cluster_numbers,
-                                clustered_layout.d_cluster_offsets,
-                                clustered_layout.d_cluster_valid_masks,
-                                clustered_layout.d_cluster_local_masks,
-                                clustered_layout.d_super_cluster_offsets,
-                                clustered_layout.d_gmxpacked_sci,
-                                clustered_layout.d_gmxpacked_cjpacked,
-                                clustered_layout.d_gmxpacked_exclusions,
-                                clustered_layout.d_pair_shift_bits,
-                                sci_shift_flags, 0,
-                                clustered_direct_cache->d_sorted_atom_ids,
-                                clustered_direct_cache->d_sorted_xq,
-                                clustered_direct_cache->d_sorted_lj_type,
-                                clustered_direct_cache->d_sorted_lj_comb, cell,
-                                d_LJ_AB_packed, cutoff, clustered_force_target,
-                                pme_beta, atom_energy, atom_virial,
-                                atom_direct_pme_energy, d_LJ_energy_atom);
+                            if (gmxpacked_sci_shift_split_has_safe)
+                            {
+                                Launch_Device_Kernel(
+                                    gmxpacked_fast_f, gmxpackedGridSize,
+                                    blockSize, 0, NULL,
+                                    clustered_layout.gmxpacked_sci_numbers,
+                                    clustered_layout.cluster_size,
+                                    clustered_layout.super_cluster_clusters,
+                                    clustered_layout.cluster_numbers,
+                                    clustered_layout.d_cluster_offsets,
+                                    clustered_layout.d_cluster_valid_masks,
+                                    clustered_layout.d_cluster_local_masks,
+                                    clustered_layout.d_super_cluster_offsets,
+                                    clustered_layout.d_gmxpacked_sci,
+                                    clustered_layout.d_gmxpacked_cjpacked,
+                                    clustered_layout.d_gmxpacked_exclusions,
+                                    NULL, fast_sci_shift_flags, 1,
+                                    clustered_direct_cache->d_sorted_atom_ids,
+                                    clustered_direct_cache->d_sorted_xq,
+                                    clustered_direct_cache->d_sorted_lj_type,
+                                    clustered_direct_cache->d_sorted_lj_comb,
+                                    cell, d_LJ_AB_packed, cutoff,
+                                    clustered_force_target, pme_beta,
+                                    atom_energy, atom_virial,
+                                    atom_direct_pme_energy, d_LJ_energy_atom);
+                            }
+                            if (gmxpacked_sci_shift_split_has_unsafe)
+                            {
+                                Launch_Device_Kernel(
+                                    gmxpacked_slow_f, gmxpackedGridSize,
+                                    blockSize, 0, NULL,
+                                    clustered_layout.gmxpacked_sci_numbers,
+                                    clustered_layout.cluster_size,
+                                    clustered_layout.super_cluster_clusters,
+                                    clustered_layout.cluster_numbers,
+                                    clustered_layout.d_cluster_offsets,
+                                    clustered_layout.d_cluster_valid_masks,
+                                    clustered_layout.d_cluster_local_masks,
+                                    clustered_layout.d_super_cluster_offsets,
+                                    clustered_layout.d_gmxpacked_sci,
+                                    clustered_layout.d_gmxpacked_cjpacked,
+                                    clustered_layout.d_gmxpacked_exclusions,
+                                    clustered_layout.d_pair_shift_bits,
+                                    sci_shift_flags, 0,
+                                    clustered_direct_cache->d_sorted_atom_ids,
+                                    clustered_direct_cache->d_sorted_xq,
+                                    clustered_direct_cache->d_sorted_lj_type,
+                                    clustered_direct_cache->d_sorted_lj_comb,
+                                    cell, d_LJ_AB_packed, cutoff,
+                                    clustered_force_target, pme_beta,
+                                    atom_energy, atom_virial,
+                                    atom_direct_pme_energy, d_LJ_energy_atom);
+                            }
                         }
                     }
                     else if (use_gmxpacked_float4_sorted_force)

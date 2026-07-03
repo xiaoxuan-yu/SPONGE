@@ -19,6 +19,7 @@ enum class SnapshotKind : uint32_t
     spongeForceOnly = 1u,
     gromacsPairlist = 2u,
     spongeClusteredFullOutput = 3u,
+    spongeGmxpackedForceOnly = 4u,
 };
 
 struct SnapshotFileHeader
@@ -93,6 +94,31 @@ struct GromacsCjPackedPOD
 };
 
 struct GromacsExclPOD
+{
+    unsigned int pair[32] = {};
+};
+
+struct SpongeGmxpackedSciPOD
+{
+    int supercluster_id = 0;
+    int shift_id = 13;
+    int cjpacked_begin = 0;
+    int cjpacked_end = 0;
+};
+
+struct SpongeGmxpackedSplitPOD
+{
+    unsigned int imask = 0u;
+    int exclusion_index = 0;
+};
+
+struct SpongeGmxpackedCjPOD
+{
+    int cj[4] = { -1, -1, -1, -1 };
+    SpongeGmxpackedSplitPOD split[2] = {};
+};
+
+struct SpongeGmxpackedExclusionPOD
 {
     unsigned int pair[32] = {};
 };
@@ -175,6 +201,31 @@ struct GromacsPairlistSnapshotHeader
     std::array<Float4POD, 27> shiftvec = {};
 };
 
+struct SpongeGmxpackedForceOnlySnapshotHeader
+{
+    SnapshotFileHeader file = {};
+    uint32_t cluster_size = 8u;
+    uint32_t super_cluster_clusters = 8u;
+    uint32_t warp_split_count = 2u;
+    uint32_t j_group_size = 4u;
+    uint32_t force_storage_sorted = 1u;
+    uint32_t use_lj_comb = 1u;
+    uint32_t reserved0 = 0u;
+    uint32_t reserved1 = 0u;
+    uint64_t cluster_numbers = 0u;
+    uint64_t super_cluster_numbers = 0u;
+    uint64_t sci_numbers = 0u;
+    uint64_t cjpacked_numbers = 0u;
+    uint64_t excl_numbers = 0u;
+    uint64_t pair_shift_word_numbers = 0u;
+    uint64_t total_atom_numbers = 0u;
+    uint64_t local_atom_numbers = 0u;
+    uint64_t lj_param_numbers = 0u;
+    float cutoff = 0.0f;
+    float pme_beta = 0.0f;
+    LTMatrix3POD cell = {};
+};
+
 struct SpongeForceOnlySnapshot
 {
     SpongeForceOnlySnapshotHeader header = {};
@@ -223,6 +274,25 @@ struct GromacsPairlistSnapshot
     std::vector<GromacsSciPOD> sci;
     std::vector<GromacsCjPackedPOD> cjpacked;
     std::vector<GromacsExclPOD> excl;
+    std::vector<int> sorted_atom_ids;
+    std::vector<Float4POD> sorted_xq;
+    std::vector<int> sorted_lj_type;
+    std::vector<Float2POD> sorted_lj_comb;
+    std::vector<Float2POD> lj_ab;
+};
+
+struct SpongeGmxpackedForceOnlySnapshot
+{
+    SpongeGmxpackedForceOnlySnapshotHeader header = {};
+    std::vector<int> cluster_offsets;
+    std::vector<unsigned int> cluster_valid_masks;
+    std::vector<unsigned int> cluster_local_masks;
+    std::vector<int> super_cluster_offsets;
+    std::vector<SpongeGmxpackedSciPOD> sci;
+    std::vector<SpongeGmxpackedCjPOD> cjpacked;
+    std::vector<SpongeGmxpackedExclusionPOD> excl;
+    std::vector<uint64_t> pair_shift_bits;
+    std::vector<int> sci_shift_safe_flags;
     std::vector<int> sorted_atom_ids;
     std::vector<Float4POD> sorted_xq;
     std::vector<int> sorted_lj_type;
@@ -411,6 +481,79 @@ inline bool ReadGromacsPairlistSnapshot(const std::string& path,
            ReadVector(&in, &snapshot->sci, sci_numbers) &&
            ReadVector(&in, &snapshot->cjpacked, cjpacked_numbers) &&
            ReadVector(&in, &snapshot->excl, excl_numbers) &&
+           ReadVector(&in, &snapshot->sorted_xq, total_atom_numbers) &&
+           ReadVector(&in, &snapshot->sorted_lj_type, total_atom_numbers) &&
+           ReadVector(&in, &snapshot->sorted_lj_comb, total_atom_numbers) &&
+           ReadVector(&in, &snapshot->lj_ab, lj_param_numbers);
+}
+
+inline bool WriteSpongeGmxpackedForceOnlySnapshot(
+    const std::string& path,
+    const SpongeGmxpackedForceOnlySnapshot& snapshot)
+{
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out.good())
+    {
+        return false;
+    }
+    if (!WriteBinary(&out, snapshot.header) ||
+        !WriteVector(&out, snapshot.cluster_offsets) ||
+        !WriteVector(&out, snapshot.cluster_valid_masks) ||
+        !WriteVector(&out, snapshot.cluster_local_masks) ||
+        !WriteVector(&out, snapshot.super_cluster_offsets) ||
+        !WriteVector(&out, snapshot.sci) ||
+        !WriteVector(&out, snapshot.cjpacked) ||
+        !WriteVector(&out, snapshot.excl) ||
+        !WriteVector(&out, snapshot.pair_shift_bits) ||
+        !WriteVector(&out, snapshot.sci_shift_safe_flags) ||
+        !WriteVector(&out, snapshot.sorted_atom_ids) ||
+        !WriteVector(&out, snapshot.sorted_xq) ||
+        !WriteVector(&out, snapshot.sorted_lj_type) ||
+        !WriteVector(&out, snapshot.sorted_lj_comb) ||
+        !WriteVector(&out, snapshot.lj_ab))
+    {
+        return false;
+    }
+    return out.good();
+}
+
+inline bool ReadSpongeGmxpackedForceOnlySnapshot(
+    const std::string& path,
+    SpongeGmxpackedForceOnlySnapshot* snapshot)
+{
+    std::ifstream in(path, std::ios::binary);
+    if (!in.good() || !ReadBinary(&in, &snapshot->header) ||
+        !IsValidFileHeader(snapshot->header.file,
+                           SnapshotKind::spongeGmxpackedForceOnly))
+    {
+        return false;
+    }
+    const auto cluster_numbers =
+        static_cast<size_t>(snapshot->header.cluster_numbers);
+    const auto super_cluster_numbers =
+        static_cast<size_t>(snapshot->header.super_cluster_numbers);
+    const auto sci_numbers = static_cast<size_t>(snapshot->header.sci_numbers);
+    const auto cjpacked_numbers =
+        static_cast<size_t>(snapshot->header.cjpacked_numbers);
+    const auto excl_numbers = static_cast<size_t>(snapshot->header.excl_numbers);
+    const auto pair_shift_word_numbers =
+        static_cast<size_t>(snapshot->header.pair_shift_word_numbers);
+    const auto total_atom_numbers =
+        static_cast<size_t>(snapshot->header.total_atom_numbers);
+    const auto lj_param_numbers =
+        static_cast<size_t>(snapshot->header.lj_param_numbers);
+    return ReadVector(&in, &snapshot->cluster_offsets, cluster_numbers) &&
+           ReadVector(&in, &snapshot->cluster_valid_masks, cluster_numbers) &&
+           ReadVector(&in, &snapshot->cluster_local_masks, cluster_numbers) &&
+           ReadVector(&in, &snapshot->super_cluster_offsets,
+                      super_cluster_numbers + 1) &&
+           ReadVector(&in, &snapshot->sci, sci_numbers) &&
+           ReadVector(&in, &snapshot->cjpacked, cjpacked_numbers) &&
+           ReadVector(&in, &snapshot->excl, excl_numbers) &&
+           ReadVector(&in, &snapshot->pair_shift_bits,
+                      pair_shift_word_numbers) &&
+           ReadVector(&in, &snapshot->sci_shift_safe_flags, sci_numbers) &&
+           ReadVector(&in, &snapshot->sorted_atom_ids, total_atom_numbers) &&
            ReadVector(&in, &snapshot->sorted_xq, total_atom_numbers) &&
            ReadVector(&in, &snapshot->sorted_lj_type, total_atom_numbers) &&
            ReadVector(&in, &snapshot->sorted_lj_comb, total_atom_numbers) &&

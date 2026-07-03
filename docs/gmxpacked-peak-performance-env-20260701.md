@@ -23,16 +23,20 @@ Equivalent inputs are valid if they keep:
 Do not compare these numbers with the 160k PME case or with nsys-wrapped
 `Core Run Speed` values.
 
-## Peak env
+## Stable peak env
 
-This is the current peak-performance env for the force-only case:
+This is the current stable peak-performance env for the force-only case.
+
+Important: keep rolling source cache disabled until that path is fixed. The
+same env with `SPONGE_CLUSTERED_GMXPACKED_ACTIVE_VIEW_ROLLING_SOURCE_CACHE=1`
+has shown intermittent 10000-step NaN after repeated no-verify runs.
 
 ```sh
 SPONGE_CLUSTERED_DISABLE_FINE_TIMERS=1
 SPONGE_CLUSTERED_USE_GMXPACKED_DIRECT=1
 SPONGE_CLUSTERED_GMXPACKED_LIFECYCLE_POLICY=outer
 SPONGE_CLUSTERED_GMXPACKED_ACTIVE_VIEW=1
-SPONGE_CLUSTERED_GMXPACKED_ACTIVE_VIEW_ROLLING_SOURCE_CACHE=1
+SPONGE_CLUSTERED_GMXPACKED_ACTIVE_VIEW_ROLLING_SOURCE_CACHE=0
 SPONGE_CLUSTERED_GMXPACKED_SUBGROUP_BUILDER=1
 SPONGE_CLUSTERED_SHIFT_PARTITIONED_BUILDER=1
 SPONGE_CLUSTERED_FIXED_SHIFT_LEAF_SCREENING=1
@@ -47,13 +51,65 @@ SPONGE_CLUSTERED_GMXPACKED_DIRTY_J_PARALLEL_SCAN=1
 SPONGE_CLUSTERED_GMXPACKED_ACTIVE_VIEW_ZERO_DIRTY_SOURCE_REUSE=1
 ```
 
-Do not add this flag to the peak env:
+Do not add these flags to the peak env:
 
 ```sh
 SPONGE_CLUSTERED_GMXPACKED_ACTIVE_VIEW_SOURCE_CACHE_PATCH=1
+SPONGE_CLUSTERED_GMXPACKED_COUNT_FIXED_LIGHT_SASS_OPT=1
+SPONGE_CLUSTERED_FIXED_SHIFT_CANDIDATE_LEAF_COLLECT_SASS_OPT=1
+SPONGE_CLUSTERED_GMXPACKED_PAIR_SHIFT_SIMPLE_REFRESH=1
+SPONGE_CLUSTERED_GMXPACKED_SORTED_CLUSTER_MAP=1
+SPONGE_CLUSTERED_GMXPACKED_SCI_SHIFT_SPLIT_SKIP_EMPTY=1
 ```
 
-In the 2026-07-01 matrix it did not improve the peak path.
+The source-cache patch did not improve the 2026-07-01 peak path. The 2026-07-03
+dirty-gate bundle above was stable with rolling cache off, but it was slower
+than the default-off path.
+
+## 2026-07-03 rolling source cache decision
+
+Case:
+
+```text
+/tmp/sponge-onepass-capacity-check/mdin_skin11_current_10000.spg.toml
+```
+
+Build:
+
+```sh
+pixi run -e dev-cuda13 cmake --build build-dev-cuda13 --target SPONGE --parallel 4
+```
+
+The worktree was first stashed and rebuilt clean, then the dirty experiment
+stash was popped and rebuilt again. The purpose was to separate peak-env
+stability from uncommitted experimental code.
+
+| configuration | runs | stability | average speed | speed range |
+|---|---:|---:|---:|---:|
+| clean HEAD, rolling source cache on | 3 | 2 finite, 1 NaN | finite runs: `104.064915 ns/day` | `103.112076-105.017754 ns/day` |
+| clean HEAD, rolling source cache on, zero-dirty source reuse off | 2 | 1 finite, 1 NaN | finite run: `93.731171 ns/day` | n/a |
+| clean HEAD, rolling source cache off | 5 | 5 finite, 0 NaN | `107.217345 ns/day` | `105.671165-109.398247 ns/day` |
+| dirty experiment code popped, rolling source cache off, new gates default off | 3 | 3 finite, 0 NaN | `106.095558 ns/day` | `104.869461-107.298065 ns/day` |
+| dirty experiment code popped, rolling source cache off, new dirty gates on | 2 | 2 finite, 0 NaN | `102.969200 ns/day` | `102.713722-103.224678 ns/day` |
+
+Detailed output files:
+
+```text
+/tmp/sponge-clean-stability-10000-r*.out
+/tmp/sponge-clean-ablate-zero_off-10000-r*.out
+/tmp/sponge-clean-ablate-rolling_off-10000-r*.out
+/tmp/sponge-dirty-rollingoff-10000-r*.out
+/tmp/sponge-dirty-rollingoff-gateson-10000-r*.out
+```
+
+Decision:
+
+- the stable peak env disables rolling source cache;
+- the current highest observed stable 10000-step speed is
+  `109.398247 ns/day`;
+- the dirty experiment gates are not part of the peak env;
+- rolling source cache should be treated as an isolated correctness/stability
+  repair target before it is used again in peak runs.
 
 ## Observed results
 

@@ -69,14 +69,17 @@ preserves the original fill order.
 
 ## Current accepted peak path
 
-Common env for the current best 160k force-only path:
+Common env for the current best stable 160k force-only path. As of the
+2026-07-03 stability retest, rolling source cache is intentionally disabled;
+see `docs/gmxpacked-peak-performance-env-20260701.md` for the latest repeated
+10000-step matrix.
 
 ```sh
 SPONGE_CLUSTERED_DISABLE_FINE_TIMERS=1
 SPONGE_CLUSTERED_USE_GMXPACKED_DIRECT=1
 SPONGE_CLUSTERED_GMXPACKED_LIFECYCLE_POLICY=outer
 SPONGE_CLUSTERED_GMXPACKED_ACTIVE_VIEW=1
-SPONGE_CLUSTERED_GMXPACKED_ACTIVE_VIEW_ROLLING_SOURCE_CACHE=1
+SPONGE_CLUSTERED_GMXPACKED_ACTIVE_VIEW_ROLLING_SOURCE_CACHE=0
 SPONGE_CLUSTERED_GMXPACKED_SUBGROUP_BUILDER=1
 SPONGE_CLUSTERED_SHIFT_PARTITIONED_BUILDER=1
 SPONGE_CLUSTERED_FIXED_SHIFT_LEAF_SCREENING=1
@@ -273,6 +276,109 @@ Relative to the current one-pass-off run:
 
 Both current force-only 10000-step runs had empty stderr and no NaN, mismatch,
 overflow, or error text.
+
+## Rejected count-metadata extension
+
+Date: 2026-07-02.
+
+An experimental extension attempted to carry three extra per-candidate-leaf
+metadata arrays from one-pass collect into payload count:
+
+- `cluster_j_start`
+- `cluster_j_end`
+- `deduped_cluster_j_start`
+
+The goal was to avoid the bounded backward scan in
+`Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup`. The experiment was
+env-gated as:
+
+```sh
+SPONGE_CLUSTERED_FIXED_SHIFT_ONEPASS_COUNT_METADATA=1
+```
+
+It was removed from the code after validation because the performance gain was
+too small and the no-verify path showed a stability regression.
+
+Same current binary, same peak env, 10000-step nsys comparison:
+
+| case | speed | core wall | `Calculate_Force` |
+|---|---:|---:|---:|
+| metadata off | `99.478813 ns/day` | `8.686135 s` | `7.896326 s` |
+| metadata on | `99.582550 ns/day` | `8.677086 s` | `7.972086 s` |
+
+Kernel-level result:
+
+| kernel group | metadata off | metadata on | conclusion |
+|---|---:|---:|---|
+| payload count | `1294.378 ms x19`, avg `68.125 ms` | `1392.189 ms x21`, avg `66.295 ms` | per-launch only `2.7%` faster, total higher due to more rebuilds |
+| one-pass collect | `841.128 ms x19`, avg `44.270 ms` | `896.358 ms x21`, avg `42.684 ms` | per-launch only `3.6%` faster |
+| one-pass scatter | `4.419 ms x19`, avg `0.233 ms` | `16.514 ms x21`, avg `0.786 ms` | extra metadata writes made scatter about `3.4x` slower |
+| source count/fill/materialize | `343.475 ms` | `372.577 ms` | total increased with extra rebuilds |
+
+Additional stability observation:
+
+- a no-verify 10000-step metadata-on run previously reached `20.608513 ns/day`
+  and ended with `NaN` at step 10000;
+- a verify-enabled metadata-on run stayed finite and reported all count/fill
+  mismatches as zero, but verify adds synchronization and is not representative
+  of the production no-verify path.
+
+Decision:
+
+- do not keep `SPONGE_CLUSTERED_FIXED_SHIFT_ONEPASS_COUNT_METADATA`;
+- keep the accepted one-pass candidate leaf path;
+- do not spend more time on this metadata variant unless a future design avoids
+  the extra scatter writes and first fixes no-verify stability.
+
+## Microbench L1 cache check
+
+Date: 2026-07-02.
+
+The force-kernel microbench was used to isolate whether the remaining
+production gmxpacked replay gap is directly recoverable from L1/global-load
+changes without changing payload shape:
+
+```sh
+build-dev-cuda13/NBNXM_MICROBENCH \
+  --kernel sponge \
+  --sponge-lj-mode production-gmxpacked \
+  --snapshot /tmp/sponge-microbench-matrix-20260702/forceonly_payload.sponge_gmxpacked_forceonly.bin \
+  --warmup 40 --iters 160
+```
+
+The kept baseline is the normal global-load path after removing the earlier
+`LoadReadOnly`/`__ldg` use. The lineinfo/source-page pass showed the hottest
+read sites around:
+
+- `sci_entries[sci]`;
+- i-side `sorted_xq` and `sorted_lj_comb` preload into shared memory;
+- split `imask` / `exclusion_index` / exclusion pair data;
+- j-side `packed->cj`, `sorted_xq`, `sorted_lj_comb`;
+- force-output `sorted_atom_ids` for native force storage.
+
+Two microbench-only A/B variants were tried and rejected:
+
+| variant | force-only timing | NCU time | global ld | miss ld | sectors | miss sectors | regs | eligible | issue active | result |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
+| normal global load | `0.267-0.289 ms` | `312.768 us` | `119.538 MB` | `68.380 MB` | `3.736 M` | `2.137 M` | `70` | `0.96` | `52.80%` | kept |
+| cache/broadcast force-output atom ids | `0.293-0.315 ms` | `327.616 us` | `118.541 MB` | `67.746 MB` | `3.704 M` | `2.117 M` | `70` | `1.02` | `54.71%` | rejected |
+| subgroup-broadcast j-side `xq/lj` | `0.319 ms` | `348.928 us` | `119.538 MB` | `68.309 MB` | `3.736 M` | `2.135 M` | `71` | `0.90` | `51.43%` | rejected |
+
+Interpretation:
+
+- The atom-id cache reduces only about `1.0 MB` of global load traffic and
+  about `0.9%` of miss sectors, which is too small to pay for the extra shared
+  memory/shuffle path.
+- The j-side broadcast variant does not reduce the measured global-load
+  requests or sectors on this build, and it increases register pressure. The
+  compiler/hardware path for same-address subgroup reads is already better than
+  the manual broadcast version here.
+- The L1 signal remains useful diagnostically, but the next kernel optimization
+  should not be another hand-written broadcast of the current payload. The
+  higher-value direction is still payload-shape or production-kernel scheduling:
+  reduce the amount of work presented to the force kernel, or change the replay
+  organization so fewer memory/atomic instructions are needed rather than
+  adding shuffle work around the existing layout.
 
 ## Status
 

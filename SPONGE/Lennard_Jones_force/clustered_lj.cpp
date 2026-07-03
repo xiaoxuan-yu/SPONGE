@@ -150,6 +150,12 @@ static bool Clustered_Gmxpacked_Sci_Shift_Runtime_Enabled()
         "SPONGE_CLUSTERED_GMXPACKED_SCI_SHIFT_RUNTIME");
 }
 
+static bool Clustered_Gmxpacked_Sci_Shift_Split_Skip_Empty_Enabled()
+{
+    return Clustered_Gmxpacked_Env_Flag_Enabled(
+        "SPONGE_CLUSTERED_GMXPACKED_SCI_SHIFT_SPLIT_SKIP_EMPTY");
+}
+
 static bool Clustered_Gmxpacked_Exact_Sci_Shift_Flags_Enabled()
 {
     return Clustered_Gmxpacked_Env_Flag_Enabled(
@@ -168,6 +174,30 @@ static bool Clustered_Gmxpacked_Pair_Shift_Metadata_Cache_Enabled()
         std::getenv("SPONGE_CLUSTERED_GMXPACKED_ACTIVE_VIEW");
     return active_view != NULL && active_view[0] != '\0' &&
            active_view[0] != '0';
+}
+
+static bool Clustered_Gmxpacked_Sorted_Cluster_Map_Enabled()
+{
+    return Clustered_Gmxpacked_Env_Flag_Enabled(
+        "SPONGE_CLUSTERED_GMXPACKED_SORTED_CLUSTER_MAP");
+}
+
+static bool Clustered_Gmxpacked_Pair_Shift_Simple_Refresh_Enabled()
+{
+    return Clustered_Gmxpacked_Env_Flag_Enabled(
+        "SPONGE_CLUSTERED_GMXPACKED_PAIR_SHIFT_SIMPLE_REFRESH");
+}
+
+static bool Clustered_Gmxpacked_Count_Fixed_Light_Sass_Opt_Enabled()
+{
+    return Clustered_Gmxpacked_Env_Flag_Enabled(
+        "SPONGE_CLUSTERED_GMXPACKED_COUNT_FIXED_LIGHT_SASS_OPT");
+}
+
+static bool Clustered_Fixed_Shift_Candidate_Leaf_Collect_Sass_Opt_Enabled()
+{
+    return Clustered_Gmxpacked_Env_Flag_Enabled(
+        "SPONGE_CLUSTERED_FIXED_SHIFT_CANDIDATE_LEAF_COLLECT_SASS_OPT");
 }
 
 #ifdef USE_CPU
@@ -846,9 +876,23 @@ static __host__ __device__ __forceinline__ VECTOR Fractional_Extent_Pad(
         fabsf(extent.z * rcell.a33)};
 }
 
+static __host__ __device__ __forceinline__ bool
+Cluster_Aabb_Overlaps_Shifted_CutoffSq(VECTOR center_i, VECTOR extent_i,
+                                       VECTOR center_j, VECTOR extent_j,
+                                       float cutoff_sq, VECTOR shift_vec);
+
 static __host__ __device__ __forceinline__ bool Cluster_Aabb_Overlaps_Shifted(
     VECTOR center_i, VECTOR extent_i, VECTOR center_j, VECTOR extent_j,
     float cutoff, VECTOR shift_vec)
+{
+    return Cluster_Aabb_Overlaps_Shifted_CutoffSq(
+        center_i, extent_i, center_j, extent_j, cutoff * cutoff, shift_vec);
+}
+
+static __host__ __device__ __forceinline__ bool
+Cluster_Aabb_Overlaps_Shifted_CutoffSq(VECTOR center_i, VECTOR extent_i,
+                                       VECTOR center_j, VECTOR extent_j,
+                                       float cutoff_sq, VECTOR shift_vec)
 {
     const VECTOR dr = center_j - (center_i + shift_vec);
     const float gap_x =
@@ -857,7 +901,7 @@ static __host__ __device__ __forceinline__ bool Cluster_Aabb_Overlaps_Shifted(
         fmaxf(fabsf(dr.y) - (extent_i.y + extent_j.y), 0.0f);
     const float gap_z =
         fmaxf(fabsf(dr.z) - (extent_i.z + extent_j.z), 0.0f);
-    return gap_x * gap_x + gap_y * gap_y + gap_z * gap_z <= cutoff * cutoff;
+    return gap_x * gap_x + gap_y * gap_y + gap_z * gap_z <= cutoff_sq;
 }
 
 static __host__ __device__ __forceinline__ bool Cluster_Aabb_Overlaps(
@@ -965,6 +1009,40 @@ Leaf_Has_Fixed_Shift_Candidate_Overlap_Subgroup(
                         cluster_centers[cluster_j],
                         cluster_extents[cluster_j], cutoff, shift_vec);
                 }
+            }
+        }
+        if (deviceBallot(subgroup_mask, lane_overlap) != 0u)
+        {
+            leaf_overlap = true;
+            break;
+        }
+    }
+    return leaf_overlap;
+}
+
+static __device__ __forceinline__ bool
+Leaf_Has_Fixed_Shift_Candidate_Overlap_Subgroup_PreloadedI(
+    int cluster_i_start, int leaf_cluster_start, int leaf_cluster_end,
+    int fixed_shift_id, float cutoff_sq, VECTOR shift_vec,
+    const unsigned int* cluster_valid_masks, const VECTOR* cluster_centers,
+    const VECTOR* cluster_extents, int cluster_i, bool lane_i_valid,
+    VECTOR center_i, VECTOR extent_i, device_mask_t subgroup_mask)
+{
+    bool leaf_overlap = false;
+    for (int cluster_j = leaf_cluster_start; cluster_j < leaf_cluster_end;
+         cluster_j += 1)
+    {
+        bool lane_overlap = false;
+        if (lane_i_valid && cluster_valid_masks[cluster_j] != 0u)
+        {
+            const bool central_self_pair =
+                fixed_shift_id == kClusteredCentralShiftId &&
+                cluster_j >= cluster_i_start && cluster_i > cluster_j;
+            if (!central_self_pair)
+            {
+                lane_overlap = Cluster_Aabb_Overlaps_Shifted_CutoffSq(
+                    center_i, extent_i, cluster_centers[cluster_j],
+                    cluster_extents[cluster_j], cutoff_sq, shift_vec);
             }
         }
         if (deviceBallot(subgroup_mask, lane_overlap) != 0u)
@@ -1251,9 +1329,9 @@ Fill_Gmxpacked_Record_Stream_Source_Pair_Words(
 }
 
 static __device__ __forceinline__ unsigned int
-Prune_Gmxpacked_Record_Stream_Source_Imask(
+Prune_Gmxpacked_Record_Stream_Source_Imask_With_Shift(
     const int split_id, const unsigned int record_imask,
-    const unsigned int valid_mask_j, const int shift_id, const LTMatrix3 cell,
+    const unsigned int valid_mask_j, const VECTOR pair_shift, const LTMatrix3 cell,
     const LTMatrix3 rcell, const VECTOR* crd,
     const float* shared_i_center_x, const float* shared_i_center_y,
     const float* shared_i_center_z, const VECTOR center_j,
@@ -1271,7 +1349,6 @@ Prune_Gmxpacked_Record_Stream_Source_Imask(
         return record_imask;
     }
 
-    const VECTOR pair_shift = Shift_Vector_From_Id(shift_id, cell);
     const int j_lane_base = split_id * kClusteredSplitJClusterSize;
     unsigned int pruned_imask = 0u;
 #pragma unroll
@@ -1349,6 +1426,25 @@ Prune_Gmxpacked_Record_Stream_Source_Imask(
         }
     }
     return pruned_imask;
+}
+
+static __device__ __forceinline__ unsigned int
+Prune_Gmxpacked_Record_Stream_Source_Imask(
+    const int split_id, const unsigned int record_imask,
+    const unsigned int valid_mask_j, const int shift_id, const LTMatrix3 cell,
+    const LTMatrix3 rcell, const VECTOR* crd,
+    const float* shared_i_center_x, const float* shared_i_center_y,
+    const float* shared_i_center_z, const VECTOR center_j,
+    const int shared_i_atom_ids[kClusteredMaxSuperClusterClusters]
+                               [kClusteredClusterSize],
+    const int* shared_j_atom_ids, const unsigned int* shared_i_local_masks,
+    const float cutoff_sq)
+{
+    return Prune_Gmxpacked_Record_Stream_Source_Imask_With_Shift(
+        split_id, record_imask, valid_mask_j,
+        Shift_Vector_From_Id(shift_id, cell), cell, rcell, crd,
+        shared_i_center_x, shared_i_center_y, shared_i_center_z, center_j,
+        shared_i_atom_ids, shared_j_atom_ids, shared_i_local_masks, cutoff_sq);
 }
 
 static __device__ __forceinline__ bool
@@ -1518,6 +1614,34 @@ static __global__ void Refresh_Current_Cluster_Centers_From_Crd(
     }
 }
 
+static __global__ void Refresh_Current_Cluster_Centers_And_Sorted_Cluster_Map(
+    const int cluster_numbers, const int* permutation, const int* cluster_offsets,
+    const VECTOR* crd, const LTMatrix3 cell, const LTMatrix3 rcell,
+    VECTOR* cluster_centers, int* sorted_cluster_ids)
+{
+    SIMPLE_DEVICE_FOR(cluster_i, cluster_numbers)
+    {
+        const int start = cluster_offsets[cluster_i];
+        const int end = cluster_offsets[cluster_i + 1];
+        const int count = end > start ? end - start : 0;
+        VECTOR center = {0.0f, 0.0f, 0.0f};
+        if (count > 0)
+        {
+            const VECTOR anchor = crd[permutation[start]];
+            for (int atom_offset = start; atom_offset < end; atom_offset += 1)
+            {
+                sorted_cluster_ids[atom_offset] = cluster_i;
+                const VECTOR pos = crd[permutation[atom_offset]];
+                center = center + (anchor + Get_Periodic_Displacement(
+                                                pos, anchor, cell, rcell));
+            }
+            center = (1.0f / static_cast<float>(count)) * center;
+            center = Get_Periodic_Coordinate(center, cell, rcell);
+        }
+        cluster_centers[cluster_i] = center;
+    }
+}
+
 static __global__ void Gather_Sorted_LJ_Direct_Scratch_From_Plain(
     const int atom_numbers, const int cluster_numbers, const int* permutation,
     const int* cluster_offsets, const VECTOR* cluster_centers,
@@ -1543,6 +1667,40 @@ static __global__ void Gather_Sorted_LJ_Direct_Scratch_From_Plain(
             }
         }
         const VECTOR center = cluster_centers[cluster_lo];
+        const int atom_i = permutation[sorted_i];
+        const VECTOR atom_crd = crd[atom_i];
+        const VECTOR shifted_crd =
+            center + Get_Periodic_Displacement(atom_crd, center, cell, rcell);
+        sorted_atom_ids[sorted_i] = atom_i;
+        sorted_xq[sorted_i] = {shifted_crd.x, shifted_crd.y, shifted_crd.z,
+                               charge[atom_i]};
+        const int lj_type = lj_type_src[atom_i].LJ_type;
+        sorted_lj_type[sorted_i] = lj_type;
+        if (sorted_lj_comb != NULL)
+        {
+            float2 comb = {0.0f, 0.0f};
+            if (lj_ab_packed != NULL)
+            {
+                const float2 self_ab = lj_ab_packed[Get_LJ_Type(lj_type, lj_type)];
+                comb.x = sqrtf(fmaxf(self_ab.y, 0.0f));
+                comb.y = sqrtf(fmaxf(self_ab.x, 0.0f));
+            }
+            sorted_lj_comb[sorted_i] = comb;
+        }
+    }
+}
+
+static __global__ void Gather_Sorted_LJ_Direct_Scratch_From_Plain_Cluster_Map(
+    const int atom_numbers, const int* sorted_cluster_ids, const int* permutation,
+    const VECTOR* cluster_centers, const LTMatrix3 cell, const LTMatrix3 rcell,
+    const VECTOR* crd, const float* charge, const VECTOR_LJ* lj_type_src,
+    int* sorted_atom_ids, float4* sorted_xq, int* sorted_lj_type,
+    const float2* lj_ab_packed, float2* sorted_lj_comb)
+{
+    SIMPLE_DEVICE_FOR(sorted_i, atom_numbers)
+    {
+        const int cluster_i = sorted_cluster_ids[sorted_i];
+        const VECTOR center = cluster_centers[cluster_i];
         const int atom_i = permutation[sorted_i];
         const VECTOR atom_crd = crd[atom_i];
         const VECTOR shifted_crd =
@@ -1660,7 +1818,7 @@ static __global__ void Refresh_Gmxpacked_Pair_Shift_Bits(
     const LJ_CLUSTERED_GMXPACKED_EXCLUSION* exclusion_entries,
     const LTMatrix3 rcell, uint64_t* pair_shift_bits,
     int* sci_shift_only_safe, int* sci_shift_safe_flags,
-    const bool exact_sci_shift_flags)
+    int* sci_shift_safe_count, const bool exact_sci_shift_flags)
 {
     const int sci = blockIdx.x;
     if (sci >= sci_numbers)
@@ -1794,6 +1952,94 @@ static __global__ void Refresh_Gmxpacked_Pair_Shift_Bits(
             }
         }
         pair_shift_bits[packed_idx * kClusteredJGroupSize + jm] = shift_bits;
+    }
+    if (sci_shift_safe_flags != NULL && sci_shift_safe_count != NULL)
+    {
+        __syncthreads();
+        if (threadIdx.x == 0 && sci_shift_safe_flags[sci] != 0)
+        {
+            atomicAdd(sci_shift_safe_count, 1);
+        }
+    }
+}
+
+static __global__ void Refresh_Gmxpacked_Pair_Shift_Bits_Simple_Flags(
+    const int sci_numbers, const int* super_cluster_offsets,
+    const VECTOR* cluster_centers,
+    const LJ_CLUSTERED_GMXPACKED_SCI* gmxpacked_sci,
+    const LJ_CLUSTERED_GMXPACKED_CJ* gmxpacked_cjpacked, const LTMatrix3 rcell,
+    uint64_t* pair_shift_bits, int* sci_shift_only_safe,
+    int* sci_shift_safe_flags, int* sci_shift_safe_count)
+{
+    const int sci = blockIdx.x;
+    if (sci >= sci_numbers)
+    {
+        return;
+    }
+    if (threadIdx.x == 0 && sci_shift_safe_flags != NULL)
+    {
+        sci_shift_safe_flags[sci] = 1;
+    }
+    __syncthreads();
+
+    const LJ_CLUSTERED_GMXPACKED_SCI sci_entry = gmxpacked_sci[sci];
+    const int cluster_i_start =
+        super_cluster_offsets[sci_entry.supercluster_id];
+    const int cluster_i_end =
+        super_cluster_offsets[sci_entry.supercluster_id + 1];
+    const int active_cluster_count = cluster_i_end - cluster_i_start;
+    const int packed_count = sci_entry.cjpacked_end - sci_entry.cjpacked_begin;
+    const int total_records = packed_count * kClusteredJGroupSize;
+
+    for (int record = threadIdx.x; record < total_records; record += blockDim.x)
+    {
+        const int local_packed = record / kClusteredJGroupSize;
+        const int jm = record % kClusteredJGroupSize;
+        const int packed_idx = sci_entry.cjpacked_begin + local_packed;
+        const LJ_CLUSTERED_GMXPACKED_CJ packed = gmxpacked_cjpacked[packed_idx];
+        const int cluster_j = packed.cj[jm];
+
+        uint64_t shift_bits = 0ull;
+        if (cluster_j >= 0)
+        {
+            const unsigned int combined_imask =
+                ((packed.split[0].imask | packed.split[1].imask) >>
+                 Clustered_Jm_Imask_Shift(jm)) &
+                ((1u << kClusteredSuperClusterClusters) - 1u);
+            const VECTOR center_j = cluster_centers[cluster_j];
+            for (int i_local = 0; i_local < active_cluster_count; i_local += 1)
+            {
+                int shift_id = kClusteredCentralShiftId;
+                if ((combined_imask &
+                     (1u << static_cast<unsigned int>(i_local))) != 0u)
+                {
+                    shift_id = Determine_Clustered_Pair_Shift_Id(
+                        cluster_centers[cluster_i_start + i_local], center_j,
+                        rcell);
+                    if (shift_id != sci_entry.shift_id)
+                    {
+                        if (sci_shift_only_safe != NULL)
+                        {
+                            atomicExch(sci_shift_only_safe, 0);
+                        }
+                        if (sci_shift_safe_flags != NULL)
+                        {
+                            atomicExch(sci_shift_safe_flags + sci, 0);
+                        }
+                    }
+                }
+                Clustered_Set_Pair_Shift_Id(&shift_bits, i_local, shift_id);
+            }
+        }
+        pair_shift_bits[packed_idx * kClusteredJGroupSize + jm] = shift_bits;
+    }
+    if (sci_shift_safe_flags != NULL && sci_shift_safe_count != NULL)
+    {
+        __syncthreads();
+        if (threadIdx.x == 0 && sci_shift_safe_flags[sci] != 0)
+        {
+            atomicAdd(sci_shift_safe_count, 1);
+        }
     }
 }
 
@@ -4654,6 +4900,112 @@ Collect_Supercluster_Candidate_Leaves_Fixed_Shift_Subgroup_Onepass(
     }
 }
 
+static __global__ void
+Collect_Supercluster_Candidate_Leaves_Fixed_Shift_Subgroup_Onepass_Sass_Opt(
+    const int sci_numbers, const int* sci_supercluster_ids,
+    const VECTOR* super_cluster_centers, const VECTOR* super_cluster_sizes,
+    const int* super_cluster_offsets, const int* leaf_cluster_starts,
+    const int* leaf_cluster_ends, const int* leaf_all_local,
+    const LTMatrix3 cell, const float cutoff, const VECTOR* cluster_centers,
+    const VECTOR* cluster_extents, const unsigned int* cluster_valid_masks,
+    const unsigned int* cluster_local_masks,
+    const CornerstoneKey* node_prefixes,
+    const CornerstoneNodeIndex* child_offsets,
+    const CornerstoneNodeIndex* parents,
+    const CornerstoneNodeIndex* internal_to_leaf,
+    const int* candidate_shift_ids, const bool central_halfshell_culling,
+    const bool use_morton_sfc, const int onepass_capacity,
+    int* candidate_leaf_counts, int* onepass_sci_ids, int* onepass_ranks,
+    int* onepass_leaf_ids, int* onepass_cursor, int* onepass_overflow)
+{
+    constexpr int kGroupsPerBlock =
+        kClusteredBuilderBlockSize / kFixedShiftCandidateLeafSubgroupSize;
+    const int group_id = threadIdx.x / kFixedShiftCandidateLeafSubgroupSize;
+    const int sublane = threadIdx.x % kFixedShiftCandidateLeafSubgroupSize;
+    const int lane_id = threadIdx.x & (kClusteredBuilderWarpSize - 1);
+    const int subgroup_lane_base = lane_id - sublane;
+    const device_mask_t subgroup_mask =
+        (((device_mask_t)1 << kFixedShiftCandidateLeafSubgroupSize) - 1u)
+        << subgroup_lane_base;
+    const int sci = blockIdx.x * kGroupsPerBlock + group_id;
+    if (sci >= sci_numbers)
+    {
+        return;
+    }
+
+    const int sci_base =
+        candidate_shift_ids == NULL ? sci / kClusteredShiftCount : sci;
+    const int candidate_shift_id =
+        candidate_shift_ids != NULL ? candidate_shift_ids[sci]
+                                    : (sci % kClusteredShiftCount);
+    const int super_i = sci_supercluster_ids[sci_base];
+    const VECTOR target_center = super_cluster_centers[super_i];
+    const VECTOR target_size = super_cluster_sizes[super_i];
+    const int cluster_i_start = super_cluster_offsets[super_i];
+    const int cluster_i_end = super_cluster_offsets[super_i + 1];
+    const VECTOR shift_vec = Shift_Vector_From_Id(candidate_shift_id, cell);
+    const float cutoff_sq = cutoff * cutoff;
+    const int cluster_i = cluster_i_start + sublane;
+    const bool lane_i_valid =
+        cluster_i < cluster_i_end && cluster_local_masks[cluster_i] != 0u;
+    const VECTOR center_i =
+        lane_i_valid ? cluster_centers[cluster_i] : VECTOR{0.0f, 0.0f, 0.0f};
+    const VECTOR extent_i =
+        lane_i_valid ? cluster_extents[cluster_i] : VECTOR{0.0f, 0.0f, 0.0f};
+    int count = 0;
+
+    auto overlaps = [=](CornerstoneNodeIndex node)
+    {
+        return Cornerstone_Node_Overlaps_Shifted_Box(
+            node_prefixes[node], target_center, target_size,
+            candidate_shift_id, use_morton_sfc);
+    };
+    auto endpoint = [&](CornerstoneNodeIndex node)
+    {
+        const int leaf_j = internal_to_leaf[node];
+        if (leaf_j >= 0)
+        {
+            if (central_halfshell_culling &&
+                candidate_shift_id == kClusteredCentralShiftId &&
+                leaf_all_local[leaf_j] != 0 &&
+                leaf_cluster_ends[leaf_j] <= cluster_i_start)
+            {
+                return;
+            }
+            if (!Leaf_Has_Fixed_Shift_Candidate_Overlap_Subgroup_PreloadedI(
+                    cluster_i_start, leaf_cluster_starts[leaf_j],
+                    leaf_cluster_ends[leaf_j], candidate_shift_id, cutoff_sq,
+                    shift_vec, cluster_valid_masks, cluster_centers,
+                    cluster_extents, cluster_i, lane_i_valid, center_i,
+                    extent_i, subgroup_mask))
+            {
+                return;
+            }
+            if (sublane == 0)
+            {
+                const int rank = count;
+                count += 1;
+                const int write_idx = atomicAdd(onepass_cursor, 1);
+                if (write_idx < onepass_capacity)
+                {
+                    onepass_sci_ids[write_idx] = sci;
+                    onepass_ranks[write_idx] = rank;
+                    onepass_leaf_ids[write_idx] = leaf_j;
+                }
+                else
+                {
+                    atomicAdd(onepass_overflow, 1);
+                }
+            }
+        }
+    };
+    cstone::singleTraversal(child_offsets, parents, overlaps, endpoint);
+    if (sublane == 0)
+    {
+        candidate_leaf_counts[sci] = count;
+    }
+}
+
 static __global__ void Scatter_Candidate_Leaves_From_Onepass(
     const int candidate_leaf_numbers, const int* candidate_leaf_offsets,
     const int* onepass_sci_ids, const int* onepass_ranks,
@@ -5307,7 +5659,7 @@ static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves(
 // the baseline count kernel before it is allowed to feed the build.
 template <bool kParallelAccum, bool kParallelFragmentEmit,
           bool kFixedShiftLeafScreenedSpecialized = false,
-          bool kLightFragmentOnly = false>
+          bool kLightFragmentOnly = false, bool kFixedLightSassOpt = false>
 static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup(
     const int candidate_sci_numbers, const int sci_shift_numbers,
     const int cluster_size, const int super_cluster_clusters,
@@ -5344,6 +5696,10 @@ static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup(
 {
     constexpr int kSubgroupSize = kClusteredClusterSize;            // 8
     constexpr int kCountSubgroups = kClusteredBuilderWarpSize / kSubgroupSize; // 4
+    static_assert(!kFixedLightSassOpt ||
+                      (kFixedShiftLeafScreenedSpecialized &&
+                       kLightFragmentOnly),
+                  "fixed-light SASS opt requires specialized light count path");
     const int lane_id = threadIdx.x & (warpSize - 1);
     const int warp_id = threadIdx.x / warpSize;
     const int warps_per_block = blockDim.x / warpSize;
@@ -5452,6 +5808,11 @@ static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup(
         record_stream_source_rows != NULL ||
         record_stream_source_counts_by_candidate != NULL ||
         emit_any_count_source_fragments;
+    const float record_stream_cutoff_sq =
+        record_stream_cutoff * record_stream_cutoff;
+    int local_record_stream_source_count = 0;
+    int local_shift_record_count = 0;
+    int local_shift_exclusion_count = 0;
     // Load i-cluster metadata (per-warp, all 32 lanes cooperate).
     if (lane_id < kClusteredMaxSuperClusterClusters)
     {
@@ -5844,6 +6205,11 @@ static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup(
                     (kFixedShiftLeafScreenedSpecialized || fixed_shift_candidates)
                         ? fixed_shift_id
                         : group_shift_id;
+                VECTOR source_pair_shift = {0.0f, 0.0f, 0.0f};
+                if constexpr (kFixedLightSassOpt)
+                {
+                    source_pair_shift = Shift_Vector_From_Id(source_shift_id, cell);
+                }
                 unsigned int parallel_split_local_imask = 0u;
                 int parallel_source_rows_for_group = 0;
                 if (use_parallel_group_accum &&
@@ -5853,8 +6219,25 @@ static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup(
                     bool split_has_source_row = false;
                     if (sublane < kClusteredWarpSplitCount)
                     {
-                        const unsigned int split_local_imask =
-                            Prune_Gmxpacked_Record_Stream_Source_Imask(
+                        unsigned int split_local_imask = 0u;
+                        if constexpr (kFixedLightSassOpt)
+                        {
+                            split_local_imask =
+                                Prune_Gmxpacked_Record_Stream_Source_Imask_With_Shift(
+                                    sublane, group_record_imask, valid_mask_j,
+                                    source_pair_shift, cell, rcell, crd,
+                                    shared_i_center_x[warp_id],
+                                    shared_i_center_y[warp_id],
+                                    shared_i_center_z[warp_id], center_j,
+                                    shared_i_atom_ids[warp_id],
+                                    shared_j_atom_ids[warp_id][subgroup],
+                                    shared_i_local_masks[warp_id],
+                                    record_stream_cutoff_sq);
+                        }
+                        else
+                        {
+                            split_local_imask =
+                                Prune_Gmxpacked_Record_Stream_Source_Imask(
                                 sublane, group_record_imask, valid_mask_j,
                                 source_shift_id, cell, rcell, crd,
                                 shared_i_center_x[warp_id],
@@ -5863,7 +6246,8 @@ static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup(
                                 shared_i_atom_ids[warp_id],
                                 shared_j_atom_ids[warp_id][subgroup],
                                 shared_i_local_masks[warp_id],
-                                record_stream_cutoff * record_stream_cutoff);
+                                    record_stream_cutoff_sq);
+                        }
                         parallel_split_local_imask = split_local_imask;
                         split_has_source_row =
                             Clustered_Split_Has_Atoms(valid_mask_j, sublane) &&
@@ -6014,7 +6398,12 @@ static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup(
                                 : group_shift_id;
                         if (source_rows_for_group > 0)
                         {
-                            if (use_candidate_record_stream_source_count)
+                            if constexpr (kFixedLightSassOpt)
+                            {
+                                local_record_stream_source_count +=
+                                    source_rows_for_group;
+                            }
+                            else if (use_candidate_record_stream_source_count)
                             {
                                 atomicAdd(
                                     &shared_record_stream_source_counts[warp_id],
@@ -6026,17 +6415,32 @@ static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup(
                                           source_rows_for_group);
                             }
                         }
-                        atomicAdd(
-                            &shared_shift_record_counts[warp_id]
-                                                       [output_shift_idx],
-                            1);
+                        if constexpr (kFixedLightSassOpt)
+                        {
+                            local_shift_record_count += 1;
+                        }
+                        else
+                        {
+                            atomicAdd(
+                                &shared_shift_record_counts[warp_id]
+                                                           [output_shift_idx],
+                                1);
+                        }
                         if (need_j_cached_atoms &&
                             parallel_exclusion_count_for_group > 0)
                         {
-                            atomicAdd(
-                                &shared_shift_exclusion_counts[warp_id]
-                                                              [output_shift_idx],
-                                parallel_exclusion_count_for_group);
+                            if constexpr (kFixedLightSassOpt)
+                            {
+                                local_shift_exclusion_count +=
+                                    parallel_exclusion_count_for_group;
+                            }
+                            else
+                            {
+                                atomicAdd(
+                                    &shared_shift_exclusion_counts[warp_id]
+                                                                  [output_shift_idx],
+                                    parallel_exclusion_count_for_group);
+                            }
                         }
                     }
                 }
@@ -6124,21 +6528,40 @@ static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup(
                                 }
                                 else
                                 {
-                                    split_local_imask =
-                                        Prune_Gmxpacked_Record_Stream_Source_Imask(
-                                            split, group_record_imask,
-                                            valid_mask_j, source_shift_id, cell,
-                                            rcell, crd,
-                                            shared_i_center_x[warp_id],
-                                            shared_i_center_y[warp_id],
-                                            shared_i_center_z[warp_id],
-                                            center_j,
-                                            shared_i_atom_ids[warp_id],
-                                            shared_j_atom_ids[warp_id]
-                                                                 [subgroup],
-                                            shared_i_local_masks[warp_id],
-                                            record_stream_cutoff *
-                                                record_stream_cutoff);
+                                    if constexpr (kFixedLightSassOpt)
+                                    {
+                                        split_local_imask =
+                                            Prune_Gmxpacked_Record_Stream_Source_Imask_With_Shift(
+                                                split, group_record_imask,
+                                                valid_mask_j, source_pair_shift,
+                                                cell, rcell, crd,
+                                                shared_i_center_x[warp_id],
+                                                shared_i_center_y[warp_id],
+                                                shared_i_center_z[warp_id],
+                                                center_j,
+                                                shared_i_atom_ids[warp_id],
+                                                shared_j_atom_ids[warp_id]
+                                                                     [subgroup],
+                                                shared_i_local_masks[warp_id],
+                                                record_stream_cutoff_sq);
+                                    }
+                                    else
+                                    {
+                                        split_local_imask =
+                                            Prune_Gmxpacked_Record_Stream_Source_Imask(
+                                                split, group_record_imask,
+                                                valid_mask_j, source_shift_id,
+                                                cell, rcell, crd,
+                                                shared_i_center_x[warp_id],
+                                                shared_i_center_y[warp_id],
+                                                shared_i_center_z[warp_id],
+                                                center_j,
+                                                shared_i_atom_ids[warp_id],
+                                                shared_j_atom_ids[warp_id]
+                                                                     [subgroup],
+                                                shared_i_local_masks[warp_id],
+                                                record_stream_cutoff_sq);
+                                    }
                                 }
                                 if (Clustered_Split_Has_Atoms(valid_mask_j,
                                                               split) &&
@@ -6209,7 +6632,12 @@ static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup(
                             }
                             if (source_rows_for_group > 0)
                             {
-                                if (use_candidate_record_stream_source_count)
+                                if constexpr (kFixedLightSassOpt)
+                                {
+                                    local_record_stream_source_count +=
+                                        source_rows_for_group;
+                                }
+                                else if (use_candidate_record_stream_source_count)
                                 {
                                     atomicAdd(
                                         &shared_record_stream_source_counts[warp_id],
@@ -6222,22 +6650,42 @@ static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup(
                                 }
                             }
                         }
-                        atomicAdd(&shared_shift_record_counts[warp_id]
-                                                             [output_shift_idx],
-                                  1);
+                        if constexpr (kFixedLightSassOpt)
+                        {
+                            local_shift_record_count += 1;
+                        }
+                        else
+                        {
+                            atomicAdd(&shared_shift_record_counts[warp_id]
+                                                                 [output_shift_idx],
+                                      1);
+                        }
                         if (need_j_cached_atoms)
                         {
-                            atomicAdd(
-                                &shared_shift_exclusion_counts[warp_id]
-                                                              [output_shift_idx],
-                                exclusion_count_for_group);
+                            if constexpr (kFixedLightSassOpt)
+                            {
+                                local_shift_exclusion_count +=
+                                    exclusion_count_for_group;
+                            }
+                            else
+                            {
+                                atomicAdd(
+                                    &shared_shift_exclusion_counts[warp_id]
+                                                                  [output_shift_idx],
+                                    exclusion_count_for_group);
+                            }
                         }
                     }
                     else if (use_parallel_group_accum)
                     {
                         if (parallel_source_rows_for_group > 0)
                         {
-                            if (use_candidate_record_stream_source_count)
+                            if constexpr (kFixedLightSassOpt)
+                            {
+                                local_record_stream_source_count +=
+                                    parallel_source_rows_for_group;
+                            }
+                            else if (use_candidate_record_stream_source_count)
                             {
                                 atomicAdd(
                                     &shared_record_stream_source_counts[warp_id],
@@ -6249,16 +6697,31 @@ static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup(
                                           parallel_source_rows_for_group);
                             }
                         }
-                        atomicAdd(
-                            &shared_shift_record_counts[warp_id][output_shift_idx],
-                            1);
+                        if constexpr (kFixedLightSassOpt)
+                        {
+                            local_shift_record_count += 1;
+                        }
+                        else
+                        {
+                            atomicAdd(
+                                &shared_shift_record_counts[warp_id][output_shift_idx],
+                                1);
+                        }
                         if (need_j_cached_atoms &&
                             parallel_exclusion_count_for_group > 0)
                         {
-                            atomicAdd(
-                                &shared_shift_exclusion_counts[warp_id]
-                                                              [output_shift_idx],
-                                parallel_exclusion_count_for_group);
+                            if constexpr (kFixedLightSassOpt)
+                            {
+                                local_shift_exclusion_count +=
+                                    parallel_exclusion_count_for_group;
+                            }
+                            else
+                            {
+                                atomicAdd(
+                                    &shared_shift_exclusion_counts[warp_id]
+                                                                  [output_shift_idx],
+                                    parallel_exclusion_count_for_group);
+                            }
                         }
                     }
                     else
@@ -6271,22 +6734,43 @@ static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup(
                             for (int split = 0; split < kClusteredWarpSplitCount;
                                  split += 1)
                             {
-                                const unsigned int split_local_imask =
-                                    Prune_Gmxpacked_Record_Stream_Source_Imask(
-                                        split, group_record_imask, valid_mask_j,
-                                        (kFixedShiftLeafScreenedSpecialized ||
-                                         fixed_shift_candidates)
-                                            ? fixed_shift_id
-                                            : group_shift_id,
-                                        cell, rcell, crd,
-                                        shared_i_center_x[warp_id],
-                                        shared_i_center_y[warp_id],
-                                        shared_i_center_z[warp_id], center_j,
-                                        shared_i_atom_ids[warp_id],
-                                        shared_j_atom_ids[warp_id][subgroup],
-                                        shared_i_local_masks[warp_id],
-                                        record_stream_cutoff *
-                                            record_stream_cutoff);
+                                unsigned int split_local_imask = 0u;
+                                if constexpr (kFixedLightSassOpt)
+                                {
+                                    split_local_imask =
+                                        Prune_Gmxpacked_Record_Stream_Source_Imask_With_Shift(
+                                            split, group_record_imask,
+                                            valid_mask_j, source_pair_shift,
+                                            cell, rcell, crd,
+                                            shared_i_center_x[warp_id],
+                                            shared_i_center_y[warp_id],
+                                            shared_i_center_z[warp_id],
+                                            center_j,
+                                            shared_i_atom_ids[warp_id],
+                                            shared_j_atom_ids[warp_id][subgroup],
+                                            shared_i_local_masks[warp_id],
+                                            record_stream_cutoff_sq);
+                                }
+                                else
+                                {
+                                    split_local_imask =
+                                        Prune_Gmxpacked_Record_Stream_Source_Imask(
+                                            split, group_record_imask,
+                                            valid_mask_j,
+                                            (kFixedShiftLeafScreenedSpecialized ||
+                                             fixed_shift_candidates)
+                                                ? fixed_shift_id
+                                                : group_shift_id,
+                                            cell, rcell, crd,
+                                            shared_i_center_x[warp_id],
+                                            shared_i_center_y[warp_id],
+                                            shared_i_center_z[warp_id],
+                                            center_j,
+                                            shared_i_atom_ids[warp_id],
+                                            shared_j_atom_ids[warp_id][subgroup],
+                                            shared_i_local_masks[warp_id],
+                                            record_stream_cutoff_sq);
+                                }
                                 if (Clustered_Split_Has_Atoms(valid_mask_j,
                                                               split) &&
                                     split_local_imask != 0u)
@@ -6296,7 +6780,12 @@ static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup(
                             }
                             if (source_rows_for_group > 0)
                             {
-                                if (use_candidate_record_stream_source_count)
+                                if constexpr (kFixedLightSassOpt)
+                                {
+                                    local_record_stream_source_count +=
+                                        source_rows_for_group;
+                                }
+                                else if (use_candidate_record_stream_source_count)
                                 {
                                     atomicAdd(
                                         &shared_record_stream_source_counts[warp_id],
@@ -6309,9 +6798,16 @@ static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup(
                                 }
                             }
                         }
-                        atomicAdd(&shared_shift_record_counts[warp_id]
-                                                             [output_shift_idx],
-                                  1);
+                        if constexpr (kFixedLightSassOpt)
+                        {
+                            local_shift_record_count += 1;
+                        }
+                        else
+                        {
+                            atomicAdd(&shared_shift_record_counts[warp_id]
+                                                                 [output_shift_idx],
+                                      1);
+                        }
                         if (need_j_cached_atoms)
                         {
                             const unsigned int group_exclusion_imask =
@@ -6342,10 +6838,18 @@ static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup(
                                 exclusion_count_for_group +=
                                     exclusion_mask != 0ull ? 1 : 0;
                             }
-                            atomicAdd(
-                                &shared_shift_exclusion_counts[warp_id]
-                                                              [output_shift_idx],
-                                exclusion_count_for_group);
+                            if constexpr (kFixedLightSassOpt)
+                            {
+                                local_shift_exclusion_count +=
+                                    exclusion_count_for_group;
+                            }
+                            else
+                            {
+                                atomicAdd(
+                                    &shared_shift_exclusion_counts[warp_id]
+                                                                  [output_shift_idx],
+                                    exclusion_count_for_group);
+                            }
                         }
                     }
                 }
@@ -6354,6 +6858,29 @@ static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup(
         }
     }
 
+    if constexpr (kFixedLightSassOpt)
+    {
+        for (int offset = warpSize / 2; offset > 0; offset >>= 1)
+        {
+            local_record_stream_source_count +=
+                deviceShflDown(FULL_MASK, local_record_stream_source_count,
+                               offset, warpSize);
+            local_shift_record_count +=
+                deviceShflDown(FULL_MASK, local_shift_record_count, offset,
+                               warpSize);
+            local_shift_exclusion_count +=
+                deviceShflDown(FULL_MASK, local_shift_exclusion_count, offset,
+                               warpSize);
+        }
+        if (lane_id == 0)
+        {
+            shared_record_stream_source_counts[warp_id] =
+                local_record_stream_source_count;
+            shared_shift_record_counts[warp_id][0] = local_shift_record_count;
+            shared_shift_exclusion_counts[warp_id][0] =
+                local_shift_exclusion_count;
+        }
+    }
     __syncwarp();
     if (lane_id == 0)
     {
@@ -12013,9 +12540,12 @@ static void Invalidate_Gmxpacked_Pair_Shift_Metadata(
         return;
     }
     layout->gmxpacked_pair_shift_metadata_ready = false;
+    layout->gmxpacked_pair_shift_sci_safe_counts_ready = false;
     layout->gmxpacked_pair_shift_metadata_sci_numbers = 0;
     layout->gmxpacked_pair_shift_metadata_cjpacked_numbers = 0;
     layout->gmxpacked_pair_shift_metadata_exclusion_numbers = 0;
+    layout->gmxpacked_pair_shift_safe_sci_numbers = 0;
+    layout->gmxpacked_pair_shift_unsafe_sci_numbers = 0;
     layout->gmxpacked_pair_shift_metadata_rcell = {};
     layout->gmxpacked_pair_shift_sci_only_compatible = false;
 }
@@ -12052,6 +12582,12 @@ static bool Clustered_Gmxpacked_Should_Refresh_Pair_Shift_Metadata(
     if ((Clustered_Gmxpacked_Sci_Shift_Split_Enabled() ||
          Clustered_Gmxpacked_Sci_Shift_Runtime_Enabled()) &&
         layout->d_gmxpacked_pair_shift_sci_safe_flags == NULL)
+    {
+        return true;
+    }
+    if (Clustered_Gmxpacked_Sci_Shift_Split_Skip_Empty_Enabled() &&
+        Clustered_Gmxpacked_Sci_Shift_Split_Enabled() &&
+        !layout->gmxpacked_pair_shift_sci_safe_counts_ready)
     {
         return true;
     }
@@ -13000,6 +13536,7 @@ static void Refresh_Gmxpacked_Pair_Shift_Metadata(LJ_CLUSTER_LAYOUT* layout,
         !need_device_sci_shift_flags;
     int* d_sci_shift_only_flag = NULL;
     int* d_sci_shift_safe_flags = NULL;
+    int* d_sci_shift_safe_count = NULL;
     if (need_host_sci_shift_only_flag)
     {
         if (layout->d_gmxpacked_pair_shift_sci_only_flag == NULL)
@@ -13019,6 +13556,24 @@ static void Refresh_Gmxpacked_Pair_Shift_Metadata(LJ_CLUSTER_LAYOUT* layout,
         d_sci_shift_safe_flags =
             layout->d_gmxpacked_pair_shift_sci_safe_flags;
     }
+    const bool need_sci_shift_safe_count =
+        d_sci_shift_safe_flags != NULL &&
+        Clustered_Gmxpacked_Sci_Shift_Split_Skip_Empty_Enabled() &&
+        Clustered_Gmxpacked_Sci_Shift_Split_Enabled();
+    if (need_sci_shift_safe_count)
+    {
+        if (layout->d_gmxpacked_pair_shift_safe_sci_count == NULL)
+        {
+            Device_Malloc_Safely(
+                (void**)&layout->d_gmxpacked_pair_shift_safe_sci_count,
+                sizeof(int));
+        }
+        d_sci_shift_safe_count =
+            layout->d_gmxpacked_pair_shift_safe_sci_count;
+        int zero = 0;
+        deviceMemcpy(d_sci_shift_safe_count, &zero, sizeof(int),
+                     deviceMemcpyHostToDevice);
+    }
     const bool exact_sci_shift_flags =
         Clustered_Gmxpacked_Exact_Sci_Shift_Flags_Enabled();
     int sci_shift_only_safe = 1;
@@ -13027,20 +13582,40 @@ static void Refresh_Gmxpacked_Pair_Shift_Metadata(LJ_CLUSTER_LAYOUT* layout,
         deviceMemcpy(d_sci_shift_only_flag, &sci_shift_only_safe, sizeof(int),
                      deviceMemcpyHostToDevice);
     }
-    Launch_Device_Kernel(Refresh_Gmxpacked_Pair_Shift_Bits,
-                         layout->gmxpacked_sci_numbers,
-                         CONTROLLER::device_max_thread, 0, NULL,
-                         layout->gmxpacked_sci_numbers,
-                         layout->d_super_cluster_offsets,
-                         layout->d_cluster_centers,
-                         layout->d_cluster_valid_masks,
-                         layout->d_cluster_local_masks,
-                         layout->d_gmxpacked_sci,
-                         layout->d_gmxpacked_cjpacked,
-                         layout->d_gmxpacked_exclusions, rcell,
-                         layout->d_pair_shift_bits,
-                         d_sci_shift_only_flag, d_sci_shift_safe_flags,
-                         exact_sci_shift_flags);
+    const bool use_simple_refresh =
+        Clustered_Gmxpacked_Pair_Shift_Simple_Refresh_Enabled() &&
+        !exact_sci_shift_flags;
+    if (use_simple_refresh)
+    {
+        Launch_Device_Kernel(Refresh_Gmxpacked_Pair_Shift_Bits_Simple_Flags,
+                             layout->gmxpacked_sci_numbers,
+                             CONTROLLER::device_max_thread, 0, NULL,
+                             layout->gmxpacked_sci_numbers,
+                             layout->d_super_cluster_offsets,
+                             layout->d_cluster_centers,
+                             layout->d_gmxpacked_sci,
+                             layout->d_gmxpacked_cjpacked, rcell,
+                             layout->d_pair_shift_bits,
+                             d_sci_shift_only_flag, d_sci_shift_safe_flags,
+                             d_sci_shift_safe_count);
+    }
+    else
+    {
+        Launch_Device_Kernel(Refresh_Gmxpacked_Pair_Shift_Bits,
+                             layout->gmxpacked_sci_numbers,
+                             CONTROLLER::device_max_thread, 0, NULL,
+                             layout->gmxpacked_sci_numbers,
+                             layout->d_super_cluster_offsets,
+                             layout->d_cluster_centers,
+                             layout->d_cluster_valid_masks,
+                             layout->d_cluster_local_masks,
+                             layout->d_gmxpacked_sci,
+                             layout->d_gmxpacked_cjpacked,
+                             layout->d_gmxpacked_exclusions, rcell,
+                             layout->d_pair_shift_bits,
+                             d_sci_shift_only_flag, d_sci_shift_safe_flags,
+                             d_sci_shift_safe_count, exact_sci_shift_flags);
+    }
     if (d_sci_shift_only_flag != NULL)
     {
         deviceMemcpy(&sci_shift_only_safe, d_sci_shift_only_flag, sizeof(int),
@@ -13051,6 +13626,30 @@ static void Refresh_Gmxpacked_Pair_Shift_Metadata(LJ_CLUSTER_LAYOUT* layout,
     else
     {
         layout->gmxpacked_pair_shift_sci_only_compatible = false;
+    }
+    if (d_sci_shift_safe_count != NULL)
+    {
+        int safe_sci_count = 0;
+        deviceMemcpy(&safe_sci_count, d_sci_shift_safe_count, sizeof(int),
+                     deviceMemcpyDeviceToHost);
+        if (safe_sci_count < 0)
+        {
+            safe_sci_count = 0;
+        }
+        if (safe_sci_count > layout->gmxpacked_sci_numbers)
+        {
+            safe_sci_count = layout->gmxpacked_sci_numbers;
+        }
+        layout->gmxpacked_pair_shift_safe_sci_numbers = safe_sci_count;
+        layout->gmxpacked_pair_shift_unsafe_sci_numbers =
+            layout->gmxpacked_sci_numbers - safe_sci_count;
+        layout->gmxpacked_pair_shift_sci_safe_counts_ready = true;
+    }
+    else
+    {
+        layout->gmxpacked_pair_shift_safe_sci_numbers = 0;
+        layout->gmxpacked_pair_shift_unsafe_sci_numbers = 0;
+        layout->gmxpacked_pair_shift_sci_safe_counts_ready = false;
     }
     layout->gmxpacked_pair_shift_metadata_ready = true;
     layout->gmxpacked_pair_shift_metadata_sci_numbers =
@@ -13098,7 +13697,7 @@ static bool Refresh_Gmxpacked_Delta_Pair_Shift_Bits(LJ_CLUSTER_LAYOUT* layout,
                          layout->d_gmxpacked_delta_cjpacked,
                          layout->d_gmxpacked_delta_exclusions, rcell,
                          layout->d_gmxpacked_delta_pair_shift_bits,
-                         NULL, NULL, exact_sci_shift_flags);
+                         NULL, NULL, NULL, exact_sci_shift_flags);
     return layout->d_gmxpacked_delta_pair_shift_bits != NULL;
 #endif
 }
@@ -16490,6 +17089,8 @@ static void Free_Gmxpacked_Payload(LJ_CLUSTER_LAYOUT* layout)
     Free_Single_Device_Pointer(
         (void**)&layout->d_gmxpacked_pair_shift_sci_safe_flags);
     Free_Single_Device_Pointer(
+        (void**)&layout->d_gmxpacked_pair_shift_safe_sci_count);
+    Free_Single_Device_Pointer(
         (void**)&layout->d_gmxpacked_inner_active_anchor_crd);
     Free_Single_Device_Pointer(
         (void**)&layout->d_gmxpacked_inner_active_source_imasks);
@@ -16507,6 +17108,9 @@ static void Free_Gmxpacked_Payload(LJ_CLUSTER_LAYOUT* layout)
     layout->gmxpacked_record_stream_source_capacity = 0;
     layout->gmxpacked_record_stream_aggregate_capacity = 0;
     layout->gmxpacked_pair_shift_sci_safe_flag_capacity = 0;
+    layout->gmxpacked_pair_shift_sci_safe_counts_ready = false;
+    layout->gmxpacked_pair_shift_safe_sci_numbers = 0;
+    layout->gmxpacked_pair_shift_unsafe_sci_numbers = 0;
     layout->gmxpacked_inner_active_anchor_crd_capacity = 0;
     layout->gmxpacked_inner_active_source_imask_capacity = 0;
     layout->gmxpacked_inner_active_compact_base_imask_capacity = 0;
@@ -26631,8 +27235,12 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
             const int candidate_leaf_groups_per_block =
                 kClusteredBuilderBlockSize /
                 kFixedShiftCandidateLeafSubgroupSize;
+            auto* collect_onepass_kernel =
+                Clustered_Fixed_Shift_Candidate_Leaf_Collect_Sass_Opt_Enabled()
+                    ? Collect_Supercluster_Candidate_Leaves_Fixed_Shift_Subgroup_Onepass_Sass_Opt
+                    : Collect_Supercluster_Candidate_Leaves_Fixed_Shift_Subgroup_Onepass;
             Launch_Device_Kernel(
-                Collect_Supercluster_Candidate_Leaves_Fixed_Shift_Subgroup_Onepass,
+                collect_onepass_kernel,
                 (candidate_sci_numbers + candidate_leaf_groups_per_block - 1) /
                     candidate_leaf_groups_per_block,
                 kClusteredBuilderBlockSize, 0, NULL, candidate_sci_numbers,
@@ -27500,8 +28108,15 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
             use_gmxpacked_count_fragment_parallel_emit &&
             use_gmxpacked_fill_prune_reuse_light &&
             d_candidate_leaf_reach_masks != NULL;
+        const bool use_gmxpacked_count_fixed_light_sass_opt =
+            use_gmxpacked_fixed_shift_builder_specialized &&
+            Clustered_Gmxpacked_Count_Fixed_Light_Sass_Opt_Enabled();
         auto* subgroup_count_kernel =
-            use_gmxpacked_fixed_shift_builder_specialized
+            use_gmxpacked_count_fixed_light_sass_opt
+                ? Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup<true, true,
+                                                                     true, true,
+                                                                     true>
+                : use_gmxpacked_fixed_shift_builder_specialized
                 ? Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup<true, true,
                                                                      true, true>
                 : (use_gmxpacked_count_fragment_parallel_emit
@@ -29723,9 +30338,12 @@ void LJ_CLUSTER_LAYOUT::Clear()
     gmxpacked_incremental_source_patch_fallbacks = 0;
     gmxpacked_pair_shift_sci_only_compatible = false;
     gmxpacked_pair_shift_metadata_ready = false;
+    gmxpacked_pair_shift_sci_safe_counts_ready = false;
     gmxpacked_pair_shift_metadata_sci_numbers = 0;
     gmxpacked_pair_shift_metadata_cjpacked_numbers = 0;
     gmxpacked_pair_shift_metadata_exclusion_numbers = 0;
+    gmxpacked_pair_shift_safe_sci_numbers = 0;
+    gmxpacked_pair_shift_unsafe_sci_numbers = 0;
     gmxpacked_pair_shift_metadata_rcell = {};
     candidate_leaf_numbers = 0;
     candidate_leaf_cluster_stride = 0;
@@ -29964,23 +30582,54 @@ void LJ_CLUSTERED_DIRECT_CACHE::Gather_Plain(const VECTOR* crd,
         fflush(stderr);
     }
     ClusteredRecorderScope gather_scope(payload_gather_time_recorder);
-    Launch_Device_Kernel(
-        Refresh_Current_Cluster_Centers_From_Crd,
-        (layout.cluster_numbers + CONTROLLER::device_max_thread - 1) /
-            CONTROLLER::device_max_thread,
-        CONTROLLER::device_max_thread, 0, NULL, layout.cluster_numbers,
-        layout.d_sort_permutation, layout.d_cluster_offsets, crd, cell, rcell,
-        layout.d_cluster_centers);
     Reserve_Plain_Gather_Scratch(this);
-    Launch_Device_Kernel(
-        Gather_Sorted_LJ_Direct_Scratch_From_Plain,
-        (layout.total_atom_numbers + CONTROLLER::device_max_thread - 1) /
-            CONTROLLER::device_max_thread,
-        CONTROLLER::device_max_thread, 0, NULL, layout.total_atom_numbers,
-        layout.cluster_numbers, layout.d_sort_permutation,
-        layout.d_cluster_offsets, layout.d_cluster_centers, cell, rcell, crd,
-        charge, lj_type_src, d_sorted_atom_ids, d_sorted_xq,
-        d_sorted_lj_type, lj_ab_packed, d_sorted_lj_comb);
+    const bool request_sorted_cluster_map =
+        Clustered_Gmxpacked_Sorted_Cluster_Map_Enabled();
+    if (request_sorted_cluster_map)
+    {
+        Reserve_Device_Buffer(layout.total_atom_numbers, &d_sorted_cluster_ids,
+                              &scratch_capacity);
+    }
+    const bool use_sorted_cluster_map =
+        request_sorted_cluster_map && d_sorted_cluster_ids != NULL;
+    if (use_sorted_cluster_map)
+    {
+        Launch_Device_Kernel(
+            Refresh_Current_Cluster_Centers_And_Sorted_Cluster_Map,
+            (layout.cluster_numbers + CONTROLLER::device_max_thread - 1) /
+                CONTROLLER::device_max_thread,
+            CONTROLLER::device_max_thread, 0, NULL, layout.cluster_numbers,
+            layout.d_sort_permutation, layout.d_cluster_offsets, crd, cell,
+            rcell, layout.d_cluster_centers, d_sorted_cluster_ids);
+        Launch_Device_Kernel(
+            Gather_Sorted_LJ_Direct_Scratch_From_Plain_Cluster_Map,
+            (layout.total_atom_numbers + CONTROLLER::device_max_thread - 1) /
+                CONTROLLER::device_max_thread,
+            CONTROLLER::device_max_thread, 0, NULL, layout.total_atom_numbers,
+            d_sorted_cluster_ids, layout.d_sort_permutation,
+            layout.d_cluster_centers, cell, rcell, crd, charge, lj_type_src,
+            d_sorted_atom_ids, d_sorted_xq, d_sorted_lj_type, lj_ab_packed,
+            d_sorted_lj_comb);
+    }
+    else
+    {
+        Launch_Device_Kernel(
+            Refresh_Current_Cluster_Centers_From_Crd,
+            (layout.cluster_numbers + CONTROLLER::device_max_thread - 1) /
+                CONTROLLER::device_max_thread,
+            CONTROLLER::device_max_thread, 0, NULL, layout.cluster_numbers,
+            layout.d_sort_permutation, layout.d_cluster_offsets, crd, cell,
+            rcell, layout.d_cluster_centers);
+        Launch_Device_Kernel(
+            Gather_Sorted_LJ_Direct_Scratch_From_Plain,
+            (layout.total_atom_numbers + CONTROLLER::device_max_thread - 1) /
+                CONTROLLER::device_max_thread,
+            CONTROLLER::device_max_thread, 0, NULL, layout.total_atom_numbers,
+            layout.cluster_numbers, layout.d_sort_permutation,
+            layout.d_cluster_offsets, layout.d_cluster_centers, cell, rcell,
+            crd, charge, lj_type_src, d_sorted_atom_ids, d_sorted_xq,
+            d_sorted_lj_type, lj_ab_packed, d_sorted_lj_comb);
+    }
     Refresh_Plain_Gather_Dependent_Metadata(this, cell, rcell);
 }
 
@@ -30081,6 +30730,7 @@ void LJ_CLUSTERED_DIRECT_CACHE::Clear()
     Free_Single_Device_Pointer((void**)&d_sorted_atom_ids);
     Free_Single_Device_Pointer((void**)&d_sorted_xq);
     Free_Single_Device_Pointer((void**)&d_sorted_lj_type);
+    Free_Single_Device_Pointer((void**)&d_sorted_cluster_ids);
     Free_Single_Device_Pointer((void**)&d_sorted_lj_comb);
     Free_Single_Device_Pointer((void**)&d_sorted_frc);
     Free_Single_Device_Pointer((void**)&d_sorted_frc4);
