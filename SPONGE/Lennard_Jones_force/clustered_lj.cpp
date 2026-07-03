@@ -5720,6 +5720,11 @@ static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup(
     (void)sci_shift_numbers;
     (void)super_cluster_centers;
     (void)cluster_radii;
+    if constexpr (kFixedShiftLeafScreenedSpecialized)
+    {
+        (void)candidate_shift_ids;
+        (void)fixed_shift_candidates;
+    }
 
     const int sci_base =
         kFixedShiftLeafScreenedSpecialized
@@ -6196,11 +6201,12 @@ static __global__ void Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup(
                 {
                     remaining_lane_mask &= ~group_lane_mask_local;
                 }
+                constexpr bool kSpecializedParallelGroupAccum =
+                    kParallelAccum && kFixedShiftLeafScreenedSpecialized;
                 const bool use_parallel_group_accum =
-                    kParallelAccum &&
-                    (kFixedShiftLeafScreenedSpecialized ||
-                     (fixed_shift_candidates &&
-                      candidate_leaf_reach_masks != NULL));
+                    kSpecializedParallelGroupAccum ||
+                    (kParallelAccum && fixed_shift_candidates &&
+                     candidate_leaf_reach_masks != NULL);
                 const int source_shift_id =
                     (kFixedShiftLeafScreenedSpecialized || fixed_shift_candidates)
                         ? fixed_shift_id
@@ -28099,7 +28105,6 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
             runtime_gmxpacked_direct_requested &&
             Clustered_Gmxpacked_Lifecycle_Policy_Is("outer") &&
             Clustered_Gmxpacked_Active_View_Enabled() &&
-            Clustered_Gmxpacked_Active_View_Rolling_Source_Cache_Enabled() &&
             dense_shift_partitioned_candidates && candidate_shift_ids == NULL &&
             fixed_shift_candidates && fixed_shift_leaf_screening &&
             candidate_leaf_onepass_used && run_gmxpacked_primary_builder &&
@@ -28111,6 +28116,19 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
         const bool use_gmxpacked_count_fixed_light_sass_opt =
             use_gmxpacked_fixed_shift_builder_specialized &&
             Clustered_Gmxpacked_Count_Fixed_Light_Sass_Opt_Enabled();
+        const char* gmxpacked_count_variant =
+            use_gmxpacked_count_fixed_light_sass_opt
+                ? "subgroup-fixed-light-sass-opt"
+                : use_gmxpacked_fixed_shift_builder_specialized
+                      ? "subgroup-fixed-light-specialized"
+                      : use_gmxpacked_count_fragment_parallel_emit
+                            ? "subgroup-parallel-fragment-emit"
+                            : use_gmxpacked_count_parallel_accum
+                                  ? "subgroup-parallel-accum"
+                                  : (Clustered_Gmxpacked_Subgroup_Builder_Enabled() &&
+                                             run_gmxpacked_primary_builder
+                                         ? "subgroup-baseline"
+                                         : "legacy");
         auto* subgroup_count_kernel =
             use_gmxpacked_count_fixed_light_sass_opt
                 ? Count_Nbnxm_Payload_From_Candidate_Leaves_Subgroup<true, true,
@@ -28137,6 +28155,24 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
              run_gmxpacked_primary_builder)
                 ? subgroup_count_kernel
                 : Count_Nbnxm_Payload_From_Candidate_Leaves;
+        if (record_builder_summary_trace)
+        {
+            fprintf(stderr,
+                    "[clustered gmxpacked count variant] step=%d variant=%s "
+                    "fixed_specialized=%d rolling_source_cache=%d "
+                    "onepass=%d light=%d parallel_accum=%d "
+                    "parallel_fragment_emit=%d\n",
+                    md_info.sys.steps, gmxpacked_count_variant,
+                    use_gmxpacked_fixed_shift_builder_specialized ? 1 : 0,
+                    Clustered_Gmxpacked_Active_View_Rolling_Source_Cache_Enabled()
+                        ? 1
+                        : 0,
+                    candidate_leaf_onepass_used ? 1 : 0,
+                    use_gmxpacked_fill_prune_reuse_light ? 1 : 0,
+                    use_gmxpacked_count_parallel_accum ? 1 : 0,
+                    use_gmxpacked_count_fragment_parallel_emit ? 1 : 0);
+            fflush(stderr);
+        }
         Launch_Device_Kernel(
             count_kernel,
             candidate_sci_blocks, kClusteredBuilderBlockSize, 0, NULL,

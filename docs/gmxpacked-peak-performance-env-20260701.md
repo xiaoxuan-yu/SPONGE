@@ -105,11 +105,38 @@ Detailed output files:
 Decision:
 
 - the stable peak env disables rolling source cache;
-- the current highest observed stable 10000-step speed is
-  `109.398247 ns/day`;
+- the current highest observed stable 10000-step speed before the fixed-count
+  dispatch repair was `109.398247 ns/day`;
 - the dirty experiment gates are not part of the peak env;
 - rolling source cache should be treated as an isolated correctness/stability
   repair target before it is used again in peak runs.
+
+## 2026-07-03 fixed-count specialization dispatch repair
+
+The fixed-shift/light count specialization gate originally required rolling
+source cache to be enabled, so it did not match the stable rolling-off peak env.
+That dispatch condition was repaired and validated in:
+
+```text
+docs/gmxpacked-fixed-count-specialized-stable-peak-20260703.md
+```
+
+Updated stable peak result on:
+
+```text
+/tmp/sponge-onepass-capacity-check/mdin_skin11_current_10000.spg.toml
+```
+
+| configuration | runs | stability | average speed | speed range |
+|---|---:|---:|---:|---:|
+| fixed-count specialized on, rolling source cache off | 3 | 3 finite, 0 NaN | `111.150754 ns/day` | `110.137749-111.908737 ns/day` |
+| fixed-count specialized off, rolling source cache off | 1 | 1 finite, 0 NaN | `106.373154 ns/day` | n/a |
+
+The current highest observed stable 10000-step speed is now:
+
+```text
+111.908737 ns/day
+```
 
 ## Observed results
 
