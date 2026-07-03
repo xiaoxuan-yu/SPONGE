@@ -347,9 +347,11 @@ struct LJ_CLUSTER_LAYOUT
     int sci_candidate_leaf_count_capacity = 0;
     int sci_candidate_leaf_offset_capacity = 0;
     int candidate_leaf_capacity = 0;
+    int candidate_leaf_prev_running_max_capacity = 0;
     int candidate_leaf_onepass_sci_capacity = 0;
     int candidate_leaf_onepass_rank_capacity = 0;
     int candidate_leaf_onepass_leaf_capacity = 0;
+    int candidate_leaf_onepass_prev_running_max_capacity = 0;
     int candidate_leaf_onepass_cursor_capacity = 0;
     int candidate_leaf_onepass_record_capacity = 0;
     int candidate_leaf_onepass_high_water = 0;
@@ -463,9 +465,11 @@ struct LJ_CLUSTER_LAYOUT
     int* d_sci_candidate_leaf_counts = NULL;
     int* d_sci_candidate_leaf_offsets = NULL;
     int* d_sci_candidate_leaf_ids = NULL;
+    int* d_sci_candidate_leaf_prev_running_max_ends = NULL;
     int* d_candidate_leaf_onepass_sci_ids = NULL;
     int* d_candidate_leaf_onepass_ranks = NULL;
     int* d_candidate_leaf_onepass_leaf_ids = NULL;
+    int* d_candidate_leaf_onepass_prev_running_max_ends = NULL;
     int* d_candidate_leaf_onepass_cursor = NULL;
     unsigned int* d_candidate_leaf_reach_masks = NULL;
     int* d_candidate_sci_offsets = NULL;

@@ -56,6 +56,7 @@ Do not add these flags to the peak env:
 ```sh
 SPONGE_CLUSTERED_GMXPACKED_ACTIVE_VIEW_SOURCE_CACHE_PATCH=1
 SPONGE_CLUSTERED_GMXPACKED_COUNT_FIXED_LIGHT_SASS_OPT=1
+SPONGE_CLUSTERED_GMXPACKED_COUNT_FIXED_LIGHT_SLIM=1
 SPONGE_CLUSTERED_FIXED_SHIFT_CANDIDATE_LEAF_COLLECT_SASS_OPT=1
 SPONGE_CLUSTERED_GMXPACKED_PAIR_SHIFT_SIMPLE_REFRESH=1
 SPONGE_CLUSTERED_GMXPACKED_SORTED_CLUSTER_MAP=1
@@ -137,6 +138,37 @@ The current highest observed stable 10000-step speed is now:
 ```text
 111.908737 ns/day
 ```
+
+## 2026-07-03 fixed-shift count metadata experiment
+
+The follow-up gate
+`SPONGE_CLUSTERED_GMXPACKED_FIXED_SHIFT_COUNT_METADATA=1` was implemented and
+validated, but it is not part of the peak env. Details:
+
+```text
+docs/gmxpacked-fixed-shift-count-metadata-20260703.md
+```
+
+Result: 2000-step verify was zero-mismatch, but 10000-step nsys showed
+`Collect + Count` regressing from `1970.932 ms` to `2004.089 ms`. The extra
+metadata memory was about `53.95 MiB`, which is acceptable by itself, but the
+kernel timing misses the acceptance gate.
+
+## 2026-07-03 fixed-light slim count experiment
+
+The follow-up gate
+`SPONGE_CLUSTERED_GMXPACKED_COUNT_FIXED_LIGHT_SLIM=1` was implemented and
+validated, but it is not part of the peak env. Details:
+
+```text
+docs/gmxpacked-count-fixed-light-slim-20260703.md
+```
+
+Result: 2000-step verify was zero-mismatch. NCU on the first count launch showed
+a small improvement over the fixed-light SASS opt variant, `60.948 ms` to
+`59.978 ms`, with the same `72` registers/thread and no local spilling. This is
+not enough to promote it: the 10000-step sanity run was finite but only reached
+`107.187294 ns/day`, below the recorded stable peak of `111.908737 ns/day`.
 
 ## Observed results
 
