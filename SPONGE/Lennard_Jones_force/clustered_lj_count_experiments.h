@@ -10,6 +10,21 @@ enum class ClusteredGmxpackedCountFixedLightProbeMode
     ExclusionEmit,
 };
 
+enum class ClusteredGmxpackedCandidateLeafProbeMode
+{
+    Traversal,
+    Screen,
+    Emit,
+};
+
+struct LJ_CLUSTERED_GMXPACKED_CANDIDATE_LEAF_PROBE_RECORD
+{
+    int sci_id = -1;
+    int rank = 0;
+    int leaf_id = -1;
+    int prev_running_max_end = 0;
+};
+
 struct LJ_CLUSTERED_GMXPACKED_COUNT_EXPERIMENT_LIGHT_FRAGMENT
 {
     int sci_id = -1;
@@ -58,6 +73,23 @@ void Launch_Clustered_Gmxpacked_Count_Fixed_Light_Probe(
     LJ_CLUSTERED_GMXPACKED_COUNT_EXPERIMENT_LIGHT_FRAGMENT* probe_fragments,
     int probe_fragment_capacity, int* probe_fragment_cursor,
     int* probe_fragment_overflow_rows);
+
+void Launch_Clustered_Gmxpacked_Candidate_Leaf_Probe(
+    ClusteredGmxpackedCandidateLeafProbeMode mode,
+    int candidate_sci_blocks, int builder_block_size, int candidate_sci_numbers,
+    const int* sci_supercluster_ids, const VECTOR* super_cluster_centers,
+    const VECTOR* super_cluster_sizes, const int* super_cluster_offsets,
+    const int* leaf_cluster_starts, const int* leaf_cluster_ends,
+    const int* leaf_all_local, LTMatrix3 cell, float cutoff,
+    const VECTOR* cluster_centers, const VECTOR* cluster_extents,
+    const unsigned int* cluster_valid_masks,
+    const unsigned int* cluster_local_masks, const uint64_t* node_prefixes,
+    const int* child_offsets, const int* parents, const int* internal_to_leaf,
+    const int* candidate_shift_ids, bool central_halfshell_culling,
+    bool use_morton_sfc, bool use_fast_node_overlap,
+    bool use_cooperative_traversal, int onepass_capacity, int* probe_counts,
+    LJ_CLUSTERED_GMXPACKED_CANDIDATE_LEAF_PROBE_RECORD* probe_records,
+    int* probe_cursor, int* probe_overflow);
 
 void Launch_Clustered_Gmxpacked_Count_Fixed_Light_Dedicated(
     int candidate_sci_blocks, int builder_block_size,

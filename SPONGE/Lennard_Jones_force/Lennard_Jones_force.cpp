@@ -84,9 +84,28 @@ static VECTOR Wrap_To_Box_Fractional(VECTOR crd, LTMatrix3 rcell,
 //                                               uses a microbench-style float4
 //                                               sorted force target with the
 //                                               fused sorted-force path
+//   SPONGE_CLUSTERED_GMXPACKED_FORCE_RAW_COMPONENT_ATOMIC_PROBE
+//                                               uses raw float-stride addressing
+//                                               for atom-order component atomics
+//                                               in the force-only gmxpacked
+//                                               full-local dense path
+//   SPONGE_CLUSTERED_GMXPACKED_FORCE_STAGGERED_ATOMIC_PROBE
+//                                               rotates component-atomic lane
+//                                               mapping in the force-only
+//                                               gmxpacked full-local dense path
+//   SPONGE_CLUSTERED_GMXPACKED_FORCE_SKIP_WRITEBACK_PROBE
+//                                               skips both i/j force atomics
+//                                               after math/reduction
+//   SPONGE_CLUSTERED_GMXPACKED_FORCE_SKIP_I_WRITEBACK_PROBE
+//                                               skips only i force atomics
+//   SPONGE_CLUSTERED_GMXPACKED_FORCE_SKIP_J_WRITEBACK_PROBE
+//                                               skips only j force atomics
 //   SPONGE_CLUSTERED_GMXPACKED_FORCE_KERNEL_GATE_TRACE
 //                                               prints production gmxpacked
 //                                               force-kernel gate decisions
+//   SPONGE_CLUSTERED_GMXPACKED_FORCE_PAYLOAD_STATS
+//                                               prints host-side gmxpacked
+//                                               force payload coverage stats
 //   SPONGE_CLUSTERED_GMXPACKED_ASSUME_SCI_SHIFT skips per-pair shift words in
 //                                               full-local fast gmxpacked mode
 //                                               and uses SCI shift directly
@@ -173,10 +192,46 @@ static bool Clustered_Gmxpacked_Float4_Sorted_Force_Enabled()
     return Env_Flag_Enabled("SPONGE_CLUSTERED_GMXPACKED_FLOAT4_SORTED_FORCE");
 }
 
+static bool Clustered_Gmxpacked_Force_Raw_Component_Atomic_Probe_Enabled()
+{
+    return Env_Flag_Enabled(
+        "SPONGE_CLUSTERED_GMXPACKED_FORCE_RAW_COMPONENT_ATOMIC_PROBE");
+}
+
+static bool Clustered_Gmxpacked_Force_Staggered_Atomic_Probe_Enabled()
+{
+    return Env_Flag_Enabled(
+        "SPONGE_CLUSTERED_GMXPACKED_FORCE_STAGGERED_ATOMIC_PROBE");
+}
+
+static bool Clustered_Gmxpacked_Force_Skip_Writeback_Probe_Enabled()
+{
+    return Env_Flag_Enabled(
+        "SPONGE_CLUSTERED_GMXPACKED_FORCE_SKIP_WRITEBACK_PROBE");
+}
+
+static bool Clustered_Gmxpacked_Force_Skip_I_Writeback_Probe_Enabled()
+{
+    return Env_Flag_Enabled(
+        "SPONGE_CLUSTERED_GMXPACKED_FORCE_SKIP_I_WRITEBACK_PROBE");
+}
+
+static bool Clustered_Gmxpacked_Force_Skip_J_Writeback_Probe_Enabled()
+{
+    return Env_Flag_Enabled(
+        "SPONGE_CLUSTERED_GMXPACKED_FORCE_SKIP_J_WRITEBACK_PROBE");
+}
+
 static bool Clustered_Gmxpacked_Force_Kernel_Gate_Trace_Enabled()
 {
     return Env_Flag_Enabled(
         "SPONGE_CLUSTERED_GMXPACKED_FORCE_KERNEL_GATE_TRACE");
+}
+
+static bool Clustered_Gmxpacked_Force_Payload_Stats_Enabled()
+{
+    return Env_Flag_Enabled(
+        "SPONGE_CLUSTERED_GMXPACKED_FORCE_PAYLOAD_STATS");
 }
 
 static bool Clustered_Gmxpacked_Shift_Analyze_Enabled()
@@ -500,6 +555,287 @@ static int Clustered_Host_Popcount_U32(unsigned int value)
         count += 1;
     }
     return count;
+}
+
+static double Clustered_Host_Percent(unsigned long long value,
+                                     unsigned long long total)
+{
+    return total > 0ull ? 100.0 * static_cast<double>(value) /
+                              static_cast<double>(total)
+                        : 0.0;
+}
+
+static void Print_Clustered_Gmxpacked_Force_Payload_Stats(
+    const LJ_CLUSTER_LAYOUT& layout, int lj_call, bool need_atom_energy,
+    bool need_virial, bool use_gmxpacked_direct,
+    bool use_gmxpacked_fast_kernel, bool full_local_dense,
+    bool use_gmxpacked_sci_shift_only, bool use_gmxpacked_sci_shift_split,
+    bool use_gmxpacked_sci_shift_runtime)
+{
+    if (!Clustered_Gmxpacked_Force_Payload_Stats_Enabled() ||
+        !Clustered_Layout_Has_Primary_Gmxpacked_Payload(layout))
+    {
+        return;
+    }
+
+    const auto sci_entries = Copy_Device_Vector_To_Host(
+        layout.d_gmxpacked_sci,
+        static_cast<size_t>(layout.gmxpacked_sci_numbers));
+    const auto cj_entries = Copy_Device_Vector_To_Host(
+        layout.d_gmxpacked_cjpacked,
+        static_cast<size_t>(layout.gmxpacked_cjpacked_numbers));
+    const auto exclusion_entries = Copy_Device_Vector_To_Host(
+        layout.d_gmxpacked_exclusions,
+        static_cast<size_t>(layout.gmxpacked_exclusion_numbers));
+    const auto sci_shift_safe_flags =
+        layout.d_gmxpacked_pair_shift_sci_safe_flags != NULL
+            ? Copy_Device_Vector_To_Host(
+                  layout.d_gmxpacked_pair_shift_sci_safe_flags,
+                  static_cast<size_t>(layout.gmxpacked_sci_numbers))
+            : std::vector<int>();
+    const auto pair_shift_words =
+        layout.d_pair_shift_bits != NULL
+            ? Copy_Device_Vector_To_Host(
+                  layout.d_pair_shift_bits,
+                  static_cast<size_t>(layout.gmxpacked_cjpacked_numbers) *
+                      static_cast<size_t>(kClusteredJGroupSize))
+            : std::vector<uint64_t>();
+
+    unsigned long long sci_cj_refs = 0ull;
+    unsigned long long sci_empty = 0ull;
+    unsigned long long sci_min_cj = ULLONG_MAX;
+    unsigned long long sci_max_cj = 0ull;
+    for (const auto& sci : sci_entries)
+    {
+        const int begin = sci.cjpacked_begin;
+        const int end = sci.cjpacked_end;
+        const unsigned long long count =
+            end > begin ? static_cast<unsigned long long>(end - begin) : 0ull;
+        sci_cj_refs += count;
+        sci_min_cj = std::min(sci_min_cj, count);
+        sci_max_cj = std::max(sci_max_cj, count);
+        if (count == 0ull)
+        {
+            sci_empty += 1ull;
+        }
+    }
+    if (sci_min_cj == ULLONG_MAX)
+    {
+        sci_min_cj = 0ull;
+    }
+
+    unsigned long long split_total = 0ull;
+    unsigned long long split_imask_nonzero = 0ull;
+    unsigned long long split_imask_zero = 0ull;
+    unsigned long long split_no_excl = 0ull;
+    unsigned long long split_with_excl = 0ull;
+    unsigned long long imask_bits = 0ull;
+    unsigned long long imask_bits_no_excl = 0ull;
+    unsigned long long imask_bits_with_excl = 0ull;
+    unsigned long long thread_mask_bits = 0ull;
+    unsigned long long thread_mask_bits_after_excl = 0ull;
+    unsigned long long thread_mask_bits_no_excl = 0ull;
+    unsigned long long thread_mask_bits_with_excl = 0ull;
+    unsigned long long used_exclusion_indices = 0ull;
+    std::vector<unsigned char> exclusion_index_seen(
+        layout.gmxpacked_exclusion_numbers > 0
+            ? static_cast<size_t>(layout.gmxpacked_exclusion_numbers)
+            : 0u,
+        0u);
+
+    for (const auto& cj : cj_entries)
+    {
+        for (int split = 0; split < kClusteredWarpSplitCount; split += 1)
+        {
+            split_total += 1ull;
+            const unsigned int imask = cj.split[split].imask;
+            if (imask == 0u)
+            {
+                split_imask_zero += 1ull;
+                continue;
+            }
+
+            split_imask_nonzero += 1ull;
+            const int exclusion_index = cj.split[split].exclusion_index;
+            const bool has_exclusion =
+                exclusion_index != 0 && layout.d_gmxpacked_exclusions != NULL;
+            const unsigned long long bit_count =
+                static_cast<unsigned long long>(
+                    Clustered_Host_Popcount_U32(imask));
+            imask_bits += bit_count;
+            if (has_exclusion)
+            {
+                split_with_excl += 1ull;
+                imask_bits_with_excl += bit_count;
+                if (exclusion_index > 0 &&
+                    static_cast<size_t>(exclusion_index) <
+                        exclusion_index_seen.size() &&
+                    exclusion_index_seen[exclusion_index] == 0u)
+                {
+                    exclusion_index_seen[exclusion_index] = 1u;
+                    used_exclusion_indices += 1ull;
+                }
+            }
+            else
+            {
+                split_no_excl += 1ull;
+                imask_bits_no_excl += bit_count;
+            }
+
+            for (int jm = 0; jm < kClusteredJGroupSize; jm += 1)
+            {
+                const unsigned int jm_mask =
+                    ((1u << kClusteredSuperClusterClusters) - 1u)
+                    << Clustered_Jm_Imask_Shift(jm);
+                const unsigned int jm_imask = imask & jm_mask;
+                const unsigned long long jm_bits =
+                    static_cast<unsigned long long>(
+                        Clustered_Host_Popcount_U32(jm_imask));
+                thread_mask_bits +=
+                    jm_bits * static_cast<unsigned long long>(kClusteredClusterSize);
+                if (!has_exclusion)
+                {
+                    thread_mask_bits_after_excl +=
+                        jm_bits *
+                        static_cast<unsigned long long>(kClusteredClusterSize);
+                    thread_mask_bits_no_excl +=
+                        jm_bits *
+                        static_cast<unsigned long long>(kClusteredClusterSize);
+                    continue;
+                }
+                unsigned long long after_for_jm = 0ull;
+                if (exclusion_index > 0 &&
+                    static_cast<size_t>(exclusion_index) <
+                        exclusion_entries.size())
+                {
+                    const auto& exclusion =
+                        exclusion_entries[static_cast<size_t>(exclusion_index)];
+                    for (int i_lane = 0; i_lane < kClusteredClusterSize;
+                         i_lane += 1)
+                    {
+                        const unsigned int pair_bits =
+                            exclusion.pair[jm * kClusteredClusterSize + i_lane];
+                        after_for_jm += static_cast<unsigned long long>(
+                            Clustered_Host_Popcount_U32(jm_imask & pair_bits));
+                    }
+                }
+                thread_mask_bits_after_excl += after_for_jm;
+                thread_mask_bits_with_excl += after_for_jm;
+            }
+        }
+    }
+
+    unsigned long long safe_sci = 0ull;
+    unsigned long long unsafe_sci = 0ull;
+    if (!sci_shift_safe_flags.empty())
+    {
+        for (int flag : sci_shift_safe_flags)
+        {
+            if (flag != 0)
+            {
+                safe_sci += 1ull;
+            }
+            else
+            {
+                unsafe_sci += 1ull;
+            }
+        }
+    }
+
+    unsigned long long shift_uniform_words = 0ull;
+    unsigned long long shift_central_words = 0ull;
+    unsigned long long shift_noncentral_slots = 0ull;
+    for (uint64_t word : pair_shift_words)
+    {
+        const int first_shift = Clustered_Get_Pair_Shift_Id(word, 0);
+        bool uniform = true;
+        bool central = first_shift == kClusteredCentralShiftId;
+        if (!central)
+        {
+            shift_noncentral_slots += 1ull;
+        }
+        for (int lane = 1; lane < kClusteredClusterSize; lane += 1)
+        {
+            const int shift_id = Clustered_Get_Pair_Shift_Id(word, lane);
+            if (shift_id != first_shift)
+            {
+                uniform = false;
+            }
+            if (shift_id != kClusteredCentralShiftId)
+            {
+                central = false;
+                shift_noncentral_slots += 1ull;
+            }
+        }
+        if (uniform)
+        {
+            shift_uniform_words += 1ull;
+        }
+        if (central)
+        {
+            shift_central_words += 1ull;
+        }
+    }
+
+    const unsigned long long shift_word_total =
+        static_cast<unsigned long long>(pair_shift_words.size());
+    const unsigned long long shift_slot_total =
+        shift_word_total * static_cast<unsigned long long>(kClusteredClusterSize);
+    const unsigned long long split_common_candidate = split_no_excl;
+    const unsigned long long imask_common_candidate = imask_bits_no_excl;
+    fprintf(
+        stderr,
+        "[clustered gmxpacked force payload stats] call=%d need_energy=%d "
+        "need_virial=%d use_direct=%d fast=%d full_local_dense=%d "
+        "sci_shift_only=%d sci_shift_split=%d sci_shift_runtime=%d "
+        "sci=%d cj=%d excl=%d sci_cj_refs=%llu sci_empty=%llu "
+        "sci_cj_min=%llu sci_cj_max=%llu sci_cj_avg=%.3f "
+        "splits=%llu split_nonzero=%llu split_zero=%llu "
+        "split_no_excl=%llu split_with_excl=%llu "
+        "split_no_excl_pct=%.2f imask_bits=%llu imask_no_excl=%llu "
+        "imask_with_excl=%llu imask_no_excl_pct=%.2f "
+        "thread_mask_bits=%llu thread_mask_after_excl=%llu "
+        "thread_mask_no_excl=%llu thread_mask_with_excl=%llu "
+        "thread_mask_removed_by_excl=%llu used_excl_indices=%llu "
+        "sci_shift_flags=%d sci_shift_safe=%llu sci_shift_unsafe=%llu "
+        "sci_shift_safe_pct=%.2f shift_words=%llu "
+        "shift_uniform_words=%llu shift_uniform_pct=%.2f "
+        "shift_central_words=%llu shift_central_pct=%.2f "
+        "shift_noncentral_slots=%llu shift_noncentral_slot_pct=%.2f "
+        "common_split_candidate=%llu common_imask_candidate=%llu\n",
+        lj_call, need_atom_energy ? 1 : 0, need_virial ? 1 : 0,
+        use_gmxpacked_direct ? 1 : 0, use_gmxpacked_fast_kernel ? 1 : 0,
+        full_local_dense ? 1 : 0, use_gmxpacked_sci_shift_only ? 1 : 0,
+        use_gmxpacked_sci_shift_split ? 1 : 0,
+        use_gmxpacked_sci_shift_runtime ? 1 : 0,
+        layout.gmxpacked_sci_numbers, layout.gmxpacked_cjpacked_numbers,
+        layout.gmxpacked_exclusion_numbers, sci_cj_refs, sci_empty,
+        sci_min_cj, sci_max_cj,
+        layout.gmxpacked_sci_numbers > 0
+            ? static_cast<double>(sci_cj_refs) /
+                  static_cast<double>(layout.gmxpacked_sci_numbers)
+            : 0.0,
+        split_total, split_imask_nonzero, split_imask_zero, split_no_excl,
+        split_with_excl,
+        Clustered_Host_Percent(split_no_excl, split_imask_nonzero),
+        imask_bits, imask_bits_no_excl, imask_bits_with_excl,
+        Clustered_Host_Percent(imask_bits_no_excl, imask_bits),
+        thread_mask_bits, thread_mask_bits_after_excl,
+        thread_mask_bits_no_excl, thread_mask_bits_with_excl,
+        thread_mask_bits >= thread_mask_bits_after_excl
+            ? thread_mask_bits - thread_mask_bits_after_excl
+            : 0ull,
+        used_exclusion_indices,
+        sci_shift_safe_flags.empty() ? 0 : 1, safe_sci, unsafe_sci,
+        Clustered_Host_Percent(safe_sci, safe_sci + unsafe_sci),
+        shift_word_total, shift_uniform_words,
+        Clustered_Host_Percent(shift_uniform_words, shift_word_total),
+        shift_central_words,
+        Clustered_Host_Percent(shift_central_words, shift_word_total),
+        shift_noncentral_slots,
+        Clustered_Host_Percent(shift_noncentral_slots, shift_slot_total),
+        split_common_candidate, imask_common_candidate);
+    fflush(stderr);
 }
 
 struct Clustered_Gmxpacked_Shift_Analyze_Stats
@@ -2074,6 +2410,44 @@ static __device__ __forceinline__ void Clustered_Atomic_Add_Force_Component(
     atomicAdd(frc_component + component, value);
 }
 
+template <bool raw_component_addressing>
+static __device__ __forceinline__ void
+Clustered_Atomic_Add_Force_Component_Probe(VECTOR* frc, int atom_index,
+                                           int component, float value)
+{
+    if constexpr (raw_component_addressing)
+    {
+        float* frc_component = reinterpret_cast<float*>(frc);
+        atomicAdd(frc_component + atom_index * 3 + component, value);
+    }
+    else
+    {
+        Clustered_Atomic_Add_Force_Component(frc, atom_index, component, value);
+    }
+}
+
+template <bool raw_component_addressing>
+static __device__ __forceinline__ void
+Clustered_Atomic_Add_Force_Component_Probe(float4* frc, int atom_index,
+                                           int component, float value)
+{
+    if constexpr (raw_component_addressing)
+    {
+        float* frc_component = reinterpret_cast<float*>(frc);
+        atomicAdd(frc_component + atom_index * 4 + component, value);
+    }
+    else
+    {
+        Clustered_Atomic_Add_Force_Component(frc, atom_index, component, value);
+    }
+}
+
+static __device__ __forceinline__ void
+Clustered_Gmxpacked_Consume_Force_Component_Probe(float value)
+{
+    asm volatile("" : : "f"(value));
+}
+
 static __global__ void Scatter_Sorted_Clustered_Force(
     const int total_atom_numbers, const int* sorted_atom_ids,
     const VECTOR* sorted_frc, VECTOR* frc)
@@ -2993,7 +3367,11 @@ static __global__ void Clustered_Lennard_Jones_And_Direct_Coulomb_Device(
 template <bool need_energy, bool need_virial, bool total_output,
           bool compact_force_storage, bool use_lj_comb, bool dense_offsets,
           bool full_local_dense, bool sci_shift_only,
-          typename ForceTarget = VECTOR, bool runtime_sci_shift = false>
+          typename ForceTarget = VECTOR, bool runtime_sci_shift = false,
+          bool raw_component_atomic_probe = false,
+          bool staggered_component_atomic_probe = false,
+          bool skip_j_force_writeback_probe = false,
+          bool skip_i_force_writeback_probe = false>
 static __global__ __launch_bounds__(kClusteredClusterSize *
                                          kClusteredSuperClusterClusters,
                                      use_lj_comb
@@ -3024,10 +3402,10 @@ Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb_ForceOnly_Warp_Record_Device(
                   "gmxpacked energy/virial dispatch must use total output");
     static_assert(!full_local_dense || dense_offsets,
                   "full-local dense gmxpacked specialization requires dense offsets");
-    static_assert(!sci_shift_only || (full_local_dense && dense_offsets),
-                  "sci-shift-only gmxpacked specialization requires full-local dense offsets");
-    static_assert(!runtime_sci_shift || (full_local_dense && dense_offsets),
-                  "runtime sci-shift gmxpacked specialization requires full-local dense offsets");
+    static_assert(!sci_shift_only || dense_offsets,
+                  "sci-shift-only gmxpacked specialization requires dense offsets");
+    static_assert(!runtime_sci_shift || dense_offsets,
+                  "runtime sci-shift gmxpacked specialization requires dense offsets");
     static_assert(!(sci_shift_only && runtime_sci_shift),
                   "runtime sci-shift is mutually exclusive with compile-time sci-shift-only");
     constexpr int max_super_cluster_atoms =
@@ -3449,18 +3827,45 @@ Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb_ForceOnly_Warp_Record_Device(
                         CLUSTERED_GMXPACKED_COMPUTE_I)                      \
                     if (j_is_local)                                         \
                     {                                                       \
+                        int fcj_component_lane = i_lane;                    \
+                        int staggered_force_index = 0;                       \
+                        if constexpr (staggered_component_atomic_probe)      \
+                        {                                                   \
+                            if (i_lane < 3)                                  \
+                            {                                                \
+                                staggered_force_index =                      \
+                                    compact_force_storage                    \
+                                        ? sorted_j                           \
+                                        : sorted_atom_ids[sorted_j];         \
+                                fcj_component_lane =                         \
+                                    (fcj_component_lane +                    \
+                                     staggered_force_index % 3) % 3;         \
+                            }                                                \
+                        }                                                   \
                         const float fcj_component =                         \
                             Reduce_Clustered_Subgroup_Vector_To_Component(  \
-                                fcj_x, fcj_y, fcj_z, i_lane, lane,          \
-                                cluster_stride);                            \
+                                fcj_x, fcj_y, fcj_z, fcj_component_lane,    \
+                                lane, cluster_stride);                      \
                         if (i_lane < 3)                                     \
                         {                                                   \
                             const int force_index =                         \
-                                compact_force_storage                       \
-                                    ? sorted_j                              \
-                                    : sorted_atom_ids[sorted_j];            \
-                            Clustered_Atomic_Add_Force_Component(           \
-                                frc, force_index, i_lane, fcj_component);   \
+                                staggered_component_atomic_probe             \
+                                    ? staggered_force_index                  \
+                                    : (compact_force_storage                 \
+                                           ? sorted_j                        \
+                                           : sorted_atom_ids[sorted_j]);     \
+                            if constexpr (!skip_j_force_writeback_probe)     \
+                            {                                                \
+                                Clustered_Atomic_Add_Force_Component_Probe<  \
+                                    raw_component_atomic_probe>(             \
+                                    frc, force_index, fcj_component_lane,    \
+                                    fcj_component);                          \
+                            }                                                \
+                            else                                             \
+                            {                                                \
+                                Clustered_Gmxpacked_Consume_Force_Component_Probe( \
+                                    fcj_component);                          \
+                            }                                                \
                         }                                                   \
                     }                                                       \
                 }                                                           \
@@ -3481,27 +3886,67 @@ Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb_ForceOnly_Warp_Record_Device(
         float reduced_x = active_i ? fci_x_##I : 0.0f;                      \
         float reduced_y = active_i ? fci_y_##I : 0.0f;                      \
         float reduced_z = active_i ? fci_z_##I : 0.0f;                      \
+        int staggered_sorted_i = 0;                                           \
+        int staggered_force_index = 0;                                        \
+        int reduced_component_lane = split_j_lane;                           \
+        if constexpr (staggered_component_atomic_probe)                      \
+        {                                                                    \
+            if (active_i && split_j_lane < 3)                                \
+            {                                                                \
+                if constexpr (full_local_dense)                              \
+                {                                                            \
+                    staggered_sorted_i = (cluster_i_start + (I)) *           \
+                                         kClusteredClusterSize + i_lane;     \
+                }                                                            \
+                else                                                         \
+                {                                                            \
+                    staggered_sorted_i =                                     \
+                        shared_i_sorted_ids[(I) * cluster_stride + i_lane];  \
+                }                                                            \
+                staggered_force_index = compact_force_storage                \
+                                            ? staggered_sorted_i             \
+                                            : sorted_atom_ids[staggered_sorted_i]; \
+                reduced_component_lane =                                     \
+                    (reduced_component_lane + staggered_force_index % 3) % 3; \
+            }                                                                \
+        }                                                                    \
         const float reduced_component =                                     \
             Reduce_Clustered_Warp_I_To_Component(                           \
-                reduced_x, reduced_y, reduced_z, i_lane, split_j_lane,      \
-                cluster_stride);                                            \
+                reduced_x, reduced_y, reduced_z, i_lane,                    \
+                reduced_component_lane, cluster_stride);                    \
         if (active_i && split_j_lane < 3)                                   \
         {                                                                   \
-            int sorted_i = 0;                                               \
-            if constexpr (full_local_dense)                                 \
-            {                                                               \
-                sorted_i = (cluster_i_start + (I)) *                        \
-                           kClusteredClusterSize + i_lane;                  \
-            }                                                               \
-            else                                                            \
-            {                                                               \
-                sorted_i =                                                  \
-                    shared_i_sorted_ids[(I) * cluster_stride + i_lane];     \
-            }                                                               \
-            const int force_index =                                         \
-                compact_force_storage ? sorted_i : sorted_atom_ids[sorted_i]; \
-            Clustered_Atomic_Add_Force_Component(                           \
-                frc, force_index, split_j_lane, reduced_component);         \
+            int sorted_i = staggered_sorted_i;                               \
+            if constexpr (!staggered_component_atomic_probe)                 \
+            {                                                                \
+                if constexpr (full_local_dense)                              \
+                {                                                            \
+                    sorted_i = (cluster_i_start + (I)) *                     \
+                               kClusteredClusterSize + i_lane;               \
+                }                                                            \
+                else                                                         \
+                {                                                            \
+                    sorted_i =                                               \
+                        shared_i_sorted_ids[(I) * cluster_stride + i_lane];  \
+                }                                                            \
+            }                                                                \
+            const int force_index =                                          \
+                staggered_component_atomic_probe                             \
+                    ? staggered_force_index                                  \
+                    : (compact_force_storage ? sorted_i                      \
+                                             : sorted_atom_ids[sorted_i]);    \
+            if constexpr (!skip_i_force_writeback_probe)                     \
+            {                                                                \
+                Clustered_Atomic_Add_Force_Component_Probe<                  \
+                    raw_component_atomic_probe>(                             \
+                    frc, force_index, reduced_component_lane,                \
+                    reduced_component);                                      \
+            }                                                                \
+            else                                                             \
+            {                                                                \
+                Clustered_Gmxpacked_Consume_Force_Component_Probe(           \
+                    reduced_component);                                      \
+            }                                                                \
         }                                                                   \
     }
     CLUSTERED_GMXPACKED_I_LOCAL_LIST(CLUSTERED_GMXPACKED_REDUCE_I)
@@ -7209,6 +7654,16 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
                 Clustered_Gmxpacked_Fused_Sorted_Force_Enabled();
             const bool requested_gmxpacked_float4_sorted_force =
                 Clustered_Gmxpacked_Float4_Sorted_Force_Enabled();
+            const bool requested_gmxpacked_raw_component_atomic_probe =
+                Clustered_Gmxpacked_Force_Raw_Component_Atomic_Probe_Enabled();
+            const bool requested_gmxpacked_staggered_atomic_probe =
+                Clustered_Gmxpacked_Force_Staggered_Atomic_Probe_Enabled();
+            const bool requested_gmxpacked_skip_writeback_probe =
+                Clustered_Gmxpacked_Force_Skip_Writeback_Probe_Enabled();
+            const bool requested_gmxpacked_skip_i_writeback_probe =
+                Clustered_Gmxpacked_Force_Skip_I_Writeback_Probe_Enabled();
+            const bool requested_gmxpacked_skip_j_writeback_probe =
+                Clustered_Gmxpacked_Force_Skip_J_Writeback_Probe_Enabled();
             const bool requested_gmxpacked_assume_sci_shift =
                 Clustered_Gmxpacked_Assume_Sci_Shift_Enabled();
             const bool requested_gmxpacked_sci_shift_split =
@@ -7225,8 +7680,8 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
             {
                 fprintf(stderr,
                         "[clustered gmxpacked lj comb] requested but LJ pair "
-                        "table is not compatible with geometric comb; falling "
-                        "back to AB-table kernel\n");
+                        "table is not compatible with geometric comb; using "
+                        "AB-table parameter path\n");
                 fflush(stderr);
                 warned_gmxpacked_lj_comb_incompatible = true;
             }
@@ -7272,10 +7727,10 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
                 clustered_layout.cluster_numbers > 0;
             const bool use_gmxpacked_fast_kernel =
                 use_gmxpacked_direct && requested_gmxpacked_fast_kernel &&
-                use_gmxpacked_lj_comb_kernel &&
                 gmxpacked_fast_layout_compatible;
             const bool gmxpacked_fast_full_local_dense_compatible =
                 use_gmxpacked_fast_kernel &&
+                use_gmxpacked_lj_comb_kernel &&
                 clustered_layout.ghost_numbers == 0 &&
                 clustered_layout.local_atom_numbers ==
                     clustered_layout.total_atom_numbers &&
@@ -7293,7 +7748,7 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
                 clustered_layout.gmxpacked_pair_shift_sci_only_compatible;
             const bool use_gmxpacked_sci_shift_split =
                 requested_gmxpacked_sci_shift_split &&
-                gmxpacked_fast_full_local_dense_compatible &&
+                use_gmxpacked_fast_kernel &&
                 clustered_layout.d_gmxpacked_pair_shift_sci_safe_flags != NULL;
             const bool use_gmxpacked_sci_shift_split_skip_empty =
                 use_gmxpacked_sci_shift_split &&
@@ -7314,18 +7769,23 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
                 clustered_layout.gmxpacked_pair_shift_unsafe_sci_numbers > 0;
             const bool use_gmxpacked_sci_shift_runtime =
                 requested_gmxpacked_sci_shift_runtime &&
-                gmxpacked_fast_full_local_dense_compatible &&
+                use_gmxpacked_fast_kernel &&
                 clustered_layout.d_gmxpacked_pair_shift_sci_safe_flags != NULL;
             static bool warned_gmxpacked_sci_shift_unavailable = false;
-            if ((requested_gmxpacked_assume_sci_shift ||
-                 requested_gmxpacked_sci_shift_split ||
-                 requested_gmxpacked_sci_shift_runtime) &&
-                !gmxpacked_fast_full_local_dense_compatible &&
+            const bool gmxpacked_sci_shift_requested_unavailable =
+                (requested_gmxpacked_assume_sci_shift &&
+                 !gmxpacked_fast_full_local_dense_compatible) ||
+                ((requested_gmxpacked_sci_shift_split ||
+                  requested_gmxpacked_sci_shift_runtime) &&
+                 (!use_gmxpacked_fast_kernel ||
+                  clustered_layout.d_gmxpacked_pair_shift_sci_safe_flags ==
+                      NULL));
+            if (gmxpacked_sci_shift_requested_unavailable &&
                 !warned_gmxpacked_sci_shift_unavailable)
             {
                 fprintf(stderr,
                         "[clustered gmxpacked sci-shift] requested but requires "
-                        "full-local dense fast gmxpacked layout; falling back to "
+                        "fast dense-offset gmxpacked layout; falling back to "
                         "pair-shift metadata\n");
                 fflush(stderr);
                 warned_gmxpacked_sci_shift_unavailable = true;
@@ -7355,7 +7815,7 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
             {
                 fprintf(stderr,
                         "[clustered gmxpacked fast] requested but requires "
-                        "gmxpacked LJ-comb payload and dense %dx%d layout "
+                        "dense %dx%d gmxpacked layout "
                         "(cluster_size=%d super_cluster_clusters=%d "
                         "lj_comb=%d); falling back to regular gmxpacked "
                         "kernel\n",
@@ -7377,6 +7837,36 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
                 requested_gmxpacked_float4_sorted_force &&
                 gmxpacked_fast_full_local_dense_compatible &&
                 has_sorted_force_float4_scratch;
+            const bool use_gmxpacked_raw_component_atomic_probe =
+                use_gmxpacked_direct &&
+                requested_gmxpacked_raw_component_atomic_probe &&
+                !need_atom_energy && !need_virial &&
+                gmxpacked_fast_full_local_dense_compatible &&
+                !use_gmxpacked_compact_force_scratch &&
+                !use_gmxpacked_float4_sorted_force;
+            const bool use_gmxpacked_staggered_atomic_probe =
+                use_gmxpacked_direct &&
+                requested_gmxpacked_staggered_atomic_probe &&
+                !need_atom_energy && !need_virial &&
+                gmxpacked_fast_full_local_dense_compatible &&
+                !use_gmxpacked_compact_force_scratch &&
+                !use_gmxpacked_float4_sorted_force;
+            const bool use_gmxpacked_skip_i_writeback_probe =
+                use_gmxpacked_direct &&
+                (requested_gmxpacked_skip_writeback_probe ||
+                 requested_gmxpacked_skip_i_writeback_probe) &&
+                !need_atom_energy && !need_virial &&
+                gmxpacked_fast_full_local_dense_compatible &&
+                !use_gmxpacked_compact_force_scratch &&
+                !use_gmxpacked_float4_sorted_force;
+            const bool use_gmxpacked_skip_j_writeback_probe =
+                use_gmxpacked_direct &&
+                (requested_gmxpacked_skip_writeback_probe ||
+                 requested_gmxpacked_skip_j_writeback_probe) &&
+                !need_atom_energy && !need_virial &&
+                gmxpacked_fast_full_local_dense_compatible &&
+                !use_gmxpacked_compact_force_scratch &&
+                !use_gmxpacked_float4_sorted_force;
             if (Clustered_Gmxpacked_Force_Kernel_Gate_Trace_Enabled())
             {
                 const int trace_key = (need_atom_energy ? 2 : 0) |
@@ -7394,9 +7884,13 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
                         "sorted atom=%d xq=%d lj_type=%d lj_comb=%d "
                         "frc=%d frc4=%d soa=%d "
                         "requested lj_comb=%d fast=%d force_scratch=%d "
-                        "fused=%d float4=%d "
+                        "fused=%d float4=%d raw_component_atomic=%d "
+                        "staggered_atomic=%d skip_i_writeback=%d "
+                        "skip_j_writeback=%d "
                         "use direct=%d lj_comb=%d fast=%d compact=%d "
-                        "fused=%d float4=%d "
+                        "fused=%d float4=%d raw_component_atomic=%d "
+                        "staggered_atomic=%d skip_i_writeback=%d "
+                        "skip_j_writeback=%d "
                         "layout cluster_size=%d super_clusters=%d "
                         "clusters=%d total_atoms=%d local_atoms=%d "
                         "direct_local_atoms=%d ghosts=%d "
@@ -7427,12 +7921,26 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
                         requested_gmxpacked_force_sorted_scratch ? 1 : 0,
                         requested_gmxpacked_fused_sorted_force ? 1 : 0,
                         requested_gmxpacked_float4_sorted_force ? 1 : 0,
+                        requested_gmxpacked_raw_component_atomic_probe ? 1 : 0,
+                        requested_gmxpacked_staggered_atomic_probe ? 1 : 0,
+                        (requested_gmxpacked_skip_writeback_probe ||
+                         requested_gmxpacked_skip_i_writeback_probe)
+                            ? 1
+                            : 0,
+                        (requested_gmxpacked_skip_writeback_probe ||
+                         requested_gmxpacked_skip_j_writeback_probe)
+                            ? 1
+                            : 0,
                         use_gmxpacked_direct ? 1 : 0,
                         use_gmxpacked_lj_comb_kernel ? 1 : 0,
                         use_gmxpacked_fast_kernel ? 1 : 0,
                         use_gmxpacked_compact_force_scratch ? 1 : 0,
                         use_gmxpacked_fused_sorted_force ? 1 : 0,
                         use_gmxpacked_float4_sorted_force ? 1 : 0,
+                        use_gmxpacked_raw_component_atomic_probe ? 1 : 0,
+                        use_gmxpacked_staggered_atomic_probe ? 1 : 0,
+                        use_gmxpacked_skip_i_writeback_probe ? 1 : 0,
+                        use_gmxpacked_skip_j_writeback_probe ? 1 : 0,
                         clustered_layout.cluster_size,
                         clustered_layout.super_cluster_clusters,
                         clustered_layout.cluster_numbers,
@@ -7461,6 +7969,25 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
                         clustered_layout.gmxpacked_pair_shift_unsafe_sci_numbers);
                     fflush(stderr);
                     printed_gate_trace[trace_key] = true;
+                }
+            }
+            if (Clustered_Gmxpacked_Force_Payload_Stats_Enabled())
+            {
+                const int stats_key = (need_atom_energy ? 2 : 0) |
+                                      (need_virial ? 1 : 0);
+                static bool printed_payload_stats[4] = {false, false, false,
+                                                        false};
+                if (!printed_payload_stats[stats_key])
+                {
+                    Print_Clustered_Gmxpacked_Force_Payload_Stats(
+                        clustered_layout, lj_call, need_atom_energy != 0,
+                        need_virial != 0, use_gmxpacked_direct,
+                        use_gmxpacked_fast_kernel,
+                        gmxpacked_fast_full_local_dense_compatible,
+                        use_gmxpacked_sci_shift_only,
+                        use_gmxpacked_sci_shift_split,
+                        use_gmxpacked_sci_shift_runtime);
+                    printed_payload_stats[stats_key] = true;
                 }
             }
             const bool use_total_output_warp_record =
@@ -7659,36 +8186,55 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
                         }
                         else
                         {
-#define CLUSTERED_GMXPACKED_RUNTIME_FULL_DENSE_KERNEL(NEED_ENERGY, NEED_VIRIAL, TOTAL_OUTPUT, COMPACT_FORCE) \
+#define CLUSTERED_GMXPACKED_RUNTIME_FULL_DENSE_KERNEL(NEED_ENERGY, NEED_VIRIAL, TOTAL_OUTPUT, COMPACT_FORCE, RAW_COMPONENT_ATOMIC, STAGGERED_ATOMIC, SKIP_J_WRITEBACK, SKIP_I_WRITEBACK) \
     Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb_ForceOnly_Warp_Record_Device<                           \
-        NEED_ENERGY, NEED_VIRIAL, TOTAL_OUTPUT, COMPACT_FORCE, true, true, true, false, VECTOR, true>
+        NEED_ENERGY, NEED_VIRIAL, TOTAL_OUTPUT, COMPACT_FORCE, true, true, true, false, VECTOR, true,          \
+        RAW_COMPONENT_ATOMIC, STAGGERED_ATOMIC, SKIP_J_WRITEBACK, SKIP_I_WRITEBACK>
+#define CLUSTERED_GMXPACKED_RUNTIME_FULL_DENSE_FORCEONLY_KERNEL()                                             \
+    (use_gmxpacked_skip_i_writeback_probe                                                                     \
+         ? (use_gmxpacked_skip_j_writeback_probe                                                              \
+                ? CLUSTERED_GMXPACKED_RUNTIME_FULL_DENSE_KERNEL(false, false, false, false, false, false, true, true) \
+                : CLUSTERED_GMXPACKED_RUNTIME_FULL_DENSE_KERNEL(false, false, false, false, false, false, false, true)) \
+         : (use_gmxpacked_skip_j_writeback_probe                                                              \
+                ? CLUSTERED_GMXPACKED_RUNTIME_FULL_DENSE_KERNEL(false, false, false, false, false, false, true, false) \
+                : (use_gmxpacked_raw_component_atomic_probe                                                   \
+                       ? (use_gmxpacked_staggered_atomic_probe                                                \
+                              ? CLUSTERED_GMXPACKED_RUNTIME_FULL_DENSE_KERNEL(false, false, false, false, true, true, false, false) \
+                              : CLUSTERED_GMXPACKED_RUNTIME_FULL_DENSE_KERNEL(false, false, false, false, true, false, false, false)) \
+                       : (use_gmxpacked_staggered_atomic_probe                                                \
+                              ? CLUSTERED_GMXPACKED_RUNTIME_FULL_DENSE_KERNEL(false, false, false, false, false, true, false, false) \
+                              : CLUSTERED_GMXPACKED_RUNTIME_FULL_DENSE_KERNEL(false, false, false, false, false, false, false, false)))))
                             auto gmxpacked_runtime_f =
-                                CLUSTERED_GMXPACKED_RUNTIME_FULL_DENSE_KERNEL(
-                                    false, false, false, false);
+                                CLUSTERED_GMXPACKED_RUNTIME_FULL_DENSE_FORCEONLY_KERNEL();
                             if (use_gmxpacked_compact_force_scratch)
                             {
                                 gmxpacked_runtime_f =
                                     CLUSTERED_GMXPACKED_RUNTIME_FULL_DENSE_KERNEL(
-                                        false, false, false, true);
+                                        false, false, false, true, false,
+                                        false, false, false);
                             }
                             if (need_atom_energy && need_virial)
                             {
                                 gmxpacked_runtime_f =
                                     CLUSTERED_GMXPACKED_RUNTIME_FULL_DENSE_KERNEL(
-                                        true, true, true, true);
+                                        true, true, true, true, false, false,
+                                        false, false);
                             }
                             else if (need_atom_energy)
                             {
                                 gmxpacked_runtime_f =
                                     CLUSTERED_GMXPACKED_RUNTIME_FULL_DENSE_KERNEL(
-                                        true, false, true, true);
+                                        true, false, true, true, false, false,
+                                        false, false);
                             }
                             else if (need_virial)
                             {
                                 gmxpacked_runtime_f =
                                     CLUSTERED_GMXPACKED_RUNTIME_FULL_DENSE_KERNEL(
-                                        false, true, true, true);
+                                        false, true, true, true, false, false,
+                                        false, false);
                             }
+#undef CLUSTERED_GMXPACKED_RUNTIME_FULL_DENSE_FORCEONLY_KERNEL
 #undef CLUSTERED_GMXPACKED_RUNTIME_FULL_DENSE_KERNEL
                             Launch_Device_Kernel(
                                 gmxpacked_runtime_f, gmxpackedGridSize,
@@ -7791,51 +8337,75 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
                         }
                         else
                         {
-#define CLUSTERED_GMXPACKED_SPLIT_FULL_DENSE_KERNEL(NEED_ENERGY, NEED_VIRIAL, TOTAL_OUTPUT, COMPACT_FORCE, SCI_SHIFT_ONLY) \
+#define CLUSTERED_GMXPACKED_SPLIT_FULL_DENSE_KERNEL(NEED_ENERGY, NEED_VIRIAL, TOTAL_OUTPUT, COMPACT_FORCE, SCI_SHIFT_ONLY, RAW_COMPONENT_ATOMIC, STAGGERED_ATOMIC, SKIP_J_WRITEBACK, SKIP_I_WRITEBACK) \
     Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb_ForceOnly_Warp_Record_Device<                                        \
-        NEED_ENERGY, NEED_VIRIAL, TOTAL_OUTPUT, COMPACT_FORCE, true, true, true, SCI_SHIFT_ONLY>
+        NEED_ENERGY, NEED_VIRIAL, TOTAL_OUTPUT, COMPACT_FORCE, true, true, true, SCI_SHIFT_ONLY, VECTOR, false,             \
+        RAW_COMPONENT_ATOMIC, STAGGERED_ATOMIC, SKIP_J_WRITEBACK, SKIP_I_WRITEBACK>
+#define CLUSTERED_GMXPACKED_SPLIT_FULL_DENSE_FORCEONLY_KERNEL(SCI_SHIFT_ONLY)                                             \
+    (use_gmxpacked_skip_i_writeback_probe                                                                                 \
+         ? (use_gmxpacked_skip_j_writeback_probe                                                                          \
+                ? CLUSTERED_GMXPACKED_SPLIT_FULL_DENSE_KERNEL(false, false, false, false, SCI_SHIFT_ONLY, false, false, true, true) \
+                : CLUSTERED_GMXPACKED_SPLIT_FULL_DENSE_KERNEL(false, false, false, false, SCI_SHIFT_ONLY, false, false, false, true)) \
+         : (use_gmxpacked_skip_j_writeback_probe                                                                          \
+                ? CLUSTERED_GMXPACKED_SPLIT_FULL_DENSE_KERNEL(false, false, false, false, SCI_SHIFT_ONLY, false, false, true, false) \
+                : (use_gmxpacked_raw_component_atomic_probe                                                               \
+                       ? (use_gmxpacked_staggered_atomic_probe                                                            \
+                              ? CLUSTERED_GMXPACKED_SPLIT_FULL_DENSE_KERNEL(false, false, false, false, SCI_SHIFT_ONLY, true, true, false, false) \
+                              : CLUSTERED_GMXPACKED_SPLIT_FULL_DENSE_KERNEL(false, false, false, false, SCI_SHIFT_ONLY, true, false, false, false)) \
+                       : (use_gmxpacked_staggered_atomic_probe                                                            \
+                              ? CLUSTERED_GMXPACKED_SPLIT_FULL_DENSE_KERNEL(false, false, false, false, SCI_SHIFT_ONLY, false, true, false, false) \
+                              : CLUSTERED_GMXPACKED_SPLIT_FULL_DENSE_KERNEL(false, false, false, false, SCI_SHIFT_ONLY, false, false, false, false)))))
                             auto gmxpacked_fast_f =
-                                CLUSTERED_GMXPACKED_SPLIT_FULL_DENSE_KERNEL(
-                                    false, false, false, false, true);
+                                CLUSTERED_GMXPACKED_SPLIT_FULL_DENSE_FORCEONLY_KERNEL(
+                                    true);
                             auto gmxpacked_slow_f =
-                                CLUSTERED_GMXPACKED_SPLIT_FULL_DENSE_KERNEL(
-                                    false, false, false, false, false);
+                                CLUSTERED_GMXPACKED_SPLIT_FULL_DENSE_FORCEONLY_KERNEL(
+                                    false);
                             if (use_gmxpacked_compact_force_scratch)
                             {
                                 gmxpacked_fast_f =
                                     CLUSTERED_GMXPACKED_SPLIT_FULL_DENSE_KERNEL(
-                                        false, false, false, true, true);
+                                        false, false, false, true, true, false,
+                                        false, false, false);
                                 gmxpacked_slow_f =
                                     CLUSTERED_GMXPACKED_SPLIT_FULL_DENSE_KERNEL(
-                                        false, false, false, true, false);
+                                        false, false, false, true, false, false,
+                                        false, false, false);
                             }
                             if (need_atom_energy && need_virial)
                             {
                                 gmxpacked_fast_f =
                                     CLUSTERED_GMXPACKED_SPLIT_FULL_DENSE_KERNEL(
-                                        true, true, true, true, true);
+                                        true, true, true, true, true, false,
+                                        false, false, false);
                                 gmxpacked_slow_f =
                                     CLUSTERED_GMXPACKED_SPLIT_FULL_DENSE_KERNEL(
-                                        true, true, true, true, false);
+                                        true, true, true, true, false, false,
+                                        false, false, false);
                             }
                             else if (need_atom_energy)
                             {
                                 gmxpacked_fast_f =
                                     CLUSTERED_GMXPACKED_SPLIT_FULL_DENSE_KERNEL(
-                                        true, false, true, true, true);
+                                        true, false, true, true, true, false,
+                                        false, false, false);
                                 gmxpacked_slow_f =
                                     CLUSTERED_GMXPACKED_SPLIT_FULL_DENSE_KERNEL(
-                                        true, false, true, true, false);
+                                        true, false, true, true, false, false,
+                                        false, false, false);
                             }
                             else if (need_virial)
                             {
                                 gmxpacked_fast_f =
                                     CLUSTERED_GMXPACKED_SPLIT_FULL_DENSE_KERNEL(
-                                        false, true, true, true, true);
+                                        false, true, true, true, true, false,
+                                        false, false, false);
                                 gmxpacked_slow_f =
                                     CLUSTERED_GMXPACKED_SPLIT_FULL_DENSE_KERNEL(
-                                        false, true, true, true, false);
+                                        false, true, true, true, false, false,
+                                        false, false, false);
                             }
+#undef CLUSTERED_GMXPACKED_SPLIT_FULL_DENSE_FORCEONLY_KERNEL
 #undef CLUSTERED_GMXPACKED_SPLIT_FULL_DENSE_KERNEL
                             if (gmxpacked_sci_shift_split_has_safe)
                             {
@@ -7927,39 +8497,63 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
                     }
                     else
                     {
-#define CLUSTERED_GMXPACKED_FULL_DENSE_KERNEL(NEED_ENERGY, NEED_VIRIAL, TOTAL_OUTPUT, COMPACT_FORCE) \
-    (use_gmxpacked_sci_shift_only                                                                  \
-         ? Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb_ForceOnly_Warp_Record_Device<          \
-               NEED_ENERGY, NEED_VIRIAL, TOTAL_OUTPUT, COMPACT_FORCE, true, true, true, true>       \
-         : Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb_ForceOnly_Warp_Record_Device<          \
-               NEED_ENERGY, NEED_VIRIAL, TOTAL_OUTPUT, COMPACT_FORCE, true, true, true, false>)
+#define CLUSTERED_GMXPACKED_FULL_DENSE_KERNEL(NEED_ENERGY, NEED_VIRIAL, TOTAL_OUTPUT, COMPACT_FORCE, RAW_COMPONENT_ATOMIC, STAGGERED_ATOMIC, SKIP_J_WRITEBACK, SKIP_I_WRITEBACK) \
+    (use_gmxpacked_sci_shift_only                                                                                         \
+         ? Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb_ForceOnly_Warp_Record_Device<                                 \
+               NEED_ENERGY, NEED_VIRIAL, TOTAL_OUTPUT, COMPACT_FORCE, true, true, true, true, VECTOR, false,               \
+               RAW_COMPONENT_ATOMIC, STAGGERED_ATOMIC, SKIP_J_WRITEBACK, SKIP_I_WRITEBACK>                                \
+         : Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb_ForceOnly_Warp_Record_Device<                                 \
+               NEED_ENERGY, NEED_VIRIAL, TOTAL_OUTPUT, COMPACT_FORCE, true, true, true, false, VECTOR, false,              \
+               RAW_COMPONENT_ATOMIC, STAGGERED_ATOMIC, SKIP_J_WRITEBACK, SKIP_I_WRITEBACK>)
+#define CLUSTERED_GMXPACKED_FULL_DENSE_FORCEONLY_KERNEL()                                                                  \
+    (use_gmxpacked_skip_i_writeback_probe                                                                                  \
+         ? (use_gmxpacked_skip_j_writeback_probe                                                                           \
+                ? CLUSTERED_GMXPACKED_FULL_DENSE_KERNEL(false, false, false, false, false, false, true, true)              \
+                : CLUSTERED_GMXPACKED_FULL_DENSE_KERNEL(false, false, false, false, false, false, false, true))            \
+         : (use_gmxpacked_skip_j_writeback_probe                                                                           \
+                ? CLUSTERED_GMXPACKED_FULL_DENSE_KERNEL(false, false, false, false, false, false, true, false)             \
+                : (use_gmxpacked_raw_component_atomic_probe                                                                \
+                       ? (use_gmxpacked_staggered_atomic_probe                                                             \
+                              ? CLUSTERED_GMXPACKED_FULL_DENSE_KERNEL(false, false, false, false, true, true, false, false) \
+                              : CLUSTERED_GMXPACKED_FULL_DENSE_KERNEL(false, false, false, false, true, false, false, false)) \
+                       : (use_gmxpacked_staggered_atomic_probe                                                             \
+                              ? CLUSTERED_GMXPACKED_FULL_DENSE_KERNEL(false, false, false, false, false, true, false, false) \
+                              : CLUSTERED_GMXPACKED_FULL_DENSE_KERNEL(false, false, false, false, false, false, false, false)))))
                     auto gmxpacked_f =
-                        CLUSTERED_GMXPACKED_FULL_DENSE_KERNEL(false, false,
-                                                               false, false);
+                        CLUSTERED_GMXPACKED_FULL_DENSE_FORCEONLY_KERNEL();
                     if (use_gmxpacked_compact_force_scratch)
                     {
                         gmxpacked_f =
                             CLUSTERED_GMXPACKED_FULL_DENSE_KERNEL(false, false,
-                                                                   false, true);
+                                                                   false, true,
+                                                                   false, false,
+                                                                   false, false);
                     }
                     if (need_atom_energy && need_virial)
                     {
                         gmxpacked_f =
                             CLUSTERED_GMXPACKED_FULL_DENSE_KERNEL(true, true,
-                                                                   true, true);
+                                                                   true, true,
+                                                                   false, false,
+                                                                   false, false);
                     }
                     else if (need_atom_energy)
                     {
                         gmxpacked_f =
                             CLUSTERED_GMXPACKED_FULL_DENSE_KERNEL(true, false,
-                                                                   true, true);
+                                                                   true, true,
+                                                                   false, false,
+                                                                   false, false);
                     }
                     else if (need_virial)
                     {
                         gmxpacked_f =
                             CLUSTERED_GMXPACKED_FULL_DENSE_KERNEL(false, true,
-                                                                   true, true);
+                                                                   true, true,
+                                                                   false, false,
+                                                                   false, false);
                     }
+#undef CLUSTERED_GMXPACKED_FULL_DENSE_FORCEONLY_KERNEL
 #undef CLUSTERED_GMXPACKED_FULL_DENSE_KERNEL
                     Launch_Device_Kernel(
                         gmxpacked_f, gmxpackedGridSize, blockSize, 0, NULL,
@@ -7986,38 +8580,153 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
                 }
                 else if (use_gmxpacked_fast_kernel)
                 {
+                    if (use_gmxpacked_sci_shift_split)
+                    {
+                        const int* sci_shift_flags =
+                            clustered_layout
+                                .d_gmxpacked_pair_shift_sci_safe_flags;
+                        const int* fast_sci_shift_flags =
+                            gmxpacked_sci_shift_split_counts_valid &&
+                                    !gmxpacked_sci_shift_split_has_unsafe
+                                ? NULL
+                                : sci_shift_flags;
+#define CLUSTERED_GMXPACKED_SPLIT_DENSE_OFFSET_KERNEL(NEED_ENERGY, NEED_VIRIAL, TOTAL_OUTPUT, COMPACT_FORCE, SCI_SHIFT_ONLY) \
+    (use_gmxpacked_lj_comb_kernel                                                                                            \
+         ? Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb_ForceOnly_Warp_Record_Device<                                   \
+               NEED_ENERGY, NEED_VIRIAL, TOTAL_OUTPUT, COMPACT_FORCE, true, true, false, SCI_SHIFT_ONLY>                     \
+         : Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb_ForceOnly_Warp_Record_Device<                                   \
+               NEED_ENERGY, NEED_VIRIAL, TOTAL_OUTPUT, COMPACT_FORCE, false, true, false, SCI_SHIFT_ONLY>)
+                        auto gmxpacked_fast_f =
+                            CLUSTERED_GMXPACKED_SPLIT_DENSE_OFFSET_KERNEL(
+                                false, false, false, false, true);
+                        auto gmxpacked_slow_f =
+                            CLUSTERED_GMXPACKED_SPLIT_DENSE_OFFSET_KERNEL(
+                                false, false, false, false, false);
+                        if (use_gmxpacked_compact_force_scratch)
+                        {
+                            gmxpacked_fast_f =
+                                CLUSTERED_GMXPACKED_SPLIT_DENSE_OFFSET_KERNEL(
+                                    false, false, false, true, true);
+                            gmxpacked_slow_f =
+                                CLUSTERED_GMXPACKED_SPLIT_DENSE_OFFSET_KERNEL(
+                                    false, false, false, true, false);
+                        }
+                        if (need_atom_energy && need_virial)
+                        {
+                            gmxpacked_fast_f =
+                                CLUSTERED_GMXPACKED_SPLIT_DENSE_OFFSET_KERNEL(
+                                    true, true, true, true, true);
+                            gmxpacked_slow_f =
+                                CLUSTERED_GMXPACKED_SPLIT_DENSE_OFFSET_KERNEL(
+                                    true, true, true, true, false);
+                        }
+                        else if (need_atom_energy)
+                        {
+                            gmxpacked_fast_f =
+                                CLUSTERED_GMXPACKED_SPLIT_DENSE_OFFSET_KERNEL(
+                                    true, false, true, true, true);
+                            gmxpacked_slow_f =
+                                CLUSTERED_GMXPACKED_SPLIT_DENSE_OFFSET_KERNEL(
+                                    true, false, true, true, false);
+                        }
+                        else if (need_virial)
+                        {
+                            gmxpacked_fast_f =
+                                CLUSTERED_GMXPACKED_SPLIT_DENSE_OFFSET_KERNEL(
+                                    false, true, true, true, true);
+                            gmxpacked_slow_f =
+                                CLUSTERED_GMXPACKED_SPLIT_DENSE_OFFSET_KERNEL(
+                                    false, true, true, true, false);
+                        }
+#undef CLUSTERED_GMXPACKED_SPLIT_DENSE_OFFSET_KERNEL
+                        if (gmxpacked_sci_shift_split_has_safe)
+                        {
+                            Launch_Device_Kernel(
+                                gmxpacked_fast_f, gmxpackedGridSize, blockSize,
+                                0, NULL,
+                                clustered_layout.gmxpacked_sci_numbers,
+                                clustered_layout.cluster_size,
+                                clustered_layout.super_cluster_clusters,
+                                clustered_layout.cluster_numbers,
+                                clustered_layout.d_cluster_offsets,
+                                clustered_layout.d_cluster_valid_masks,
+                                clustered_layout.d_cluster_local_masks,
+                                clustered_layout.d_super_cluster_offsets,
+                                clustered_layout.d_gmxpacked_sci,
+                                clustered_layout.d_gmxpacked_cjpacked,
+                                clustered_layout.d_gmxpacked_exclusions,
+                                NULL, fast_sci_shift_flags, 1,
+                                clustered_direct_cache->d_sorted_atom_ids,
+                                clustered_direct_cache->d_sorted_xq,
+                                clustered_direct_cache->d_sorted_lj_type,
+                                clustered_direct_cache->d_sorted_lj_comb, cell,
+                                d_LJ_AB_packed, cutoff, clustered_force_target,
+                                pme_beta, atom_energy, atom_virial,
+                                atom_direct_pme_energy, d_LJ_energy_atom);
+                        }
+                        if (gmxpacked_sci_shift_split_has_unsafe)
+                        {
+                            Launch_Device_Kernel(
+                                gmxpacked_slow_f, gmxpackedGridSize, blockSize,
+                                0, NULL,
+                                clustered_layout.gmxpacked_sci_numbers,
+                                clustered_layout.cluster_size,
+                                clustered_layout.super_cluster_clusters,
+                                clustered_layout.cluster_numbers,
+                                clustered_layout.d_cluster_offsets,
+                                clustered_layout.d_cluster_valid_masks,
+                                clustered_layout.d_cluster_local_masks,
+                                clustered_layout.d_super_cluster_offsets,
+                                clustered_layout.d_gmxpacked_sci,
+                                clustered_layout.d_gmxpacked_cjpacked,
+                                clustered_layout.d_gmxpacked_exclusions,
+                                clustered_layout.d_pair_shift_bits,
+                                sci_shift_flags, 0,
+                                clustered_direct_cache->d_sorted_atom_ids,
+                                clustered_direct_cache->d_sorted_xq,
+                                clustered_direct_cache->d_sorted_lj_type,
+                                clustered_direct_cache->d_sorted_lj_comb, cell,
+                                d_LJ_AB_packed, cutoff, clustered_force_target,
+                                pme_beta, atom_energy, atom_virial,
+                                atom_direct_pme_energy, d_LJ_energy_atom);
+                        }
+                    }
+                    else
+                    {
+#define CLUSTERED_GMXPACKED_DENSE_OFFSET_KERNEL(NEED_ENERGY, NEED_VIRIAL, TOTAL_OUTPUT, COMPACT_FORCE) \
+    (use_gmxpacked_lj_comb_kernel                                                                       \
+         ? Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb_ForceOnly_Warp_Record_Device<              \
+               NEED_ENERGY, NEED_VIRIAL, TOTAL_OUTPUT, COMPACT_FORCE, true, true, false, false>         \
+         : Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb_ForceOnly_Warp_Record_Device<              \
+               NEED_ENERGY, NEED_VIRIAL, TOTAL_OUTPUT, COMPACT_FORCE, false, true, false, false>)
                     auto gmxpacked_f =
-                        Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb_ForceOnly_Warp_Record_Device<
-                            false, false, false, false, true, true, false,
-                            false>;
+                        CLUSTERED_GMXPACKED_DENSE_OFFSET_KERNEL(
+                            false, false, false, false);
                     if (use_gmxpacked_compact_force_scratch)
                     {
                         gmxpacked_f =
-                            Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb_ForceOnly_Warp_Record_Device<
-                                false, false, false, true, true, true, false,
-                                false>;
+                            CLUSTERED_GMXPACKED_DENSE_OFFSET_KERNEL(
+                                false, false, false, true);
                     }
                     if (need_atom_energy && need_virial)
                     {
                         gmxpacked_f =
-                            Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb_ForceOnly_Warp_Record_Device<
-                                true, true, true, true, true, true, false,
-                                false>;
+                            CLUSTERED_GMXPACKED_DENSE_OFFSET_KERNEL(
+                                true, true, true, true);
                     }
                     else if (need_atom_energy)
                     {
                         gmxpacked_f =
-                            Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb_ForceOnly_Warp_Record_Device<
-                                true, false, true, true, true, true, false,
-                                false>;
+                            CLUSTERED_GMXPACKED_DENSE_OFFSET_KERNEL(
+                                true, false, true, true);
                     }
                     else if (need_virial)
                     {
                         gmxpacked_f =
-                            Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb_ForceOnly_Warp_Record_Device<
-                                false, true, true, true, true, true, false,
-                                false>;
+                            CLUSTERED_GMXPACKED_DENSE_OFFSET_KERNEL(
+                                false, true, true, true);
                     }
+#undef CLUSTERED_GMXPACKED_DENSE_OFFSET_KERNEL
                     Launch_Device_Kernel(
                         gmxpacked_f, gmxpackedGridSize, blockSize, 0, NULL,
                         clustered_layout.gmxpacked_sci_numbers,
@@ -8039,6 +8748,7 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
                         d_LJ_AB_packed, cutoff, clustered_force_target,
                         pme_beta, atom_energy, atom_virial,
                         atom_direct_pme_energy, d_LJ_energy_atom);
+                    }
                 }
                 else if (use_gmxpacked_lj_comb_kernel)
                 {
