@@ -9,7 +9,8 @@ set(SOURCES
     ${PROJECT_ROOT_DIR}/SPONGE/manager/output/manager_printer.cpp
     ${PROJECT_ROOT_DIR}/SPONGE/worker_protocol/child_process_worker.cpp
     ${PROJECT_ROOT_DIR}/SPONGE/manager/manager_main.cpp
-    ${SPONGE_RUNTIME_SOURCES})
+    ${SPONGE_RUNTIME_SOURCES}
+    $<TARGET_OBJECTS:sponge_clustered_lj_count_experiments>)
 set(TARGET_SOURCE_LANGUAGE "${CPP_DIALECT}")
 set(TARGET_LINKER_LANGUAGE "${CPP_DIALECT}")
 

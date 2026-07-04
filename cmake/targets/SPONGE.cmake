@@ -1,6 +1,9 @@
 include(${PROJECT_ROOT_DIR}/cmake/targets/SPONGE_runtime_sources.cmake)
 
-set(SOURCES ${PROJECT_ROOT_DIR}/SPONGE/cli_main.cpp ${SPONGE_RUNTIME_SOURCES})
+set(SOURCES
+    ${PROJECT_ROOT_DIR}/SPONGE/cli_main.cpp
+    ${SPONGE_RUNTIME_SOURCES}
+    $<TARGET_OBJECTS:sponge_clustered_lj_count_experiments>)
 set(TARGET_LINKER_LANGUAGE "${CPP_DIALECT}")
 
 if(NOT TARGET sponge_toml)

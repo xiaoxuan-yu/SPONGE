@@ -47,6 +47,7 @@ SPONGE_CLUSTERED_GMXPACKED_COUNT_FRAGMENT_PARALLEL_EMIT=1
 SPONGE_CLUSTERED_FIXED_SHIFT_CANDIDATE_LEAF_PARALLEL=1
 SPONGE_CLUSTERED_FIXED_SHIFT_CANDIDATE_LEAF_ONEPASS=1
 SPONGE_CLUSTERED_GMXPACKED_FIXED_SHIFT_BUILDER_SPECIALIZED=1
+SPONGE_CLUSTERED_GMXPACKED_COUNT_FIXED_LIGHT_DEDICATED=1
 SPONGE_CLUSTERED_GMXPACKED_DIRTY_J_PARALLEL_SCAN=1
 SPONGE_CLUSTERED_GMXPACKED_ACTIVE_VIEW_ZERO_DIRTY_SOURCE_REUSE=1
 ```
@@ -133,11 +134,95 @@ Updated stable peak result on:
 | fixed-count specialized on, rolling source cache off | 3 | 3 finite, 0 NaN | `111.150754 ns/day` | `110.137749-111.908737 ns/day` |
 | fixed-count specialized off, rolling source cache off | 1 | 1 finite, 0 NaN | `106.373154 ns/day` | n/a |
 
-The current highest observed stable 10000-step speed is now:
+The highest observed stable 10000-step speed before the dedicated fixed-light
+count promotion was:
 
 ```text
 111.908737 ns/day
 ```
+
+## 2026-07-04 dedicated fixed-light count promotion
+
+The dedicated fixed-light count kernel is now part of the stable peak env:
+
+```sh
+SPONGE_CLUSTERED_GMXPACKED_COUNT_FIXED_LIGHT_DEDICATED=1
+```
+
+This gate remains default-off in code. It is promoted only for the fixed-shift,
+onepass candidate-leaf, fill-prune-reuse-light peak path above.
+
+Retest input:
+
+```text
+/tmp/sponge-fixed-light-probes-20260704/mdin_dedicated_10000.spg.toml
+```
+
+Build and correctness checks:
+
+- `ninja -C build-dev-cuda13 SPONGE` passed.
+- `pixi run -e dev-cuda13 compile` passed.
+- 2000-step verify had zero count and fill mismatches:
+  `/tmp/sponge-fixed-light-probes-20260704/dedicated_verify2000.err`.
+- 10000-step dedicated run was finite with empty stderr:
+  `/tmp/sponge-fixed-light-probes-20260704/dedicated_10000.out`.
+
+Clean 10000-step retest on the same input:
+
+| configuration | speed | `Calculate_Force` | stderr |
+|---|---:|---:|---:|
+| peak env without dedicated count | `117.301613 ns/day` | `6.875158 s` | empty |
+| peak env with dedicated count | `131.760040 ns/day` | `6.068877 s` | empty |
+
+Commit-time alternating e2e retest:
+
+```text
+/tmp/sponge-fixed-light-probes-20260704/alternating-e2e-20260704-1037
+```
+
+| order | configuration | speed | `Calculate_Force` | final temperature | stderr |
+|---:|---|---:|---:|---:|---:|
+| 1 | peak env without dedicated count | `117.054840 ns/day` | `6.882856 s` | `295.14 K` | empty |
+| 2 | peak env with dedicated count | `130.189102 ns/day` | `6.150772 s` | `294.44 K` | empty |
+| 3 | peak env without dedicated count | `117.026611 ns/day` | `6.891029 s` | `295.05 K` | empty |
+| 4 | peak env with dedicated count | `130.491608 ns/day` | `6.126318 s` | `294.53 K` | empty |
+
+Alternating-run averages: baseline `117.040726 ns/day`, dedicated
+`130.340355 ns/day` (`+11.363%`); baseline `Calculate_Force`
+`6.886942 s`, dedicated `6.138545 s` (`-10.867%`).
+
+NCU first count launch:
+
+| configuration | count kernel | registers/thread | eligible warps/scheduler | issued warps/scheduler | local spill |
+|---|---:|---:|---:|---:|---:|
+| peak env without dedicated count | `59.844224 ms` | `71` | `0.12` | `0.11` | `0 B` |
+| peak env with dedicated count | `22.289888 ms` | `70` | `0.51` | `0.38` | `0 B` |
+
+Nsys 10000-step retest artifacts:
+
+```text
+/tmp/sponge-fixed-light-probes-20260704/nsys_baseline_10000.nsys-rep
+/tmp/sponge-fixed-light-probes-20260704/nsys_dedicated_10000.nsys-rep
+/tmp/sponge-fixed-light-probes-20260704/nsys_baseline_10000_stats_cuda_gpu_kern_sum.csv
+/tmp/sponge-fixed-light-probes-20260704/nsys_dedicated_10000_stats_cuda_gpu_kern_sum.csv
+```
+
+Nsys-wrapped run speed improved from `114.208397 ns/day` to
+`126.263268 ns/day`. The targeted kernel group improved without shifting cost
+into materialize/fill:
+
+| group | without dedicated | with dedicated | delta |
+|---|---:|---:|---:|
+| main count kernel | `1250.114 ms x25` | `460.243 ms x25` | `-63.184%` |
+| materialize light fragments | `34.377 ms x25` | `34.521 ms x25` | `+0.418%` |
+| record-stream fill total | `174.572 ms x125` | `175.539 ms x125` | `+0.554%` |
+| Count + Materialize + Fill | `1459.063 ms` | `670.303 ms` | `-54.059%` |
+| total GPU kernels | `6912.057 ms` | `6142.529 ms` | `-11.133%` |
+
+Decision: promote
+`SPONGE_CLUSTERED_GMXPACKED_COUNT_FIXED_LIGHT_DEDICATED=1` into the stable peak
+env. Keep the previous fixed-light SASS/slim gates, source-cache patch, and
+rolling source cache out of the peak env.
 
 ## 2026-07-03 fixed-shift count metadata experiment
 
@@ -271,10 +356,11 @@ kernel. It is:
 When investigating peak performance, first run the full peak env above. Then
 ablate only one layer at a time:
 
-1. remove `SPONGE_CLUSTERED_GMXPACKED_FIXED_SHIFT_BUILDER_SPECIALIZED`;
-2. remove `SPONGE_CLUSTERED_GMXPACKED_DIRTY_J_PARALLEL_SCAN`;
-3. remove `SPONGE_CLUSTERED_GMXPACKED_ACTIVE_VIEW_ZERO_DIRTY_SOURCE_REUSE`;
-4. remove onepass/count-fragment flags only if the target is candidate-leaf or
+1. remove `SPONGE_CLUSTERED_GMXPACKED_COUNT_FIXED_LIGHT_DEDICATED`;
+2. remove `SPONGE_CLUSTERED_GMXPACKED_FIXED_SHIFT_BUILDER_SPECIALIZED`;
+3. remove `SPONGE_CLUSTERED_GMXPACKED_DIRTY_J_PARALLEL_SCAN`;
+4. remove `SPONGE_CLUSTERED_GMXPACKED_ACTIVE_VIEW_ZERO_DIRTY_SOURCE_REUSE`;
+5. remove onepass/count-fragment flags only if the target is candidate-leaf or
    count-kernel attribution.
 
 If a run reports around `80-84 ns/day`, check first whether dirty-J parallel

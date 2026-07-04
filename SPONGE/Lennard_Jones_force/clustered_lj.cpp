@@ -1,4 +1,5 @@
 #include "clustered_lj.h"
+#include "clustered_lj_count_experiments.h"
 
 #include <algorithm>
 #include <array>
@@ -70,20 +71,6 @@ constexpr int kCandidateLeafOnepassSlackNumerator = 5;
 constexpr int kCandidateLeafOnepassSlackDenominator = 4;
 constexpr int kCandidateLeafOnepassGrowNumerator = 3;
 constexpr int kCandidateLeafOnepassGrowDenominator = 2;
-
-struct LJ_CLUSTERED_GMXPACKED_COUNT_SOURCE_FRAGMENT
-{
-    int sci_id = -1;
-    int shift_id = kClusteredCentralShiftId;
-    int supercluster_id = -1;
-    int cluster_j = -1;
-    int split_id = 0;
-    unsigned int imask = 0u;
-    unsigned int valid_mask_j = 0u;
-    unsigned int local_mask_j = 0u;
-    int source_order = 0;
-    unsigned long long exclusion_masks[kClusteredMaxSuperClusterClusters] = {};
-};
 
 static bool Clustered_Fine_Timers_Enabled()
 {
@@ -198,6 +185,39 @@ static bool Clustered_Gmxpacked_Count_Fixed_Light_Slim_Enabled()
 {
     return Clustered_Gmxpacked_Env_Flag_Enabled(
         "SPONGE_CLUSTERED_GMXPACKED_COUNT_FIXED_LIGHT_SLIM");
+}
+
+static bool
+Clustered_Gmxpacked_Count_Fixed_Light_Traversal_Probe_Enabled()
+{
+    return Clustered_Gmxpacked_Env_Flag_Enabled(
+        "SPONGE_CLUSTERED_GMXPACKED_COUNT_FIXED_LIGHT_TRAVERSAL_PROBE");
+}
+
+static bool
+Clustered_Gmxpacked_Count_Fixed_Light_Source_Prune_Probe_Enabled()
+{
+    return Clustered_Gmxpacked_Env_Flag_Enabled(
+        "SPONGE_CLUSTERED_GMXPACKED_COUNT_FIXED_LIGHT_SOURCE_PRUNE_PROBE");
+}
+
+static bool
+Clustered_Gmxpacked_Count_Fixed_Light_Source_Emit_Probe_Enabled()
+{
+    return Clustered_Gmxpacked_Env_Flag_Enabled(
+        "SPONGE_CLUSTERED_GMXPACKED_COUNT_FIXED_LIGHT_SOURCE_EMIT_PROBE");
+}
+
+static bool Clustered_Gmxpacked_Count_Fixed_Light_Excl_Probe_Enabled()
+{
+    return Clustered_Gmxpacked_Env_Flag_Enabled(
+        "SPONGE_CLUSTERED_GMXPACKED_COUNT_FIXED_LIGHT_EXCL_PROBE");
+}
+
+static bool Clustered_Gmxpacked_Count_Fixed_Light_Dedicated_Enabled()
+{
+    return Clustered_Gmxpacked_Env_Flag_Enabled(
+        "SPONGE_CLUSTERED_GMXPACKED_COUNT_FIXED_LIGHT_DEDICATED");
 }
 
 static bool Clustered_Fixed_Shift_Candidate_Leaf_Collect_Sass_Opt_Enabled()
@@ -28267,6 +28287,17 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
             use_gmxpacked_fixed_shift_builder_specialized &&
             !use_gmxpacked_count_fixed_light_slim &&
             Clustered_Gmxpacked_Count_Fixed_Light_Sass_Opt_Enabled();
+        const bool use_gmxpacked_count_fixed_light_dedicated =
+            use_gmxpacked_fixed_shift_builder_specialized &&
+            !use_gmxpacked_count_fixed_light_slim &&
+            !use_gmxpacked_count_fixed_light_sass_opt &&
+            capture_fill_prune_reuse_sources &&
+            use_gmxpacked_fill_prune_reuse_light &&
+            d_candidate_leaf_reach_masks != NULL &&
+            d_gmxpacked_count_light_source_fragments != NULL &&
+            d_gmxpacked_count_source_fragment_cursor != NULL &&
+            d_gmxpacked_count_source_fragment_overflow_rows != NULL &&
+            Clustered_Gmxpacked_Count_Fixed_Light_Dedicated_Enabled();
         const long long fixed_shift_count_metadata_bytes =
             use_gmxpacked_fixed_shift_count_metadata
                 ? static_cast<long long>(candidate_leaf_numbers) *
@@ -28277,6 +28308,8 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
         const char* gmxpacked_count_variant =
             use_gmxpacked_count_fixed_light_slim
                 ? "subgroup-fixed-light-slim"
+            : use_gmxpacked_count_fixed_light_dedicated
+                ? "subgroup-fixed-light-dedicated"
             : use_gmxpacked_fixed_shift_count_metadata
                 ? "subgroup-fixed-light-metadata"
                 : use_gmxpacked_count_fixed_light_sass_opt
@@ -28346,57 +28379,216 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                     fixed_shift_count_metadata_bytes);
             fflush(stderr);
         }
-        Launch_Device_Kernel(
-            count_kernel,
-            candidate_sci_blocks, kClusteredBuilderBlockSize, 0, NULL,
-            candidate_sci_numbers,
-            sci_shift_numbers, cluster_size, super_cluster_clusters,
-            local_atom_numbers, build_cutoff, cell, rcell, d_sort_permutation,
-            d_cluster_offsets, d_leaf_cluster_starts, d_leaf_cluster_ends,
-            d_super_cluster_offsets, d_cluster_to_supercluster,
-            candidate_sci_supercluster_ids, d_super_cluster_centers,
-            candidate_shift_ids,
-            d_sci_candidate_leaf_offsets, d_sci_candidate_leaf_ids,
-            use_gmxpacked_fixed_shift_count_metadata
-                ? d_sci_candidate_leaf_prev_running_max_ends
-                : NULL,
-            candidate_leaf_cluster_stride,
-            fixed_shift_leaf_screening ? d_candidate_leaf_reach_masks : NULL,
-            d_cluster_valid_masks, d_cluster_local_masks, d_cluster_centers,
-            d_cluster_extents, d_cluster_radii, cluster_molecule_signatures,
-            cluster_molecule_ids,
-            d_excluded_list_start, d_excluded_list, d_excluded_numbers,
-            fixed_shift_candidates, gmxpacked_record_stream_cutoff,
-            gmxpacked_record_stream_prune_crd,
-            d_sci_shift_flags, d_cjpacked_counts, d_exclusion_counts,
-            defer_gmxpacked_record_stream_source_count
-                ? NULL
-                : d_gmxpacked_record_stream_source_rows,
-            defer_gmxpacked_record_stream_source_count
-                ? NULL
-                : d_gmxpacked_record_stream_source_counts_by_candidate,
-            accumulate_gmxpacked_record_stream_source_rows_by_candidate, NULL,
-            max_leaf_cluster_span,
-            capture_fill_prune_reuse_sources &&
-                    !use_gmxpacked_fill_prune_reuse_light
-                ? d_gmxpacked_count_source_fragments
-                : NULL,
-            capture_fill_prune_reuse_sources &&
-                    use_gmxpacked_fill_prune_reuse_light
-                ? d_gmxpacked_count_light_source_fragments
-                : NULL,
-            capture_fill_prune_reuse_sources
-                ? gmxpacked_count_source_fragment_capacity_request
-                : 0,
-            capture_fill_prune_reuse_sources
-                ? d_gmxpacked_count_source_fragment_cursor
-                : NULL,
-            capture_fill_prune_reuse_sources
-                ? d_gmxpacked_count_source_fragment_overflow_rows
-                : NULL);
+        const bool run_fixed_light_traversal_probe =
+            use_gmxpacked_fixed_shift_builder_specialized &&
+            Clustered_Gmxpacked_Count_Fixed_Light_Traversal_Probe_Enabled();
+        const bool run_fixed_light_source_prune_probe =
+            use_gmxpacked_fixed_shift_builder_specialized &&
+            Clustered_Gmxpacked_Count_Fixed_Light_Source_Prune_Probe_Enabled();
+        const bool run_fixed_light_source_emit_probe =
+            use_gmxpacked_fixed_shift_builder_specialized &&
+            Clustered_Gmxpacked_Count_Fixed_Light_Source_Emit_Probe_Enabled();
+        const bool run_fixed_light_excl_probe =
+            use_gmxpacked_fixed_shift_builder_specialized &&
+            Clustered_Gmxpacked_Count_Fixed_Light_Excl_Probe_Enabled();
+        if (run_fixed_light_traversal_probe ||
+            run_fixed_light_source_prune_probe ||
+            run_fixed_light_source_emit_probe || run_fixed_light_excl_probe)
+        {
+            static int* d_fixed_light_probe_counts = NULL;
+            static int fixed_light_probe_count_capacity = 0;
+            static LJ_CLUSTERED_GMXPACKED_COUNT_EXPERIMENT_LIGHT_FRAGMENT*
+                d_fixed_light_probe_fragments = NULL;
+            static int fixed_light_probe_fragment_capacity = 0;
+            static int* d_fixed_light_probe_fragment_cursor = NULL;
+            static int fixed_light_probe_fragment_cursor_capacity = 0;
+            static int* d_fixed_light_probe_fragment_overflow_rows = NULL;
+            static int fixed_light_probe_fragment_overflow_capacity = 0;
+            Reserve_Device_Int_Buffer(
+                candidate_sci_numbers, &d_fixed_light_probe_counts,
+                &fixed_light_probe_count_capacity);
+            deviceMemset(d_fixed_light_probe_counts, 0,
+                         sizeof(int) * candidate_sci_numbers);
+            const bool fixed_light_probe_needs_fragments =
+                run_fixed_light_source_emit_probe || run_fixed_light_excl_probe;
+            int fixed_light_probe_fragment_capacity_request = 0;
+            if (fixed_light_probe_needs_fragments)
+            {
+                fixed_light_probe_fragment_capacity_request =
+                    Estimate_Gmxpacked_Primary_Fill_Prune_Reuse_Source_Capacity(
+                        candidate_sci_numbers, candidate_leaf_numbers);
+                Reserve_Device_Buffer(
+                    fixed_light_probe_fragment_capacity_request,
+                    &d_fixed_light_probe_fragments,
+                    &fixed_light_probe_fragment_capacity);
+                Reserve_Device_Int_Buffer(
+                    1, &d_fixed_light_probe_fragment_cursor,
+                    &fixed_light_probe_fragment_cursor_capacity);
+                Reserve_Device_Int_Buffer(
+                    1, &d_fixed_light_probe_fragment_overflow_rows,
+                    &fixed_light_probe_fragment_overflow_capacity);
+                deviceMemset(d_fixed_light_probe_fragment_cursor, 0,
+                             sizeof(int));
+                deviceMemset(d_fixed_light_probe_fragment_overflow_rows, 0,
+                             sizeof(int));
+            }
+            auto run_fixed_light_count_probe =
+                [&](ClusteredGmxpackedCountFixedLightProbeMode mode,
+                    const char* sync_tag, bool needs_fragments) {
+                    deviceMemset(d_fixed_light_probe_counts, 0,
+                                 sizeof(int) * candidate_sci_numbers);
+                    if (needs_fragments)
+                    {
+                        deviceMemset(d_fixed_light_probe_fragment_cursor, 0,
+                                     sizeof(int));
+                        deviceMemset(d_fixed_light_probe_fragment_overflow_rows,
+                                     0, sizeof(int));
+                    }
+                    Launch_Clustered_Gmxpacked_Count_Fixed_Light_Probe(
+                        mode, candidate_sci_blocks, kClusteredBuilderBlockSize,
+                        candidate_sci_numbers, cluster_size,
+                        local_atom_numbers, gmxpacked_record_stream_cutoff,
+                        cell, rcell, gmxpacked_record_stream_prune_crd,
+                        d_sort_permutation, d_cluster_offsets,
+                        d_leaf_cluster_starts, d_leaf_cluster_ends,
+                        d_super_cluster_offsets, d_cluster_to_supercluster,
+                        candidate_sci_supercluster_ids,
+                        d_sci_candidate_leaf_offsets,
+                        d_sci_candidate_leaf_ids,
+                        candidate_leaf_cluster_stride,
+                        d_candidate_leaf_reach_masks, d_cluster_valid_masks,
+                        d_cluster_local_masks, d_cluster_centers,
+                        cluster_molecule_signatures, cluster_molecule_ids,
+                        d_excluded_list_start, d_excluded_list,
+                        d_excluded_numbers, max_leaf_cluster_span,
+                        d_fixed_light_probe_counts,
+                        needs_fragments ? d_fixed_light_probe_fragments : NULL,
+                        needs_fragments
+                            ? fixed_light_probe_fragment_capacity_request
+                            : 0,
+                        needs_fragments ? d_fixed_light_probe_fragment_cursor
+                                        : NULL,
+                        needs_fragments
+                            ? d_fixed_light_probe_fragment_overflow_rows
+                            : NULL);
+#ifndef USE_CPU
+                    Clustered_Debug_Device_Sync_If_Tracing(sync_tag);
+#endif
+                };
+            if (run_fixed_light_traversal_probe)
+            {
+                run_fixed_light_count_probe(
+                    ClusteredGmxpackedCountFixedLightProbeMode::Traversal,
+                    "Probe_Count_Nbnxm_Payload_Fixed_Light_Traversal",
+                    false);
+            }
+            if (run_fixed_light_source_prune_probe)
+            {
+                run_fixed_light_count_probe(
+                    ClusteredGmxpackedCountFixedLightProbeMode::SourcePrune,
+                    "Probe_Count_Nbnxm_Payload_Fixed_Light_Source_Prune",
+                    false);
+            }
+            if (run_fixed_light_source_emit_probe)
+            {
+                run_fixed_light_count_probe(
+                    ClusteredGmxpackedCountFixedLightProbeMode::SourceEmit,
+                    "Probe_Count_Nbnxm_Payload_Fixed_Light_Source_Emit",
+                    true);
+            }
+            if (run_fixed_light_excl_probe)
+            {
+                run_fixed_light_count_probe(
+                    ClusteredGmxpackedCountFixedLightProbeMode::ExclusionEmit,
+                    "Probe_Count_Nbnxm_Payload_Fixed_Light_Excl",
+                    true);
+            }
+        }
+        if (use_gmxpacked_count_fixed_light_dedicated)
+        {
+            Launch_Clustered_Gmxpacked_Count_Fixed_Light_Dedicated(
+                candidate_sci_blocks, kClusteredBuilderBlockSize,
+                candidate_sci_numbers, cluster_size, local_atom_numbers,
+                gmxpacked_record_stream_cutoff, cell, rcell,
+                gmxpacked_record_stream_prune_crd, d_sort_permutation,
+                d_cluster_offsets, d_leaf_cluster_starts, d_leaf_cluster_ends,
+                d_super_cluster_offsets, d_cluster_to_supercluster,
+                candidate_sci_supercluster_ids, d_sci_candidate_leaf_offsets,
+                d_sci_candidate_leaf_ids, candidate_leaf_cluster_stride,
+                d_candidate_leaf_reach_masks, d_cluster_valid_masks,
+                d_cluster_local_masks, d_cluster_centers,
+                cluster_molecule_signatures, cluster_molecule_ids,
+                d_excluded_list_start, d_excluded_list, d_excluded_numbers,
+                max_leaf_cluster_span, d_sci_shift_flags, d_cjpacked_counts,
+                d_exclusion_counts,
+                defer_gmxpacked_record_stream_source_count
+                    ? NULL
+                    : d_gmxpacked_record_stream_source_rows,
+                defer_gmxpacked_record_stream_source_count
+                    ? NULL
+                    : d_gmxpacked_record_stream_source_counts_by_candidate,
+                accumulate_gmxpacked_record_stream_source_rows_by_candidate,
+                d_gmxpacked_count_light_source_fragments,
+                gmxpacked_count_source_fragment_capacity_request,
+                d_gmxpacked_count_source_fragment_cursor,
+                d_gmxpacked_count_source_fragment_overflow_rows);
+        }
+        else
+        {
+            Launch_Device_Kernel(
+                count_kernel,
+                candidate_sci_blocks, kClusteredBuilderBlockSize, 0, NULL,
+                candidate_sci_numbers,
+                sci_shift_numbers, cluster_size, super_cluster_clusters,
+                local_atom_numbers, build_cutoff, cell, rcell, d_sort_permutation,
+                d_cluster_offsets, d_leaf_cluster_starts, d_leaf_cluster_ends,
+                d_super_cluster_offsets, d_cluster_to_supercluster,
+                candidate_sci_supercluster_ids, d_super_cluster_centers,
+                candidate_shift_ids,
+                d_sci_candidate_leaf_offsets, d_sci_candidate_leaf_ids,
+                use_gmxpacked_fixed_shift_count_metadata
+                    ? d_sci_candidate_leaf_prev_running_max_ends
+                    : NULL,
+                candidate_leaf_cluster_stride,
+                fixed_shift_leaf_screening ? d_candidate_leaf_reach_masks : NULL,
+                d_cluster_valid_masks, d_cluster_local_masks, d_cluster_centers,
+                d_cluster_extents, d_cluster_radii, cluster_molecule_signatures,
+                cluster_molecule_ids,
+                d_excluded_list_start, d_excluded_list, d_excluded_numbers,
+                fixed_shift_candidates, gmxpacked_record_stream_cutoff,
+                gmxpacked_record_stream_prune_crd,
+                d_sci_shift_flags, d_cjpacked_counts, d_exclusion_counts,
+                defer_gmxpacked_record_stream_source_count
+                    ? NULL
+                    : d_gmxpacked_record_stream_source_rows,
+                defer_gmxpacked_record_stream_source_count
+                    ? NULL
+                    : d_gmxpacked_record_stream_source_counts_by_candidate,
+                accumulate_gmxpacked_record_stream_source_rows_by_candidate, NULL,
+                max_leaf_cluster_span,
+                capture_fill_prune_reuse_sources &&
+                        !use_gmxpacked_fill_prune_reuse_light
+                    ? d_gmxpacked_count_source_fragments
+                    : NULL,
+                capture_fill_prune_reuse_sources &&
+                        use_gmxpacked_fill_prune_reuse_light
+                    ? d_gmxpacked_count_light_source_fragments
+                    : NULL,
+                capture_fill_prune_reuse_sources
+                    ? gmxpacked_count_source_fragment_capacity_request
+                    : 0,
+                capture_fill_prune_reuse_sources
+                    ? d_gmxpacked_count_source_fragment_cursor
+                    : NULL,
+                capture_fill_prune_reuse_sources
+                    ? d_gmxpacked_count_source_fragment_overflow_rows
+                    : NULL);
+        }
 #ifndef USE_CPU
         Clustered_Debug_Device_Sync_If_Tracing(
-            "Count_Nbnxm_Payload_From_Candidate_Leaves");
+            use_gmxpacked_count_fixed_light_dedicated
+                ? "Dedicated_Count_Nbnxm_Payload_Fixed_Light"
+                : "Count_Nbnxm_Payload_From_Candidate_Leaves");
 #endif
         if (capture_fill_prune_reuse_sources)
         {

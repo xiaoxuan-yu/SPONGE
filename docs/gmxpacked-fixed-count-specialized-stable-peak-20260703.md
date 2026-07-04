@@ -152,5 +152,10 @@ Keep `SPONGE_CLUSTERED_GMXPACKED_FIXED_SHIFT_BUILDER_SPECIALIZED=1` in the
 stable peak env. Do not enable the previous SASS opt gates by default; the
 documented 2026-07-03 retest still shows them slower.
 
+As of the 2026-07-04 retest, this fixed builder specialization remains required,
+but the count kernel itself is superseded in the peak env by
+`SPONGE_CLUSTERED_GMXPACKED_COUNT_FIXED_LIGHT_DEDICATED=1`; see
+`docs/gmxpacked-peak-performance-env-20260701.md`.
+
 Rolling source cache remains disabled in the peak env until its intermittent
 NaN is fixed separately.

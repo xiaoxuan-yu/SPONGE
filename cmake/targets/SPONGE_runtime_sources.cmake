@@ -121,3 +121,32 @@ set(SPONGE_RUNTIME_SOURCES
     ${PROJECT_ROOT_DIR}/SPONGE/manybody/reaxff/hydrogen_bond.cpp
     ${PROJECT_ROOT_DIR}/SPONGE/manybody/reaxff/reaxff.cpp
     ${SPONGE_CSTONE_SOURCES})
+
+if(NOT TARGET sponge_clustered_lj_count_experiments)
+  add_library(
+    sponge_clustered_lj_count_experiments OBJECT
+    ${PROJECT_ROOT_DIR}/SPONGE/Lennard_Jones_force/clustered_lj_count_experiments.cpp)
+  set_target_properties(
+    sponge_clustered_lj_count_experiments
+    PROPERTIES CXX_STANDARD 20
+               CXX_STANDARD_REQUIRED ON
+               CUDA_STANDARD 20
+               CUDA_STANDARD_REQUIRED ON
+               HIP_STANDARD 20
+               HIP_STANDARD_REQUIRED ON)
+  set_source_files_properties(
+    ${PROJECT_ROOT_DIR}/SPONGE/Lennard_Jones_force/clustered_lj_count_experiments.cpp
+    PROPERTIES LANGUAGE ${CPP_DIALECT}
+               CXX_STANDARD 20
+               CXX_STANDARD_REQUIRED ON
+               CUDA_STANDARD 20
+               CUDA_STANDARD_REQUIRED ON
+               HIP_STANDARD 20
+               HIP_STANDARD_REQUIRED ON)
+  target_include_directories(
+    sponge_clustered_lj_count_experiments
+    PRIVATE ${PROJECT_ROOT_DIR}/SPONGE
+            ${PROJECT_ROOT_DIR}/SPONGE/third_party/cornerstone_octree/include)
+  target_link_libraries(sponge_clustered_lj_count_experiments
+                        PUBLIC common_libraries)
+endif()
