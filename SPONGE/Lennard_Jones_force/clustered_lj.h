@@ -318,6 +318,17 @@ struct LJ_CLUSTER_LAYOUT
     int gmxpacked_inner_active_source_imask_numbers = 0;
     int gmxpacked_inner_active_compact_base_imask_numbers = 0;
     int gmxpacked_inner_active_source_rows_baseline = 0;
+    long long gmxpacked_inner_active_anchor_generation = 0;
+    long long gmxpacked_inner_active_source_generation = 0;
+    long long gmxpacked_compact_payload_anchor_generation = -1;
+    long long gmxpacked_compact_payload_source_generation = -1;
+    long long gmxpacked_current_source_anchor_generation = 0;
+    long long gmxpacked_current_source_generation = 0;
+    long long gmxpacked_incremental_source_anchor_generation = -1;
+    long long gmxpacked_incremental_source_generation = -1;
+    int gmxpacked_current_source_patch_attempts = 0;
+    int gmxpacked_current_source_patch_successes = 0;
+    int gmxpacked_current_source_patch_fallbacks = 0;
     long long gmxpacked_inner_active_append_attempts = 0;
     long long gmxpacked_inner_active_append_successes = 0;
     long long gmxpacked_inner_active_append_fallbacks = 0;

@@ -9012,6 +9012,54 @@ static __global__ void Fill_Gmxpacked_Dirty_Source_Indices_By_Candidate(
     }
 }
 
+static __global__ void Count_Gmxpacked_Current_Source_Patch_Rows_By_Candidate(
+    const int candidate_sci_numbers, const int* dirty_candidate_sci,
+    const int* previous_source_offsets_by_candidate,
+    const int* replacement_source_offsets_by_candidate,
+    int* patched_source_counts_by_candidate)
+{
+    SIMPLE_DEVICE_FOR(candidate_sci, candidate_sci_numbers)
+    {
+        const bool dirty =
+            dirty_candidate_sci != NULL && dirty_candidate_sci[candidate_sci] != 0;
+        const int* offsets = dirty ? replacement_source_offsets_by_candidate
+                                   : previous_source_offsets_by_candidate;
+        patched_source_counts_by_candidate[candidate_sci] =
+            offsets[candidate_sci + 1] - offsets[candidate_sci];
+    }
+}
+
+static __global__ void Fill_Gmxpacked_Current_Source_Patch_Sources(
+    const int candidate_sci_numbers, const int* dirty_candidate_sci,
+    const int* previous_source_offsets_by_candidate,
+    const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* previous_sources,
+    const int* replacement_source_offsets_by_candidate,
+    const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* replacement_sources,
+    const int* patched_source_offsets_by_candidate,
+    LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* patched_sources)
+{
+    SIMPLE_DEVICE_FOR(candidate_sci, candidate_sci_numbers)
+    {
+        const bool dirty =
+            dirty_candidate_sci != NULL && dirty_candidate_sci[candidate_sci] != 0;
+        const int* src_offsets = dirty ? replacement_source_offsets_by_candidate
+                                       : previous_source_offsets_by_candidate;
+        const LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* src_sources =
+            dirty ? replacement_sources : previous_sources;
+        const int src_begin = src_offsets[candidate_sci];
+        const int src_end = src_offsets[candidate_sci + 1];
+        const int dst_begin = patched_source_offsets_by_candidate[candidate_sci];
+        for (int src_idx = src_begin; src_idx < src_end; src_idx += 1)
+        {
+            const int dst_idx = dst_begin + (src_idx - src_begin);
+            LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE source =
+                src_sources[src_idx];
+            source.source_order = dst_idx;
+            patched_sources[dst_idx] = source;
+        }
+    }
+}
+
 static __global__ void
 Fill_Gmxpacked_Record_Stream_Inner_Active_Missing_Sources_From_Source_Indices(
     const int dirty_source_rows, const int* dirty_source_indices,
@@ -12458,6 +12506,22 @@ static bool Clustered_Gmxpacked_Active_View_Source_Cache_Patch_Verify_Enabled()
     return Clustered_Gmxpacked_Active_View_Source_Cache_Patch_Enabled();
 }
 
+static bool Clustered_Gmxpacked_Active_View_Current_Source_Patch_Enabled()
+{
+    return Clustered_Gmxpacked_Env_Flag_Enabled(
+        "SPONGE_CLUSTERED_GMXPACKED_ACTIVE_VIEW_CURRENT_SOURCE_PATCH");
+}
+
+static float
+Clustered_Gmxpacked_Active_View_Current_Source_Patch_Max_Dirty_Ratio()
+{
+    const char* value = std::getenv(
+        "SPONGE_CLUSTERED_GMXPACKED_ACTIVE_VIEW_CURRENT_SOURCE_PATCH_MAX_DIRTY_RATIO");
+    return value != NULL && value[0] != '\0'
+               ? atof(value)
+               : Clustered_Gmxpacked_Active_View_Source_Cache_Patch_Max_Dirty_Ratio();
+}
+
 static bool Clustered_Gmxpacked_Source_Cache_Refresh_Probe_Enabled()
 {
     const char* enabled = std::getenv(
@@ -12499,11 +12563,18 @@ static void Invalidate_Gmxpacked_Incremental_Source_Cache_State(
     layout->gmxpacked_incremental_source_numbers = 0;
     layout->gmxpacked_incremental_source_cutoff = -1.0f;
     layout->gmxpacked_incremental_source_global_valid_cutoff = -1.0f;
+    layout->gmxpacked_incremental_source_anchor_generation = -1;
+    layout->gmxpacked_incremental_source_generation = -1;
     layout->gmxpacked_outer_source_anchor_ready = false;
 }
 
 static bool Clustered_Gmxpacked_Active_View_Partial_Refresh_Enabled()
 {
+    if (Clustered_Gmxpacked_Active_View_Current_Mask_Enabled())
+    {
+        return Clustered_Gmxpacked_Env_Flag_Enabled(
+            "SPONGE_CLUSTERED_GMXPACKED_ACTIVE_VIEW_CURRENT_MASK_PARTIAL_REFRESH");
+    }
     return Clustered_Gmxpacked_Active_View_Enabled();
 }
 
@@ -12532,15 +12603,8 @@ static bool Clustered_Gmxpacked_Active_View_Rolling_Source_Cache_Enabled()
 static bool
 Clustered_Gmxpacked_Active_View_Zero_Dirty_Source_Reuse_Enabled()
 {
-    if (!Clustered_Gmxpacked_Env_Flag_Enabled(
-            "SPONGE_CLUSTERED_GMXPACKED_ACTIVE_VIEW_ZERO_DIRTY_SOURCE_REUSE"))
-    {
-        return false;
-    }
-    // Zero-dirty source reuse is only a valid contract when active sources are
-    // derived from the stable target layout. With current-coordinate masks,
-    // source membership can change even when the candidate dirty index is zero.
-    return !Clustered_Gmxpacked_Active_View_Current_Mask_Enabled();
+    return Clustered_Gmxpacked_Env_Flag_Enabled(
+        "SPONGE_CLUSTERED_GMXPACKED_ACTIVE_VIEW_ZERO_DIRTY_SOURCE_REUSE");
 }
 
 static float Clustered_Gmxpacked_Active_View_Source_Cache_Skin(
@@ -14413,46 +14477,29 @@ static float Clustered_Max_Gmxpacked_Inner_Active_Anchor_Displacement(
     return 0.0f;
 #else
     Bind_Clustered_Working_Device(&layout->working_device);
-    Reserve_Device_Byte_Buffer(
-        sizeof(float) * static_cast<size_t>(layout->total_atom_numbers),
-        &layout->d_sort_key_buffer, &layout->sort_key_buffer_bytes);
-    Reserve_Device_Byte_Buffer(sizeof(float), &layout->d_sort_value_buffer,
-                               &layout->sort_value_buffer_bytes);
-    float* d_displacement_sq =
-        reinterpret_cast<float*>(layout->d_sort_key_buffer);
-    float* d_max_displacement_sq =
-        reinterpret_cast<float*>(layout->d_sort_value_buffer);
+    Reserve_Device_Int_Buffer(1, &layout->d_need_rebuild,
+                              &layout->rebuild_flag_capacity);
+    int max_displacement_sq_bits = 0;
+    deviceMemcpy(layout->d_need_rebuild, &max_displacement_sq_bits,
+                 sizeof(int), deviceMemcpyHostToDevice);
     Launch_Device_Kernel(
-        Build_Clustered_Anchor_Displacement_Sq,
+        Atomic_Max_Clustered_Anchor_Displacement_Sq,
         (layout->total_atom_numbers + CONTROLLER::device_max_thread - 1) /
             CONTROLLER::device_max_thread,
         CONTROLLER::device_max_thread, 0, NULL, layout->total_atom_numbers, crd,
         layout->d_gmxpacked_inner_active_anchor_crd, cell, rcell,
-        d_displacement_sq);
-    size_t reduce_storage_bytes = 0;
-    const cudaError_t preexisting_err = cudaGetLastError();
-    (void)preexisting_err;
-    const cudaError_t query_err =
-        cub::DeviceReduce::Max(NULL, reduce_storage_bytes, d_displacement_sq,
-                               d_max_displacement_sq,
-                               layout->total_atom_numbers);
-    Reserve_Device_Opaque_Buffer(reduce_storage_bytes,
-                                 &layout->d_reduce_temp_storage,
-                                 &layout->reduce_temp_storage_bytes);
-    const cudaError_t reduce_err = cub::DeviceReduce::Max(
-        layout->d_reduce_temp_storage, reduce_storage_bytes, d_displacement_sq,
-        d_max_displacement_sq, layout->total_atom_numbers);
+        layout->d_need_rebuild);
     const cudaError_t sync_err = cudaDeviceSynchronize();
-    Clustered_Check_Cuda_Status(query_err,
-                                "clustered-inner-active-displacement-max-query");
-    Clustered_Check_Cuda_Status(reduce_err,
-                                "clustered-inner-active-displacement-max-run");
     Clustered_Check_Cuda_Status(sync_err,
                                 "clustered-inner-active-displacement-max-sync");
-    float max_displacement_sq = 0.0f;
-    deviceMemcpy(&max_displacement_sq, d_max_displacement_sq, sizeof(float),
+    deviceMemcpy(&max_displacement_sq_bits, layout->d_need_rebuild, sizeof(int),
                  deviceMemcpyDeviceToHost);
-    return sqrtf(fmaxf(max_displacement_sq, 0.0f));
+    union
+    {
+        int bits;
+        float value;
+    } max_displacement_square = {max_displacement_sq_bits};
+    return sqrtf(fmaxf(max_displacement_square.value, 0.0f));
 #endif
 }
 
@@ -14531,6 +14578,7 @@ static void Refresh_Gmxpacked_Outer_Source_Anchor_Crd(
                  deviceMemcpyDeviceToDevice);
 #endif
     layout->gmxpacked_outer_source_anchor_ready = true;
+    layout->gmxpacked_current_source_anchor_generation += 1;
 }
 
 static void Refresh_Gmxpacked_Inner_Active_Anchor_Crd(
@@ -14550,6 +14598,68 @@ static void Refresh_Gmxpacked_Inner_Active_Anchor_Crd(
                  deviceMemcpyDeviceToDevice);
 #endif
     layout->gmxpacked_inner_active_anchor_ready = true;
+    layout->gmxpacked_inner_active_anchor_generation += 1;
+}
+
+static void Mark_Gmxpacked_Inner_Active_Source_Generation(
+    LJ_CLUSTER_LAYOUT* layout)
+{
+    if (layout == NULL)
+    {
+        return;
+    }
+    layout->gmxpacked_inner_active_source_generation += 1;
+    layout->gmxpacked_compact_payload_source_generation = -1;
+}
+
+static void Mark_Gmxpacked_Current_Source_Generation(
+    LJ_CLUSTER_LAYOUT* layout)
+{
+    if (layout == NULL)
+    {
+        return;
+    }
+    layout->gmxpacked_current_source_generation += 1;
+}
+
+static void Mark_Gmxpacked_Incremental_Source_Cache_Key(
+    LJ_CLUSTER_LAYOUT* layout)
+{
+    if (layout == NULL)
+    {
+        return;
+    }
+    layout->gmxpacked_incremental_source_anchor_generation =
+        layout->gmxpacked_current_source_anchor_generation;
+    layout->gmxpacked_incremental_source_generation =
+        layout->gmxpacked_current_source_generation;
+}
+
+static void Mark_Gmxpacked_Compact_Payload_Active_Key(
+    LJ_CLUSTER_LAYOUT* layout)
+{
+    if (layout == NULL)
+    {
+        return;
+    }
+    layout->gmxpacked_compact_payload_anchor_generation =
+        layout->gmxpacked_inner_active_anchor_generation;
+    layout->gmxpacked_compact_payload_source_generation =
+        layout->gmxpacked_inner_active_source_generation;
+}
+
+static bool Gmxpacked_Compact_Payload_Active_Key_Matches(
+    const LJ_CLUSTER_LAYOUT* layout, bool use_current_active_mask)
+{
+    if (!use_current_active_mask)
+    {
+        return true;
+    }
+    return layout != NULL &&
+           layout->gmxpacked_compact_payload_anchor_generation ==
+               layout->gmxpacked_inner_active_anchor_generation &&
+           layout->gmxpacked_compact_payload_source_generation ==
+               layout->gmxpacked_inner_active_source_generation;
 }
 
 static int Copy_Clustered_Global_Atom_Id(const LJ_CLUSTER_LAYOUT* layout,
@@ -15903,6 +16013,7 @@ static bool Append_Gmxpacked_Inner_Active_Missing_Sources(
         deviceMemcpyDeviceToDevice);
     layout->gmxpacked_record_stream_source_numbers = combined_source_rows;
     layout->gmxpacked_record_stream_aggregate_numbers = 0;
+    Mark_Gmxpacked_Inner_Active_Source_Generation(layout);
     return true;
 #endif
 }
@@ -16082,6 +16193,7 @@ static bool Append_Gmxpacked_Inner_Active_Missing_Sources_From_Dirty_Candidates(
         deviceMemcpyDeviceToDevice);
     layout->gmxpacked_record_stream_source_numbers = combined_source_rows;
     layout->gmxpacked_record_stream_aggregate_numbers = 0;
+    Mark_Gmxpacked_Inner_Active_Source_Generation(layout);
     return true;
 #endif
 }
@@ -16111,8 +16223,14 @@ static int Prune_Gmxpacked_Record_Stream_To_Inner_Active_Sources(
             layout, source_rows, layout->d_gmxpacked_record_stream_sources, crd,
             cell, rcell, cutoff, record_builder_stage_timers,
             "record-stream-inner-active-flag-scan", record_active_imasks);
+    const bool active_source_rows_changed =
+        active_source_rows != layout->gmxpacked_record_stream_source_numbers;
     layout->gmxpacked_record_stream_source_numbers = active_source_rows;
     layout->gmxpacked_record_stream_aggregate_numbers = 0;
+    if (active_source_rows_changed || record_active_imasks)
+    {
+        Mark_Gmxpacked_Inner_Active_Source_Generation(layout);
+    }
     if (record_active_imasks)
     {
         layout->gmxpacked_inner_active_source_rows_baseline =
@@ -16412,6 +16530,8 @@ static int Refresh_Gmxpacked_Record_Stream_Active_View_Sources(
         return -1;
     }
 
+    const int previous_active_source_rows =
+        layout->gmxpacked_record_stream_source_numbers;
     layout->gmxpacked_record_stream_source_numbers = active_source_rows;
     layout->gmxpacked_record_stream_aggregate_numbers = 0;
     if (active_source_rows <= 0)
@@ -16443,6 +16563,12 @@ static int Refresh_Gmxpacked_Record_Stream_Active_View_Sources(
             sizeof(LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE) *
                 static_cast<size_t>(active_source_rows),
             deviceMemcpyDeviceToDevice);
+    }
+    if (active_source_rows != previous_active_source_rows ||
+        changed_source_rows != 0 || dirty_source_rows != 0 ||
+        allow_full_dirty_refresh)
+    {
+        Mark_Gmxpacked_Inner_Active_Source_Generation(layout);
     }
     if (Clustered_Trace_Warp_Records_Enabled() ||
         Clustered_Gmxpacked_Incremental_Stats_Enabled() ||
@@ -17435,6 +17561,10 @@ static void Reset_Gmxpacked_Payload(LJ_CLUSTER_LAYOUT* layout)
     layout->gmxpacked_inner_active_source_imask_numbers = 0;
     layout->gmxpacked_inner_active_compact_base_imask_numbers = 0;
     layout->gmxpacked_inner_active_source_rows_baseline = 0;
+    layout->gmxpacked_compact_payload_anchor_generation = -1;
+    layout->gmxpacked_compact_payload_source_generation = -1;
+    layout->gmxpacked_incremental_source_anchor_generation = -1;
+    layout->gmxpacked_incremental_source_generation = -1;
     Invalidate_Gmxpacked_Pair_Shift_Metadata(layout);
 }
 
@@ -17491,6 +17621,14 @@ static void Free_Gmxpacked_Payload(LJ_CLUSTER_LAYOUT* layout)
     layout->gmxpacked_inner_active_source_imask_numbers = 0;
     layout->gmxpacked_inner_active_compact_base_imask_numbers = 0;
     layout->gmxpacked_inner_active_source_rows_baseline = 0;
+    layout->gmxpacked_inner_active_anchor_generation = 0;
+    layout->gmxpacked_inner_active_source_generation = 0;
+    layout->gmxpacked_compact_payload_anchor_generation = -1;
+    layout->gmxpacked_compact_payload_source_generation = -1;
+    layout->gmxpacked_current_source_anchor_generation = 0;
+    layout->gmxpacked_current_source_generation = 0;
+    layout->gmxpacked_incremental_source_anchor_generation = -1;
+    layout->gmxpacked_incremental_source_generation = -1;
     Reset_Gmxpacked_Payload(layout);
 }
 
@@ -24926,6 +25064,9 @@ void LJ_CLUSTER_LAYOUT::Initial(CONTROLLER* controller, const char* module_name,
     stable_target_layout_anchor_ready = false;
     gmxpacked_incremental_source_patch_successes = 0;
     gmxpacked_incremental_source_patch_fallbacks = 0;
+    gmxpacked_current_source_patch_attempts = 0;
+    gmxpacked_current_source_patch_successes = 0;
+    gmxpacked_current_source_patch_fallbacks = 0;
     gmxpacked_inner_active_append_attempts = 0;
     gmxpacked_inner_active_append_successes = 0;
     gmxpacked_inner_active_append_fallbacks = 0;
@@ -25306,6 +25447,11 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
             Clustered_Gmxpacked_Active_View_Current_Mask_Enabled();
         const bool use_current_active_mask =
             use_current_inner_active || use_active_view_current_mask;
+        auto compact_payload_generation_matches = [&]() -> bool
+        {
+            return Gmxpacked_Compact_Payload_Active_Key_Matches(
+                this, use_current_active_mask);
+        };
         const bool track_active_view_source_anchor =
             Clustered_Gmxpacked_Active_View_Rolling_Source_Cache_Enabled() &&
             Clustered_Gmxpacked_Active_View_Enabled() &&
@@ -25382,9 +25528,9 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                 : configured_guard_margin;
         const float active_view_payload_guard_margin =
             (!use_current_inner_active && use_active_view_current_mask)
-                ? Clustered_Gmxpacked_Active_View_Payload_Guard_Margin(
-                      guard_margin)
-                : guard_margin;
+                ? guard_margin
+                : Clustered_Gmxpacked_Active_View_Payload_Guard_Margin(
+                      guard_margin);
         const bool active_view_fixed_cutoff =
             use_active_view_current_mask &&
             Clustered_Gmxpacked_Active_View_Fixed_Cutoff_Enabled();
@@ -25646,6 +25792,7 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                 active_view_cached_anchor_reuse_limit + 1e-5f;
         if (previous_gmxpacked_compact_payload_ready &&
             current_inner_active_anchor_ready &&
+            compact_payload_generation_matches() &&
             gmxpacked_inner_active_guard_cutoff + 1e-6f >=
                 required_guard_cutoff &&
             !active_view_refresh_due &&
@@ -25737,6 +25884,7 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
         if (use_current_inner_active &&
             Clustered_Gmxpacked_Inner_Active_Incremental_Append_Enabled() &&
             previous_gmxpacked_compact_payload_ready &&
+            compact_payload_generation_matches() &&
             current_inner_active_anchor_ready &&
             d_gmxpacked_incremental_record_stream_sources != NULL &&
             gmxpacked_inner_active_source_imasks_ready &&
@@ -25964,6 +26112,7 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                 {
                     Refresh_Gmxpacked_Inner_Active_Anchor_Crd(this, crd);
                 }
+                Mark_Gmxpacked_Compact_Payload_Active_Key(this);
                 if (commit_current_cache_on_success)
                 {
                     Commit_Clustered_Build_Cache(this, crd, cutoff);
@@ -26037,6 +26186,7 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
         if (use_current_inner_active &&
             Clustered_Gmxpacked_Inner_Active_Coverage_Reuse_Enabled() &&
             previous_gmxpacked_compact_payload_ready &&
+            compact_payload_generation_matches() &&
             current_inner_active_anchor_ready &&
             d_gmxpacked_incremental_record_stream_sources != NULL &&
             gmxpacked_inner_active_source_imasks_ready &&
@@ -26136,7 +26286,8 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
         const bool can_reuse_previous_compact_payload =
             previous_gmxpacked_compact_payload_ready &&
             previous_active_source_rows > 0 &&
-            previous_active_aggregate_rows > 0;
+            previous_active_aggregate_rows > 0 &&
+            compact_payload_generation_matches();
         const bool active_view_cutoff_exact_matches =
             gmxpacked_inner_active_guard_cutoff > 0.0f &&
             fabsf(gmxpacked_inner_active_guard_cutoff -
@@ -26223,8 +26374,12 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                     candidate_sci_numbers &&
                 d_gmxpacked_incremental_dirty_candidate_sci != NULL)
             {
+                const bool zero_dirty_reuse_contract_ready =
+                    !use_current_active_mask ||
+                    compact_payload_generation_matches();
                 const int zero_dirty_reuse_source_rows =
-                    Clustered_Gmxpacked_Active_View_Zero_Dirty_Source_Reuse_Enabled()
+                    Clustered_Gmxpacked_Active_View_Zero_Dirty_Source_Reuse_Enabled() &&
+                            zero_dirty_reuse_contract_ready
                         ? gmxpacked_record_stream_source_numbers
                         : 0;
                 active_source_rows =
@@ -26235,13 +26390,13 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                         d_gmxpacked_incremental_dirty_candidate_sci,
                         d_gmxpacked_incremental_source_offsets_by_candidate,
                         active_prune_crd, cell, rcell, target_guard_cutoff,
-                        use_current_inner_active
+                        use_current_active_mask
                             ? d_gmxpacked_inner_active_anchor_crd
                             : NULL,
                         fmaxf(0.0f, target_guard_cutoff - cutoff),
                         refresh_stage_timers, &active_view_dirty_source_rows,
                         &active_view_changed_source_rows,
-                        zero_dirty_reuse_source_rows);
+                        zero_dirty_reuse_source_rows, false);
                 used_active_view_refresh = active_source_rows >= 0;
                 if (used_active_view_refresh &&
                     Clustered_Gmxpacked_Active_View_Verify_Coverage_Enabled())
@@ -26435,7 +26590,11 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                         NULL,
                         d_gmxpacked_incremental_source_offsets_by_candidate,
                         active_prune_crd, cell, rcell, target_guard_cutoff,
-                        NULL, 0.0f, refresh_stage_timers,
+                        use_current_active_mask
+                            ? d_gmxpacked_inner_active_anchor_crd
+                            : NULL,
+                        fmaxf(0.0f, target_guard_cutoff - cutoff),
+                        refresh_stage_timers,
                         &active_view_dirty_source_rows,
                         &active_view_changed_source_rows, 0, true);
                 used_active_view_refresh = active_source_rows >= 0;
@@ -26760,6 +26919,11 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
         {
             Refresh_Gmxpacked_Inner_Active_Anchor_Crd(this, crd);
         }
+        if (reused_compact_payload || used_delta_compact_payload ||
+            rebuilt_full_compact_payload)
+        {
+            Mark_Gmxpacked_Compact_Payload_Active_Key(this);
+        }
         {
             ClusteredGmxpackedRecordBuilderStageTimer stage_timer(
                 allow_anchor_drift ? "rolling-inner-active-pair-shift-refresh"
@@ -26862,8 +27026,14 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
         const float outer_source_cutoff = cutoff + rebuild_skin;
         const float guard_margin =
             Clustered_Gmxpacked_Record_Builder_Inner_Active_Guard_Margin();
+        const bool refresh_use_current_active_mask =
+            Clustered_Gmxpacked_Current_Inner_Active_Enabled() ||
+            Clustered_Gmxpacked_Active_View_Current_Mask_Enabled();
         const float active_payload_guard_margin =
-            Clustered_Gmxpacked_Active_View_Payload_Guard_Margin(guard_margin);
+            refresh_use_current_active_mask
+                ? guard_margin
+                : Clustered_Gmxpacked_Active_View_Payload_Guard_Margin(
+                      guard_margin);
         const float active_cutoff =
             fminf(outer_source_cutoff,
                   cutoff + fmaxf(0.0f, active_payload_guard_margin));
@@ -26910,6 +27080,7 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
         Refresh_Gmxpacked_Active_View_Compact_Base_Imasks(this);
         Refresh_Gmxpacked_Inner_Active_Anchor_Crd(this, crd);
         gmxpacked_inner_active_guard_cutoff = active_cutoff;
+        Mark_Gmxpacked_Compact_Payload_Active_Key(this);
         {
             ClusteredGmxpackedRecordBuilderStageTimer stage_timer(
                 "active-view-pair-shift-refresh", refresh_stage_timers);
@@ -26939,24 +27110,672 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
         return true;
 #endif
     };
+    auto try_current_source_patch_from_cache = [&](const char* phase) -> bool
+    {
+        if (!Clustered_Gmxpacked_Active_View_Current_Source_Patch_Enabled() ||
+            !Clustered_Gmxpacked_Active_View_Current_Mask_Enabled() ||
+            !active_view_payload_requested_for_cache() ||
+            !previous_gmxpacked_incremental_source_cache_ready ||
+            previous_gmxpacked_incremental_candidate_sci_numbers !=
+                candidate_sci_numbers ||
+            previous_gmxpacked_incremental_source_numbers <= 0 ||
+            previous_gmxpacked_incremental_source_cutoff < cutoff ||
+            !gmxpacked_outer_source_anchor_ready ||
+            d_gmxpacked_outer_source_anchor_crd == NULL ||
+            d_gmxpacked_incremental_source_offsets_by_candidate == NULL ||
+            d_gmxpacked_incremental_record_stream_sources == NULL ||
+            d_sci_candidate_leaf_offsets == NULL ||
+            d_sci_candidate_leaf_ids == NULL ||
+            d_leaf_cluster_starts == NULL || d_leaf_cluster_ends == NULL ||
+            d_super_cluster_offsets == NULL || d_cluster_to_supercluster == NULL ||
+            d_cluster_valid_masks == NULL || d_cluster_local_masks == NULL ||
+            d_cluster_centers == NULL || d_cluster_extents == NULL)
+        {
+            return false;
+        }
+#ifdef USE_CPU
+        (void)phase;
+        return false;
+#else
+        ClusteredRecorderScope payload_build_scope(payload_build_time_recorder);
+        const bool refresh_stage_timers =
+            Clustered_Gmxpacked_Record_Builder_Stage_Timers_Enabled();
+        const bool refresh_summary_trace =
+            Clustered_Trace_Warp_Records_Enabled() ||
+            Clustered_Gmxpacked_Incremental_Stats_Enabled() ||
+            refresh_stage_timers;
+        gmxpacked_current_source_patch_attempts += 1;
+        const bool dense_shift_partitioned_candidates =
+            Clustered_Use_Shift_Partitioned_Builder();
+        const bool sparse_shift_candidates =
+            !dense_shift_partitioned_candidates &&
+            Clustered_Use_Sparse_Shift_Candidate_Builder();
+        const bool fixed_shift_candidates =
+            dense_shift_partitioned_candidates || sparse_shift_candidates;
+        const bool fixed_shift_leaf_screening =
+            fixed_shift_candidates && Clustered_Use_Fixed_Shift_Leaf_Screening();
+        const int* candidate_sci_supercluster_ids =
+            sparse_shift_candidates ? d_candidate_sci_offsets
+                                    : d_sci_supercluster_ids;
+        const int* candidate_shift_ids =
+            sparse_shift_candidates ? d_candidate_shift_ids : NULL;
+        if (!fixed_shift_candidates || candidate_sci_supercluster_ids == NULL ||
+            (sparse_shift_candidates && candidate_shift_ids == NULL))
+        {
+            gmxpacked_current_source_patch_fallbacks += 1;
+            return false;
+        }
+        const float source_window =
+            previous_gmxpacked_incremental_source_cutoff - cutoff;
+        if (source_window <= 1.0e-6f)
+        {
+            gmxpacked_current_source_patch_fallbacks += 1;
+            return false;
+        }
+        bool current_patch_j_leaf_scope_ready = false;
+        const bool dirty_mask_ready =
+            Build_Gmxpacked_Inner_Active_Dirty_Device_Mask(
+                this, crd, d_gmxpacked_outer_source_anchor_crd, cell, rcell,
+                candidate_sci_supercluster_ids, candidate_shift_ids,
+                fixed_shift_candidates, source_window,
+                &current_patch_j_leaf_scope_ready);
+        if (!dirty_mask_ready || !current_patch_j_leaf_scope_ready ||
+            d_gmxpacked_incremental_dirty_candidate_sci == NULL)
+        {
+            gmxpacked_current_source_patch_fallbacks += 1;
+            return false;
+        }
+
+        Reserve_Device_Int_Buffer(candidate_sci_numbers + 1, &d_jentry_counts,
+                                  &jentry_count_capacity);
+        Reserve_Device_Int_Buffer(candidate_sci_numbers + 1, &d_jentry_offsets,
+                                  &jentry_offset_capacity);
+        const int dirty_candidates =
+            Exclusive_Scan_Counts(this, candidate_sci_numbers,
+                                  d_gmxpacked_incremental_dirty_candidate_sci,
+                                  d_jentry_offsets);
+        if (dirty_candidates <= 0)
+        {
+            const int previous_active_source_rows_for_patch =
+                gmxpacked_record_stream_source_numbers;
+            const int previous_active_aggregate_rows_for_patch =
+                gmxpacked_record_stream_aggregate_numbers;
+
+            const float guard_margin =
+                Clustered_Gmxpacked_Record_Builder_Inner_Active_Guard_Margin();
+            const float active_cutoff =
+                fminf(previous_gmxpacked_incremental_source_cutoff,
+                      cutoff + fmaxf(0.0f, guard_margin));
+            int active_view_dirty_source_rows = -1;
+            int active_view_changed_source_rows = -1;
+            int active_source_rows = -1;
+            bool used_current_source_partial_active_refresh = false;
+            const bool current_source_partial_active_refresh_safe =
+                gmxpacked_inner_active_source_imasks_ready &&
+                gmxpacked_inner_active_source_imask_numbers ==
+                    previous_gmxpacked_incremental_source_numbers &&
+                d_gmxpacked_inner_active_source_imasks != NULL &&
+                gmxpacked_inner_active_anchor_ready &&
+                d_gmxpacked_inner_active_anchor_crd != NULL;
+            if (current_source_partial_active_refresh_safe)
+            {
+                bool active_patch_j_leaf_scope_ready = false;
+                const bool active_dirty_mask_ready =
+                    Build_Gmxpacked_Inner_Active_Dirty_Device_Mask(
+                        this, crd, d_gmxpacked_inner_active_anchor_crd, cell,
+                        rcell, candidate_sci_supercluster_ids,
+                        candidate_shift_ids, fixed_shift_candidates,
+                        fmaxf(0.0f, active_cutoff - cutoff),
+                        &active_patch_j_leaf_scope_ready);
+                if (active_dirty_mask_ready && active_patch_j_leaf_scope_ready &&
+                    d_gmxpacked_incremental_dirty_candidate_sci != NULL)
+                {
+                    active_source_rows =
+                        Refresh_Gmxpacked_Record_Stream_Active_View_Sources(
+                            this, previous_gmxpacked_incremental_source_numbers,
+                            d_gmxpacked_incremental_record_stream_sources,
+                            candidate_sci_numbers,
+                            d_gmxpacked_incremental_dirty_candidate_sci,
+                            d_gmxpacked_incremental_source_offsets_by_candidate,
+                            crd, cell, rcell, active_cutoff,
+                            d_gmxpacked_inner_active_anchor_crd,
+                            fmaxf(0.0f, active_cutoff - cutoff),
+                            refresh_stage_timers,
+                            &active_view_dirty_source_rows,
+                            &active_view_changed_source_rows,
+                            previous_active_source_rows_for_patch, false);
+                    used_current_source_partial_active_refresh =
+                        active_source_rows >= 0;
+                }
+            }
+            if (!used_current_source_partial_active_refresh ||
+                active_source_rows <= 0)
+            {
+                gmxpacked_current_source_patch_fallbacks += 1;
+                return false;
+            }
+
+            const bool reused_current_source_compact_payload =
+                active_view_dirty_source_rows == 0 &&
+                active_view_changed_source_rows == 0 &&
+                active_source_rows == previous_active_source_rows_for_patch &&
+                previous_active_aggregate_rows_for_patch > 0 &&
+                previous_gmxpacked_compact_payload_ready &&
+                gmxpacked_sci_numbers == previous_gmxpacked_sci_numbers &&
+                gmxpacked_cjpacked_numbers ==
+                    previous_gmxpacked_cjpacked_numbers &&
+                gmxpacked_exclusion_numbers ==
+                    previous_gmxpacked_exclusion_numbers &&
+                gmxpacked_split_exclusion_numbers ==
+                    previous_gmxpacked_split_exclusion_numbers &&
+                Gmxpacked_Compact_Payload_Active_Key_Matches(this, true);
+            if (reused_current_source_compact_payload)
+            {
+                gmxpacked_record_stream_aggregate_numbers =
+                    previous_active_aggregate_rows_for_patch;
+            }
+            else
+            {
+                const int filled_aggregate_rows =
+                    Build_Gmxpacked_Record_Stream_Aggregates(this);
+                if (gmxpacked_record_stream_aggregate_numbers <= 0 ||
+                    filled_aggregate_rows !=
+                        gmxpacked_record_stream_aggregate_numbers)
+                {
+                    gmxpacked_current_source_patch_fallbacks += 1;
+                    return false;
+                }
+                gmxpacked_delta_sci_numbers = 0;
+                gmxpacked_delta_cjpacked_numbers = 0;
+                gmxpacked_delta_exclusion_numbers = 0;
+                gmxpacked_delta_split_exclusion_numbers = 0;
+                const ClusteredGmxpackedRecordStreamCompactSummary
+                    compact_summary =
+                        Build_Gmxpacked_Record_Stream_Compact_Payload(this);
+                if (compact_summary.compact_sci <= 0 ||
+                    compact_summary.compact_cj <= 0 ||
+                    compact_summary.compact_excl <= 0)
+                {
+                    gmxpacked_current_source_patch_fallbacks += 1;
+                    return false;
+                }
+            }
+            Refresh_Gmxpacked_Active_View_Compact_Base_Imasks(this);
+            if (!reused_current_source_compact_payload)
+            {
+                Refresh_Gmxpacked_Inner_Active_Anchor_Crd(this, crd);
+            }
+            gmxpacked_inner_active_guard_cutoff = active_cutoff;
+            if (!reused_current_source_compact_payload)
+            {
+                Mark_Gmxpacked_Compact_Payload_Active_Key(this);
+            }
+            if (Clustered_Gmxpacked_Should_Refresh_Pair_Shift_Metadata(this,
+                                                                       rcell))
+            {
+                Reserve_Device_U64_Buffer(
+                    gmxpacked_cjpacked_numbers * kClusteredJGroupSize,
+                    &d_pair_shift_bits, &pair_shift_capacity);
+                Refresh_Gmxpacked_Pair_Shift_Metadata(this, rcell);
+            }
+            if (refresh_summary_trace)
+            {
+                fprintf(stderr,
+                        "[clustered gmxpacked current source patch] step=%d "
+                        "cached_step=%d phase=%s dirty_candidates=0 "
+                        "dirty_prev_source_rows=0 replacement_rows=0 "
+                        "patched_source_rows=%d active_source_rows=%d "
+                        "compact_sci=%d compact_cj=%d compact_excl=%d "
+                        "source_cutoff=%.6f active_cutoff=%.6f ratio=0.000000 "
+                        "partial_active=%d active_dirty_source_rows=%d "
+                        "active_changed_source_rows=%d compact_reuse=%d "
+                        "source_reuse=1\n",
+                        md_info.sys.steps, cached_build_step,
+                        phase != NULL ? phase : "cache-hit",
+                        previous_gmxpacked_incremental_source_numbers,
+                        active_source_rows, gmxpacked_sci_numbers,
+                        gmxpacked_cjpacked_numbers,
+                        gmxpacked_exclusion_numbers,
+                        previous_gmxpacked_incremental_source_cutoff,
+                        active_cutoff,
+                        used_current_source_partial_active_refresh ? 1 : 0,
+                        active_view_dirty_source_rows,
+                        active_view_changed_source_rows,
+                        reused_current_source_compact_payload ? 1 : 0);
+                fflush(stderr);
+            }
+            gmxpacked_current_source_patch_successes += 1;
+            return true;
+        }
+        Launch_Device_Kernel(
+            Count_Gmxpacked_Dirty_Source_Rows_By_Candidate,
+            (candidate_sci_numbers + CONTROLLER::device_max_thread - 1) /
+                CONTROLLER::device_max_thread,
+            CONTROLLER::device_max_thread, 0, NULL, candidate_sci_numbers,
+            d_gmxpacked_incremental_dirty_candidate_sci,
+            d_gmxpacked_incremental_source_offsets_by_candidate,
+            d_jentry_counts);
+        const int dirty_previous_source_rows =
+            Exclusive_Scan_Counts(this, candidate_sci_numbers, d_jentry_counts,
+                                  d_jentry_offsets);
+        const float dirty_source_ratio =
+            previous_gmxpacked_incremental_source_numbers > 0
+                ? static_cast<float>(dirty_previous_source_rows) /
+                      static_cast<float>(
+                          previous_gmxpacked_incremental_source_numbers)
+                : 1.0f;
+        const float dirty_ratio_limit =
+            Clustered_Gmxpacked_Active_View_Current_Source_Patch_Max_Dirty_Ratio();
+        if (dirty_previous_source_rows < 0 ||
+            dirty_source_ratio > dirty_ratio_limit)
+        {
+            if (refresh_summary_trace)
+            {
+                fprintf(stderr,
+                        "[clustered gmxpacked current source patch fallback] "
+                        "step=%d phase=%s reason=dirty-ratio "
+                        "dirty_candidates=%d dirty_source_rows=%d "
+                        "source_rows=%d ratio=%.6f limit=%.6f\n",
+                        md_info.sys.steps, phase != NULL ? phase : "cache-hit",
+                        dirty_candidates, dirty_previous_source_rows,
+                        previous_gmxpacked_incremental_source_numbers,
+                        dirty_source_ratio, dirty_ratio_limit);
+                fflush(stderr);
+            }
+            gmxpacked_current_source_patch_fallbacks += 1;
+            return false;
+        }
+
+        const int sci_shift_numbers =
+            fixed_shift_candidates ? candidate_sci_numbers : sci_numbers;
+        const int candidate_sci_blocks =
+            (candidate_sci_numbers +
+             (kClusteredBuilderBlockSize / kClusteredBuilderWarpSize) - 1) /
+            (kClusteredBuilderBlockSize / kClusteredBuilderWarpSize);
+        int* d_patch_sci_shift_flags = NULL;
+        int patch_sci_shift_flag_capacity = 0;
+        int* d_patch_cjpacked_counts = NULL;
+        int patch_cjpacked_count_capacity = 0;
+        int* d_patch_exclusion_counts = NULL;
+        int patch_exclusion_count_capacity = 0;
+        int* d_patch_source_fill_cursor = NULL;
+        int patch_source_fill_cursor_capacity = 0;
+        int* d_patch_source_overflow_rows = NULL;
+        int patch_source_overflow_capacity = 0;
+        Reserve_Device_Int_Buffer(sci_shift_numbers, &d_patch_sci_shift_flags,
+                                  &patch_sci_shift_flag_capacity);
+        Reserve_Device_Int_Buffer(sci_shift_numbers, &d_patch_cjpacked_counts,
+                                  &patch_cjpacked_count_capacity);
+        Reserve_Device_Int_Buffer(sci_shift_numbers, &d_patch_exclusion_counts,
+                                  &patch_exclusion_count_capacity);
+        Reserve_Device_Int_Buffer(
+            candidate_sci_numbers,
+            &d_gmxpacked_incremental_replacement_source_counts_by_candidate,
+            &gmxpacked_incremental_replacement_source_count_capacity);
+        Reserve_Device_Int_Buffer(
+            candidate_sci_numbers + 1,
+            &d_gmxpacked_incremental_replacement_source_offsets_by_candidate,
+            &gmxpacked_incremental_replacement_source_offset_capacity);
+        Reserve_Device_Int_Buffer(1, &d_patch_source_fill_cursor,
+                                  &patch_source_fill_cursor_capacity);
+        Reserve_Device_Int_Buffer(1, &d_patch_source_overflow_rows,
+                                  &patch_source_overflow_capacity);
+        deviceMemset(d_patch_sci_shift_flags, 0,
+                     sizeof(int) * sci_shift_numbers);
+        deviceMemset(d_patch_cjpacked_counts, 0,
+                     sizeof(int) * sci_shift_numbers);
+        deviceMemset(d_patch_exclusion_counts, 0,
+                     sizeof(int) * sci_shift_numbers);
+        deviceMemset(d_gmxpacked_incremental_replacement_source_counts_by_candidate,
+                     0, sizeof(int) * candidate_sci_numbers);
+
+        Launch_Device_Kernel(
+            Count_Nbnxm_Payload_From_Candidate_Leaves, candidate_sci_blocks,
+            kClusteredBuilderBlockSize, 0, NULL, candidate_sci_numbers,
+            sci_shift_numbers, cluster_size, super_cluster_clusters,
+            local_atom_numbers, previous_gmxpacked_incremental_source_cutoff, cell,
+            rcell, d_sort_permutation, d_cluster_offsets, d_leaf_cluster_starts,
+            d_leaf_cluster_ends, d_super_cluster_offsets, d_cluster_to_supercluster,
+            candidate_sci_supercluster_ids, d_super_cluster_centers,
+            candidate_shift_ids, d_sci_candidate_leaf_offsets,
+            d_sci_candidate_leaf_ids, NULL, candidate_leaf_cluster_stride,
+            fixed_shift_leaf_screening ? d_candidate_leaf_reach_masks : NULL,
+            d_cluster_valid_masks, d_cluster_local_masks, d_cluster_centers,
+            d_cluster_extents, d_cluster_radii, d_cluster_molecule_signatures,
+            d_cluster_molecule_ids, d_excluded_list_start, d_excluded_list,
+            d_excluded_numbers, fixed_shift_candidates,
+            previous_gmxpacked_incremental_source_cutoff, crd,
+            d_patch_sci_shift_flags, d_patch_cjpacked_counts,
+            d_patch_exclusion_counts, NULL,
+            d_gmxpacked_incremental_replacement_source_counts_by_candidate,
+            false, d_gmxpacked_incremental_dirty_candidate_sci,
+            0, NULL, NULL, 0, NULL, NULL);
+        const int replacement_source_rows =
+            Exclusive_Scan_Counts(
+                this, candidate_sci_numbers,
+                d_gmxpacked_incremental_replacement_source_counts_by_candidate,
+                d_gmxpacked_incremental_replacement_source_offsets_by_candidate);
+        int patch_overflow_rows = 0;
+        if (replacement_source_rows > 0)
+        {
+            Reserve_Device_Buffer(
+                replacement_source_rows,
+                &d_gmxpacked_incremental_replacement_sources,
+                &gmxpacked_incremental_replacement_source_capacity);
+            deviceMemset(d_patch_source_fill_cursor, 0, sizeof(int));
+            deviceMemset(d_patch_source_overflow_rows, 0, sizeof(int));
+            Launch_Device_Kernel(
+                Fill_Gmxpacked_Record_Stream_Sources_From_Candidate_Leaves,
+                candidate_sci_blocks, kClusteredBuilderBlockSize, 0, NULL,
+                candidate_sci_numbers, cluster_size, local_atom_numbers,
+                previous_gmxpacked_incremental_source_cutoff, cell, rcell,
+                d_sort_permutation, d_cluster_offsets, d_leaf_cluster_starts,
+                d_leaf_cluster_ends, d_super_cluster_offsets,
+                d_cluster_to_supercluster, candidate_sci_supercluster_ids,
+                candidate_shift_ids, d_sci_candidate_leaf_offsets,
+                d_sci_candidate_leaf_ids, candidate_leaf_cluster_stride,
+                fixed_shift_leaf_screening ? d_candidate_leaf_reach_masks : NULL,
+                d_cluster_valid_masks, d_cluster_local_masks, d_cluster_centers,
+                d_cluster_extents, d_cluster_molecule_signatures,
+                d_cluster_molecule_ids, d_excluded_list_start, d_excluded_list,
+                d_excluded_numbers, fixed_shift_candidates,
+                previous_gmxpacked_incremental_source_cutoff, crd,
+                replacement_source_rows,
+                d_gmxpacked_incremental_replacement_source_offsets_by_candidate,
+                d_gmxpacked_incremental_replacement_sources,
+                d_patch_source_fill_cursor, d_patch_source_overflow_rows,
+                0, NULL, 0, NULL, NULL, NULL,
+                d_gmxpacked_incremental_dirty_candidate_sci,
+                candidate_leaf_cluster_stride);
+            deviceMemcpy(&patch_overflow_rows, d_patch_source_overflow_rows,
+                         sizeof(int), deviceMemcpyDeviceToHost);
+        }
+        if (patch_overflow_rows != 0)
+        {
+            Free_Single_Device_Pointer((void**)&d_patch_sci_shift_flags);
+            Free_Single_Device_Pointer((void**)&d_patch_cjpacked_counts);
+            Free_Single_Device_Pointer((void**)&d_patch_exclusion_counts);
+            Free_Single_Device_Pointer((void**)&d_patch_source_fill_cursor);
+            Free_Single_Device_Pointer((void**)&d_patch_source_overflow_rows);
+            gmxpacked_current_source_patch_fallbacks += 1;
+            return false;
+        }
+
+        const int previous_active_source_rows_for_patch =
+            gmxpacked_record_stream_source_numbers;
+        const int previous_active_aggregate_rows_for_patch =
+            gmxpacked_record_stream_aggregate_numbers;
+        Launch_Device_Kernel(
+            Count_Gmxpacked_Current_Source_Patch_Rows_By_Candidate,
+            (candidate_sci_numbers + CONTROLLER::device_max_thread - 1) /
+                CONTROLLER::device_max_thread,
+            CONTROLLER::device_max_thread, 0, NULL, candidate_sci_numbers,
+            d_gmxpacked_incremental_dirty_candidate_sci,
+            d_gmxpacked_incremental_source_offsets_by_candidate,
+            d_gmxpacked_incremental_replacement_source_offsets_by_candidate,
+            d_jentry_counts);
+        const int patched_source_rows =
+            Exclusive_Scan_Counts(this, candidate_sci_numbers, d_jentry_counts,
+                                  d_jentry_offsets);
+        if (patched_source_rows <= 0)
+        {
+            Free_Single_Device_Pointer((void**)&d_patch_sci_shift_flags);
+            Free_Single_Device_Pointer((void**)&d_patch_cjpacked_counts);
+            Free_Single_Device_Pointer((void**)&d_patch_exclusion_counts);
+            Free_Single_Device_Pointer((void**)&d_patch_source_fill_cursor);
+            Free_Single_Device_Pointer((void**)&d_patch_source_overflow_rows);
+            gmxpacked_current_source_patch_fallbacks += 1;
+            return false;
+        }
+        Reserve_Device_Buffer(patched_source_rows, &d_gmxpacked_record_stream_sources,
+                              &gmxpacked_record_stream_source_capacity);
+        Launch_Device_Kernel(
+            Fill_Gmxpacked_Current_Source_Patch_Sources,
+            (candidate_sci_numbers + CONTROLLER::device_max_thread - 1) /
+                CONTROLLER::device_max_thread,
+            CONTROLLER::device_max_thread, 0, NULL, candidate_sci_numbers,
+            d_gmxpacked_incremental_dirty_candidate_sci,
+            d_gmxpacked_incremental_source_offsets_by_candidate,
+            d_gmxpacked_incremental_record_stream_sources,
+            d_gmxpacked_incremental_replacement_source_offsets_by_candidate,
+            d_gmxpacked_incremental_replacement_sources, d_jentry_offsets,
+            d_gmxpacked_record_stream_sources);
+        Reserve_Device_Int_Buffer(candidate_sci_numbers + 1,
+                                  &d_gmxpacked_incremental_source_offsets_by_candidate,
+                                  &gmxpacked_incremental_source_offset_capacity);
+        deviceMemcpy(d_gmxpacked_incremental_source_offsets_by_candidate,
+                     d_jentry_offsets, sizeof(int) * (candidate_sci_numbers + 1),
+                     deviceMemcpyDeviceToDevice);
+        Reserve_Device_Buffer(patched_source_rows,
+                              &d_gmxpacked_incremental_record_stream_sources,
+                              &gmxpacked_incremental_source_cache_capacity);
+        deviceMemcpy(
+            d_gmxpacked_incremental_record_stream_sources,
+            d_gmxpacked_record_stream_sources,
+            sizeof(LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE) *
+                static_cast<size_t>(patched_source_rows),
+            deviceMemcpyDeviceToDevice);
+        gmxpacked_record_stream_source_numbers = patched_source_rows;
+        gmxpacked_record_stream_aggregate_numbers = 0;
+        gmxpacked_incremental_candidate_sci_numbers = candidate_sci_numbers;
+        gmxpacked_incremental_source_numbers = patched_source_rows;
+        gmxpacked_incremental_source_cutoff =
+            previous_gmxpacked_incremental_source_cutoff;
+        gmxpacked_incremental_source_global_valid_cutoff =
+            previous_gmxpacked_incremental_source_cutoff;
+        gmxpacked_incremental_source_offsets_ready = true;
+        gmxpacked_incremental_source_cache_ready = true;
+        const bool current_source_cache_changed =
+            dirty_previous_source_rows > 0 || replacement_source_rows > 0 ||
+            patched_source_rows != previous_gmxpacked_incremental_source_numbers;
+        if (current_source_cache_changed)
+        {
+            Refresh_Gmxpacked_Outer_Source_Anchor_Crd(this, crd);
+            Mark_Gmxpacked_Current_Source_Generation(this);
+            Mark_Gmxpacked_Incremental_Source_Cache_Key(this);
+        }
+
+        const float guard_margin =
+            Clustered_Gmxpacked_Record_Builder_Inner_Active_Guard_Margin();
+        const float active_cutoff =
+            fminf(previous_gmxpacked_incremental_source_cutoff,
+                  cutoff + fmaxf(0.0f, guard_margin));
+        int active_view_dirty_source_rows = -1;
+        int active_view_changed_source_rows = -1;
+        bool used_current_source_partial_active_refresh = false;
+        const bool current_source_partial_active_refresh_safe =
+            patched_source_rows == previous_gmxpacked_incremental_source_numbers &&
+            dirty_previous_source_rows == 0 &&
+            gmxpacked_inner_active_source_imasks_ready &&
+            gmxpacked_inner_active_source_imask_numbers ==
+                previous_gmxpacked_incremental_source_numbers &&
+            d_gmxpacked_inner_active_source_imasks != NULL &&
+            gmxpacked_inner_active_anchor_ready &&
+            d_gmxpacked_inner_active_anchor_crd != NULL;
+        int active_source_rows = -1;
+        if (current_source_partial_active_refresh_safe)
+        {
+            bool active_patch_j_leaf_scope_ready = false;
+            const bool active_dirty_mask_ready =
+                Build_Gmxpacked_Inner_Active_Dirty_Device_Mask(
+                    this, crd, d_gmxpacked_inner_active_anchor_crd, cell, rcell,
+                    candidate_sci_supercluster_ids, candidate_shift_ids,
+                    fixed_shift_candidates, fmaxf(0.0f, active_cutoff - cutoff),
+                    &active_patch_j_leaf_scope_ready);
+            if (active_dirty_mask_ready && active_patch_j_leaf_scope_ready &&
+                d_gmxpacked_incremental_dirty_candidate_sci != NULL)
+            {
+                active_source_rows =
+                    Refresh_Gmxpacked_Record_Stream_Active_View_Sources(
+                        this, patched_source_rows,
+                        d_gmxpacked_incremental_record_stream_sources,
+                        candidate_sci_numbers,
+                        d_gmxpacked_incremental_dirty_candidate_sci,
+                        d_gmxpacked_incremental_source_offsets_by_candidate,
+                        crd, cell, rcell, active_cutoff,
+                        d_gmxpacked_inner_active_anchor_crd,
+                        fmaxf(0.0f, active_cutoff - cutoff),
+                        refresh_stage_timers, &active_view_dirty_source_rows,
+                        &active_view_changed_source_rows,
+                        previous_active_source_rows_for_patch, false);
+                used_current_source_partial_active_refresh =
+                    active_source_rows >= 0;
+            }
+        }
+        if (!used_current_source_partial_active_refresh)
+        {
+            active_source_rows =
+                Prune_Gmxpacked_Record_Stream_To_Inner_Active_Sources(
+                    this, crd, cell, rcell, active_cutoff,
+                    refresh_stage_timers, true);
+        }
+        if (active_source_rows <= 0)
+        {
+            Free_Single_Device_Pointer((void**)&d_patch_sci_shift_flags);
+            Free_Single_Device_Pointer((void**)&d_patch_cjpacked_counts);
+            Free_Single_Device_Pointer((void**)&d_patch_exclusion_counts);
+            Free_Single_Device_Pointer((void**)&d_patch_source_fill_cursor);
+            Free_Single_Device_Pointer((void**)&d_patch_source_overflow_rows);
+            gmxpacked_current_source_patch_fallbacks += 1;
+            return false;
+        }
+        const bool reused_current_source_compact_payload =
+            used_current_source_partial_active_refresh &&
+            active_view_dirty_source_rows == 0 &&
+            active_view_changed_source_rows == 0 &&
+            active_source_rows == previous_active_source_rows_for_patch &&
+            previous_active_aggregate_rows_for_patch > 0 &&
+            previous_gmxpacked_compact_payload_ready &&
+            gmxpacked_sci_numbers == previous_gmxpacked_sci_numbers &&
+            gmxpacked_cjpacked_numbers == previous_gmxpacked_cjpacked_numbers &&
+            gmxpacked_exclusion_numbers == previous_gmxpacked_exclusion_numbers &&
+            gmxpacked_split_exclusion_numbers ==
+                previous_gmxpacked_split_exclusion_numbers &&
+            Gmxpacked_Compact_Payload_Active_Key_Matches(this, true);
+        int filled_aggregate_rows = previous_active_aggregate_rows_for_patch;
+        if (reused_current_source_compact_payload)
+        {
+            gmxpacked_record_stream_aggregate_numbers =
+                previous_active_aggregate_rows_for_patch;
+        }
+        else
+        {
+            filled_aggregate_rows = Build_Gmxpacked_Record_Stream_Aggregates(this);
+            if (gmxpacked_record_stream_aggregate_numbers <= 0 ||
+                filled_aggregate_rows != gmxpacked_record_stream_aggregate_numbers)
+            {
+                Free_Single_Device_Pointer((void**)&d_patch_sci_shift_flags);
+                Free_Single_Device_Pointer((void**)&d_patch_cjpacked_counts);
+                Free_Single_Device_Pointer((void**)&d_patch_exclusion_counts);
+                Free_Single_Device_Pointer((void**)&d_patch_source_fill_cursor);
+                Free_Single_Device_Pointer((void**)&d_patch_source_overflow_rows);
+                gmxpacked_current_source_patch_fallbacks += 1;
+                return false;
+            }
+        }
+        if (!reused_current_source_compact_payload)
+        {
+            gmxpacked_delta_sci_numbers = 0;
+            gmxpacked_delta_cjpacked_numbers = 0;
+            gmxpacked_delta_exclusion_numbers = 0;
+            gmxpacked_delta_split_exclusion_numbers = 0;
+            const ClusteredGmxpackedRecordStreamCompactSummary compact_summary =
+                Build_Gmxpacked_Record_Stream_Compact_Payload(this);
+            if (compact_summary.compact_sci <= 0 ||
+                compact_summary.compact_cj <= 0 ||
+                compact_summary.compact_excl <= 0)
+            {
+                Free_Single_Device_Pointer((void**)&d_patch_sci_shift_flags);
+                Free_Single_Device_Pointer((void**)&d_patch_cjpacked_counts);
+                Free_Single_Device_Pointer((void**)&d_patch_exclusion_counts);
+                Free_Single_Device_Pointer((void**)&d_patch_source_fill_cursor);
+                Free_Single_Device_Pointer((void**)&d_patch_source_overflow_rows);
+                gmxpacked_current_source_patch_fallbacks += 1;
+                return false;
+            }
+        }
+        Refresh_Gmxpacked_Active_View_Compact_Base_Imasks(this);
+        if (!reused_current_source_compact_payload)
+        {
+            Refresh_Gmxpacked_Inner_Active_Anchor_Crd(this, crd);
+        }
+        gmxpacked_inner_active_guard_cutoff = active_cutoff;
+        if (!reused_current_source_compact_payload)
+        {
+            Mark_Gmxpacked_Compact_Payload_Active_Key(this);
+        }
+        if (Clustered_Gmxpacked_Should_Refresh_Pair_Shift_Metadata(this, rcell))
+        {
+            Reserve_Device_U64_Buffer(
+                gmxpacked_cjpacked_numbers * kClusteredJGroupSize,
+                &d_pair_shift_bits, &pair_shift_capacity);
+            Refresh_Gmxpacked_Pair_Shift_Metadata(this, rcell);
+        }
+        if (refresh_summary_trace)
+        {
+            fprintf(stderr,
+                    "[clustered gmxpacked current source patch] step=%d "
+                    "cached_step=%d phase=%s dirty_candidates=%d "
+                    "dirty_prev_source_rows=%d replacement_rows=%d "
+                    "patched_source_rows=%d active_source_rows=%d "
+                    "compact_sci=%d compact_cj=%d compact_excl=%d "
+                    "source_cutoff=%.6f active_cutoff=%.6f ratio=%.6f "
+                    "partial_active=%d active_dirty_source_rows=%d "
+                    "active_changed_source_rows=%d compact_reuse=%d\n",
+                    md_info.sys.steps, cached_build_step,
+                    phase != NULL ? phase : "cache-hit", dirty_candidates,
+                    dirty_previous_source_rows, replacement_source_rows,
+                    patched_source_rows, active_source_rows, gmxpacked_sci_numbers,
+                    gmxpacked_cjpacked_numbers, gmxpacked_exclusion_numbers,
+                    previous_gmxpacked_incremental_source_cutoff, active_cutoff,
+                    dirty_source_ratio,
+                    used_current_source_partial_active_refresh ? 1 : 0,
+                    active_view_dirty_source_rows,
+                    active_view_changed_source_rows,
+                    reused_current_source_compact_payload ? 1 : 0);
+            fflush(stderr);
+        }
+        Free_Single_Device_Pointer((void**)&d_patch_sci_shift_flags);
+        Free_Single_Device_Pointer((void**)&d_patch_cjpacked_counts);
+        Free_Single_Device_Pointer((void**)&d_patch_exclusion_counts);
+        Free_Single_Device_Pointer((void**)&d_patch_source_fill_cursor);
+        Free_Single_Device_Pointer((void**)&d_patch_source_overflow_rows);
+        gmxpacked_current_source_patch_successes += 1;
+        return true;
+#endif
+    };
     if (!clustered_build_needed && !cached_native_payload_missing)
     {
-        if (can_attempt_inner_active_from_cached_outer_source() &&
+        const bool force_current_mask_source_rebuild =
+            Clustered_Gmxpacked_Active_View_Current_Mask_Enabled();
+        if (force_current_mask_source_rebuild &&
+            try_current_source_patch_from_cache("cache-hit"))
+        {
+            return;
+        }
+        if (!force_current_mask_source_rebuild &&
+            can_attempt_inner_active_from_cached_outer_source() &&
             try_inner_active_payload_refresh_from_outer_cache(
                 "cache-hit", true, false))
         {
             return;
         }
-        if (!active_view_source_cache_coverage_miss &&
+        if (!force_current_mask_source_rebuild &&
+            !active_view_source_cache_coverage_miss &&
             active_view_payload_requested_for_cache())
         {
+            const bool active_view_reuse_current_mask =
+                Clustered_Gmxpacked_Current_Inner_Active_Enabled() ||
+                Clustered_Gmxpacked_Active_View_Current_Mask_Enabled();
             bool can_reuse_active_payload =
                 previous_gmxpacked_compact_payload_ready &&
                 gmxpacked_inner_active_anchor_ready &&
                 d_gmxpacked_inner_active_anchor_crd != NULL &&
                 gmxpacked_inner_active_source_imasks_ready &&
                 gmxpacked_inner_active_source_imask_numbers ==
-                    previous_gmxpacked_incremental_source_numbers;
+                    previous_gmxpacked_incremental_source_numbers &&
+                Gmxpacked_Compact_Payload_Active_Key_Matches(
+                    this, active_view_reuse_current_mask);
             float active_anchor_max_displacement = 0.0f;
             const float guard_margin =
                 Clustered_Gmxpacked_Record_Builder_Inner_Active_Guard_Margin();
@@ -27007,14 +27826,26 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                     : 0;
             fprintf(stderr,
                     "[clustered primary payload cache hit] step=%d "
-                    "cached_step=%d step_builds=%d total_builds=%lld\n",
+                    "cached_step=%d step_builds=%d total_builds=%lld "
+                    "current_mask_source_rebuild=%d\n",
                     md_info.sys.steps, cached_build_step, builds_this_step,
-                    primary_payload_build_count_total);
+                    primary_payload_build_count_total,
+                    force_current_mask_source_rebuild ? 1 : 0);
             fflush(stderr);
         }
+        if (!force_current_mask_source_rebuild)
+        {
+            return;
+        }
+    }
+    if (clustered_build_needed && !cached_native_payload_missing &&
+        Clustered_Gmxpacked_Active_View_Current_Mask_Enabled() &&
+        try_current_source_patch_from_cache("build-needed"))
+    {
         return;
     }
     if (clustered_build_needed && !cached_native_payload_missing &&
+        !Clustered_Gmxpacked_Active_View_Current_Mask_Enabled() &&
         Clustered_Gmxpacked_Active_View_Rolling_Source_Cache_Enabled() &&
         can_attempt_inner_active_from_cached_outer_source() &&
         try_inner_active_payload_refresh_from_outer_cache(
@@ -28427,6 +29258,7 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
     const bool request_gmxpacked_incremental_merge =
         request_gmxpacked_record_builder_route && run_gmxpacked_primary_builder &&
         use_gmxpacked_incremental_cache &&
+        !Clustered_Gmxpacked_Active_View_Current_Mask_Enabled() &&
         Clustered_Gmxpacked_Incremental_Device_Mask_Enabled() &&
         Clustered_Gmxpacked_Incremental_Merge_Enabled() &&
         current_layout_incremental_device_mask_ready &&
@@ -29955,6 +30787,8 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                 gmxpacked_incremental_source_global_valid_cutoff =
                     gmxpacked_record_stream_cutoff;
                 gmxpacked_incremental_source_cache_ready = true;
+                Mark_Gmxpacked_Current_Source_Generation(this);
+                Mark_Gmxpacked_Incremental_Source_Cache_Key(this);
                 if (use_gmxpacked_inner_active_payload &&
                     Clustered_Gmxpacked_Record_Builder_Inner_Active_Debug_Counts_Enabled() &&
                     d_stable_target_layout_crd != NULL)
@@ -30367,12 +31201,16 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
         gmxpacked_incremental_source_cutoff = gmxpacked_record_stream_cutoff;
         gmxpacked_incremental_source_global_valid_cutoff =
             gmxpacked_record_stream_cutoff;
-        if (Clustered_Gmxpacked_Active_View_Rolling_Source_Cache_Enabled())
+        if (Clustered_Gmxpacked_Active_View_Rolling_Source_Cache_Enabled() ||
+            (Clustered_Gmxpacked_Active_View_Current_Mask_Enabled() &&
+             Clustered_Gmxpacked_Active_View_Current_Source_Patch_Enabled()))
         {
             Refresh_Gmxpacked_Outer_Source_Anchor_Crd(
                 this, gmxpacked_record_stream_prune_crd);
         }
         gmxpacked_incremental_source_cache_ready = true;
+        Mark_Gmxpacked_Current_Source_Generation(this);
+        Mark_Gmxpacked_Incremental_Source_Cache_Key(this);
         gmxpacked_incremental_source_offsets_ready =
             gmxpacked_incremental_source_offsets_ready &&
             d_gmxpacked_incremental_source_offsets_by_candidate != NULL;
@@ -30396,11 +31234,7 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
             use_current_inner_active
                 ? fminf(configured_guard_margin, 1.0f)
                 : configured_guard_margin;
-        const float active_payload_guard_margin =
-            (!use_current_inner_active && use_current_active_mask)
-                ? Clustered_Gmxpacked_Active_View_Payload_Guard_Margin(
-                      guard_margin)
-                : guard_margin;
+        const float active_payload_guard_margin = guard_margin;
         float initial_active_cutoff =
             fminf(gmxpacked_record_stream_cutoff,
                   cutoff + active_payload_guard_margin);
@@ -30418,6 +31252,9 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                 previous_gmxpacked_incremental_source_numbers &&
             d_gmxpacked_incremental_dirty_candidate_sci != NULL &&
             d_gmxpacked_incremental_source_offsets_by_candidate != NULL &&
+            (!use_current_active_mask ||
+             (gmxpacked_inner_active_anchor_ready &&
+              d_gmxpacked_inner_active_anchor_crd != NULL)) &&
             gmxpacked_inner_active_source_imasks_ready &&
             gmxpacked_inner_active_source_imask_numbers ==
                 gmxpacked_record_stream_source_numbers &&
@@ -30430,10 +31267,14 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                     d_gmxpacked_incremental_dirty_candidate_sci,
                     d_gmxpacked_incremental_source_offsets_by_candidate,
                     initial_active_prune_crd, cell, rcell,
-                    initial_active_cutoff, NULL, 0.0f,
+                    initial_active_cutoff,
+                    use_current_active_mask
+                        ? d_gmxpacked_inner_active_anchor_crd
+                        : NULL,
+                    fmaxf(0.0f, initial_active_cutoff - cutoff),
                     record_builder_stage_timers,
                     &active_view_dirty_source_rows,
-                    &active_view_changed_source_rows);
+                    &active_view_changed_source_rows, 0, false);
             used_active_view_refresh = active_source_rows >= 0;
         }
         if (!used_active_view_refresh)
@@ -30535,6 +31376,11 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                 gmxpacked_record_stream_compact_summary.compact_excl > 0)
             {
                 Refresh_Gmxpacked_Active_View_Compact_Base_Imasks(this);
+                if (Clustered_Gmxpacked_Current_Inner_Active_Enabled() ||
+                    Clustered_Gmxpacked_Active_View_Current_Mask_Enabled())
+                {
+                    Mark_Gmxpacked_Compact_Payload_Active_Key(this);
+                }
 #ifndef USE_CPU
                 Clustered_Gmxpacked_Active_View_Payload_Boundary_Sync(
                     "initial-compact");
@@ -31017,6 +31863,7 @@ void LJ_CLUSTER_LAYOUT::Clear()
     Free_Single_Device_Pointer((void**)&d_cached_crd);
     Free_Single_Device_Pointer((void**)&d_stable_target_layout_crd);
     Free_Single_Device_Pointer((void**)&d_gmxpacked_outer_source_anchor_crd);
+    Free_Single_Device_Pointer((void**)&d_gmxpacked_inner_active_anchor_crd);
     Free_Single_Device_Pointer((void**)&d_need_rebuild);
     Free_Single_Device_Pointer((void**)&d_global_atom_to_molecule);
     Free_Single_Device_Pointer((void**)&d_local_atom_to_molecule);
@@ -31230,6 +32077,13 @@ void LJ_CLUSTER_LAYOUT::Clear()
     gmxpacked_incremental_candidate_sci_numbers = 0;
     gmxpacked_incremental_source_patch_successes = 0;
     gmxpacked_incremental_source_patch_fallbacks = 0;
+    gmxpacked_current_source_anchor_generation = 0;
+    gmxpacked_current_source_generation = 0;
+    gmxpacked_incremental_source_anchor_generation = -1;
+    gmxpacked_incremental_source_generation = -1;
+    gmxpacked_current_source_patch_attempts = 0;
+    gmxpacked_current_source_patch_successes = 0;
+    gmxpacked_current_source_patch_fallbacks = 0;
     gmxpacked_pair_shift_sci_only_compatible = false;
     gmxpacked_pair_shift_metadata_ready = false;
     gmxpacked_pair_shift_sci_safe_counts_ready = false;

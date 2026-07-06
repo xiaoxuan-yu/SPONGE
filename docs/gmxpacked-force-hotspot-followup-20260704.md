@@ -1197,3 +1197,126 @@ Calculate_Force: 6.563854 s
 This does not prove the current-mask path is irreparable. It means current-mask
 is not a safe default contract for non-water DNA_COU today, while zero-dirty
 reuse can be retained only under stable-source active-view semantics.
+
+## Current-Mask Anchor/Generation Contract Attempt
+
+Follow-up implementation made the current-mask payload ownership explicit:
+
+- `gmxpacked_inner_active_anchor_generation` increments whenever the inner
+  active anchor coordinate buffer is refreshed.
+- `gmxpacked_inner_active_source_generation` increments when active source rows
+  are rewritten, including active-view dirty refresh, full dirty refresh, and
+  coverage append.
+- compact payload reuse now checks both anchor and source generation when
+  current-mask semantics are active.
+- all active-view source refresh calls now pass the current-mask anchor when
+  `use_current_active_mask` is true.
+- current-mask dirty-index partial refresh is now a separate experimental gate:
+
+```text
+SPONGE_CLUSTERED_GMXPACKED_ACTIVE_VIEW_CURRENT_MASK_PARTIAL_REFRESH=1
+```
+
+This supersedes the earlier zero-dirty conclusion above: zero-dirty source reuse
+is no longer hard-disabled only because `CURRENT_MASK=1`; instead it is guarded
+by the compact payload anchor/source generation key. However, current-mask
+itself still failed validation, so it remains experimental and must not enter
+peak env.
+
+Validation on DNA_COU basic+velocity with peak env:
+
+| variant | result |
+|---|---|
+| stable-source active view, 15000 steps | finite, `Calculate_Force=6.433809 s`, `288.372162 ns/day` |
+| current-mask with generation key, dirty partial enabled | mixed; one finite 15000-step run at `6.854192 s`, repeat NaN by mdout step 2000/12000 depending on phase |
+| current-mask with partial disabled, full current-mask refresh | NaN already by mdout step 1000, `Calculate_Force=2.716502 min` |
+
+Interpretation: the remaining current-mask bug is not just stale compact payload
+reuse. Even a full current-coordinate active prune over cached outer sources can
+produce a bad payload. The likely contract gap is geometric source ownership:
+the current mask is evaluated with current coordinates while cluster
+centers/extents/layout metadata still belong to the cached build geometry. The
+next repair should either recompute the geometry used by current-mask active
+prune or keep current-mask disabled and continue optimizing the stable-source
+active-view path.
+
+## Current-Mask Geometry Source Repair
+
+The next repair targeted the geometric source ownership issue above. The
+current-mask path no longer derives active payloads from a cached outer source on
+cache-hit steps, and it no longer uses incremental source merge under
+`SPONGE_CLUSTERED_GMXPACKED_ACTIVE_VIEW_CURRENT_MASK=1`. Instead, cache-hit
+current-mask steps fall through to a full gmxpacked record-stream build from the
+current `crd`, then build the inner-active payload from that same current-source
+record stream.
+
+An intermediate probe that recomputed current cluster centers for active prune
+was rejected: force `sorted_xq`, pair-shift metadata, and record-stream sources
+are keyed to the layout cluster-center frame, so injecting a separate
+current-center frame made the geometry source less consistent, not more.
+
+Validation on DNA_COU basic+velocity with the current-mask peak-like env and
+`write_mdout_interval=100`:
+
+| variant | result |
+|---|---|
+| current-mask cached outer-source active refresh | NaN by mdout step 700-800 |
+| stable-source active view, same 1200-step input | finite to step 1200, `Calculate_Force=0.549364 s` |
+| current-mask current-source rebuild | finite to step 1200, `Calculate_Force=31.054245 s` |
+
+This is a correctness fix and a diagnosis result, not a peak candidate. It
+shows the NaN was caused by deriving current masks from stale cached outer-source
+geometry. The current-mask gate must remain default-off and out of peak env until
+a cheaper current-source update exists; stable-source active-view remains the
+performance path.
+
+## Current-Source Patch/Update Contract Probe
+
+Follow-up implementation adds a default-off current-source patch gate:
+
+```text
+SPONGE_CLUSTERED_GMXPACKED_ACTIVE_VIEW_CURRENT_SOURCE_PATCH=1
+SPONGE_CLUSTERED_GMXPACKED_ACTIVE_VIEW_CURRENT_SOURCE_PATCH_MAX_DIRTY_RATIO=<float>
+```
+
+The contract is separate from the stable-source active-view path:
+
+- current source anchor generation and current source generation are tracked
+  independently from inner-active anchor/source generation;
+- source-cache patch is attempted even when the ordinary cached-coordinate
+  rebuild check says the old layout is stale, because this path is governed by
+  the current source anchor/window contract;
+- dirty source candidates patch the source cache by candidate row offsets;
+- zero-dirty source candidates reuse the existing source cache without copying
+  the 2M source rows;
+- active-source partial refresh and compact payload reuse are only used when
+  the source row mapping is unchanged and the compact anchor/source generation
+  still matches;
+- pure source/compact reuse does not refresh source or active anchors. Anchors
+  are only advanced when the payload they represent is actually updated.
+
+The last point is essential. An intermediate version refreshed source/active
+anchors on zero-dirty reuse and looked fast on 1000 steps, but failed 10000-step
+validation with NaN because cumulative displacement was hidden from the dirty
+contract.
+
+Validation on wat160k force-only NVE, peak env plus current-mask/current-source
+patch:
+
+| variant | result |
+|---|---|
+| current-mask off, 1000 steps | finite, `Calculate_Force=0.687824 s`, `111.619247 ns/day` |
+| current-source patch before partial/compact reuse | finite 1000 steps, `Calculate_Force=23.935474 s`, `3.599688 ns/day` |
+| current-source patch with zero-dirty source reuse but wrong anchor refresh | 1000-step finite, `Calculate_Force=0.810725 s`, `98.795883 ns/day`; 10000-step NaN |
+| current-source patch with corrected anchor contract | 1000-step finite, `Calculate_Force=5.269162 s`, `16.170336 ns/day`; 10000-step finite, `Calculate_Force=52.510219 s`, `16.216900 ns/day` |
+
+20-step trace after the corrected contract showed 19 current-source patch hits,
+17 zero-dirty source-reuse hits, and 2 full payload builds. The extra full build
+is expected after cumulative displacement exceeds the active/source reuse
+contract; unlike the rejected version, this preserves correctness.
+
+Conclusion: the current-source patch/update contract now gives a finite
+correctness path, but its rebuild cadence is too high for peak. It remains
+default-off and must not be added to peak env. The next optimization target, if
+this line is continued, is reducing full source/payload rebuild frequency under
+the corrected anchor contract rather than relaxing the anchor semantics.

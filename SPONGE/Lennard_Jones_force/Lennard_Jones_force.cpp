@@ -7535,10 +7535,13 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
         std::vector<LTMatrix3> full_output_atom_virial_before;
         if (use_clustered_direct)
         {
+            const bool gmxpacked_direct_force_inputs_ready =
+                d_LJ_AB_packed != NULL;
             const bool need_gmxpacked_payload =
                 Clustered_Microbench_Dump_Prefix() != NULL ||
                 (Clustered_Gmxpacked_Direct_Opt_In_Enabled() &&
-                 !Clustered_Gmxpacked_Fallback_Native_Enabled());
+                 !Clustered_Gmxpacked_Fallback_Native_Enabled() &&
+                 gmxpacked_direct_force_inputs_ready);
             // [EXPERIMENTAL] see env-var policy comment at top of section
             const char* full_warp_record_env =
                 std::getenv("SPONGE_CLUSTERED_USE_WARP_RECORD_FULL");
@@ -7553,7 +7556,8 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
                 (force_full_warp_record || auto_prefer_full_warp_record);
             const bool intend_gmxpacked_direct =
                 Clustered_Gmxpacked_Direct_Opt_In_Enabled() &&
-                !Clustered_Gmxpacked_Fallback_Native_Enabled();
+                !Clustered_Gmxpacked_Fallback_Native_Enabled() &&
+                gmxpacked_direct_force_inputs_ready;
             const bool need_aux_clustered_metadata =
                 !intend_gmxpacked_direct && need_virial &&
                 (prefer_full_warp_record_build ||
