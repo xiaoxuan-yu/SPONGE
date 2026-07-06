@@ -12359,7 +12359,15 @@ static bool Clustered_Gmxpacked_Current_Inner_Active_Enabled()
 
 static bool Clustered_Gmxpacked_Active_View_Current_Mask_Enabled()
 {
-    return Clustered_Gmxpacked_Active_View_Enabled();
+    const char* enabled =
+        std::getenv("SPONGE_CLUSTERED_GMXPACKED_ACTIVE_VIEW_CURRENT_MASK");
+    if (enabled != NULL && enabled[0] != '\0')
+    {
+        return enabled[0] != '0';
+    }
+    // Current-coordinate active masks are not yet a proven reuse contract for
+    // long DNA_COU runs. Keep this as an explicit experimental opt-in.
+    return false;
 }
 
 static bool Clustered_Gmxpacked_Active_View_Active_Compact_Enabled()
@@ -12501,6 +12509,12 @@ static bool Clustered_Gmxpacked_Active_View_Partial_Refresh_Enabled()
 
 static bool Clustered_Gmxpacked_Active_View_Dirty_Index_Refresh_Enabled()
 {
+    const char* enabled = std::getenv(
+        "SPONGE_CLUSTERED_GMXPACKED_ACTIVE_VIEW_DIRTY_INDEX_REFRESH");
+    if (enabled != NULL && enabled[0] != '\0')
+    {
+        return enabled[0] != '0';
+    }
     return Clustered_Gmxpacked_Active_View_Enabled();
 }
 
@@ -12518,8 +12532,15 @@ static bool Clustered_Gmxpacked_Active_View_Rolling_Source_Cache_Enabled()
 static bool
 Clustered_Gmxpacked_Active_View_Zero_Dirty_Source_Reuse_Enabled()
 {
-    return Clustered_Gmxpacked_Env_Flag_Enabled(
-        "SPONGE_CLUSTERED_GMXPACKED_ACTIVE_VIEW_ZERO_DIRTY_SOURCE_REUSE");
+    if (!Clustered_Gmxpacked_Env_Flag_Enabled(
+            "SPONGE_CLUSTERED_GMXPACKED_ACTIVE_VIEW_ZERO_DIRTY_SOURCE_REUSE"))
+    {
+        return false;
+    }
+    // Zero-dirty source reuse is only a valid contract when active sources are
+    // derived from the stable target layout. With current-coordinate masks,
+    // source membership can change even when the candidate dirty index is zero.
+    return !Clustered_Gmxpacked_Active_View_Current_Mask_Enabled();
 }
 
 static float Clustered_Gmxpacked_Active_View_Source_Cache_Skin(

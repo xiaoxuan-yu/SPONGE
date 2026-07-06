@@ -1000,3 +1000,200 @@ Decision: keep `SPONGE_CLUSTERED_GMXPACKED_FORCE_LJ_AB_MATRIX_PROBE` default-off
 The kernel-level and 2000-step signals are real but small. It should not enter
 the stable peak env until a finite 10000-step run on a stable mdin reproduces an
 end-to-end gain.
+
+## Finite Lifecycle Probe
+
+Added a default-off lifecycle probe for the DNA_COU NaN diagnosis:
+
+```text
+SPONGE_CLUSTERED_GMXPACKED_FINITE_LIFECYCLE_PROBE=1
+SPONGE_CLUSTERED_GMXPACKED_FINITE_LIFECYCLE_PROBE_BEGIN=<step>
+SPONGE_CLUSTERED_GMXPACKED_FINITE_LIFECYCLE_PROBE_END=<step>
+SPONGE_CLUSTERED_GMXPACKED_FINITE_LIFECYCLE_PROBE_INTERVAL=<n>
+SPONGE_CLUSTERED_GMXPACKED_FINITE_LIFECYCLE_PROBE_SITE=<site>
+SPONGE_CLUSTERED_GMXPACKED_FINITE_LIFECYCLE_PROBE_ABORT=1
+```
+
+The probe is host-side and synchronous: it copies `dd.crd`, `dd.vel`, `dd.frc`,
+`dd.acc`, `md_info.crd`, `md_info.vel`, and `md_info.frc` to host and reports the
+first nonfinite vector per array. For local `dd` arrays it also copies
+`dd.atom_local` and prints the mapped global atom id.
+
+Output format:
+
+```text
+SPONGE_FINITE_LIFECYCLE_PROBE step=<step> site=<site> array=<array> \
+bad_atoms=<count> first_local=<local> first_global=<global> \
+value=(<x>,<y>,<z>)
+```
+
+Important boundary: this probe synchronizes CUDA work. Continuous probing before
+the failing step can mask the timing-sensitive NaN, matching the earlier
+cuda-gdb observation. Use `BEGIN=END=<step>` and `SITE=<site>` for low-disturbance
+single-boundary checks.
+
+Validation:
+
+```text
+ninja -C build-dev-cuda13 SPONGE
+```
+
+DNA_COU single-boundary probe with peak env plus full-dense padding:
+
+```text
+SPONGE_CLUSTERED_GMXPACKED_FINITE_LIFECYCLE_PROBE=1
+SPONGE_CLUSTERED_GMXPACKED_FINITE_LIFECYCLE_PROBE_BEGIN=4707
+SPONGE_CLUSTERED_GMXPACKED_FINITE_LIFECYCLE_PROBE_END=4707
+SPONGE_CLUSTERED_GMXPACKED_FINITE_LIFECYCLE_PROBE_SITE=force_entry
+SPONGE_CLUSTERED_GMXPACKED_FINITE_LIFECYCLE_PROBE_ABORT=1
+```
+
+Result:
+
+```text
+SPONGE_FINITE_LIFECYCLE_PROBE step=4707 site=force_entry array=dd.crd \
+bad_atoms=291 first_local=1395 first_global=1395 value=(nan,nan,nan)
+SPONGE_FINITE_LIFECYCLE_PROBE step=4707 site=force_entry array=dd.vel \
+bad_atoms=291 first_local=1395 first_global=1395 value=(nan,nan,nan)
+SPONGE_FINITE_LIFECYCLE_PROBE step=4707 site=force_entry array=dd.frc \
+bad_atoms=291 first_local=1395 first_global=1395 value=(nan,nan,nan)
+```
+
+This confirms the earlier cuda-gdb finding without modifying source state at
+runtime: by the next step's force entry, the local `dd` view already contains
+NaNs in coordinates, velocities, and forces. The first bad local id maps directly
+to the same global atom id in this single-rank DNA_COU run.
+
+## Async Finite Lifecycle Sentinel
+
+The host-side lifecycle probe can still mask the bug even when used at a single
+boundary. A `force_entry@14000` host probe completed finite on a run where the
+same input without host copies reached NaN. Added a lower-disturbance device-side
+sentinel:
+
+```text
+SPONGE_CLUSTERED_GMXPACKED_FINITE_ASYNC_LIFECYCLE_PROBE=1
+SPONGE_CLUSTERED_GMXPACKED_FINITE_LIFECYCLE_PROBE_BEGIN=<step>
+SPONGE_CLUSTERED_GMXPACKED_FINITE_LIFECYCLE_PROBE_END=<step>
+SPONGE_CLUSTERED_GMXPACKED_FINITE_LIFECYCLE_PROBE_SITE=<site>
+```
+
+It reuses the lifecycle probe filters, but only launches scan kernels and records
+the first nonfinite vector in a device record. The device record is copied back
+once during finalization:
+
+```text
+SPONGE_FINITE_ASYNC_LIFECYCLE_PROBE step=<step> site=<site> site_id=<id> \
+array=<array> array_id=<id> first_local=<local> first_global=<global> \
+value=(<x>,<y>,<z>)
+```
+
+The basic DNA_COU NVT input that reproduces the issue is the force-matrix case,
+not the sinkmeta helper default:
+
+```text
+cutoff = 8.0
+velocity_in_file = "Pmin_velocity.txt"
+print_zeroth_frame = 0
+[PM]
+MPI_size = 0
+```
+
+Fresh sinkmeta-style input with `cutoff=10`, no initial velocity, CV, and
+restraint completed 10000 steps finite under the same peak env plus
+`SPONGE_CLUSTERED_GMXPACKED_FULL_DENSE_PADDING=1`.
+
+Current async-sentinel evidence on the basic+velocity input:
+
+| run | result |
+|---|---|
+| 10000-step basic+velocity | finite |
+| 15000-step basic+velocity | first printed NaN at step 14000 |
+| 20000-step, output only at 20000 | abnormal long execution; interrupted after no mdout progress |
+| async all-sites 13999-14000 | first record: `step=13999 site=run_step_begin array=dd.crd first_global=5160` |
+| run-step bisection | `run_step_begin@13376` finite, `run_step_begin@13377` nonfinite |
+| async `after_step_increment`, step 13375 -> 13376 | nonfinite `dd.crd`, first global 2403 |
+| async `after_print@13375` | nonfinite `dd.crd`, first global 573 |
+| async `after_iteration@13375` | nonfinite `dd.crd`, first global 797 |
+| async `iteration_entry@13375` | nonfinite `dd.crd`, first global 21507 |
+
+Interpretation: the bad state is already in the local `dd` coordinate view before
+the next step's force kernels. The strongest current signal is still a local-view
+lifecycle/asynchronous dependency issue. The exact first bad step and first atom
+move with probe placement, so independent site-filtered runs must not be treated
+as one strict timeline.
+
+Next diagnostic target: add finer low-disturbance boundaries before
+`force_entry` in the previous step, especially the end of `Main_Calculate_Force`
+and any non-default-stream work that can still write `dd.crd` after force/print
+boundaries. The async sentinel should stay default-off and diagnostic-only.
+
+## DNA_COU NaN Active-View Root Slice
+
+Follow-up async sentinel work added two diagnostic improvements:
+
+```text
+SPONGE_CLUSTERED_GMXPACKED_FINITE_ASYNC_LIFECYCLE_PROBE_STOP=1
+SPONGE_CLUSTERED_GMXPACKED_FINITE_ASYNC_LIFECYCLE_PROBE_ARRAY=dd.crd
+```
+
+The async sentinel now records first-hit data per site and per array, rather than
+only a single global first-hit record. This made same-run site comparisons
+possible without treating independent STOP runs as a strict timeline.
+
+Key observations from the basic DNA_COU NVT input:
+
+| run | result |
+|---|---|
+| STOP `after_step_increment@13375`, two repeats | both nonfinite `dd.crd` |
+| STOP `run_step_begin@13375`, two repeats | one finite, one nonfinite |
+| single-site first-hit `run_step_begin`, 0-12000 | first bad at step 1741 in that run |
+| narrow same-run all-site window 1740-1742 | finite |
+| same-run all-site window 13374-13375 | already bad at `run_step_begin@13374` |
+
+Interpretation: first bad step is highly phase-sensitive under probes. The more
+actionable result came from gate ablation:
+
+| variant | result |
+|---|---|
+| peak env, active-view current mask on | NaN observed, e.g. mdout step 3000/4000/9000 depending on run |
+| `ACTIVE_VIEW=0` | 2/2 finite to 15000 steps |
+| `ACTIVE_VIEW=1`, `ZERO_DIRTY_SOURCE_REUSE=0` | mixed: one finite, one NaN at step 7000 |
+| `ACTIVE_VIEW=1`, `DIRTY_INDEX_REFRESH=0` | 2/2 NaN at step 1000 |
+| `ACTIVE_VIEW=1`, `CURRENT_MASK=0` | 2/2 finite to 15000 steps |
+| `ACTIVE_VIEW=1`, `CURRENT_MASK=1`, zero-dirty contract-gated off | NaN at step 9000 |
+
+The minimum stable slice found in this round is to keep active-view enabled but
+make current-coordinate active masks explicit opt-in:
+
+```text
+SPONGE_CLUSTERED_GMXPACKED_ACTIVE_VIEW_CURRENT_MASK=1
+```
+
+Default behavior now leaves current-mask disabled. Zero-dirty source reuse is
+not fixed by an extra runtime source-displacement scan. Instead it is restricted
+by source contract:
+
+```text
+ZERO_DIRTY_SOURCE_REUSE is allowed only when CURRENT_MASK=0.
+```
+
+With current-coordinate masks, source membership can change even when the
+candidate dirty index is zero, so `dirty_candidate_sci == 0` does not imply the
+active source/payload is reusable. With stable target-layout active sources,
+that implication is the intended contract and no extra per-refresh source scan is
+needed.
+
+Validation after the change, using the original peak env that still contains
+`SPONGE_CLUSTERED_GMXPACKED_ACTIVE_VIEW=1` and
+`SPONGE_CLUSTERED_GMXPACKED_ACTIVE_VIEW_ZERO_DIRTY_SOURCE_REUSE=1`:
+
+```text
+ninja -C build-dev-cuda13 SPONGE
+DNA_COU basic+velocity 15000-step: no mdout NaN
+Calculate_Force: 6.563854 s
+```
+
+This does not prove the current-mask path is irreparable. It means current-mask
+is not a safe default contract for non-water DNA_COU today, while zero-dirty
+reuse can be retained only under stable-source active-view semantics.

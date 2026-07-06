@@ -1,6 +1,10 @@
 ﻿#include "main.h"
 
+#include <cmath>
+#include <cstdio>
+#include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <sstream>
 
 #define SUBPACKAGE_HINT \
@@ -78,6 +82,499 @@ sponge::RuntimeStateAtom Make_Runtime_State_Atom(const VECTOR& value)
 VECTOR Make_Vector(const sponge::RuntimeStateAtom& value)
 {
     return {value.x, value.y, value.z};
+}
+
+bool Main_Finite_Lifecycle_Probe_Env_Enabled(const char* name)
+{
+    const char* enabled = std::getenv(name);
+    return enabled != NULL && enabled[0] != '\0' &&
+           !(enabled[0] == '0' && enabled[1] == '\0');
+}
+
+bool Main_Finite_Lifecycle_Probe_Enabled()
+{
+    static const bool enabled = Main_Finite_Lifecycle_Probe_Env_Enabled(
+        "SPONGE_CLUSTERED_GMXPACKED_FINITE_LIFECYCLE_PROBE");
+    return enabled;
+}
+
+bool Main_Finite_Lifecycle_Probe_Abort_Enabled()
+{
+    static const bool enabled = Main_Finite_Lifecycle_Probe_Env_Enabled(
+        "SPONGE_CLUSTERED_GMXPACKED_FINITE_LIFECYCLE_PROBE_ABORT");
+    return enabled;
+}
+
+bool Main_Finite_Async_Lifecycle_Probe_Enabled()
+{
+    static const bool enabled = Main_Finite_Lifecycle_Probe_Env_Enabled(
+        "SPONGE_CLUSTERED_GMXPACKED_FINITE_ASYNC_LIFECYCLE_PROBE");
+    return enabled;
+}
+
+bool Main_Finite_Async_Lifecycle_Probe_Stop_Enabled()
+{
+    static const bool enabled = Main_Finite_Lifecycle_Probe_Env_Enabled(
+        "SPONGE_CLUSTERED_GMXPACKED_FINITE_ASYNC_LIFECYCLE_PROBE_STOP");
+    return enabled;
+}
+
+int Main_Finite_Lifecycle_Probe_Begin_Step()
+{
+    static const int begin_step = [] {
+        const char* value = std::getenv(
+            "SPONGE_CLUSTERED_GMXPACKED_FINITE_LIFECYCLE_PROBE_BEGIN");
+        return value == NULL ? 0 : atoi(value);
+    }();
+    return begin_step;
+}
+
+int Main_Finite_Lifecycle_Probe_End_Step()
+{
+    static const int end_step = [] {
+        const char* value = std::getenv(
+            "SPONGE_CLUSTERED_GMXPACKED_FINITE_LIFECYCLE_PROBE_END");
+        return value == NULL ? -1 : atoi(value);
+    }();
+    return end_step;
+}
+
+int Main_Finite_Lifecycle_Probe_Interval()
+{
+    static const int interval = [] {
+        const char* value = std::getenv(
+            "SPONGE_CLUSTERED_GMXPACKED_FINITE_LIFECYCLE_PROBE_INTERVAL");
+        const int parsed = value == NULL ? 1 : atoi(value);
+        return parsed <= 0 ? 1 : parsed;
+    }();
+    return interval;
+}
+
+const char* Main_Finite_Lifecycle_Probe_Site_Filter()
+{
+    static const char* site = std::getenv(
+        "SPONGE_CLUSTERED_GMXPACKED_FINITE_LIFECYCLE_PROBE_SITE");
+    return site != NULL && site[0] != '\0' ? site : NULL;
+}
+
+const char* const* Main_Finite_Probe_Site_Names(int* count)
+{
+    static const char* sites[] = {
+        "run_step_begin",
+        "after_sync_dynamic_targets",
+        "after_calculate_force",
+        "after_iteration",
+        "after_print",
+        "after_step_increment",
+        "force_entry",
+        "after_md_reset_force",
+        "after_qc_scf",
+        "after_dd_reset_force",
+        "after_qc_gradient",
+        "after_update_ghost",
+        "after_force_neighbor_update",
+        "after_reaxff_force",
+        "after_selective_update",
+        "after_vatom_force_redistribute",
+        "before_scale_force_dynamic_dt",
+        "force_exit",
+        "refresh_entry",
+        "refresh_after_get_atoms",
+        "refresh_after_get_ghost",
+        "refresh_after_ordered_layout",
+        "refresh_after_get_excluded",
+        "refresh_exit",
+        "iteration_entry",
+        "iteration_after_ek_temperature",
+        "iteration_after_potential",
+        "iteration_after_mc_barostat",
+        "iteration_before_remember_last_coordinates",
+        "iteration_after_remember_last_coordinates",
+        "iteration_before_integrator",
+        "iteration_after_nve",
+        "iteration_after_minimization",
+        "iteration_after_middle_langevin",
+        "iteration_after_berendsen",
+        "iteration_after_bussi",
+        "iteration_after_andersen",
+        "iteration_after_andersen_nve",
+        "iteration_after_nhc",
+        "iteration_before_settle",
+        "iteration_after_settle",
+        "iteration_before_shake",
+        "iteration_after_shake",
+        "iteration_before_hard_wall",
+        "iteration_after_hard_wall",
+        "iteration_after_pressure",
+        "iteration_after_rerun",
+        "iteration_after_rerun_box_change",
+        "iteration_after_rerun_global_to_dd",
+        "iteration_after_vatom_coord_refresh",
+        "iteration_after_exchange_particles",
+        "iteration_after_refresh_local_state",
+        "iteration_after_single_rank_neighbor_update",
+        "iteration_after_pm_get_atoms",
+        "iteration_exit",
+    };
+    *count = static_cast<int>(sizeof(sites) / sizeof(sites[0]));
+    return sites;
+}
+
+int Main_Finite_Probe_Site_Id(const char* site)
+{
+    int count = 0;
+    const char* const* sites = Main_Finite_Probe_Site_Names(&count);
+    for (int i = 0; i < count; i++)
+    {
+        if (std::strcmp(site, sites[i]) == 0)
+        {
+            return i;
+        }
+    }
+    return -1;
+}
+
+const char* Main_Finite_Probe_Site_Name(int site_id)
+{
+    int count = 0;
+    const char* const* sites = Main_Finite_Probe_Site_Names(&count);
+    return site_id >= 0 && site_id < count ? sites[site_id] : "unknown";
+}
+
+const char* Main_Finite_Probe_Array_Name(int array_id)
+{
+    static const char* arrays[] = {
+        "dd.crd",      "dd.vel",      "dd.frc",    "dd.acc",
+        "md_info.crd", "md_info.vel", "md_info.frc"};
+    const int count = static_cast<int>(sizeof(arrays) / sizeof(arrays[0]));
+    return array_id >= 0 && array_id < count ? arrays[array_id] : "unknown";
+}
+
+int Main_Finite_Probe_Array_Count()
+{
+    return 7;
+}
+
+const char* Main_Finite_Probe_Array_Filter()
+{
+    static const char* array = std::getenv(
+        "SPONGE_CLUSTERED_GMXPACKED_FINITE_ASYNC_LIFECYCLE_PROBE_ARRAY");
+    return array != NULL && array[0] != '\0' ? array : NULL;
+}
+
+bool Main_Finite_Probe_Array_Filter_Allows(int array_id)
+{
+    const char* array_filter = Main_Finite_Probe_Array_Filter();
+    return array_filter == NULL ||
+           std::strcmp(array_filter, Main_Finite_Probe_Array_Name(array_id)) ==
+               0;
+}
+
+bool Main_Vector_Is_Finite(const VECTOR& value)
+{
+    return std::isfinite(value.x) && std::isfinite(value.y) &&
+           std::isfinite(value.z);
+}
+
+struct Main_Finite_Async_Probe_Record
+{
+    int found;
+    int step;
+    int site_id;
+    int array_id;
+    int local_atom;
+    int global_atom;
+    float x;
+    float y;
+    float z;
+};
+
+Main_Finite_Async_Probe_Record* main_finite_async_probe_record = NULL;
+int main_finite_async_probe_record_count = 0;
+
+void Main_Finite_Async_Lifecycle_Probe_Report();
+
+__device__ __forceinline__ bool Main_Device_Vector_Is_Finite(VECTOR value)
+{
+    return isfinite(value.x) && isfinite(value.y) && isfinite(value.z);
+}
+
+__global__ void Main_Finite_Async_Scan_Vector_Array(
+    int step, int site_id, int array_id, const VECTOR* values, int atom_count,
+    const int* local_to_global, Main_Finite_Async_Probe_Record* record)
+{
+    const int atom = blockIdx.x * blockDim.x + threadIdx.x;
+    if (record == NULL || values == NULL || atom >= atom_count ||
+        record->found != 0)
+    {
+        return;
+    }
+    const VECTOR value = values[atom];
+    if (Main_Device_Vector_Is_Finite(value))
+    {
+        return;
+    }
+    if (atomicCAS(&record->found, 0, 1) == 0)
+    {
+        record->step = step;
+        record->site_id = site_id;
+        record->array_id = array_id;
+        record->local_atom = atom;
+        record->global_atom = local_to_global != NULL ? local_to_global[atom]
+                                                      : atom;
+        record->x = value.x;
+        record->y = value.y;
+        record->z = value.z;
+    }
+}
+
+void Main_Finite_Async_Lifecycle_Probe_Ensure_Record()
+{
+    if (!Main_Finite_Async_Lifecycle_Probe_Enabled() ||
+        main_finite_async_probe_record != NULL)
+    {
+        return;
+    }
+    int site_count = 0;
+    Main_Finite_Probe_Site_Names(&site_count);
+    main_finite_async_probe_record_count =
+        site_count * Main_Finite_Probe_Array_Count();
+    Device_Malloc_Safely((void**)&main_finite_async_probe_record,
+                         sizeof(Main_Finite_Async_Probe_Record) *
+                             main_finite_async_probe_record_count);
+    deviceMemset(main_finite_async_probe_record, 0,
+                 sizeof(Main_Finite_Async_Probe_Record) *
+                     main_finite_async_probe_record_count);
+}
+
+bool Main_Finite_Lifecycle_Probe_Filter_Allows(const char* site)
+{
+    const int step = md_info.sys.steps;
+    const int begin_step = Main_Finite_Lifecycle_Probe_Begin_Step();
+    const int end_step = Main_Finite_Lifecycle_Probe_End_Step();
+    const int interval = Main_Finite_Lifecycle_Probe_Interval();
+    const char* site_filter = Main_Finite_Lifecycle_Probe_Site_Filter();
+    return step >= begin_step && (end_step < 0 || step <= end_step) &&
+           ((step - begin_step) % interval) == 0 &&
+           (site_filter == NULL || std::strcmp(site_filter, site) == 0);
+}
+
+void Main_Finite_Async_Scan_One_Array(const char* site, int site_id,
+                                      int array_id, const VECTOR* values,
+                                      int atom_count,
+                                      const int* local_to_global)
+{
+    if (values == NULL || atom_count <= 0 ||
+        !Main_Finite_Probe_Array_Filter_Allows(array_id) || site_id < 0 ||
+        array_id < 0 || array_id >= Main_Finite_Probe_Array_Count())
+    {
+        return;
+    }
+    const int threads = 256;
+    const int blocks = (atom_count + threads - 1) / threads;
+    const int record_id = site_id * Main_Finite_Probe_Array_Count() + array_id;
+    if (record_id < 0 || record_id >= main_finite_async_probe_record_count)
+    {
+        return;
+    }
+    Launch_Device_Kernel(Main_Finite_Async_Scan_Vector_Array, blocks, threads,
+                         0, NULL, md_info.sys.steps, site_id, array_id, values,
+                         atom_count, local_to_global,
+                         main_finite_async_probe_record + record_id);
+}
+
+void Main_Finite_Async_Lifecycle_Probe(const char* site)
+{
+    if (!Main_Finite_Async_Lifecycle_Probe_Enabled())
+    {
+        return;
+    }
+    Main_Finite_Async_Lifecycle_Probe_Ensure_Record();
+    if (main_finite_async_probe_record == NULL ||
+        !Main_Finite_Lifecycle_Probe_Filter_Allows(site))
+    {
+        return;
+    }
+
+    const int site_id = Main_Finite_Probe_Site_Id(site);
+    const int* local_to_global =
+        CONTROLLER::MPI_rank < CONTROLLER::PP_MPI_size ? dd.atom_local : NULL;
+    if (CONTROLLER::MPI_rank < CONTROLLER::PP_MPI_size && dd.atom_numbers > 0)
+    {
+        Main_Finite_Async_Scan_One_Array(site, site_id, 0, dd.crd,
+                                         dd.atom_numbers, local_to_global);
+        Main_Finite_Async_Scan_One_Array(site, site_id, 1, dd.vel,
+                                         dd.atom_numbers, local_to_global);
+        Main_Finite_Async_Scan_One_Array(site, site_id, 2, dd.frc,
+                                         dd.atom_numbers, local_to_global);
+        Main_Finite_Async_Scan_One_Array(site, site_id, 3, dd.acc,
+                                         dd.atom_numbers, local_to_global);
+    }
+    Main_Finite_Async_Scan_One_Array(site, site_id, 4, md_info.crd,
+                                     md_info.atom_numbers, NULL);
+    Main_Finite_Async_Scan_One_Array(site, site_id, 5, md_info.vel,
+                                     md_info.atom_numbers, NULL);
+    Main_Finite_Async_Scan_One_Array(site, site_id, 6, md_info.frc,
+                                     md_info.atom_numbers, NULL);
+    if (Main_Finite_Async_Lifecycle_Probe_Stop_Enabled())
+    {
+        Main_Finite_Async_Lifecycle_Probe_Report();
+        std::fflush(stderr);
+        std::exit(0);
+    }
+}
+
+void Main_Finite_Async_Lifecycle_Probe_Report()
+{
+    if (!Main_Finite_Async_Lifecycle_Probe_Enabled() ||
+        main_finite_async_probe_record == NULL)
+    {
+        return;
+    }
+    std::vector<Main_Finite_Async_Probe_Record> records(
+        main_finite_async_probe_record_count);
+    deviceMemcpy(records.data(), main_finite_async_probe_record,
+                 sizeof(Main_Finite_Async_Probe_Record) * records.size(),
+                 deviceMemcpyDeviceToHost);
+    bool any_found = false;
+    for (const Main_Finite_Async_Probe_Record& record : records)
+    {
+        if (record.found == 0)
+        {
+            continue;
+        }
+        any_found = true;
+        std::fprintf(
+            stderr,
+            "SPONGE_FINITE_ASYNC_LIFECYCLE_PROBE step=%d site=%s site_id=%d "
+            "array=%s array_id=%d first_local=%d first_global=%d "
+            "value=(%.9g,%.9g,%.9g)\n",
+            record.step, Main_Finite_Probe_Site_Name(record.site_id),
+            record.site_id, Main_Finite_Probe_Array_Name(record.array_id),
+            record.array_id, record.local_atom, record.global_atom, record.x,
+            record.y, record.z);
+    }
+    if (!any_found)
+    {
+        std::fprintf(stderr,
+                     "SPONGE_FINITE_ASYNC_LIFECYCLE_PROBE result=finite\n");
+    }
+}
+
+struct Main_Finite_Array_Report
+{
+    int bad_atoms = 0;
+    int first_local_atom = -1;
+    int first_global_atom = -1;
+    VECTOR first_value;
+};
+
+Main_Finite_Array_Report Main_Scan_Finite_Vector_Array(
+    const char* site, const char* name, const VECTOR* device_values,
+    int atom_count, const std::vector<int>* local_to_global)
+{
+    Main_Finite_Array_Report report;
+    if (device_values == NULL || atom_count <= 0)
+    {
+        return report;
+    }
+
+    std::vector<VECTOR> values(atom_count);
+    deviceMemcpy(values.data(), device_values, sizeof(VECTOR) * atom_count,
+                 deviceMemcpyDeviceToHost);
+    for (int i = 0; i < atom_count; i++)
+    {
+        if (Main_Vector_Is_Finite(values[i]))
+        {
+            continue;
+        }
+        if (report.bad_atoms == 0)
+        {
+            report.first_local_atom = i;
+            report.first_global_atom =
+                local_to_global != NULL ? (*local_to_global)[i] : i;
+            report.first_value = values[i];
+        }
+        report.bad_atoms++;
+    }
+
+    if (report.bad_atoms > 0)
+    {
+        std::fprintf(
+            stderr,
+            "SPONGE_FINITE_LIFECYCLE_PROBE step=%d site=%s array=%s "
+            "bad_atoms=%d first_local=%d first_global=%d "
+            "value=(%.9g,%.9g,%.9g)\n",
+            md_info.sys.steps, site, name, report.bad_atoms,
+            report.first_local_atom, report.first_global_atom,
+            report.first_value.x, report.first_value.y, report.first_value.z);
+    }
+    return report;
+}
+
+void Main_Finite_Lifecycle_Probe(const char* site)
+{
+    Main_Finite_Async_Lifecycle_Probe(site);
+
+    static bool reported_first_bad = false;
+    if (!Main_Finite_Lifecycle_Probe_Enabled() || reported_first_bad ||
+        !Main_Finite_Lifecycle_Probe_Filter_Allows(site))
+    {
+        return;
+    }
+
+    bool any_bad = false;
+    std::vector<int> dd_local_to_global;
+    const bool has_dd_atoms =
+        CONTROLLER::MPI_rank < CONTROLLER::PP_MPI_size && dd.atom_numbers > 0;
+    if (has_dd_atoms && dd.atom_local != NULL)
+    {
+        dd_local_to_global.resize(dd.atom_numbers);
+        deviceMemcpy(dd_local_to_global.data(), dd.atom_local,
+                     sizeof(int) * dd.atom_numbers, deviceMemcpyDeviceToHost);
+    }
+    const std::vector<int>* local_to_global =
+        dd_local_to_global.empty() ? NULL : &dd_local_to_global;
+
+    if (has_dd_atoms)
+    {
+        any_bad |= Main_Scan_Finite_Vector_Array(
+                       site, "dd.crd", dd.crd, dd.atom_numbers,
+                       local_to_global)
+                       .bad_atoms > 0;
+        any_bad |= Main_Scan_Finite_Vector_Array(
+                       site, "dd.vel", dd.vel, dd.atom_numbers,
+                       local_to_global)
+                       .bad_atoms > 0;
+        any_bad |= Main_Scan_Finite_Vector_Array(
+                       site, "dd.frc", dd.frc, dd.atom_numbers,
+                       local_to_global)
+                       .bad_atoms > 0;
+        any_bad |= Main_Scan_Finite_Vector_Array(
+                       site, "dd.acc", dd.acc, dd.atom_numbers,
+                       local_to_global)
+                       .bad_atoms > 0;
+    }
+
+    any_bad |= Main_Scan_Finite_Vector_Array(
+                   site, "md_info.crd", md_info.crd, md_info.atom_numbers, NULL)
+                   .bad_atoms > 0;
+    any_bad |= Main_Scan_Finite_Vector_Array(
+                   site, "md_info.vel", md_info.vel, md_info.atom_numbers, NULL)
+                   .bad_atoms > 0;
+    any_bad |= Main_Scan_Finite_Vector_Array(
+                   site, "md_info.frc", md_info.frc, md_info.atom_numbers, NULL)
+                   .bad_atoms > 0;
+
+    if (any_bad)
+    {
+        reported_first_bad = true;
+        std::fflush(stderr);
+        if (Main_Finite_Lifecycle_Probe_Abort_Enabled())
+        {
+            std::abort();
+        }
+    }
 }
 
 std::vector<sponge::RuntimeStateAtom> Copy_Device_Vector_Array_To_Runtime_State(
@@ -470,14 +967,20 @@ void Main_Run_Current_Step(bool emit_output)
         return;
     }
 
+    Main_Finite_Lifecycle_Probe("run_step_begin");
     Main_Sync_Dynamic_Targets_To_Controllers();
+    Main_Finite_Lifecycle_Probe("after_sync_dynamic_targets");
     Main_Calculate_Force();
+    Main_Finite_Lifecycle_Probe("after_calculate_force");
     Main_Iteration();
+    Main_Finite_Lifecycle_Probe("after_iteration");
     if (emit_output)
     {
         Main_Print();
+        Main_Finite_Lifecycle_Probe("after_print");
     }
     md_info.sys.steps++;
+    Main_Finite_Lifecycle_Probe("after_step_increment");
 }
 
 bool Main_Is_Finished() { return md_info.sys.steps > md_info.sys.step_limit; }
@@ -1002,6 +1505,7 @@ bool SpongeScheduler::IsFinished() const
 void SpongeScheduler::Finalize()
 {
     EnsureInitialized("Finalize");
+    Main_Finite_Async_Lifecycle_Probe_Report();
     Main_Clear();
     initialized_ = false;
     finalized_ = true;
@@ -1221,12 +1725,15 @@ void Main_Initial(int argc, char* argv[])
 
 void Main_Calculate_Force()
 {
+    Main_Finite_Lifecycle_Probe("force_entry");
     bool use_reaxff_eeq = reaxff.eeq.is_initialized;
     const int cv_atom_numbers =
         md_info.atom_numbers +
         md_info.no_direct_interaction_virtual_atom_numbers;
     md_info.MD_Reset_Atom_Energy_And_Virial_And_Force();
+    Main_Finite_Lifecycle_Probe("after_md_reset_force");
     qc.Solve_SCF(dd.crd, md_info.sys.box_length, true, md_info.sys.steps);
+    Main_Finite_Lifecycle_Probe("after_qc_scf");
     if (md_info.mode == md_info.MINIMIZATION && md_info.min.dynamic_dt)
     {
         md_info.need_potential = 1;
@@ -1252,15 +1759,20 @@ void Main_Calculate_Force()
     if (CONTROLLER::MPI_rank < CONTROLLER::PP_MPI_size)
     {
         dd.Reset_Force_and_Virial(&md_info);
+        Main_Finite_Lifecycle_Probe("after_dd_reset_force");
         // QC 梯度必须在 dd.Reset_Force_and_Virial 之后调用
         if (qc.is_initialized && qc.need_gradient)
             qc.Compute_Gradient(dd.frc, dd.crd, md_info.sys.box_length,
                                 md_info.need_pressure, dd.d_virial);
+        Main_Finite_Lifecycle_Probe("after_qc_gradient");
         dd.Update_Ghost(&controller);
+        Main_Finite_Lifecycle_Probe("after_update_ghost");
         Main_Update_Legacy_Neighbor_List_If_Needed(
             "Main_Calculate_Force", neighbor_list.CONDITIONAL_UPDATE);
+        Main_Finite_Lifecycle_Probe("after_force_neighbor_update");
 
         reaxff.Calculate_Force(&dd, &md_info, &neighbor_list);
+        Main_Finite_Lifecycle_Probe("after_reaxff_force");
 
         LJ_NOPBC.LJ_Force_With_Atom_Energy(
             dd.atom_numbers, dd.crd, dd.frc, md_info.need_potential,
@@ -1479,8 +1991,10 @@ void Main_Calculate_Force()
             md_info.sys.steps, md_info.sys.d_potential, md_info.need_pressure,
             dd.d_virial, dd.frc,
             1.0f / (CONSTANT_kB * md_info.sys.target_temperature));
+        Main_Finite_Lifecycle_Probe("after_selective_update");
         vatom.Force_Redistribute(dd.crd, md_info.pbc.cell, md_info.pbc.rcell,
                                  dd.frc);
+        Main_Finite_Lifecycle_Probe("after_vatom_force_redistribute");
     }
     else
     {
@@ -1521,23 +2035,30 @@ void Main_Calculate_Force()
                                dd.atom_numbers);
         }
     }
+    Main_Finite_Lifecycle_Probe("before_scale_force_dynamic_dt");
     md_info.min.Scale_Force_For_Dynamic_Dt(dd.atom_numbers, dd.d_mass_inverse,
                                            dd.frc, dd.vel, dd.acc);
+    Main_Finite_Lifecycle_Probe("force_exit");
     controller.Get_Time_Recorder("Calculate_Force")->Stop();
 }
 
 void Main_Refresh_Local_State(bool rebuild_dd)
 {
+    Main_Finite_Lifecycle_Probe("refresh_entry");
     if (rebuild_dd)
     {
         dd.Send_Recv_Dom_Dec(&controller);
         dd.Find_Neighbor_Domain(&controller, &md_info);
         dd.Get_Atoms(&controller, &md_info);
+        Main_Finite_Lifecycle_Probe("refresh_after_get_atoms");
     }
     dd.Get_Ghost(&controller, &md_info);
+    Main_Finite_Lifecycle_Probe("refresh_after_get_ghost");
     lj.Maybe_Apply_Ordered_Layout(&controller, &dd, md_info.pbc.cell,
                                   md_info.pbc.rcell, md_info.sys.box_length);
+    Main_Finite_Lifecycle_Probe("refresh_after_ordered_layout");
     dd.Get_Excluded(&controller, &md_info);
+    Main_Finite_Lifecycle_Probe("refresh_after_get_excluded");
 
     middle_langevin.Get_Local(dd.atom_local, dd.atom_numbers);
     ad_thermo.Get_Local(dd.atom_local, dd.atom_numbers);
@@ -1599,36 +2120,48 @@ void Main_Refresh_Local_State(bool rebuild_dd)
         sits_cmap.Get_Local(dd.atom_local, dd.atom_numbers, dd.ghost_numbers,
                             dd.atom_local_label, dd.atom_local_id);
     }
+    Main_Finite_Lifecycle_Probe("refresh_exit");
 }
 
 void Main_Iteration()
 {
+    Main_Finite_Lifecycle_Probe("iteration_entry");
     controller.Get_Time_Recorder("Iteration")->Start();
     if (md_info.need_potential || md_info.need_pressure || md_info.need_kinetic)
     {
         dd.Get_Ek_and_Temperature(&controller, &md_info);
+        Main_Finite_Lifecycle_Probe("iteration_after_ek_temperature");
     }
     dd.Get_Potential(&controller, &md_info);
+    Main_Finite_Lifecycle_Probe("iteration_after_potential");
     if (md_info.mode != md_info.RERUN)
     {
         Main_MC_Barostat();
+        Main_Finite_Lifecycle_Probe("iteration_after_mc_barostat");
         if (CONTROLLER::MPI_rank < CONTROLLER::PP_MPI_size)
         {
+            Main_Finite_Lifecycle_Probe(
+                "iteration_before_remember_last_coordinates");
             settle.Remember_Last_Coordinates(dd.crd, md_info.pbc.cell,
                                              md_info.pbc.rcell);
             shake.Remember_Last_Coordinates(dd.crd, md_info.pbc.cell,
                                             md_info.pbc.rcell);
+            Main_Finite_Lifecycle_Probe(
+                "iteration_after_remember_last_coordinates");
 
+            Main_Finite_Lifecycle_Probe("iteration_before_integrator");
             if (md_info.mode == md_info.NVE)
             {
                 md_info.nve.Leap_Frog(dd.atom_numbers, dd.vel, dd.crd, dd.frc,
                                       dd.d_mass_inverse, md_info.dt);
+                Main_Finite_Lifecycle_Probe("iteration_after_nve");
             }
             else if (md_info.mode == md_info.MINIMIZATION)
             {
                 md_info.min.Gradient_Descent(dd.atom_numbers, dd.crd, dd.frc,
                                              dd.vel, dd.d_mass_inverse);
                 constrain.v_factor = fmaxf(FLT_MIN, md_info.min.momentum_keep);
+                Main_Finite_Lifecycle_Probe("iteration_after_minimization");
             }
             else if (middle_langevin.is_initialized)
             {
@@ -1636,6 +2169,7 @@ void Main_Iteration()
                                                        dd.crd);
                 constrain.v_factor = middle_langevin.exp_gamma;
                 constrain.x_factor = 0.5f * middle_langevin.exp_gamma + 0.5f;
+                Main_Finite_Lifecycle_Probe("iteration_after_middle_langevin");
             }
             else if (bd_thermo.is_initialized)
             {
@@ -1644,6 +2178,7 @@ void Main_Iteration()
                 md_info.nve.Leap_Frog(dd.atom_numbers, dd.vel, dd.crd, dd.frc,
                                       dd.d_mass_inverse, md_info.dt);
                 bd_thermo.Scale_Velocity(dd.atom_numbers, dd.vel);
+                Main_Finite_Lifecycle_Probe("iteration_after_berendsen");
             }
             else if (bussi_thermo.is_initialized)
             {
@@ -1652,6 +2187,7 @@ void Main_Iteration()
                 md_info.nve.Leap_Frog(dd.atom_numbers, dd.vel, dd.crd, dd.frc,
                                       dd.d_mass_inverse, md_info.dt);
                 bussi_thermo.Scale_Velocity(dd.atom_numbers, dd.vel);
+                Main_Finite_Lifecycle_Probe("iteration_after_bussi");
             }
             else if (ad_thermo.is_initialized)
             {
@@ -1667,6 +2203,7 @@ void Main_Iteration()
                         md_info.pbc.rcell, dd.atom_numbers);
                     constrain.v_factor = FLT_MIN;
                     constrain.x_factor = 0.5;
+                    Main_Finite_Lifecycle_Probe("iteration_after_andersen");
                 }
                 else
                 {
@@ -1675,6 +2212,7 @@ void Main_Iteration()
                                           md_info.dt);
                     constrain.v_factor = 1.0;
                     constrain.x_factor = 1.0;
+                    Main_Finite_Lifecycle_Probe("iteration_after_andersen_nve");
                 }
             }
             else if (nhc.is_initialized)
@@ -1682,15 +2220,22 @@ void Main_Iteration()
                 nhc.MD_Iteration_Leap_Frog(dd.vel, dd.crd, dd.frc, dd.acc,
                                            md_info.dt, dd.h_ek_total,
                                            md_info.sys.freedom);
+                Main_Finite_Lifecycle_Probe("iteration_after_nhc");
             }
 
+            Main_Finite_Lifecycle_Probe("iteration_before_settle");
             settle.Do_SETTLE(dd.d_mass, dd.crd, md_info.pbc.cell,
                              md_info.pbc.rcell, dd.vel, md_info.need_pressure,
                              md_info.sys.d_stress);
+            Main_Finite_Lifecycle_Probe("iteration_after_settle");
+            Main_Finite_Lifecycle_Probe("iteration_before_shake");
             shake.Constrain(dd.atom_numbers, dd.crd, dd.vel, dd.d_mass_inverse,
                             dd.d_mass, md_info.pbc.cell, md_info.pbc.rcell,
                             md_info.need_pressure, md_info.sys.d_stress);
+            Main_Finite_Lifecycle_Probe("iteration_after_shake");
+            Main_Finite_Lifecycle_Probe("iteration_before_hard_wall");
             hard_wall.Reflect(dd.atom_numbers, dd.crd, dd.vel);
+            Main_Finite_Lifecycle_Probe("iteration_after_hard_wall");
         }
         if (md_info.need_pressure && !mc_baro.is_initialized)
         {
@@ -1701,22 +2246,27 @@ void Main_Iteration()
                 md_info.sys.steps, md_info.sys.h_stress, md_info.pbc.cell,
                 md_info.dt, md_info.sys.target_pressure,
                 md_info.sys.target_temperature);
+            Main_Finite_Lifecycle_Probe("iteration_after_pressure");
         }
     }
     else
     {
         md_info.rerun.Iteration();
+        Main_Finite_Lifecycle_Probe("iteration_after_rerun");
         if (md_info.rerun.need_box_update)
         {
             Main_Box_Change(md_info.rerun.g, 1, 0, 0);
+            Main_Finite_Lifecycle_Probe("iteration_after_rerun_box_change");
         }
         md_info.Crd_Vel_Device_to_dd(dd.crd, dd.vel, dd.atom_local_label,
                                      dd.atom_local_id, main_stream);
+        Main_Finite_Lifecycle_Probe("iteration_after_rerun_global_to_dd");
     }
 
     if (CONTROLLER::MPI_rank < CONTROLLER::PP_MPI_size)
     {
         vatom.Coordinate_Refresh(dd.crd, md_info.pbc.cell, md_info.pbc.rcell);
+        Main_Finite_Lifecycle_Probe("iteration_after_vatom_coord_refresh");
         if ((md_info.sys.steps + 1) % dd.update_interval == 0 ||
             md_info.mode == md_info.RERUN)
         {
@@ -1725,12 +2275,16 @@ void Main_Iteration()
                 controller.Get_Time_Recorder("Communication")->Start();
                 dd.Exchange_Particles(&controller, &md_info);
                 controller.Get_Time_Recorder("Communication")->Stop();
+                Main_Finite_Lifecycle_Probe("iteration_after_exchange_particles");
                 Main_Refresh_Local_State(false);
+                Main_Finite_Lifecycle_Probe("iteration_after_refresh_local_state");
             }
             else
             {
                 Main_Update_Legacy_Neighbor_List_If_Needed(
                     "Main_Iteration_single_rank", neighbor_list.FORCED_UPDATE);
+                Main_Finite_Lifecycle_Probe(
+                    "iteration_after_single_rank_neighbor_update");
             }
         }
     }
@@ -1742,7 +2296,9 @@ void Main_Iteration()
                      dd.atom_numbers, dd.crd, dd.d_charge, dd.atom_local, true,
                      true, true, true);
         controller.Get_Time_Recorder("Communication")->Stop();
+        Main_Finite_Lifecycle_Probe("iteration_after_pm_get_atoms");
     }
+    Main_Finite_Lifecycle_Probe("iteration_exit");
     controller.Get_Time_Recorder("Iteration")->Stop();
 }
 
