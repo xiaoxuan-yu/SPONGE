@@ -53,6 +53,7 @@ cuda-nvcc = "12.8.*"
 cuda-nvcc = "13.0.*"
 cuda-cuobjdump = "13.0.*"
 nsight-compute = "2025.3.*"
+cuda-gdb = "13.0.*"
 
 [feature.cuda13.target.win-64.dependencies]
 cuda-nvcc = "13.0.*"

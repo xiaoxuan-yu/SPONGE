@@ -719,3 +719,284 @@ git diff --check
 Build passed after adding the force writeback probes. `git diff --check` passed.
 The earlier `pixi run -e dev-cuda13 compile` also passed and emitted the existing
 nvcc `compiler-bindir` redefinition warning.
+
+## AB-Table Full-Dense Kernel Completion
+
+Follow-up implementation after comparing the GROMACS NBNXM LJ kernel dispatch:
+the full-local-dense gmxpacked fast path no longer requires geometric LJ-comb
+compatibility. The force kernel template already had a `use_lj_comb=false`
+AB-table path that loads `sorted_lj_type` and fetches packed `A/B` parameters
+from `LJ_type_AB_packed`; the missing part was dispatch.
+
+Implemented in `SPONGE/Lennard_Jones_force/Lennard_Jones_force.cpp`:
+
+- removed `use_gmxpacked_lj_comb_kernel` from the
+  `gmxpacked_fast_full_local_dense_compatible` gate;
+- added `use_lj_comb ? comb : AB-table` dispatch for full-local-dense VECTOR
+  kernels;
+- added the same dual dispatch for sci-shift split/runtime variants;
+- added AB-table full-local-dense float4 sorted-force variants so the
+  experimental sorted-force path does not silently force comb semantics.
+
+Offline verification:
+
+```text
+ninja -C build-dev-cuda13 SPONGE
+git diff --check
+nm -C build-dev-cuda13/SPONGE
+```
+
+Build and diff check passed. `nm -C` confirms the binary now contains
+`use_lj_comb=false, dense_offsets=true, full_local_dense=true` instantiations for
+the force-only VECTOR and float4 paths, including sci-shift-only/runtime
+combinations.
+
+## Full-Dense Padding Probe
+
+DNA_COU has 31,662 atoms. Without padding it produced 3,958 clusters, so the
+fast full-local-dense gate rejected it because the cluster count was not a
+multiple of the 8-cluster supercluster shape. Added a default-off gate:
+
+```text
+SPONGE_CLUSTERED_GMXPACKED_FULL_DENSE_PADDING=1
+```
+
+The gate pads only the clustered LJ sorted scratch domain. It does not change
+the real atom count, atom-order force scatter count, domain decomposition atom
+metadata, or any non-LJ module. It is only enabled for the single-rank,
+full-local, no-ghost, fixed 8x8 gmxpacked direct shape. Padded clusters have
+zero valid/local masks and padded sorted slots are filled with zero charge,
+type 0, and zero LJ-comb values.
+
+Runtime validation on DNA_COU with peak env plus gate trace:
+
+```text
+call=0    lj_comb=0 fast=1 clusters=3960 total_atoms=31662 padded_atoms=31680 full_local_dense=1
+call=2000 lj_comb=0 fast=1 clusters=3960 total_atoms=31662 padded_atoms=31680 full_local_dense=1
+```
+
+The second line also verifies the lifecycle fix: `Refresh_Metadata()` and
+cache-hit `Build()` paths must preserve `padded_total_atom_numbers` when atom
+metadata is unchanged. Before that fix, the step-2000 energy call reset to
+`padded_atoms=31662` and fell out of full-local-dense dispatch.
+
+2000-step DNA_COU e2e, same peak env, no gate trace:
+
+| build | Calculate_Force | Core Run Speed |
+|---|---:|---:|
+| lifecycle-fix baseline | 0.868814 s | 290.818207 ns/day |
+| AB-table fast, no padding | 0.839357 s | 298.065735 ns/day |
+| AB-table fast + padding | 0.842890 s | 296.746552 ns/day |
+
+Conclusion: keep padding default-off. It fixes coverage for near-full dense
+AB-table systems and proves the dispatch path is correct, but this short
+DNA_COU e2e run does not show a stable improvement beyond the existing AB-table
+dispatch completion.
+
+## AB-Table Padding Force Kernel Tuning
+
+Artifacts:
+
+```text
+/tmp/sponge-ab-padding-force-20260705/resource_ab_full_dense_forceonly_sm80.txt
+/tmp/sponge-ab-padding-force-20260705/sass_ab_full_dense_forceonly_sm80.sass
+/tmp/sponge-ab-padding-force-20260705/sass_comb_full_dense_forceonly_sm80.sass
+/tmp/sponge-ab-padding-force-20260705/resource_ab_minmax_full_dense_forceonly_sm80.txt
+/tmp/sponge-ab-padding-force-20260705/sass_ab_minmax_full_dense_forceonly_sm80.sass
+/tmp/sponge-ab-padding-force-20260705/ncu_dna_ab_padding_force_defaultsplit_6launch.log
+/tmp/sponge-ab-padding-force-20260705/ncu_dna_ab_padding_force_skipempty_6launch.log
+/tmp/sponge-ab-padding-force-20260705/ncu_dna_ab_minmax_skipempty_6launch.log
+/tmp/sponge-ab-padding-force-20260705/ncu_dna_ab_padding_force_skipempty_forceonly_hot1_warpdetails.log
+/tmp/sponge-ab-padding-force-20260705/dna_cou_minmax_noskip_2000.stdout
+/tmp/sponge-ab-padding-force-20260705/dna_cou_minmax_skipempty_10000.stdout
+/tmp/sponge-ab-padding-force-20260705/dna_cou_minmax_noskip_10000.stdout
+```
+
+The current release binary does not retain PTX for these filtered cubin
+functions: `cuobjdump --dump-ptx --function ...` emitted only fatbin headers.
+For this round the instruction-level evidence is therefore SASS plus NCU. A
+future PTX source comparison needs a dedicated `-keep` or lineinfo build.
+
+### Static AB vs Comb Shape
+
+Static `sm_80` resource usage for full-local-dense force-only VECTOR kernels:
+
+| variant | sci-shift path | regs/thread | shared | spill/local |
+|---|---|---:|---:|---:|
+| AB-table | unsafe | 68 | 1280 B | 0 |
+| AB-table | safe | 69 | 1280 B | 0 |
+| comb | unsafe | 72 | 1536 B | 0 |
+| comb | safe | 69 | 1536 B | 0 |
+
+The AB path is not register or shared-memory worse than comb. Its static cost is
+instruction shape: before the min/max rewrite, the two AB kernels combined had
+more LJ pair-index/address work than comb:
+
+| SASS count | AB-table | comb | delta |
+|---|---:|---:|---:|
+| `LDG` | 136 | 72 | +64 |
+| `SHF` | 264 | 136 | +128 |
+| `IMAD` | 452 | 200 | +252 |
+| `FMUL` | 811 | 939 | -128 |
+| `FFMA` | 1447 | 1447 | 0 |
+| `BRA` | 388 | 388 | 0 |
+
+The extra `SHF/IMAD` came from the generic `Get_LJ_Type(a,b)` packed-triangle
+index expression in the hot AB path.
+
+### Min/Max Pair-Index Rewrite
+
+Implemented a gmxpacked-local equivalent helper:
+
+```text
+hi = max(a, b)
+lo = min(a, b)
+pair = (hi * (hi + 1) >> 1) + lo
+```
+
+This only replaces the AB-table lookup inside
+`Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb_ForceOnly_Warp_Record_Device`.
+It does not change the packed LJ table layout or any non-gmxpacked caller.
+
+Static SASS effect:
+
+| AB SASS count | before | after | delta |
+|---|---:|---:|---:|
+| total SASS lines | 16947 | 16307 | -640 |
+| `SHF` | 264 | 136 | -128 |
+| `IMAD` | 452 | 373 | -79 |
+| `IMNMX` | 0 | 128 | +128 |
+| `LDG` | 136 | 136 | 0 |
+| regs/thread | 68/69 | 68/69 | 0 |
+
+NCU on DNA_COU, peak env + full-dense padding + skip-empty, hot force-only
+safe launch:
+
+| kernel | duration samples | mean | regs | shared | eligible | issued |
+|---|---:|---:|---:|---:|---:|---:|
+| AB packed-index | 186.66, 186.37, 186.62, 186.94, 186.21 us | 186.56 us | 69 | 1.28 KiB | 0.35 | 0.29 |
+| AB min/max-index | 182.27, 182.21, 181.76, 182.75, 182.40 us | 182.28 us | 69 | 1.28 KiB | 0.34 | 0.28 |
+
+Single-launch improvement is about `2.3%`. The stall shape remains latency
+bound rather than bandwidth bound. The hot force-only safe launch reports:
+
+```text
+Stall Wait            2.17 inst
+Stall Long Scoreboard 1.81 inst
+Stall Short Scoreboard 1.39 inst
+Stall Branch Resolving 0.58 inst
+Avg active threads/warp 22.32
+```
+
+### Split Skip-Empty Result
+
+DNA_COU with padding is all sci-shift-safe:
+
+```text
+split_skip_empty=1 split_counts_valid=1 split_safe=992 split_unsafe=0
+```
+
+With skip-empty off, NCU sees an extra unsafe launch of about `2.8 us` after
+each hot safe launch. Enabling
+`SPONGE_CLUSTERED_GMXPACKED_SCI_SHIFT_SPLIT_SKIP_EMPTY=1` removes that launch,
+but the 2000/10000-step e2e results are too noisy to justify adding this flag
+to the global peak env. Keep it as a case-specific diagnostic/tuning env for
+now.
+
+### E2E Readout
+
+DNA_COU finite/e2e checks with the min/max-index build:
+
+| run | extra env | Calculate_Force | Core Run Wall Time | Core Run Speed | stderr |
+|---|---|---:|---:|---:|---|
+| 2000-step prior padding baseline | none | 0.868814 s | 1.188965 s | 290.818207 ns/day | AB fallback notice |
+| 2000-step min/max | none | 0.830006 s | 1.151830 s | 300.194336 ns/day | AB fallback notice |
+| 2000-step min/max | `SPLIT_SKIP_EMPTY=1` | 0.880432 s | 1.198400 s | 288.528778 ns/day | AB fallback notice |
+| 10000-step min/max | none | 4.857783 s | 6.459754 s | 267.529205 ns/day | AB fallback notice |
+| 10000-step min/max | `SPLIT_SKIP_EMPTY=1` | 4.504756 s | 6.125005 s | 282.150452 ns/day | AB fallback notice |
+
+All runs were finite with no NaN/Inf. The only stderr line is the expected
+notice that the system is not geometric-comb compatible and therefore uses the
+AB-table path.
+
+Decision: keep the min/max pair-index rewrite because it is semantics-preserving,
+does not increase registers/shared memory, and gives a measured NCU hot-launch
+win. Do not promote `SPLIT_SKIP_EMPTY` to the stable peak env based on this
+round; its launch-level benefit is real but small and the e2e data is not
+stable enough.
+
+## AB Row-Major Matrix Probe
+
+Implemented a default-off probe gate:
+
+```text
+SPONGE_CLUSTERED_GMXPACKED_FORCE_LJ_AB_MATRIX_PROBE=1
+```
+
+The probe adds a row-major `atom_type_numbers^2` `float2` AB table derived from
+the existing packed triangular LJ table. The packed table remains present for
+all legacy/non-probe paths. The matrix probe is intentionally narrow: AB-table
+gmxpacked force-only, full-local-dense `VECTOR` kernels, including the current
+runtime safe/unsafe split launches. It does not assume that every SCI is safe;
+split still uses the existing runtime safe flags. Energy/virial,
+runtime-sci-shift, F4/scratch, and writeback/atomic probes stay on the packed
+table.
+
+Artifacts:
+
+```text
+/tmp/sponge-ab-matrix-probe-20260705.WvpdXL/matrix_trace20.stderr
+/tmp/sponge-ab-matrix-probe-20260705.e2e.012224/packed
+/tmp/sponge-ab-matrix-probe-20260705.e2e.012224/matrix
+/tmp/sponge-ab-matrix-probe-20260705.ncu.012339/packed/ncu.log
+/tmp/sponge-ab-matrix-probe-20260705.ncu.012339/matrix/ncu.log
+/tmp/sponge-ab-matrix-probe-20260705.e2e10000.012420/packed
+/tmp/sponge-ab-matrix-probe-20260705.e2e10000.012420/matrix
+```
+
+Gate trace on DNA_COU with peak env plus full-dense padding:
+
+```text
+call=0 need_energy=1 compact=1 split=1 lj_ab_matrix=0
+call=1 need_energy=0 compact=0 split=1 lj_ab_matrix=1
+```
+
+This confirms the matrix probe is applied only to the force-only split launch,
+not to the step-0 energy path.
+
+2000-step DNA_COU e2e, current build, same peak env plus full-dense padding:
+
+| run | Calculate_Force | Core Run Wall Time | Core Run Speed | stderr |
+|---|---:|---:|---:|---|
+| packed min/max | 0.824659 s | 1.145730 s | 301.792633 ns/day | AB fallback notice |
+| row-major matrix probe | 0.805234 s | 1.122334 s | 308.083710 ns/day | AB fallback notice |
+
+The 2000-step same-build comparison shows a small positive signal:
+`Calculate_Force` improves by `19.425 ms` (`2.36%`) and wall time by
+`23.396 ms` (`2.04%`).
+
+NCU 6-launch comparison on the same DNA_COU 20-step setup:
+
+| launch | packed min/max | row-major matrix | resource |
+|---|---:|---:|---|
+| force-only safe, sample 1 | 183.30 us | 180.22 us | 69 regs, 1.28 KiB shared |
+| force-only safe, sample 2 | 183.55 us | 179.68 us | 69 regs, 1.28 KiB shared |
+| force-only unsafe, sample 1 | 2.82 us | 2.85 us | 68 regs, 1.28 KiB shared |
+| force-only unsafe, sample 2 | 2.78 us | 2.78 us | 68 regs, 1.28 KiB shared |
+
+The hot safe launch improves by about `1.9%` with no register/shared-memory
+increase. The unsafe launch is tiny and unchanged.
+
+The 10000-step same-build e2e run is not usable as a promotion gate in this
+round: both packed and matrix runs reached `NaN` at step 10000 and both slowed to
+about 150 seconds wall time:
+
+| run | Calculate_Force | Core Run Wall Time | Core Run Speed | validity |
+|---|---:|---:|---:|---|
+| packed min/max | 2.440269 min | 148.150590 s | 11.664974 ns/day | NaN at step 10000 |
+| row-major matrix probe | 2.487272 min | 150.895659 s | 11.452767 ns/day | NaN at step 10000 |
+
+Decision: keep `SPONGE_CLUSTERED_GMXPACKED_FORCE_LJ_AB_MATRIX_PROBE` default-off.
+The kernel-level and 2000-step signals are real but small. It should not enter
+the stable peak env until a finite 10000-step run on a stable mdin reproduces an
+end-to-end gain.

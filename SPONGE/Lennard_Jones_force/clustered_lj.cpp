@@ -175,6 +175,12 @@ static bool Clustered_Gmxpacked_Pair_Shift_Simple_Refresh_Enabled()
         "SPONGE_CLUSTERED_GMXPACKED_PAIR_SHIFT_SIMPLE_REFRESH");
 }
 
+static bool Clustered_Gmxpacked_Full_Dense_Padding_Enabled()
+{
+    return Clustered_Gmxpacked_Env_Flag_Enabled(
+        "SPONGE_CLUSTERED_GMXPACKED_FULL_DENSE_PADDING");
+}
+
 static bool Clustered_Gmxpacked_Count_Fixed_Light_Sass_Opt_Enabled()
 {
     return Clustered_Gmxpacked_Env_Flag_Enabled(
@@ -1794,6 +1800,28 @@ static __global__ void Gather_Sorted_LJ_Direct_Scratch_From_Plain_Cluster_Map(
                 comb.y = sqrtf(fmaxf(self_ab.x, 0.0f));
             }
             sorted_lj_comb[sorted_i] = comb;
+        }
+    }
+}
+
+static __global__ void Fill_Padded_Sorted_LJ_Direct_Scratch(
+    const int atom_numbers, const int padded_atom_numbers,
+    int* sorted_atom_ids, float4* sorted_xq, int* sorted_lj_type,
+    float2* sorted_lj_comb, int* sorted_cluster_ids)
+{
+    SIMPLE_DEVICE_FOR(sorted_i, padded_atom_numbers - atom_numbers)
+    {
+        const int index = atom_numbers + sorted_i;
+        sorted_atom_ids[index] = 0;
+        sorted_xq[index] = {0.0f, 0.0f, 0.0f, 0.0f};
+        sorted_lj_type[index] = 0;
+        if (sorted_lj_comb != NULL)
+        {
+            sorted_lj_comb[index] = {0.0f, 0.0f};
+        }
+        if (sorted_cluster_ids != NULL)
+        {
+            sorted_cluster_ids[index] = index / kClusteredClusterSize;
         }
     }
 }
@@ -4049,8 +4077,9 @@ static __global__ void Build_Global_Cluster_Metadata(
 {
     SIMPLE_DEVICE_FOR(cluster_i, cluster_numbers)
     {
-        const int start = cluster_i * cluster_size;
-        const int end = IntMin(total_atom_numbers, start + cluster_size);
+        const int raw_start = cluster_i * cluster_size;
+        const int start = IntMin(total_atom_numbers, raw_start);
+        const int end = IntMin(total_atom_numbers, raw_start + cluster_size);
         const int count = IntMax(0, end - start);
         unsigned int valid_mask = 0u;
         unsigned int local_mask = 0u;
@@ -12838,12 +12867,12 @@ static bool Clustered_Gmxpacked_Full_Local_Dense_Compatible(
            layout->cluster_size == kClusteredClusterSize &&
            layout->super_cluster_clusters == kClusteredSuperClusterClusters &&
            layout->ghost_numbers == 0 &&
-           layout->local_atom_numbers == layout->total_atom_numbers &&
-           layout->direct_local_atom_numbers == layout->total_atom_numbers &&
-           layout->cluster_numbers > 0 &&
-           layout->total_atom_numbers ==
-               layout->cluster_numbers * kClusteredClusterSize &&
-           layout->cluster_numbers % kClusteredSuperClusterClusters == 0;
+	           layout->local_atom_numbers == layout->total_atom_numbers &&
+	           layout->direct_local_atom_numbers == layout->total_atom_numbers &&
+	           layout->cluster_numbers > 0 &&
+	           layout->padded_total_atom_numbers ==
+	               layout->cluster_numbers * kClusteredClusterSize &&
+	           layout->cluster_numbers % kClusteredSuperClusterClusters == 0;
 }
 
 static bool Clustered_LtMatrix3_Exact_Equals(LTMatrix3 a, LTMatrix3 b)
@@ -23250,26 +23279,25 @@ static void Compare_Gmxpacked_Record_Stream_With_Compat_Oracle(
 static void Reserve_Plain_Gather_Scratch(LJ_CLUSTERED_DIRECT_CACHE* cache)
 {
     LJ_CLUSTER_LAYOUT& layout = cache->layout;
-    Reserve_Device_Buffer(layout.total_atom_numbers, &cache->d_sorted_atom_ids,
+    const int sorted_slot_numbers =
+        IntMax(layout.total_atom_numbers, layout.padded_total_atom_numbers);
+    Reserve_Device_Buffer(sorted_slot_numbers, &cache->d_sorted_atom_ids,
                           &cache->scratch_capacity);
-    Reserve_Device_Buffer(layout.total_atom_numbers, &cache->d_sorted_xq,
+    Reserve_Device_Buffer(sorted_slot_numbers, &cache->d_sorted_xq,
                           &cache->scratch_capacity);
-    Reserve_Device_Buffer(layout.total_atom_numbers, &cache->d_sorted_lj_type,
+    Reserve_Device_Buffer(sorted_slot_numbers, &cache->d_sorted_lj_type,
                           &cache->scratch_capacity);
-    Reserve_Device_Buffer(layout.total_atom_numbers, &cache->d_sorted_lj_comb,
+    Reserve_Device_Buffer(sorted_slot_numbers, &cache->d_sorted_lj_comb,
                           &cache->scratch_capacity);
-    Reserve_Device_Buffer(layout.total_atom_numbers, &cache->d_sorted_frc,
+    Reserve_Device_Buffer(sorted_slot_numbers, &cache->d_sorted_frc,
                           &cache->scratch_capacity);
-    Reserve_Device_Buffer(layout.total_atom_numbers, &cache->d_sorted_frc4,
+    Reserve_Device_Buffer(sorted_slot_numbers, &cache->d_sorted_frc4,
                           &cache->scratch_capacity);
-    Reserve_Device_Float_Buffer(layout.total_atom_numbers,
-                                &cache->d_sorted_frc_x,
+    Reserve_Device_Float_Buffer(sorted_slot_numbers, &cache->d_sorted_frc_x,
                                 &cache->scratch_capacity);
-    Reserve_Device_Float_Buffer(layout.total_atom_numbers,
-                                &cache->d_sorted_frc_y,
+    Reserve_Device_Float_Buffer(sorted_slot_numbers, &cache->d_sorted_frc_y,
                                 &cache->scratch_capacity);
-    Reserve_Device_Float_Buffer(layout.total_atom_numbers,
-                                &cache->d_sorted_frc_z,
+    Reserve_Device_Float_Buffer(sorted_slot_numbers, &cache->d_sorted_frc_z,
                                 &cache->scratch_capacity);
 }
 
@@ -25044,25 +25072,28 @@ void LJ_CLUSTER_LAYOUT::Refresh_Metadata(int input_local_atom_numbers,
                                          const int* d_input_excluded_list,
                                          const int* d_input_excluded_numbers)
 {
-    const int previous_local_atom_numbers = local_atom_numbers;
-    const int previous_direct_local_atom_numbers = direct_local_atom_numbers;
-    const int previous_ghost_numbers = ghost_numbers;
-    const int* previous_atom_local = d_atom_local;
-    const int* previous_excluded_list_start = d_excluded_list_start;
-    const int* previous_excluded_list = d_excluded_list;
-    const int* previous_excluded_numbers = d_excluded_numbers;
-    local_atom_numbers = input_local_atom_numbers;
+	const int previous_local_atom_numbers = local_atom_numbers;
+	const int previous_direct_local_atom_numbers = direct_local_atom_numbers;
+	const int previous_ghost_numbers = ghost_numbers;
+	const int previous_total_atom_numbers = total_atom_numbers;
+	const int previous_padded_total_atom_numbers = padded_total_atom_numbers;
+	const int* previous_atom_local = d_atom_local;
+	const int* previous_excluded_list_start = d_excluded_list_start;
+	const int* previous_excluded_list = d_excluded_list;
+	const int* previous_excluded_numbers = d_excluded_numbers;
+	local_atom_numbers = input_local_atom_numbers;
     direct_local_atom_numbers =
-        IntMin(local_atom_numbers, IntMax(0, input_direct_local_atom_numbers));
-    ghost_numbers = input_ghost_numbers;
-    total_atom_numbers = local_atom_numbers + ghost_numbers;
-    if (!enabled)
-    {
-        return;
-    }
-    d_atom_local = d_input_atom_local;
-    d_excluded_list_start = d_input_excluded_list_start;
-    d_excluded_list = d_input_excluded_list;
+	    IntMin(local_atom_numbers, IntMax(0, input_direct_local_atom_numbers));
+	ghost_numbers = input_ghost_numbers;
+	total_atom_numbers = local_atom_numbers + ghost_numbers;
+	if (!enabled)
+	{
+		padded_total_atom_numbers = total_atom_numbers;
+		return;
+	}
+	d_atom_local = d_input_atom_local;
+	d_excluded_list_start = d_input_excluded_list_start;
+	d_excluded_list = d_input_excluded_list;
     d_excluded_numbers = d_input_excluded_numbers;
     const bool local_metadata_changed =
         previous_local_atom_numbers != local_atom_numbers ||
@@ -25071,11 +25102,21 @@ void LJ_CLUSTER_LAYOUT::Refresh_Metadata(int input_local_atom_numbers,
         previous_atom_local != d_atom_local ||
         previous_excluded_list_start != d_excluded_list_start ||
         previous_excluded_list != d_excluded_list ||
-        previous_excluded_numbers != d_excluded_numbers;
-    const bool conservative_dd_refresh = CONTROLLER::PP_MPI_size > 1;
-    if (local_metadata_changed || conservative_dd_refresh)
-    {
-        Invalidate_Gmxpacked_Incremental_Source_Cache_State(this);
+	        previous_excluded_numbers != d_excluded_numbers;
+	const bool conservative_dd_refresh = CONTROLLER::PP_MPI_size > 1;
+	if (!local_metadata_changed && !conservative_dd_refresh &&
+	    previous_total_atom_numbers == total_atom_numbers &&
+	    previous_padded_total_atom_numbers >= total_atom_numbers)
+	{
+		padded_total_atom_numbers = previous_padded_total_atom_numbers;
+	}
+	else
+	{
+		padded_total_atom_numbers = total_atom_numbers;
+	}
+	if (local_metadata_changed || conservative_dd_refresh)
+	{
+		Invalidate_Gmxpacked_Incremental_Source_Cache_State(this);
         stable_target_layout_anchor_ready = false;
         rebuild_dirty = true;
         Invalidate_Clustered_Legacy_Neighbor_View(this);
@@ -25102,12 +25143,20 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
     }
     Bind_Clustered_Working_Device(&working_device);
 #endif
-    total_atom_numbers = local_atom_numbers + ghost_numbers;
-    runtime_gmxpacked_direct_requested = runtime_gmxpacked_direct;
+	const int previous_total_atom_numbers = total_atom_numbers;
+	const int previous_padded_total_atom_numbers = padded_total_atom_numbers;
+	total_atom_numbers = local_atom_numbers + ghost_numbers;
+	padded_total_atom_numbers =
+	    previous_total_atom_numbers == total_atom_numbers &&
+	            previous_padded_total_atom_numbers >= total_atom_numbers
+	        ? previous_padded_total_atom_numbers
+	        : total_atom_numbers;
+	runtime_gmxpacked_direct_requested = runtime_gmxpacked_direct;
     runtime_aux_clustered_metadata_requested = need_aux_clustered_metadata;
     if (total_atom_numbers <= 0)
     {
         cluster_numbers = 0;
+        padded_total_atom_numbers = 0;
         super_cluster_numbers = 0;
         local_cluster_numbers = 0;
         candidate_sci_numbers = 0;
@@ -27138,12 +27187,13 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                 cornerstone_state->leaves.size(),
                 cornerstone_state->leaf_counts.size());
     }
-    if (leaf_numbers <= 0)
-    {
-        cluster_numbers = 0;
-        super_cluster_numbers = 0;
-        if (Clustered_Trace_Warp_Records_Enabled())
-        {
+	if (leaf_numbers <= 0)
+	{
+		cluster_numbers = 0;
+		padded_total_atom_numbers = 0;
+		super_cluster_numbers = 0;
+		if (Clustered_Trace_Warp_Records_Enabled())
+		{
             fprintf(stderr,
                     "[clustered build early-return] step=%d stage=no-leaves\n",
                     md_info.sys.steps);
@@ -27166,11 +27216,31 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
     int leaf_atom_total = 0;
     deviceMemcpy(&leaf_atom_total, d_leaf_atom_offsets + leaf_numbers,
                  sizeof(int), deviceMemcpyDeviceToHost);
-    cluster_numbers =
+    const int raw_cluster_numbers =
         IntMax(0, (leaf_atom_total + cluster_size - 1) / cluster_size);
+    const bool use_full_dense_padding =
+        need_gmxpacked_payload && runtime_gmxpacked_direct_requested &&
+        Clustered_Gmxpacked_Full_Dense_Padding_Enabled() &&
+        !Clustered_Use_Spatial_Supercluster_Grouping() &&
+        cluster_size == kClusteredClusterSize &&
+        super_cluster_clusters == kClusteredSuperClusterClusters &&
+        ghost_numbers == 0 &&
+        local_atom_numbers == total_atom_numbers &&
+        direct_local_atom_numbers == total_atom_numbers &&
+        CONTROLLER::PP_MPI_size == 1;
+    cluster_numbers = use_full_dense_padding
+                          ? ((raw_cluster_numbers +
+                              super_cluster_clusters - 1) /
+                             super_cluster_clusters) *
+                                super_cluster_clusters
+                          : raw_cluster_numbers;
+    padded_total_atom_numbers =
+        use_full_dense_padding ? cluster_numbers * cluster_size
+                               : total_atom_numbers;
     if (cluster_numbers <= 0)
     {
         super_cluster_numbers = 0;
+        padded_total_atom_numbers = 0;
         if (Clustered_Trace_Warp_Records_Enabled())
         {
             fprintf(stderr,
@@ -31117,9 +31187,10 @@ void LJ_CLUSTER_LAYOUT::Clear()
     rebuild_flag_capacity = 0;
     local_atom_numbers = 0;
     direct_local_atom_numbers = 0;
-    ghost_numbers = 0;
-    total_atom_numbers = 0;
-    cluster_numbers = 0;
+	ghost_numbers = 0;
+	total_atom_numbers = 0;
+	padded_total_atom_numbers = 0;
+	cluster_numbers = 0;
     super_cluster_numbers = 0;
     local_cluster_numbers = 0;
     candidate_sci_numbers = 0;
@@ -31389,7 +31460,9 @@ void LJ_CLUSTERED_DIRECT_CACHE::Gather_Plain(const VECTOR* crd,
         Clustered_Gmxpacked_Sorted_Cluster_Map_Enabled();
     if (request_sorted_cluster_map)
     {
-        Reserve_Device_Buffer(layout.total_atom_numbers, &d_sorted_cluster_ids,
+        const int sorted_slot_numbers =
+            IntMax(layout.total_atom_numbers, layout.padded_total_atom_numbers);
+        Reserve_Device_Buffer(sorted_slot_numbers, &d_sorted_cluster_ids,
                               &scratch_capacity);
     }
     const bool use_sorted_cluster_map =
@@ -31431,6 +31504,18 @@ void LJ_CLUSTERED_DIRECT_CACHE::Gather_Plain(const VECTOR* crd,
             layout.d_cluster_offsets, layout.d_cluster_centers, cell, rcell,
             crd, charge, lj_type_src, d_sorted_atom_ids, d_sorted_xq,
             d_sorted_lj_type, lj_ab_packed, d_sorted_lj_comb);
+    }
+    if (layout.padded_total_atom_numbers > layout.total_atom_numbers)
+    {
+        Launch_Device_Kernel(
+            Fill_Padded_Sorted_LJ_Direct_Scratch,
+            (layout.padded_total_atom_numbers - layout.total_atom_numbers +
+             CONTROLLER::device_max_thread - 1) /
+                CONTROLLER::device_max_thread,
+            CONTROLLER::device_max_thread, 0, NULL, layout.total_atom_numbers,
+            layout.padded_total_atom_numbers, d_sorted_atom_ids, d_sorted_xq,
+            d_sorted_lj_type, d_sorted_lj_comb,
+            use_sorted_cluster_map ? d_sorted_cluster_ids : NULL);
     }
     Refresh_Plain_Gather_Dependent_Metadata(this, cell, rcell);
 }
@@ -31481,6 +31566,17 @@ void LJ_CLUSTERED_DIRECT_CACHE::Gather_Plain(const VECTOR_LJ* src,
         layout.d_cluster_offsets, layout.d_cluster_centers, cell, rcell, src,
         d_sorted_atom_ids, d_sorted_xq, d_sorted_lj_type, lj_ab_packed,
         d_sorted_lj_comb);
+    if (layout.padded_total_atom_numbers > layout.total_atom_numbers)
+    {
+        Launch_Device_Kernel(
+            Fill_Padded_Sorted_LJ_Direct_Scratch,
+            (layout.padded_total_atom_numbers - layout.total_atom_numbers +
+             CONTROLLER::device_max_thread - 1) /
+                CONTROLLER::device_max_thread,
+            CONTROLLER::device_max_thread, 0, NULL, layout.total_atom_numbers,
+            layout.padded_total_atom_numbers, d_sorted_atom_ids, d_sorted_xq,
+            d_sorted_lj_type, d_sorted_lj_comb, NULL);
+    }
     Refresh_Plain_Gather_Dependent_Metadata(this, cell, rcell);
 }
 

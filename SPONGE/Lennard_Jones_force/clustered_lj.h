@@ -271,6 +271,7 @@ struct LJ_CLUSTER_LAYOUT
     int direct_local_atom_numbers = 0;
     int ghost_numbers = 0;
     int total_atom_numbers = 0;
+    int padded_total_atom_numbers = 0;
     int cluster_numbers = 0;
     int super_cluster_numbers = 0;
     int local_cluster_numbers = 0;
