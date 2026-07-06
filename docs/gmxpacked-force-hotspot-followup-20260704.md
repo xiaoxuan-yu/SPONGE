@@ -1320,3 +1320,75 @@ correctness path, but its rebuild cadence is too high for peak. It remains
 default-off and must not be added to peak env. The next optimization target, if
 this line is continued, is reducing full source/payload rebuild frequency under
 the corrected anchor contract rather than relaxing the anchor semantics.
+
+## Nsys Overall Split After Current-Source Commit
+
+Artifacts:
+
+```text
+/tmp/sponge-nsys-overall-20260706/wat160k_peak/wat160k_peak_2000.nsys-rep
+/tmp/sponge-nsys-overall-20260706/wat160k_peak/wat160k_peak_2000.sqlite
+/tmp/sponge-nsys-overall-20260706/wat160k_peak/wat160k_peak_2000_kern_cuda_gpu_kern_sum.csv
+/tmp/sponge-nsys-overall-20260706/wat160k_peak/wat160k_peak_2000_api_cuda_api_sum.csv
+/tmp/sponge-nsys-overall-20260706/dna_peak_padding/dna_peak_padding_2000.nsys-rep
+/tmp/sponge-nsys-overall-20260706/dna_peak_padding/dna_peak_padding_2000.sqlite
+/tmp/sponge-nsys-overall-20260706/dna_peak_padding/dna_peak_padding_2000_kern_cuda_gpu_kern_sum.csv
+/tmp/sponge-nsys-overall-20260706/dna_peak_padding/dna_peak_padding_2000_api_cuda_api_sum.csv
+```
+
+Profiler command shape:
+
+```text
+nsys profile --trace=cuda,nvtx,osrt --sample=none --cpuctxsw=none --cuda-memory-usage=false
+```
+
+The `nsys` binary is packaged under the pixi `nsight-compute` installation:
+
+```text
+.pixi/envs/dev-cuda13/nsight-compute-2025.3.1/host/target-linux-x64/nsys
+```
+
+Runs:
+
+| case | env | step count | status | Calculate_Force | nsys Core Run Speed |
+|---|---|---:|---|---:|---:|
+| wat160k force-only NVE | stable peak env | 2000 | finite | `1.334775 s` | `117.582184 ns/day` |
+| DNA_COU basic NVT | stable peak env plus `SPONGE_CLUSTERED_GMXPACKED_FULL_DENSE_PADDING=1` | 2000 | finite | `0.869038 s` | `277.370850 ns/day` |
+
+Kernel-time split, excluding one-time initialization kernels such as
+`Total_C6_Get`, `get_atom_and_residues_single_domain`, `get_local_device`, and
+`device_get_excluded`:
+
+| case | repeated GPU kernel total | gmxpacked force | gmxpacked builder/update | PME/excluded correction | integration/constraint | bonded/nb14 |
+|---|---:|---:|---:|---:|---:|---:|
+| wat160k | `1226.612 ms` | `514.710 ms` (`41.96%`) | `529.551 ms` (`43.17%`) | `47.520 ms` (`3.87%`) | `52.707 ms` (`4.30%`) | `31.378 ms` (`2.56%`) |
+| DNA_COU | `978.513 ms` | `351.164 ms` (`35.89%`) | `192.952 ms` (`19.72%`) | `130.690 ms` (`13.36%`) | `221.377 ms` (`22.62%`) | `49.507 ms` (`5.06%`) |
+
+Top repeated kernels:
+
+| case | kernel | total | instances | avg |
+|---|---|---:|---:|---:|
+| wat160k | force-only main gmxpacked force `<..., use_lj_comb=1, full_local_dense=1, ...>` | `487.096 ms` | 1999 | `243.670 us` |
+| wat160k | candidate leaf collect onepass | `185.660 ms` | 7 | `26.523 ms` |
+| wat160k | dedicated fixed-light count | `122.240 ms` | 7 | `17.463 ms` |
+| wat160k | pair-shift bit refresh | `89.083 ms` | 2008 | `44.364 us` |
+| DNA_COU | force-only main gmxpacked force `<..., use_lj_comb=0, full_local_dense=1, ...>` | `289.337 ms` | 2000 | `144.668 us` |
+| DNA_COU | PME excluded correction | `130.690 ms` | 2001 | `65.312 us` |
+| DNA_COU | SHAKE `Constrain_Force_Cycle` | `106.224 ms` | 50025 | `2.123 us` |
+| DNA_COU | dedicated fixed-light count | `81.825 ms` | 7 | `11.689 ms` |
+| DNA_COU | SHAKE coordinate refresh | `74.108 ms` | 50025 | `1.481 us` |
+
+Interpretation:
+
+- wat160k is no longer force-kernel-only. In steady repeated GPU time, builder
+  and force are roughly equal. Candidate leaf collect plus fixed-light count are
+  the largest builder items, and the per-step pair-shift bit refresh is also
+  visible. Further force-only wins need to be large to move e2e.
+- DNA_COU with full-dense padding reaches the intended AB-table full-local-dense
+  force variant, but the overall bottleneck is more mixed: force is still the
+  largest single family, while SHAKE/integration and PME excluded correction
+  together exceed builder time.
+- The next optimization pass should split by case: wat160k should return to
+  candidate leaf/count/pair-shift update reduction, while DNA_COU should not
+  judge e2e only from the LJ force kernel because SHAKE and PME excluded
+  correction are already major repeated costs.
