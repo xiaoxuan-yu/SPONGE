@@ -1392,3 +1392,63 @@ Interpretation:
   candidate leaf/count/pair-shift update reduction, while DNA_COU should not
   judge e2e only from the LJ force kernel because SHAKE and PME excluded
   correction are already major repeated costs.
+
+## Nsys Overall Split, 10000-Step Standard
+
+The 2000-step run above is only a quick shape check. Use the following 10000-step
+run as the standard comparison point.
+
+Artifacts:
+
+```text
+/tmp/sponge-nsys-overall-10000-20260706/wat160k_peak/wat160k_peak_10000.nsys-rep
+/tmp/sponge-nsys-overall-10000-20260706/wat160k_peak/wat160k_peak_10000.sqlite
+/tmp/sponge-nsys-overall-10000-20260706/wat160k_peak/wat160k_peak_10000_kern_cuda_gpu_kern_sum.csv
+/tmp/sponge-nsys-overall-10000-20260706/wat160k_peak/wat160k_peak_10000_api_cuda_api_sum.csv
+/tmp/sponge-nsys-overall-10000-20260706/dna_peak_padding/dna_peak_padding_10000.nsys-rep
+/tmp/sponge-nsys-overall-10000-20260706/dna_peak_padding/dna_peak_padding_10000.sqlite
+/tmp/sponge-nsys-overall-10000-20260706/dna_peak_padding/dna_peak_padding_10000_kern_cuda_gpu_kern_sum.csv
+/tmp/sponge-nsys-overall-10000-20260706/dna_peak_padding/dna_peak_padding_10000_api_cuda_api_sum.csv
+```
+
+Runs:
+
+| case | env | step count | status | Calculate_Force | nsys Core Run Speed |
+|---|---|---:|---|---:|---:|
+| wat160k force-only NVE | stable peak env | 10000 | finite | `6.331339 s` | `123.122169 ns/day` |
+| DNA_COU basic NVT | stable peak env plus `SPONGE_CLUSTERED_GMXPACKED_FULL_DENSE_PADDING=1` | 10000 | finite | `4.448165 s` | `267.975922 ns/day` |
+
+Kernel-time split, excluding one-time initialization kernels:
+
+| case | repeated GPU kernel total | gmxpacked force | gmxpacked builder/update | PME/excluded correction | integration/constraint | bonded/nb14 |
+|---|---:|---:|---:|---:|---:|---:|
+| wat160k | `5924.541 ms` | `2654.033 ms` (`44.80%`) | `2400.025 ms` (`40.51%`) | `237.706 ms` (`4.01%`) | `286.330 ms` (`4.83%`) | `156.953 ms` (`2.65%`) |
+| DNA_COU | `4999.474 ms` | `1724.235 ms` (`34.49%`) | `1113.790 ms` (`22.28%`) | `647.188 ms` (`12.95%`) | `1124.531 ms` (`22.49%`) | `244.782 ms` (`4.90%`) |
+
+Top repeated kernels:
+
+| case | kernel | total | instances | avg |
+|---|---|---:|---:|---:|
+| wat160k | force-only main gmxpacked force `<..., use_lj_comb=1, full_local_dense=1, ...>` | `2436.357 ms` | 9999 | `243.660 us` |
+| wat160k | candidate leaf collect onepass | `790.942 ms` | 31 | `25.514 ms` |
+| wat160k | dedicated fixed-light count | `555.767 ms` | 31 | `17.928 ms` |
+| wat160k | pair-shift bit refresh | `456.392 ms` | 10032 | `45.494 us` |
+| DNA_COU | force-only main gmxpacked force `<..., use_lj_comb=0, full_local_dense=1, ...>` | `1453.835 ms` | 10000 | `145.383 us` |
+| DNA_COU | PME excluded correction | `647.188 ms` | 10001 | `64.712 us` |
+| DNA_COU | SHAKE `Constrain_Force_Cycle` | `523.697 ms` | 250025 | `2.095 us` |
+| DNA_COU | dedicated fixed-light count | `480.394 ms` | 41 | `11.717 ms` |
+| DNA_COU | SHAKE coordinate refresh | `372.864 ms` | 250025 | `1.491 us` |
+
+10000-step interpretation:
+
+- wat160k stable peak is still mostly the gmxpacked direct path, but the split is
+  not force-only: gmxpacked force is `44.80%` and builder/update is `40.51%` of
+  repeated GPU kernel time. The next wat160k work should prioritize candidate
+  leaf collect, fixed-light count, and pair-shift refresh along with any force
+  kernel improvement.
+- DNA_COU with padding reaches the AB-table full-local-dense force shape, but
+  repeated GPU time is split across force (`34.49%`), SHAKE/integration
+  (`22.49%`), builder/update (`22.28%`), and PME excluded correction
+  (`12.95%`). A DNA e2e win from LJ force alone is therefore capped.
+- Keep current-mask and current-source patch out of this standard env. They are
+  correctness/probe paths, not peak paths.
