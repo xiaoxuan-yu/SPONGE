@@ -369,6 +369,82 @@ Prune_Source_Imask_With_Shift_Probe(
     return pruned_imask;
 }
 
+static __device__ __forceinline__ unsigned int
+Prune_Source_Imask_With_Shift_Cooperative_Probe(
+    const int subgroup, const int sublane, const device_mask_t subgroup_mask,
+    const unsigned int record_imask, const unsigned int valid_mask_j,
+    const VECTOR pair_shift, const LTMatrix3 cell, const LTMatrix3 rcell,
+    const VECTOR* crd, const float* shared_i_center_x,
+    const float* shared_i_center_y, const float* shared_i_center_z,
+    const int shared_i_atom_ids[kClusteredMaxSuperClusterClusters]
+                               [kClusteredClusterSize],
+    const float* shared_j_shifted_x, const float* shared_j_shifted_y,
+    const float* shared_j_shifted_z,
+    const unsigned int* shared_i_local_masks,
+    const float cutoff_sq)
+{
+    unsigned int lane_split_hits = 0u;
+    const unsigned int i_local_bit = 1u << static_cast<unsigned int>(sublane);
+
+    if (record_imask != 0u && crd != NULL && cutoff_sq <= 0.0f)
+    {
+        lane_split_hits = (record_imask & i_local_bit) != 0u ? 0x3u : 0u;
+    }
+
+    if ((record_imask & i_local_bit) != 0u && crd != NULL && cutoff_sq > 0.0f)
+    {
+        const unsigned int local_mask_i = shared_i_local_masks[sublane];
+        const VECTOR center_i = {shared_i_center_x[sublane],
+                                 shared_i_center_y[sublane],
+                                 shared_i_center_z[sublane]};
+
+        for (int i_lane = 0; i_lane < kClusteredClusterSize; i_lane += 1)
+        {
+            const bool active_i_atom =
+                (local_mask_i & (1u << i_lane)) != 0u &&
+                shared_i_atom_ids[sublane][i_lane] >= 0;
+            if (!active_i_atom)
+            {
+                continue;
+            }
+            const VECTOR shifted_i =
+                Shift_Clustered_Atom_Into_Sorted_XQ_Frame_Probe(
+                    crd[shared_i_atom_ids[sublane][i_lane]], center_i, cell,
+                    rcell);
+
+            for (int j_lane = 0; j_lane < kClusteredClusterSize; j_lane += 1)
+            {
+                if ((valid_mask_j & (1u << j_lane)) == 0u)
+                {
+                    continue;
+                }
+                const VECTOR shifted_j = {shared_j_shifted_x[j_lane],
+                                          shared_j_shifted_y[j_lane],
+                                          shared_j_shifted_z[j_lane]};
+                const float dr_x = shifted_j.x - shifted_i.x - pair_shift.x;
+                const float dr_y = shifted_j.y - shifted_i.y - pair_shift.y;
+                const float dr_z = shifted_j.z - shifted_i.z - pair_shift.z;
+                const float dr2 = dr_x * dr_x + dr_y * dr_y + dr_z * dr_z;
+                if (dr2 < cutoff_sq && dr2 != 0.0f)
+                {
+                    lane_split_hits |=
+                        1u << (j_lane / kClusteredSplitJClusterSize);
+                }
+            }
+        }
+    }
+
+    const unsigned int split0_imask =
+        (deviceBallot(subgroup_mask, (lane_split_hits & 0x1u) != 0u) >>
+         (subgroup * kClusteredClusterSize)) &
+        0xFFu;
+    const unsigned int split1_imask =
+        (deviceBallot(subgroup_mask, (lane_split_hits & 0x2u) != 0u) >>
+         (subgroup * kClusteredClusterSize)) &
+        0xFFu;
+    return split0_imask | (split1_imask << kClusteredClusterSize);
+}
+
 template <bool kSourcePrune, bool kEmitFragments, bool kBuildExclusions>
 static __global__ void Probe_Count_Nbnxm_Payload_Fixed_Light(
     const int candidate_sci_numbers, const int cluster_size,
@@ -979,6 +1055,7 @@ static __global__ void Probe_Candidate_Leaf_Collect_Fixed_Shift_Subgroup(
     }
 }
 
+template <bool kDynamicWorkQueue, bool kSlimEmit, bool kCooperativePrune>
 static __global__ void Dedicated_Count_Nbnxm_Payload_Fixed_Light(
     const int candidate_sci_numbers, const int cluster_size,
     const int local_atom_numbers, const float record_stream_cutoff,
@@ -988,6 +1065,7 @@ static __global__ void Dedicated_Count_Nbnxm_Payload_Fixed_Light(
     const int* super_cluster_offsets, const int* cluster_to_supercluster,
     const int* sci_supercluster_ids, const int* candidate_leaf_offsets,
     const int* candidate_leaf_ids, const int candidate_leaf_cluster_stride,
+    const int* candidate_leaf_prev_running_max_ends,
     const unsigned int* candidate_leaf_reach_masks,
     const unsigned int* cluster_valid_masks,
     const unsigned int* cluster_local_masks, const VECTOR* cluster_centers,
@@ -998,8 +1076,11 @@ static __global__ void Dedicated_Count_Nbnxm_Payload_Fixed_Light(
     int* cjpacked_group_counts, int* exclusion_counts,
     int* record_stream_source_rows,
     int* record_stream_source_counts_by_candidate,
+    int* dynamic_work_counter,
     const bool accumulate_record_stream_source_rows_by_candidate,
     LJ_CLUSTERED_GMXPACKED_COUNT_SOURCE_FRAGMENT* count_light_source_fragments,
+    LJ_CLUSTERED_GMXPACKED_COUNT_SOURCE_FRAGMENT_SLIM*
+        count_slim_source_fragments,
     const int count_source_fragment_capacity, int* count_source_fragment_cursor,
     int* count_source_fragment_overflow_rows)
 {
@@ -1015,11 +1096,8 @@ static __global__ void Dedicated_Count_Nbnxm_Payload_Fixed_Light(
     const int sublane = lane_id % kSubgroupSize;
     const device_mask_t subgroup_mask =
         static_cast<device_mask_t>(0xFFu) << (subgroup * kSubgroupSize);
-    const int candidate_sci = blockIdx.x * warps_per_block + warp_id;
-    if (candidate_sci >= candidate_sci_numbers)
-    {
-        return;
-    }
+    const device_mask_t warp_mask = static_cast<device_mask_t>(0xFFFFFFFFu);
+    int candidate_sci = blockIdx.x * warps_per_block + warp_id;
 
     __shared__ int shared_record_counts[kWarpsPerBlock];
     __shared__ int shared_exclusion_counts[kWarpsPerBlock];
@@ -1045,9 +1123,32 @@ static __global__ void Dedicated_Count_Nbnxm_Payload_Fixed_Light(
     __shared__ int shared_j_molecule_ids[kWarpsPerBlock][kCountSubgroups]
                                         [kClusteredClusterSize];
     __shared__ uint64_t shared_j_signature[kWarpsPerBlock][kCountSubgroups];
+    __shared__ float shared_j_shifted_x[kWarpsPerBlock][kCountSubgroups]
+                                      [kClusteredClusterSize];
+    __shared__ float shared_j_shifted_y[kWarpsPerBlock][kCountSubgroups]
+                                      [kClusteredClusterSize];
+    __shared__ float shared_j_shifted_z[kWarpsPerBlock][kCountSubgroups]
+                                      [kClusteredClusterSize];
     __shared__ unsigned long long
         shared_exclusion_masks[kWarpsPerBlock][kCountSubgroups]
                               [kClusteredMaxSuperClusterClusters];
+
+    while (true)
+    {
+    if constexpr (kDynamicWorkQueue)
+    {
+        int dynamic_candidate_sci = candidate_sci_numbers;
+        if (lane_id == 0)
+        {
+            dynamic_candidate_sci = atomicAdd(dynamic_work_counter, 1);
+        }
+        candidate_sci =
+            deviceShfl(warp_mask, dynamic_candidate_sci, 0, warpSize);
+    }
+    if (candidate_sci >= candidate_sci_numbers)
+    {
+        break;
+    }
 
     if (lane_id == 0)
     {
@@ -1128,6 +1229,8 @@ static __global__ void Dedicated_Count_Nbnxm_Payload_Fixed_Light(
     const int leaf_begin = candidate_leaf_offsets[candidate_sci];
     const int leaf_end = candidate_leaf_offsets[candidate_sci + 1];
     const int s_max = max_leaf_cluster_span;
+    const bool use_candidate_leaf_metadata =
+        candidate_leaf_prev_running_max_ends != NULL;
     for (int candidate_idx = leaf_begin + subgroup; candidate_idx < leaf_end;
          candidate_idx += kCountSubgroups)
     {
@@ -1135,18 +1238,26 @@ static __global__ void Dedicated_Count_Nbnxm_Payload_Fixed_Light(
         const int cluster_j_start = leaf_cluster_starts[leaf_j];
         const int cluster_j_end = leaf_cluster_ends[leaf_j];
         int prev_running_max_end = 0;
-        for (int b = candidate_idx - 1; b >= leaf_begin; b -= 1)
+        if (use_candidate_leaf_metadata)
         {
-            const int b_leaf = candidate_leaf_ids[b];
-            const int b_start = leaf_cluster_starts[b_leaf];
-            const int b_end = leaf_cluster_ends[b_leaf];
-            if (b_end > prev_running_max_end)
+            prev_running_max_end =
+                candidate_leaf_prev_running_max_ends[candidate_idx];
+        }
+        else
+        {
+            for (int b = candidate_idx - 1; b >= leaf_begin; b -= 1)
             {
-                prev_running_max_end = b_end;
-            }
-            if (b_start + s_max <= prev_running_max_end)
-            {
-                break;
+                const int b_leaf = candidate_leaf_ids[b];
+                const int b_start = leaf_cluster_starts[b_leaf];
+                const int b_end = leaf_cluster_ends[b_leaf];
+                if (b_end > prev_running_max_end)
+                {
+                    prev_running_max_end = b_end;
+                }
+                if (b_start + s_max <= prev_running_max_end)
+                {
+                    break;
+                }
             }
         }
         const int leaf_mask_base =
@@ -1249,6 +1360,22 @@ static __global__ void Dedicated_Count_Nbnxm_Payload_Fixed_Light(
                 shared_j_signature[warp_id][subgroup] = signature_j;
             }
             deviceSyncWarp(subgroup_mask);
+            if constexpr (kCooperativePrune)
+            {
+                VECTOR shifted_j = {0.0f, 0.0f, 0.0f};
+                const int atom_j =
+                    shared_j_atom_ids[warp_id][subgroup][sublane];
+                if (atom_j >= 0)
+                {
+                    shifted_j =
+                        Shift_Clustered_Atom_Into_Sorted_XQ_Frame_Probe(
+                            crd[atom_j], center_j, cell, rcell);
+                }
+                shared_j_shifted_x[warp_id][subgroup][sublane] = shifted_j.x;
+                shared_j_shifted_y[warp_id][subgroup][sublane] = shifted_j.y;
+                shared_j_shifted_z[warp_id][subgroup][sublane] = shifted_j.z;
+                deviceSyncWarp(subgroup_mask);
+            }
 
             unsigned long long lane_exclusion_mask = 0ull;
             bool has_lane_exclusion = false;
@@ -1285,7 +1412,33 @@ static __global__ void Dedicated_Count_Nbnxm_Payload_Fixed_Light(
             }
             unsigned int split_local_imask = 0u;
             bool split_has_source_row = false;
-            if (sublane < kClusteredWarpSplitCount)
+            if constexpr (kCooperativePrune)
+            {
+                const unsigned int cooperative_imasks =
+                    Prune_Source_Imask_With_Shift_Cooperative_Probe(
+                        subgroup, sublane, subgroup_mask, precomputed_i_mask,
+                        valid_mask_j, fixed_shift_vec, cell, rcell, crd,
+                        shared_i_center_x[warp_id],
+                        shared_i_center_y[warp_id],
+                        shared_i_center_z[warp_id], shared_i_atom_ids[warp_id],
+                        shared_j_shifted_x[warp_id][subgroup],
+                        shared_j_shifted_y[warp_id][subgroup],
+                        shared_j_shifted_z[warp_id][subgroup],
+                        shared_i_local_masks[warp_id],
+                        record_stream_cutoff_sq);
+                if (sublane < kClusteredWarpSplitCount)
+                {
+                    split_local_imask =
+                        (cooperative_imasks >>
+                         (sublane * kClusteredClusterSize)) &
+                        0xFFu;
+                    split_has_source_row =
+                        Clustered_Split_Has_Atoms_Probe(valid_mask_j,
+                                                        sublane) &&
+                        split_local_imask != 0u;
+                }
+            }
+            else if (sublane < kClusteredWarpSplitCount)
             {
                 split_local_imask =
                     Prune_Source_Imask_With_Shift_Probe(
@@ -1336,24 +1489,44 @@ static __global__ void Dedicated_Count_Nbnxm_Payload_Fixed_Light(
                     fragment_base + __popc(lower_source_rows);
                 if (fragment_idx < count_source_fragment_capacity)
                 {
-                    LJ_CLUSTERED_GMXPACKED_COUNT_SOURCE_FRAGMENT* fragment =
-                        count_light_source_fragments + fragment_idx;
-                    fragment->sci_id = candidate_sci;
-                    fragment->shift_id = fixed_shift_id;
-                    fragment->supercluster_id = super_i;
-                    fragment->cluster_j = cluster_j;
-                    fragment->split_id = sublane;
-                    fragment->imask = split_local_imask;
-                    fragment->valid_mask_j = valid_mask_j;
-                    fragment->local_mask_j = local_mask_j;
-                    fragment->source_order = fragment_idx;
-#pragma unroll
-                    for (int i_local = 0;
-                         i_local < kClusteredMaxSuperClusterClusters;
-                         i_local += 1)
+                    if constexpr (kSlimEmit)
                     {
-                        fragment->exclusion_masks[i_local] =
-                            shared_exclusion_masks[warp_id][subgroup][i_local];
+                        LJ_CLUSTERED_GMXPACKED_COUNT_SOURCE_FRAGMENT_SLIM*
+                            fragment =
+                                count_slim_source_fragments + fragment_idx;
+                        fragment->sci_id = candidate_sci;
+                        fragment->shift_id = fixed_shift_id;
+                        fragment->supercluster_id = super_i;
+                        fragment->cluster_j = cluster_j;
+                        fragment->split_id = sublane;
+                        fragment->imask = split_local_imask;
+                        fragment->valid_mask_j = valid_mask_j;
+                        fragment->local_mask_j = local_mask_j;
+                        fragment->source_order = fragment_idx;
+                    }
+                    else
+                    {
+                        LJ_CLUSTERED_GMXPACKED_COUNT_SOURCE_FRAGMENT*
+                            fragment =
+                                count_light_source_fragments + fragment_idx;
+                        fragment->sci_id = candidate_sci;
+                        fragment->shift_id = fixed_shift_id;
+                        fragment->supercluster_id = super_i;
+                        fragment->cluster_j = cluster_j;
+                        fragment->split_id = sublane;
+                        fragment->imask = split_local_imask;
+                        fragment->valid_mask_j = valid_mask_j;
+                        fragment->local_mask_j = local_mask_j;
+                        fragment->source_order = fragment_idx;
+#pragma unroll
+                        for (int i_local = 0;
+                             i_local < kClusteredMaxSuperClusterClusters;
+                             i_local += 1)
+                        {
+                            fragment->exclusion_masks[i_local] =
+                                shared_exclusion_masks[warp_id][subgroup]
+                                                      [i_local];
+                        }
                     }
                 }
                 else
@@ -1398,6 +1571,11 @@ static __global__ void Dedicated_Count_Nbnxm_Payload_Fixed_Light(
         {
             atomicAdd(record_stream_source_rows, source_count);
         }
+    }
+    if constexpr (!kDynamicWorkQueue)
+    {
+        break;
+    }
     }
 }
 
@@ -1681,6 +1859,7 @@ void Launch_Clustered_Gmxpacked_Count_Fixed_Light_Dedicated(
     const int* super_cluster_offsets, const int* cluster_to_supercluster,
     const int* sci_supercluster_ids, const int* candidate_leaf_offsets,
     const int* candidate_leaf_ids, int candidate_leaf_cluster_stride,
+    const int* candidate_leaf_prev_running_max_ends,
     const unsigned int* candidate_leaf_reach_masks,
     const unsigned int* cluster_valid_masks,
     const unsigned int* cluster_local_masks, const VECTOR* cluster_centers,
@@ -1697,22 +1876,24 @@ void Launch_Clustered_Gmxpacked_Count_Fixed_Light_Dedicated(
     int* count_source_fragment_overflow_rows)
 {
 #ifndef USE_CPU
+    auto* kernel = Dedicated_Count_Nbnxm_Payload_Fixed_Light<false, false, false>;
     Launch_Device_Kernel(
-        Dedicated_Count_Nbnxm_Payload_Fixed_Light,
+        kernel,
         candidate_sci_blocks, builder_block_size, 0, NULL,
         candidate_sci_numbers, cluster_size, local_atom_numbers,
         record_stream_cutoff, cell, rcell, crd, permutation, cluster_offsets,
         leaf_cluster_starts, leaf_cluster_ends, super_cluster_offsets,
         cluster_to_supercluster, sci_supercluster_ids, candidate_leaf_offsets,
         candidate_leaf_ids, candidate_leaf_cluster_stride,
+        candidate_leaf_prev_running_max_ends,
         candidate_leaf_reach_masks, cluster_valid_masks, cluster_local_masks,
         cluster_centers, cluster_molecule_signatures, cluster_molecule_ids,
         excluded_list_start, excluded_list, excluded_numbers,
         max_leaf_cluster_span, sci_shift_flags, cjpacked_group_counts,
         exclusion_counts, record_stream_source_rows,
-        record_stream_source_counts_by_candidate,
+        record_stream_source_counts_by_candidate, NULL,
         accumulate_record_stream_source_rows_by_candidate,
-        count_light_source_fragments, count_source_fragment_capacity,
+        count_light_source_fragments, NULL, count_source_fragment_capacity,
         count_source_fragment_cursor, count_source_fragment_overflow_rows);
 #else
     (void)candidate_sci_blocks;
@@ -1734,6 +1915,7 @@ void Launch_Clustered_Gmxpacked_Count_Fixed_Light_Dedicated(
     (void)candidate_leaf_offsets;
     (void)candidate_leaf_ids;
     (void)candidate_leaf_cluster_stride;
+    (void)candidate_leaf_prev_running_max_ends;
     (void)candidate_leaf_reach_masks;
     (void)cluster_valid_masks;
     (void)cluster_local_masks;
@@ -1751,6 +1933,276 @@ void Launch_Clustered_Gmxpacked_Count_Fixed_Light_Dedicated(
     (void)record_stream_source_counts_by_candidate;
     (void)accumulate_record_stream_source_rows_by_candidate;
     (void)count_light_source_fragments;
+    (void)count_source_fragment_capacity;
+    (void)count_source_fragment_cursor;
+    (void)count_source_fragment_overflow_rows;
+#endif
+}
+
+void Launch_Clustered_Gmxpacked_Count_Fixed_Light_Dedicated_Cooperative(
+    int candidate_sci_blocks, int builder_block_size,
+    int candidate_sci_numbers, int cluster_size, int local_atom_numbers,
+    float record_stream_cutoff, LTMatrix3 cell, LTMatrix3 rcell,
+    const VECTOR* crd, const int* permutation, const int* cluster_offsets,
+    const int* leaf_cluster_starts, const int* leaf_cluster_ends,
+    const int* super_cluster_offsets, const int* cluster_to_supercluster,
+    const int* sci_supercluster_ids, const int* candidate_leaf_offsets,
+    const int* candidate_leaf_ids, int candidate_leaf_cluster_stride,
+    const int* candidate_leaf_prev_running_max_ends,
+    const unsigned int* candidate_leaf_reach_masks,
+    const unsigned int* cluster_valid_masks,
+    const unsigned int* cluster_local_masks, const VECTOR* cluster_centers,
+    const uint64_t* cluster_molecule_signatures,
+    const int* cluster_molecule_ids, const int* excluded_list_start,
+    const int* excluded_list, const int* excluded_numbers,
+    int max_leaf_cluster_span, int* sci_shift_flags,
+    int* cjpacked_group_counts, int* exclusion_counts,
+    int* record_stream_source_rows,
+    int* record_stream_source_counts_by_candidate,
+    bool accumulate_record_stream_source_rows_by_candidate,
+    LJ_CLUSTERED_GMXPACKED_COUNT_SOURCE_FRAGMENT* count_light_source_fragments,
+    int count_source_fragment_capacity, int* count_source_fragment_cursor,
+    int* count_source_fragment_overflow_rows)
+{
+#ifndef USE_CPU
+    auto* kernel =
+        Dedicated_Count_Nbnxm_Payload_Fixed_Light<false, false, true>;
+    Launch_Device_Kernel(
+        kernel,
+        candidate_sci_blocks, builder_block_size, 0, NULL,
+        candidate_sci_numbers, cluster_size, local_atom_numbers,
+        record_stream_cutoff, cell, rcell, crd, permutation, cluster_offsets,
+        leaf_cluster_starts, leaf_cluster_ends, super_cluster_offsets,
+        cluster_to_supercluster, sci_supercluster_ids, candidate_leaf_offsets,
+        candidate_leaf_ids, candidate_leaf_cluster_stride,
+        candidate_leaf_prev_running_max_ends,
+        candidate_leaf_reach_masks, cluster_valid_masks, cluster_local_masks,
+        cluster_centers, cluster_molecule_signatures, cluster_molecule_ids,
+        excluded_list_start, excluded_list, excluded_numbers,
+        max_leaf_cluster_span, sci_shift_flags, cjpacked_group_counts,
+        exclusion_counts, record_stream_source_rows,
+        record_stream_source_counts_by_candidate, NULL,
+        accumulate_record_stream_source_rows_by_candidate,
+        count_light_source_fragments, NULL, count_source_fragment_capacity,
+        count_source_fragment_cursor, count_source_fragment_overflow_rows);
+#else
+    (void)candidate_sci_blocks;
+    (void)builder_block_size;
+    (void)candidate_sci_numbers;
+    (void)cluster_size;
+    (void)local_atom_numbers;
+    (void)record_stream_cutoff;
+    (void)cell;
+    (void)rcell;
+    (void)crd;
+    (void)permutation;
+    (void)cluster_offsets;
+    (void)leaf_cluster_starts;
+    (void)leaf_cluster_ends;
+    (void)super_cluster_offsets;
+    (void)cluster_to_supercluster;
+    (void)sci_supercluster_ids;
+    (void)candidate_leaf_offsets;
+    (void)candidate_leaf_ids;
+    (void)candidate_leaf_cluster_stride;
+    (void)candidate_leaf_prev_running_max_ends;
+    (void)candidate_leaf_reach_masks;
+    (void)cluster_valid_masks;
+    (void)cluster_local_masks;
+    (void)cluster_centers;
+    (void)cluster_molecule_signatures;
+    (void)cluster_molecule_ids;
+    (void)excluded_list_start;
+    (void)excluded_list;
+    (void)excluded_numbers;
+    (void)max_leaf_cluster_span;
+    (void)sci_shift_flags;
+    (void)cjpacked_group_counts;
+    (void)exclusion_counts;
+    (void)record_stream_source_rows;
+    (void)record_stream_source_counts_by_candidate;
+    (void)accumulate_record_stream_source_rows_by_candidate;
+    (void)count_light_source_fragments;
+    (void)count_source_fragment_capacity;
+    (void)count_source_fragment_cursor;
+    (void)count_source_fragment_overflow_rows;
+#endif
+}
+
+void Launch_Clustered_Gmxpacked_Count_Fixed_Light_Dedicated_Dynamic(
+    int candidate_sci_blocks, int builder_block_size,
+    int candidate_sci_numbers, int cluster_size, int local_atom_numbers,
+    float record_stream_cutoff, LTMatrix3 cell, LTMatrix3 rcell,
+    const VECTOR* crd, const int* permutation, const int* cluster_offsets,
+    const int* leaf_cluster_starts, const int* leaf_cluster_ends,
+    const int* super_cluster_offsets, const int* cluster_to_supercluster,
+    const int* sci_supercluster_ids, const int* candidate_leaf_offsets,
+    const int* candidate_leaf_ids, int candidate_leaf_cluster_stride,
+    const int* candidate_leaf_prev_running_max_ends,
+    const unsigned int* candidate_leaf_reach_masks,
+    const unsigned int* cluster_valid_masks,
+    const unsigned int* cluster_local_masks, const VECTOR* cluster_centers,
+    const uint64_t* cluster_molecule_signatures,
+    const int* cluster_molecule_ids, const int* excluded_list_start,
+    const int* excluded_list, const int* excluded_numbers,
+    int max_leaf_cluster_span, int* sci_shift_flags,
+    int* cjpacked_group_counts, int* exclusion_counts,
+    int* record_stream_source_rows,
+    int* record_stream_source_counts_by_candidate,
+    bool accumulate_record_stream_source_rows_by_candidate,
+    LJ_CLUSTERED_GMXPACKED_COUNT_SOURCE_FRAGMENT* count_light_source_fragments,
+    int count_source_fragment_capacity, int* count_source_fragment_cursor,
+    int* count_source_fragment_overflow_rows, int* dynamic_work_counter)
+{
+#ifndef USE_CPU
+    auto* kernel = Dedicated_Count_Nbnxm_Payload_Fixed_Light<true, false, false>;
+    Launch_Device_Kernel(
+        kernel,
+        candidate_sci_blocks, builder_block_size, 0, NULL,
+        candidate_sci_numbers, cluster_size, local_atom_numbers,
+        record_stream_cutoff, cell, rcell, crd, permutation, cluster_offsets,
+        leaf_cluster_starts, leaf_cluster_ends, super_cluster_offsets,
+        cluster_to_supercluster, sci_supercluster_ids, candidate_leaf_offsets,
+        candidate_leaf_ids, candidate_leaf_cluster_stride,
+        candidate_leaf_prev_running_max_ends,
+        candidate_leaf_reach_masks, cluster_valid_masks, cluster_local_masks,
+        cluster_centers, cluster_molecule_signatures, cluster_molecule_ids,
+        excluded_list_start, excluded_list, excluded_numbers,
+        max_leaf_cluster_span, sci_shift_flags, cjpacked_group_counts,
+        exclusion_counts, record_stream_source_rows,
+        record_stream_source_counts_by_candidate, dynamic_work_counter,
+        accumulate_record_stream_source_rows_by_candidate,
+        count_light_source_fragments, NULL, count_source_fragment_capacity,
+        count_source_fragment_cursor, count_source_fragment_overflow_rows);
+#else
+    (void)candidate_sci_blocks;
+    (void)builder_block_size;
+    (void)candidate_sci_numbers;
+    (void)cluster_size;
+    (void)local_atom_numbers;
+    (void)record_stream_cutoff;
+    (void)cell;
+    (void)rcell;
+    (void)crd;
+    (void)permutation;
+    (void)cluster_offsets;
+    (void)leaf_cluster_starts;
+    (void)leaf_cluster_ends;
+    (void)super_cluster_offsets;
+    (void)cluster_to_supercluster;
+    (void)sci_supercluster_ids;
+    (void)candidate_leaf_offsets;
+    (void)candidate_leaf_ids;
+    (void)candidate_leaf_cluster_stride;
+    (void)candidate_leaf_prev_running_max_ends;
+    (void)candidate_leaf_reach_masks;
+    (void)cluster_valid_masks;
+    (void)cluster_local_masks;
+    (void)cluster_centers;
+    (void)cluster_molecule_signatures;
+    (void)cluster_molecule_ids;
+    (void)excluded_list_start;
+    (void)excluded_list;
+    (void)excluded_numbers;
+    (void)max_leaf_cluster_span;
+    (void)sci_shift_flags;
+    (void)cjpacked_group_counts;
+    (void)exclusion_counts;
+    (void)record_stream_source_rows;
+    (void)record_stream_source_counts_by_candidate;
+    (void)accumulate_record_stream_source_rows_by_candidate;
+    (void)count_light_source_fragments;
+    (void)count_source_fragment_capacity;
+    (void)count_source_fragment_cursor;
+    (void)count_source_fragment_overflow_rows;
+    (void)dynamic_work_counter;
+#endif
+}
+
+void Launch_Clustered_Gmxpacked_Count_Fixed_Light_Dedicated_Slim(
+    int candidate_sci_blocks, int builder_block_size,
+    int candidate_sci_numbers, int cluster_size, int local_atom_numbers,
+    float record_stream_cutoff, LTMatrix3 cell, LTMatrix3 rcell,
+    const VECTOR* crd, const int* permutation, const int* cluster_offsets,
+    const int* leaf_cluster_starts, const int* leaf_cluster_ends,
+    const int* super_cluster_offsets, const int* cluster_to_supercluster,
+    const int* sci_supercluster_ids, const int* candidate_leaf_offsets,
+    const int* candidate_leaf_ids, int candidate_leaf_cluster_stride,
+    const int* candidate_leaf_prev_running_max_ends,
+    const unsigned int* candidate_leaf_reach_masks,
+    const unsigned int* cluster_valid_masks,
+    const unsigned int* cluster_local_masks, const VECTOR* cluster_centers,
+    const uint64_t* cluster_molecule_signatures,
+    const int* cluster_molecule_ids, const int* excluded_list_start,
+    const int* excluded_list, const int* excluded_numbers,
+    int max_leaf_cluster_span, int* sci_shift_flags,
+    int* cjpacked_group_counts, int* exclusion_counts,
+    int* record_stream_source_rows,
+    int* record_stream_source_counts_by_candidate,
+    bool accumulate_record_stream_source_rows_by_candidate,
+    LJ_CLUSTERED_GMXPACKED_COUNT_SOURCE_FRAGMENT_SLIM*
+        count_slim_source_fragments,
+    int count_source_fragment_capacity, int* count_source_fragment_cursor,
+    int* count_source_fragment_overflow_rows)
+{
+#ifndef USE_CPU
+    auto* kernel = Dedicated_Count_Nbnxm_Payload_Fixed_Light<false, true, false>;
+    Launch_Device_Kernel(
+        kernel,
+        candidate_sci_blocks, builder_block_size, 0, NULL,
+        candidate_sci_numbers, cluster_size, local_atom_numbers,
+        record_stream_cutoff, cell, rcell, crd, permutation, cluster_offsets,
+        leaf_cluster_starts, leaf_cluster_ends, super_cluster_offsets,
+        cluster_to_supercluster, sci_supercluster_ids, candidate_leaf_offsets,
+        candidate_leaf_ids, candidate_leaf_cluster_stride,
+        candidate_leaf_prev_running_max_ends,
+        candidate_leaf_reach_masks, cluster_valid_masks, cluster_local_masks,
+        cluster_centers, cluster_molecule_signatures, cluster_molecule_ids,
+        excluded_list_start, excluded_list, excluded_numbers,
+        max_leaf_cluster_span, sci_shift_flags, cjpacked_group_counts,
+        exclusion_counts, record_stream_source_rows,
+        record_stream_source_counts_by_candidate, NULL,
+        accumulate_record_stream_source_rows_by_candidate,
+        NULL, count_slim_source_fragments, count_source_fragment_capacity,
+        count_source_fragment_cursor, count_source_fragment_overflow_rows);
+#else
+    (void)candidate_sci_blocks;
+    (void)builder_block_size;
+    (void)candidate_sci_numbers;
+    (void)cluster_size;
+    (void)local_atom_numbers;
+    (void)record_stream_cutoff;
+    (void)cell;
+    (void)rcell;
+    (void)crd;
+    (void)permutation;
+    (void)cluster_offsets;
+    (void)leaf_cluster_starts;
+    (void)leaf_cluster_ends;
+    (void)super_cluster_offsets;
+    (void)cluster_to_supercluster;
+    (void)sci_supercluster_ids;
+    (void)candidate_leaf_offsets;
+    (void)candidate_leaf_ids;
+    (void)candidate_leaf_cluster_stride;
+    (void)candidate_leaf_prev_running_max_ends;
+    (void)candidate_leaf_reach_masks;
+    (void)cluster_valid_masks;
+    (void)cluster_local_masks;
+    (void)cluster_centers;
+    (void)cluster_molecule_signatures;
+    (void)cluster_molecule_ids;
+    (void)excluded_list_start;
+    (void)excluded_list;
+    (void)excluded_numbers;
+    (void)max_leaf_cluster_span;
+    (void)sci_shift_flags;
+    (void)cjpacked_group_counts;
+    (void)exclusion_counts;
+    (void)record_stream_source_rows;
+    (void)record_stream_source_counts_by_candidate;
+    (void)accumulate_record_stream_source_rows_by_candidate;
+    (void)count_slim_source_fragments;
     (void)count_source_fragment_capacity;
     (void)count_source_fragment_cursor;
     (void)count_source_fragment_overflow_rows;

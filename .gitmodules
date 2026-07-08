@@ -1,0 +1,3 @@
+[submodule "SPONGE/third_party/cornerstone_octree"]
+	path = SPONGE/third_party/cornerstone_octree
+	url = https://github.com/sekelle/cornerstone-octree.git

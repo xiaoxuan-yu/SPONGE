@@ -28,6 +28,9 @@
 
 #ifndef USE_CPU
 #include <cub/cub.cuh>
+#include "../third_party/cornerstone_octree/include/cstone/cuda/device_vector.h"
+#include "../third_party/cornerstone_octree/include/cstone/execution.hpp"
+#include "../third_party/cornerstone_octree/include/cstone/primitives/primitives_gpu.h"
 #include "../third_party/cornerstone_octree/include/cstone/tree/octree_gpu.h"
 #include "../third_party/cornerstone_octree/include/cstone/tree/update_gpu.cuh"
 #endif
@@ -39,11 +42,11 @@ struct LJ_CORNERSTONE_STATE
     cstone::DeviceVector<uint64_t> tmp_leaves;
     cstone::DeviceVector<unsigned> leaf_counts;
     cstone::DeviceVector<cstone::TreeNodeIndex> work_array;
-    cstone::OctreeData<uint64_t, cstone::GpuTag> octree;
+    cstone::OctreeData<uint64_t, cstone::execution::Gpu> octree;
 #else
     std::vector<uint64_t> leaves;
     std::vector<unsigned> leaf_counts;
-    cstone::OctreeData<uint64_t, cstone::CpuTag> octree;
+    cstone::OctreeData<uint64_t, cstone::execution::Cpu> octree;
 #endif
 };
 
@@ -54,6 +57,9 @@ namespace
 
 using CornerstoneKey = uint64_t;
 using CornerstoneNodeIndex = cstone::TreeNodeIndex;
+#ifndef USE_CPU
+using cstone::rawPtr;
+#endif
 constexpr int kClusteredBuilderBlockSize = 128;
 constexpr int kClusteredBuilderWarpSize = 32;
 constexpr int kClusteredPruneBlockSize = 64;
@@ -224,6 +230,13 @@ static bool Clustered_Gmxpacked_Count_Fixed_Light_Dedicated_Enabled()
 {
     return Clustered_Gmxpacked_Env_Flag_Enabled(
         "SPONGE_CLUSTERED_GMXPACKED_COUNT_FIXED_LIGHT_DEDICATED");
+}
+
+static bool
+Clustered_Gmxpacked_Count_Fixed_Light_Cooperative_Enabled()
+{
+    return Clustered_Gmxpacked_Env_Flag_Enabled(
+        "SPONGE_CLUSTERED_GMXPACKED_COUNT_FIXED_LIGHT_COOPERATIVE");
 }
 
 static bool Clustered_Fixed_Shift_Candidate_Leaf_Collect_Sass_Opt_Enabled()
@@ -710,8 +723,8 @@ static void Sort_Cornerstone_Keys_On_Device(LJ_CLUSTER_LAYOUT* layout,
                                  &layout->d_sort_temp_storage,
                                  &layout->sort_temp_storage_bytes);
 
-    cstone::sortByKeyGpu<uint64_t, int>(
-        d_keys, d_keys + count, d_values,
+    cstone::sortByKey<uint64_t, int>(
+        cstone::execution::gpuDefaultStream, d_keys, d_keys + count, d_values,
         reinterpret_cast<uint64_t*>(layout->d_sort_key_buffer),
         reinterpret_cast<int*>(layout->d_sort_value_buffer),
         layout->d_sort_temp_storage, temp_storage_bytes);
@@ -14875,13 +14888,14 @@ static void Build_Cornerstone_Tree(LJ_CLUSTER_LAYOUT* layout)
     for (int iter = 0; iter < 64 && !converged; iter += 1)
     {
         converged = cstone::updateOctreeGpu<CornerstoneKey>(
-            key_span, static_cast<unsigned>(layout->cornerstone_leaf_size),
-            state->leaves, state->leaf_counts, state->tmp_leaves,
-            state->work_array);
+            cstone::execution::gpuDefaultStream, key_span,
+            static_cast<unsigned>(layout->cornerstone_leaf_size), state->leaves,
+            state->leaf_counts, state->tmp_leaves, state->work_array);
     }
     state->octree.resize(static_cast<CornerstoneNodeIndex>(
         cstone::nNodes(state->leaves)));
-    cstone::buildOctreeGpu(rawPtr(state->leaves), state->octree.data());
+    cstone::buildOctreeGpu(cstone::execution::gpuDefaultStream,
+                           rawPtr(state->leaves), state->octree.data());
 #else
     std::vector<CornerstoneKey> host_keys(
         static_cast<size_t>(layout->total_atom_numbers));
@@ -29613,6 +29627,9 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
             d_gmxpacked_count_source_fragment_cursor != NULL &&
             d_gmxpacked_count_source_fragment_overflow_rows != NULL &&
             Clustered_Gmxpacked_Count_Fixed_Light_Dedicated_Enabled();
+        const bool use_gmxpacked_count_fixed_light_cooperative =
+            use_gmxpacked_count_fixed_light_dedicated &&
+            Clustered_Gmxpacked_Count_Fixed_Light_Cooperative_Enabled();
         const long long fixed_shift_count_metadata_bytes =
             use_gmxpacked_fixed_shift_count_metadata
                 ? static_cast<long long>(candidate_leaf_numbers) *
@@ -29623,6 +29640,8 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
         const char* gmxpacked_count_variant =
             use_gmxpacked_count_fixed_light_slim
                 ? "subgroup-fixed-light-slim"
+            : use_gmxpacked_count_fixed_light_cooperative
+                ? "subgroup-fixed-light-dedicated-cooperative"
             : use_gmxpacked_count_fixed_light_dedicated
                 ? "subgroup-fixed-light-dedicated"
             : use_gmxpacked_fixed_shift_count_metadata
@@ -29680,7 +29699,7 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                     "fixed_specialized=%d rolling_source_cache=%d "
                     "onepass=%d light=%d parallel_accum=%d "
                     "parallel_fragment_emit=%d count_metadata=%d "
-                    "count_metadata_bytes=%lld\n",
+                    "count_cooperative=%d count_metadata_bytes=%lld\n",
                     md_info.sys.steps, gmxpacked_count_variant,
                     use_gmxpacked_fixed_shift_builder_specialized ? 1 : 0,
                     Clustered_Gmxpacked_Active_View_Rolling_Source_Cache_Enabled()
@@ -29691,6 +29710,7 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                     use_gmxpacked_count_parallel_accum ? 1 : 0,
                     use_gmxpacked_count_fragment_parallel_emit ? 1 : 0,
                     use_gmxpacked_fixed_shift_count_metadata ? 1 : 0,
+                    use_gmxpacked_count_fixed_light_cooperative ? 1 : 0,
                     fixed_shift_count_metadata_bytes);
             fflush(stderr);
         }
@@ -29821,7 +29841,11 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
         }
         if (use_gmxpacked_count_fixed_light_dedicated)
         {
-            Launch_Clustered_Gmxpacked_Count_Fixed_Light_Dedicated(
+            auto* launch_fixed_light_dedicated_count =
+                use_gmxpacked_count_fixed_light_cooperative
+                    ? Launch_Clustered_Gmxpacked_Count_Fixed_Light_Dedicated_Cooperative
+                    : Launch_Clustered_Gmxpacked_Count_Fixed_Light_Dedicated;
+            launch_fixed_light_dedicated_count(
                 candidate_sci_blocks, kClusteredBuilderBlockSize,
                 candidate_sci_numbers, cluster_size, local_atom_numbers,
                 gmxpacked_record_stream_cutoff, cell, rcell,
@@ -29830,6 +29854,9 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                 d_super_cluster_offsets, d_cluster_to_supercluster,
                 candidate_sci_supercluster_ids, d_sci_candidate_leaf_offsets,
                 d_sci_candidate_leaf_ids, candidate_leaf_cluster_stride,
+                use_gmxpacked_fixed_shift_count_metadata
+                    ? d_sci_candidate_leaf_prev_running_max_ends
+                    : NULL,
                 d_candidate_leaf_reach_masks, d_cluster_valid_masks,
                 d_cluster_local_masks, d_cluster_centers,
                 cluster_molecule_signatures, cluster_molecule_ids,
@@ -29902,7 +29929,9 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
 #ifndef USE_CPU
         Clustered_Debug_Device_Sync_If_Tracing(
             use_gmxpacked_count_fixed_light_dedicated
-                ? "Dedicated_Count_Nbnxm_Payload_Fixed_Light"
+                ? (use_gmxpacked_count_fixed_light_cooperative
+                       ? "Dedicated_Count_Nbnxm_Payload_Fixed_Light_Cooperative"
+                       : "Dedicated_Count_Nbnxm_Payload_Fixed_Light")
                 : "Count_Nbnxm_Payload_From_Candidate_Leaves");
 #endif
         if (capture_fill_prune_reuse_sources)
