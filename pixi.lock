@@ -734,6 +734,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/cuda-cudart-static-13.0.96-hecca717_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/cuda-cuobjdump-13.0.85-hffce074_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/cuda-gdb-13.0.85-py311h1da45be_3.conda
+      - conda: https://conda.anaconda.org/conda-forge/linux-64/cuda-nsight-13.0.85-h7938cbb_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/cuda-nvcc-13.0.88-hcdd1206_6.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/cuda-nvcc-impl-13.0.88-h85509e4_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/cuda-nvcc-tools-13.0.88-he02047a_0.conda
@@ -2347,6 +2348,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/cuda-cudart-static-13.0.96-hecca717_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/cuda-cuobjdump-13.0.85-hffce074_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/cuda-gdb-13.0.85-py310hb07c568_3.conda
+      - conda: https://conda.anaconda.org/conda-forge/linux-64/cuda-nsight-13.0.85-h7938cbb_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/cuda-nvcc-13.0.88-hcdd1206_6.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/cuda-nvcc-impl-13.0.88-h85509e4_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/cuda-nvcc-tools-13.0.88-he02047a_0.conda
@@ -4123,6 +4125,16 @@ packages:
   run_exports: {}
   size: 5092124
   timestamp: 1782851470555
+- conda: https://conda.anaconda.org/conda-forge/linux-64/cuda-nsight-13.0.85-h7938cbb_0.conda
+  sha256: f474c27201fa1c34a6327135b8333b308c6ff051e1def00cafb7d037212e36fe
+  md5: 1866249b0b238bc40809c891713f3482
+  depends:
+  - cuda-version >=13.0,<13.1.0a0
+  license: LicenseRef-NVIDIA-End-User-License-Agreement
+  purls: []
+  run_exports: {}
+  size: 118692095
+  timestamp: 1757018266163
 - conda: https://conda.anaconda.org/conda-forge/linux-64/cuda-nvcc-12.8.93-hcdd1206_2.conda
   sha256: fa311071c58649de53bdae218453f32983ba684a659ba284d100133cb86fee62
   md5: 04103ae1cfff32c1a76cd31164b8e128
