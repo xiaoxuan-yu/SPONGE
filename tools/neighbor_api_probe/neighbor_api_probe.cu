@@ -805,7 +805,7 @@ void RunSpongeCandidateCollect(SpongeInternalData& sponge)
         cstone::rawPtr(sponge.clusterExtents), cstone::rawPtr(sponge.clusterValidMasks),
         cstone::rawPtr(sponge.clusterLocalMasks), cstone::rawPtr(sponge.nodePrefixes),
         cstone::rawPtr(sponge.childOffsets), cstone::rawPtr(sponge.parents), cstone::rawPtr(sponge.internalToLeaf),
-        nullptr, true, true, true, true, sponge.onepassCapacity, cstone::rawPtr(sponge.collectCounts),
+        nullptr, true, true, true, true, false, sponge.onepassCapacity, cstone::rawPtr(sponge.collectCounts),
         cstone::rawPtr(sponge.collectRecords), cstone::rawPtr(sponge.collectCursor),
         cstone::rawPtr(sponge.collectOverflowCounter));
 }

@@ -12,7 +12,9 @@ namespace nbnxm_microbench
 {
 
 constexpr char kSnapshotMagic[8] = { 'N', 'B', 'N', 'X', 'M', 'B', 'E', 'N' };
+constexpr char kBuilderMetadataMagic[8] = { 'N', 'B', 'N', 'X', 'M', 'B', 'L', 'D' };
 constexpr uint32_t kSnapshotVersion = 2u;
+constexpr uint32_t kBuilderMetadataVersion = 1u;
 
 enum class SnapshotKind : uint32_t
 {
@@ -226,6 +228,21 @@ struct SpongeGmxpackedForceOnlySnapshotHeader
     LTMatrix3POD cell = {};
 };
 
+struct SpongeGmxpackedBuilderMetadataHeader
+{
+    char magic[8] = {};
+    uint32_t version = kBuilderMetadataVersion;
+    uint32_t flags = 0u;
+    uint64_t leaf_numbers = 0u;
+    uint64_t node_numbers = 0u;
+    uint64_t parent_numbers = 0u;
+    uint64_t candidate_sci_numbers = 0u;
+    uint64_t sci_supercluster_id_numbers = 0u;
+    uint64_t candidate_shift_numbers = 0u;
+    uint64_t candidate_leaf_numbers = 0u;
+    uint64_t candidate_leaf_prev_numbers = 0u;
+};
+
 struct SpongeForceOnlySnapshot
 {
     SpongeForceOnlySnapshotHeader header = {};
@@ -287,12 +304,28 @@ struct SpongeGmxpackedForceOnlySnapshot
     std::vector<int> cluster_offsets;
     std::vector<unsigned int> cluster_valid_masks;
     std::vector<unsigned int> cluster_local_masks;
+    std::vector<Float4POD> cluster_centers;
+    std::vector<Float4POD> cluster_extents;
     std::vector<int> super_cluster_offsets;
+    std::vector<Float4POD> super_cluster_centers;
+    std::vector<Float4POD> super_cluster_sizes;
     std::vector<SpongeGmxpackedSciPOD> sci;
     std::vector<SpongeGmxpackedCjPOD> cjpacked;
     std::vector<SpongeGmxpackedExclusionPOD> excl;
     std::vector<uint64_t> pair_shift_bits;
     std::vector<int> sci_shift_safe_flags;
+    std::vector<int> leaf_cluster_starts;
+    std::vector<int> leaf_cluster_ends;
+    std::vector<int> leaf_all_local;
+    std::vector<uint64_t> octree_prefixes;
+    std::vector<int> octree_child_offsets;
+    std::vector<int> octree_parents;
+    std::vector<int> octree_internal_to_leaf;
+    std::vector<int> sci_supercluster_ids;
+    std::vector<int> candidate_shift_ids;
+    std::vector<int> candidate_leaf_offsets;
+    std::vector<int> candidate_leaf_ids;
+    std::vector<int> candidate_leaf_prev_running_max_ends;
     std::vector<int> sorted_atom_ids;
     std::vector<Float4POD> sorted_xq;
     std::vector<int> sorted_lj_type;
@@ -356,12 +389,29 @@ inline SnapshotFileHeader MakeFileHeader(SnapshotKind kind)
     return header;
 }
 
+inline SpongeGmxpackedBuilderMetadataHeader MakeBuilderMetadataHeader()
+{
+    SpongeGmxpackedBuilderMetadataHeader header = {};
+    std::memcpy(header.magic, kBuilderMetadataMagic,
+                sizeof(kBuilderMetadataMagic));
+    header.version = kBuilderMetadataVersion;
+    return header;
+}
+
 inline bool IsValidFileHeader(const SnapshotFileHeader& header,
                               SnapshotKind expected_kind)
 {
     return std::memcmp(header.magic, kSnapshotMagic, sizeof(kSnapshotMagic)) == 0 &&
            header.version == kSnapshotVersion &&
            header.kind == static_cast<uint32_t>(expected_kind);
+}
+
+inline bool IsValidBuilderMetadataHeader(
+    const SpongeGmxpackedBuilderMetadataHeader& header)
+{
+    return std::memcmp(header.magic, kBuilderMetadataMagic,
+                       sizeof(kBuilderMetadataMagic)) == 0 &&
+           header.version == kBuilderMetadataVersion;
 }
 
 inline bool WriteSpongeForceOnlySnapshot(const std::string& path,
@@ -514,6 +564,52 @@ inline bool WriteSpongeGmxpackedForceOnlySnapshot(
     {
         return false;
     }
+    if (!snapshot.cluster_centers.empty() ||
+        !snapshot.cluster_extents.empty() ||
+        !snapshot.super_cluster_centers.empty() ||
+        !snapshot.super_cluster_sizes.empty() ||
+        !snapshot.leaf_cluster_starts.empty() ||
+        !snapshot.octree_prefixes.empty() ||
+        !snapshot.sci_supercluster_ids.empty() ||
+        !snapshot.candidate_leaf_offsets.empty())
+    {
+        SpongeGmxpackedBuilderMetadataHeader metadata =
+            MakeBuilderMetadataHeader();
+        metadata.leaf_numbers = snapshot.leaf_cluster_starts.size();
+        metadata.node_numbers = snapshot.octree_prefixes.size();
+        metadata.parent_numbers = snapshot.octree_parents.size();
+        metadata.candidate_sci_numbers =
+            snapshot.candidate_leaf_offsets.empty()
+                ? snapshot.sci_supercluster_ids.size()
+                : snapshot.candidate_leaf_offsets.size() - 1;
+        metadata.sci_supercluster_id_numbers =
+            snapshot.sci_supercluster_ids.size();
+        metadata.candidate_shift_numbers = snapshot.candidate_shift_ids.size();
+        metadata.candidate_leaf_numbers = snapshot.candidate_leaf_ids.size();
+        metadata.candidate_leaf_prev_numbers =
+            snapshot.candidate_leaf_prev_running_max_ends.size();
+        if (!WriteBinary(&out, metadata) ||
+            !WriteVector(&out, snapshot.cluster_centers) ||
+            !WriteVector(&out, snapshot.cluster_extents) ||
+            !WriteVector(&out, snapshot.super_cluster_centers) ||
+            !WriteVector(&out, snapshot.super_cluster_sizes) ||
+            !WriteVector(&out, snapshot.leaf_cluster_starts) ||
+            !WriteVector(&out, snapshot.leaf_cluster_ends) ||
+            !WriteVector(&out, snapshot.leaf_all_local) ||
+            !WriteVector(&out, snapshot.octree_prefixes) ||
+            !WriteVector(&out, snapshot.octree_child_offsets) ||
+            !WriteVector(&out, snapshot.octree_parents) ||
+            !WriteVector(&out, snapshot.octree_internal_to_leaf) ||
+            !WriteVector(&out, snapshot.sci_supercluster_ids) ||
+            !WriteVector(&out, snapshot.candidate_shift_ids) ||
+            !WriteVector(&out, snapshot.candidate_leaf_offsets) ||
+            !WriteVector(&out, snapshot.candidate_leaf_ids) ||
+            !WriteVector(&out,
+                         snapshot.candidate_leaf_prev_running_max_ends))
+        {
+            return false;
+        }
+    }
     return out.good();
 }
 
@@ -542,7 +638,7 @@ inline bool ReadSpongeGmxpackedForceOnlySnapshot(
         static_cast<size_t>(snapshot->header.total_atom_numbers);
     const auto lj_param_numbers =
         static_cast<size_t>(snapshot->header.lj_param_numbers);
-    return ReadVector(&in, &snapshot->cluster_offsets, cluster_numbers) &&
+    if (!(ReadVector(&in, &snapshot->cluster_offsets, cluster_numbers) &&
            ReadVector(&in, &snapshot->cluster_valid_masks, cluster_numbers) &&
            ReadVector(&in, &snapshot->cluster_local_masks, cluster_numbers) &&
            ReadVector(&in, &snapshot->super_cluster_offsets,
@@ -557,7 +653,59 @@ inline bool ReadSpongeGmxpackedForceOnlySnapshot(
            ReadVector(&in, &snapshot->sorted_xq, total_atom_numbers) &&
            ReadVector(&in, &snapshot->sorted_lj_type, total_atom_numbers) &&
            ReadVector(&in, &snapshot->sorted_lj_comb, total_atom_numbers) &&
-           ReadVector(&in, &snapshot->lj_ab, lj_param_numbers);
+           ReadVector(&in, &snapshot->lj_ab, lj_param_numbers)))
+    {
+        return false;
+    }
+    SpongeGmxpackedBuilderMetadataHeader metadata = {};
+    const std::streampos metadata_pos = in.tellg();
+    if (!ReadBinary(&in, &metadata))
+    {
+        in.clear();
+        return true;
+    }
+    if (!IsValidBuilderMetadataHeader(metadata))
+    {
+        in.clear();
+        in.seekg(metadata_pos);
+        return true;
+    }
+    const auto leaf_numbers = static_cast<size_t>(metadata.leaf_numbers);
+    const auto node_numbers = static_cast<size_t>(metadata.node_numbers);
+    const auto parent_numbers = static_cast<size_t>(metadata.parent_numbers);
+    const auto candidate_sci_numbers =
+        static_cast<size_t>(metadata.candidate_sci_numbers);
+    const auto sci_supercluster_id_numbers =
+        static_cast<size_t>(metadata.sci_supercluster_id_numbers);
+    const auto candidate_shift_numbers =
+        static_cast<size_t>(metadata.candidate_shift_numbers);
+    const auto candidate_leaf_numbers =
+        static_cast<size_t>(metadata.candidate_leaf_numbers);
+    const auto candidate_leaf_prev_numbers =
+        static_cast<size_t>(metadata.candidate_leaf_prev_numbers);
+    return ReadVector(&in, &snapshot->cluster_centers, cluster_numbers) &&
+           ReadVector(&in, &snapshot->cluster_extents, cluster_numbers) &&
+           ReadVector(&in, &snapshot->super_cluster_centers,
+                      super_cluster_numbers) &&
+           ReadVector(&in, &snapshot->super_cluster_sizes,
+                      super_cluster_numbers) &&
+           ReadVector(&in, &snapshot->leaf_cluster_starts, leaf_numbers) &&
+           ReadVector(&in, &snapshot->leaf_cluster_ends, leaf_numbers) &&
+           ReadVector(&in, &snapshot->leaf_all_local, leaf_numbers) &&
+           ReadVector(&in, &snapshot->octree_prefixes, node_numbers) &&
+           ReadVector(&in, &snapshot->octree_child_offsets, node_numbers) &&
+           ReadVector(&in, &snapshot->octree_parents, parent_numbers) &&
+           ReadVector(&in, &snapshot->octree_internal_to_leaf, node_numbers) &&
+           ReadVector(&in, &snapshot->sci_supercluster_ids,
+                      sci_supercluster_id_numbers) &&
+           ReadVector(&in, &snapshot->candidate_shift_ids,
+                      candidate_shift_numbers) &&
+           ReadVector(&in, &snapshot->candidate_leaf_offsets,
+                      candidate_sci_numbers + 1) &&
+           ReadVector(&in, &snapshot->candidate_leaf_ids,
+                      candidate_leaf_numbers) &&
+           ReadVector(&in, &snapshot->candidate_leaf_prev_running_max_ends,
+                      candidate_leaf_prev_numbers);
 }
 
 inline bool WriteSpongeClusteredFullOutputSnapshot(

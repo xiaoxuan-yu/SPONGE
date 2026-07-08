@@ -35,21 +35,6 @@
 #include "../third_party/cornerstone_octree/include/cstone/tree/update_gpu.cuh"
 #endif
 
-struct LJ_CORNERSTONE_STATE
-{
-#ifndef USE_CPU
-    cstone::DeviceVector<uint64_t> leaves;
-    cstone::DeviceVector<uint64_t> tmp_leaves;
-    cstone::DeviceVector<unsigned> leaf_counts;
-    cstone::DeviceVector<cstone::TreeNodeIndex> work_array;
-    cstone::OctreeData<uint64_t, cstone::execution::Gpu> octree;
-#else
-    std::vector<uint64_t> leaves;
-    std::vector<unsigned> leaf_counts;
-    cstone::OctreeData<uint64_t, cstone::execution::Cpu> octree;
-#endif
-};
-
 extern MD_INFORMATION md_info;
 
 namespace
@@ -273,6 +258,48 @@ static bool Clustered_Gmxpacked_Candidate_Leaf_Stats_Enabled()
 {
     return Clustered_Gmxpacked_Env_Flag_Enabled(
         "SPONGE_CLUSTERED_GMXPACKED_CANDIDATE_LEAF_STATS");
+}
+
+static int Clustered_Gmxpacked_Candidate_Leaf_Sample_Interval()
+{
+    const char* value =
+        std::getenv("SPONGE_CLUSTERED_GMXPACKED_CANDIDATE_LEAF_SAMPLE_INTERVAL");
+    if (value == NULL || value[0] == '\0')
+    {
+        return 0;
+    }
+    const int interval = std::atoi(value);
+    return interval > 0 ? interval : 0;
+}
+
+static bool Clustered_Fixed_Shift_Candidate_Leaf_Queue2_Count_Enabled()
+{
+    return Clustered_Gmxpacked_Env_Flag_Enabled(
+        "SPONGE_CLUSTERED_FIXED_SHIFT_CANDIDATE_LEAF_QUEUE2_COUNT");
+}
+
+static int Clustered_Fixed_Shift_Candidate_Leaf_Queue2_Device_Blocks()
+{
+    const char* value = std::getenv(
+        "SPONGE_CLUSTERED_FIXED_SHIFT_CANDIDATE_LEAF_QUEUE2_DEVICE_BLOCKS");
+    if (value == NULL || value[0] == '\0')
+    {
+        return 256;
+    }
+    const int blocks = std::atoi(value);
+    return blocks > 0 ? blocks : 256;
+}
+
+static int Clustered_Fixed_Shift_Candidate_Leaf_Queue2_Task_Split_Depth()
+{
+    const char* value = std::getenv(
+        "SPONGE_CLUSTERED_FIXED_SHIFT_CANDIDATE_LEAF_QUEUE2_TASK_SPLIT_DEPTH");
+    if (value == NULL || value[0] == '\0')
+    {
+        return 2;
+    }
+    const int depth = std::atoi(value);
+    return depth > 1 ? 2 : 1;
 }
 
 static bool Clustered_Fixed_Shift_Candidate_Leaf_Coop_Traversal_Probe_Enabled()
@@ -5309,6 +5336,35 @@ static __global__ void Scatter_Candidate_Leaves_From_Onepass(
             candidate_leaf_prev_running_max_ends[candidate_idx] =
                 onepass_prev_running_max_ends[index];
         }
+    }
+}
+
+static __global__ void Build_Candidate_Leaf_Queue2_Task_Sort_Keys(
+    const int task_count, const int* task_sci_ids, const int* task_nodes,
+    uint64_t* task_sort_keys, uint64_t* task_pairs)
+{
+    SIMPLE_DEVICE_FOR(task_idx, task_count)
+    {
+        const unsigned int sci =
+            static_cast<unsigned int>(task_sci_ids[task_idx]);
+        const unsigned int node =
+            static_cast<unsigned int>(task_nodes[task_idx]);
+        task_sort_keys[task_idx] =
+            (static_cast<uint64_t>(sci) << 32) | static_cast<uint64_t>(node);
+        task_pairs[task_idx] =
+            (static_cast<uint64_t>(sci) << 32) | static_cast<uint64_t>(node);
+    }
+}
+
+static __global__ void Unpack_Candidate_Leaf_Queue2_Task_Pairs(
+    const int task_count, const uint64_t* task_pairs, int* task_sci_ids,
+    int* task_nodes)
+{
+    SIMPLE_DEVICE_FOR(task_idx, task_count)
+    {
+        const uint64_t pair = task_pairs[task_idx];
+        task_sci_ids[task_idx] = static_cast<int>(pair >> 32);
+        task_nodes[task_idx] = static_cast<int>(pair & 0xffffffffu);
     }
 }
 
@@ -28377,8 +28433,12 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
     const bool use_fixed_shift_candidate_leaf_onepass =
         fixed_shift_candidates && fixed_shift_leaf_screening &&
         Clustered_Fixed_Shift_Candidate_Leaf_Onepass_Enabled();
+    const bool use_fixed_shift_candidate_leaf_queue2_count =
+        fixed_shift_candidates && fixed_shift_leaf_screening &&
+        Clustered_Fixed_Shift_Candidate_Leaf_Queue2_Count_Enabled();
     const bool request_fixed_shift_count_metadata =
         use_fixed_shift_candidate_leaf_onepass &&
+        !use_fixed_shift_candidate_leaf_queue2_count &&
         use_fixed_shift_candidate_leaf_parallel &&
         dense_shift_partitioned_candidates &&
         runtime_gmxpacked_direct_requested &&
@@ -28497,7 +28557,9 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                               &d_sci_candidate_leaf_offsets,
                               &sci_candidate_leaf_offset_capacity);
     bool candidate_leaf_onepass_used = false;
-    if (use_fixed_shift_candidate_leaf_onepass)
+    bool candidate_leaf_queue2_count_used = false;
+    if (use_fixed_shift_candidate_leaf_onepass &&
+        !use_fixed_shift_candidate_leaf_queue2_count)
     {
         const int onepass_capacity = Candidate_Leaf_Onepass_Target_Capacity(
             candidate_sci_numbers, candidate_leaf_capacity,
@@ -28658,11 +28720,19 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
             candidate_leaf_onepass_used && use_fixed_shift_candidate_leaf_parallel &&
             fixed_shift_candidates &&
             Clustered_Fixed_Shift_Candidate_Leaf_Coop_Emit_Probe_Enabled();
+        const int candidate_leaf_sample_interval =
+            Clustered_Gmxpacked_Candidate_Leaf_Sample_Interval();
+        const bool run_candidate_leaf_screen_sample =
+            candidate_leaf_onepass_used &&
+            use_fixed_shift_candidate_leaf_parallel && fixed_shift_candidates &&
+            candidate_leaf_sample_interval > 0 &&
+            (md_info.sys.steps % candidate_leaf_sample_interval) == 0;
         if (run_candidate_leaf_traversal_probe ||
             run_candidate_leaf_screen_probe || run_candidate_leaf_emit_probe ||
             run_candidate_leaf_coop_traversal_probe ||
             run_candidate_leaf_coop_screen_probe ||
-            run_candidate_leaf_coop_emit_probe)
+            run_candidate_leaf_coop_emit_probe ||
+            run_candidate_leaf_screen_sample)
         {
             static int* d_candidate_leaf_probe_counts = NULL;
             static int candidate_leaf_probe_count_capacity = 0;
@@ -28702,7 +28772,8 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
             auto run_candidate_leaf_probe =
                 [&](ClusteredGmxpackedCandidateLeafProbeMode mode,
                     const char* mode_name, const char* sync_tag,
-                    bool needs_emit, bool cooperative_traversal) {
+                    bool needs_emit, bool cooperative_traversal,
+                    bool force_stats_print) {
                     deviceMemset(d_candidate_leaf_probe_counts, 0,
                                  sizeof(int) * candidate_sci_numbers);
                     if (needs_emit)
@@ -28729,7 +28800,7 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                         use_morton_sfc,
                         !cooperative_traversal &&
                             Clustered_Fixed_Shift_Candidate_Leaf_Nodebox_Opt_Enabled(),
-                        cooperative_traversal,
+                        cooperative_traversal, false,
                         onepass_capacity, d_candidate_leaf_probe_counts,
                         needs_emit ? d_candidate_leaf_probe_records : NULL,
                         needs_emit ? d_candidate_leaf_probe_cursor : NULL,
@@ -28737,7 +28808,7 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
 #ifndef USE_CPU
                     Clustered_Debug_Device_Sync_If_Tracing(sync_tag);
 #endif
-                    if (print_candidate_leaf_stats)
+                    if (print_candidate_leaf_stats || force_stats_print)
                     {
                         std::vector<int> h_probe_counts =
                             Copy_Device_Buffer_To_Host(
@@ -28755,6 +28826,19 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                                 max_leaves = IntMax(max_leaves, count);
                             }
                         }
+                        std::sort(h_probe_counts.begin(),
+                                  h_probe_counts.end(), std::greater<int>());
+                        long long top5_leaves = 0;
+                        const size_t top5_count =
+                            std::max<size_t>(
+                                1, (h_probe_counts.size() + 19) / 20);
+                        for (size_t i = 0;
+                             i < std::min(top5_count,
+                                          h_probe_counts.size());
+                             i += 1)
+                        {
+                            top5_leaves += h_probe_counts[i];
+                        }
                         int h_cursor = -1;
                         int h_overflow = -1;
                         if (needs_emit)
@@ -28770,17 +28854,31 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                                 ? static_cast<double>(total_probe_leaves) /
                                       static_cast<double>(candidate_sci_numbers)
                                 : 0.0;
+                        const int zero_sci =
+                            candidate_sci_numbers - nonzero_sci;
+                        const double zero_pct =
+                            candidate_sci_numbers > 0
+                                ? 100.0 * static_cast<double>(zero_sci) /
+                                      static_cast<double>(candidate_sci_numbers)
+                                : 0.0;
+                        const double top5_share =
+                            total_probe_leaves > 0
+                                ? static_cast<double>(top5_leaves) /
+                                      static_cast<double>(total_probe_leaves)
+                                : 0.0;
                         fprintf(stderr,
                                 "[clustered candidate leaf probe] step=%d "
                                 "mode=%s candidate_sci=%d production_leaves=%d "
-                                "probe_total=%lld nonzero_sci=%d max_per_sci=%d "
+                                "probe_total=%lld zero_sci=%d zero_pct=%.2f "
+                                "nonzero_sci=%d max_per_sci=%d "
                                 "avg_per_sci=%.6f cursor=%d overflow=%d "
-                                "capacity=%d\n",
+                                "capacity=%d top5_share=%.6f sample=%d\n",
                                 md_info.sys.steps, mode_name,
                                 candidate_sci_numbers, candidate_leaf_numbers,
-                                total_probe_leaves, nonzero_sci, max_leaves,
-                                avg_leaves, h_cursor, h_overflow,
-                                onepass_capacity);
+                                total_probe_leaves, zero_sci, zero_pct,
+                                nonzero_sci, max_leaves, avg_leaves, h_cursor,
+                                h_overflow, onepass_capacity, top5_share,
+                                force_stats_print ? 1 : 0);
                         fflush(stderr);
                     }
                 };
@@ -28789,19 +28887,21 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                 run_candidate_leaf_probe(
                     ClusteredGmxpackedCandidateLeafProbeMode::Traversal,
                     "traversal",
-                    "Probe_Candidate_Leaf_Collect_Traversal", false, false);
+                    "Probe_Candidate_Leaf_Collect_Traversal", false, false,
+                    false);
             }
             if (run_candidate_leaf_screen_probe)
             {
                 run_candidate_leaf_probe(
                     ClusteredGmxpackedCandidateLeafProbeMode::Screen, "screen",
-                    "Probe_Candidate_Leaf_Collect_Screen", false, false);
+                    "Probe_Candidate_Leaf_Collect_Screen", false, false,
+                    false);
             }
             if (run_candidate_leaf_emit_probe)
             {
                 run_candidate_leaf_probe(
                     ClusteredGmxpackedCandidateLeafProbeMode::Emit, "emit",
-                    "Probe_Candidate_Leaf_Collect_Emit", true, false);
+                    "Probe_Candidate_Leaf_Collect_Emit", true, false, false);
             }
             if (run_candidate_leaf_coop_traversal_probe)
             {
@@ -28809,25 +28909,255 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                     ClusteredGmxpackedCandidateLeafProbeMode::Traversal,
                     "coop_traversal",
                     "Probe_Candidate_Leaf_Collect_Coop_Traversal", false,
-                    true);
+                    true, false);
             }
             if (run_candidate_leaf_coop_screen_probe)
             {
                 run_candidate_leaf_probe(
                     ClusteredGmxpackedCandidateLeafProbeMode::Screen,
                     "coop_screen",
-                    "Probe_Candidate_Leaf_Collect_Coop_Screen", false, true);
+                    "Probe_Candidate_Leaf_Collect_Coop_Screen", false, true,
+                    false);
             }
             if (run_candidate_leaf_coop_emit_probe)
             {
                 run_candidate_leaf_probe(
                     ClusteredGmxpackedCandidateLeafProbeMode::Emit,
                     "coop_emit", "Probe_Candidate_Leaf_Collect_Coop_Emit",
-                    true, true);
+                    true, true, false);
+            }
+            if (run_candidate_leaf_screen_sample)
+            {
+                run_candidate_leaf_probe(
+                    ClusteredGmxpackedCandidateLeafProbeMode::Screen,
+                    "screen_sample",
+                    "Probe_Candidate_Leaf_Collect_Screen_Sample", false,
+                    false, true);
             }
         }
     }
-    if (!candidate_leaf_onepass_used && fixed_shift_candidates)
+    if (!candidate_leaf_onepass_used && use_fixed_shift_candidate_leaf_queue2_count)
+    {
+        const int task_split_depth =
+            Clustered_Fixed_Shift_Candidate_Leaf_Queue2_Task_Split_Depth();
+        const int max_tasks_per_candidate_sci =
+            task_split_depth <= 1 ? 8 : 64;
+        const long long task_capacity_request_ll =
+            static_cast<long long>(candidate_sci_numbers) *
+            static_cast<long long>(max_tasks_per_candidate_sci);
+        const int task_capacity_request =
+            task_capacity_request_ll >
+                    static_cast<long long>(std::numeric_limits<int>::max())
+                ? std::numeric_limits<int>::max()
+                : static_cast<int>(task_capacity_request_ll);
+        if (task_capacity_request > 0)
+        {
+            candidate_leaf_queue2_task_capacity = task_capacity_request;
+            Reserve_Device_Int_Buffer(
+                1, &d_candidate_leaf_queue2_task_counter,
+                &candidate_leaf_queue2_counter_capacity);
+            Reserve_Device_Int_Buffer(
+                1, &d_candidate_leaf_queue2_task_overflow,
+                &candidate_leaf_queue2_overflow_capacity);
+            Reserve_Device_Int_Buffer(
+                1, &d_candidate_leaf_queue2_task_work_cursor,
+                &candidate_leaf_queue2_work_cursor_capacity);
+            Reserve_Device_Int_Buffer(
+                candidate_leaf_queue2_task_capacity,
+                &d_candidate_leaf_queue2_task_sci_ids,
+                &candidate_leaf_queue2_task_sci_capacity);
+            Reserve_Device_Int_Buffer(
+                candidate_leaf_queue2_task_capacity,
+                &d_candidate_leaf_queue2_task_nodes,
+                &candidate_leaf_queue2_task_node_capacity);
+            deviceMemset(d_candidate_leaf_queue2_task_counter, 0, sizeof(int));
+            deviceMemset(d_candidate_leaf_queue2_task_overflow, 0, sizeof(int));
+            deviceMemset(d_sci_candidate_leaf_counts, 0,
+                         sizeof(int) * candidate_sci_numbers);
+            {
+                ClusteredGmxpackedRecordBuilderStageTimer stage_timer(
+                    "candidate-leaf-queue2-task-build",
+                    record_builder_stage_timers, false);
+                const int task_build_block_size = 128;
+                const int task_build_items = candidate_sci_numbers * 8;
+                const int task_build_blocks =
+                    (task_build_items + task_build_block_size - 1) /
+                    task_build_block_size;
+                Launch_Clustered_Gmxpacked_Candidate_Leaf_Root_Child_Task_Build(
+                    task_build_blocks, task_build_block_size,
+                    candidate_sci_numbers, candidate_sci_supercluster_ids,
+                    d_super_cluster_centers, d_super_cluster_sizes,
+                    rawPtr(cornerstone_state->octree.prefixes),
+                    rawPtr(cornerstone_state->octree.childOffsets),
+                    candidate_shift_ids, use_morton_sfc,
+                    Clustered_Fixed_Shift_Candidate_Leaf_Nodebox_Opt_Enabled(),
+                    candidate_leaf_queue2_task_capacity,
+                    d_candidate_leaf_queue2_task_counter,
+                    d_candidate_leaf_queue2_task_overflow,
+                    d_candidate_leaf_queue2_task_sci_ids,
+                    d_candidate_leaf_queue2_task_nodes, task_split_depth);
+            }
+            int h_queue2_tasks = 0;
+            int h_queue2_task_overflow = 0;
+            deviceMemcpy(&h_queue2_tasks,
+                         d_candidate_leaf_queue2_task_counter, sizeof(int),
+                         deviceMemcpyDeviceToHost);
+            deviceMemcpy(&h_queue2_task_overflow,
+                         d_candidate_leaf_queue2_task_overflow, sizeof(int),
+                         deviceMemcpyDeviceToHost);
+            if (h_queue2_tasks > candidate_leaf_queue2_task_capacity)
+            {
+                h_queue2_tasks = candidate_leaf_queue2_task_capacity;
+            }
+            if (h_queue2_tasks > 1)
+            {
+                Reserve_Device_U64_Buffer(
+                    h_queue2_tasks, &d_candidate_leaf_queue2_task_sort_keys,
+                    &candidate_leaf_queue2_task_sort_key_capacity);
+                Reserve_Device_U64_Buffer(
+                    h_queue2_tasks, &d_candidate_leaf_queue2_task_pairs,
+                    &candidate_leaf_queue2_task_pair_capacity);
+                {
+                    ClusteredGmxpackedRecordBuilderStageTimer stage_timer(
+                        "candidate-leaf-queue2-task-sort",
+                        record_builder_stage_timers, false);
+                    Launch_Device_Kernel(
+                        Build_Candidate_Leaf_Queue2_Task_Sort_Keys,
+                        (h_queue2_tasks + 255) / 256, 256, 0, NULL,
+                        h_queue2_tasks, d_candidate_leaf_queue2_task_sci_ids,
+                        d_candidate_leaf_queue2_task_nodes,
+                        d_candidate_leaf_queue2_task_sort_keys,
+                        d_candidate_leaf_queue2_task_pairs);
+                    Stable_Sort_Device_By_Key(
+                        this, h_queue2_tasks,
+                        d_candidate_leaf_queue2_task_sort_keys,
+                        d_candidate_leaf_queue2_task_pairs);
+                    Launch_Device_Kernel(
+                        Unpack_Candidate_Leaf_Queue2_Task_Pairs,
+                        (h_queue2_tasks + 255) / 256, 256, 0, NULL,
+                        h_queue2_tasks, d_candidate_leaf_queue2_task_pairs,
+                        d_candidate_leaf_queue2_task_sci_ids,
+                        d_candidate_leaf_queue2_task_nodes);
+                }
+            }
+            Reserve_Device_Int_Buffer(
+                IntMax(h_queue2_tasks, 1),
+                &d_candidate_leaf_queue2_task_leaf_counts,
+                &candidate_leaf_queue2_task_leaf_count_capacity);
+            Reserve_Device_Int_Buffer(
+                IntMax(h_queue2_tasks + 1, 1),
+                &d_candidate_leaf_queue2_task_leaf_offsets,
+                &candidate_leaf_queue2_task_leaf_offset_capacity);
+            if (h_queue2_tasks > 0)
+            {
+                deviceMemset(d_candidate_leaf_queue2_task_leaf_counts, 0,
+                             sizeof(int) * h_queue2_tasks);
+            }
+            deviceMemset(d_candidate_leaf_queue2_task_work_cursor, 0,
+                         sizeof(int));
+            {
+                ClusteredGmxpackedRecordBuilderStageTimer stage_timer(
+                    "candidate-leaf-queue2-device-count",
+                    record_builder_stage_timers, false);
+                Launch_Clustered_Gmxpacked_Candidate_Leaf_Root_Child_Device_Counter_Probe(
+                    Clustered_Fixed_Shift_Candidate_Leaf_Queue2_Device_Blocks(),
+                    kClusteredBuilderBlockSize, candidate_sci_numbers,
+                    candidate_sci_supercluster_ids, d_super_cluster_centers,
+                    d_super_cluster_sizes, d_super_cluster_offsets,
+                    d_leaf_cluster_starts, d_leaf_cluster_ends, d_leaf_all_local,
+                    cell, build_cutoff, d_cluster_centers, d_cluster_extents,
+                    d_cluster_valid_masks, d_cluster_local_masks,
+                    rawPtr(cornerstone_state->octree.prefixes),
+                    rawPtr(cornerstone_state->octree.childOffsets),
+                    rawPtr(cornerstone_state->octree.parents),
+                    rawPtr(cornerstone_state->octree.internalToLeaf),
+                    candidate_shift_ids, central_candidate_halfshell_culling,
+                    use_morton_sfc,
+                    Clustered_Fixed_Shift_Candidate_Leaf_Nodebox_Opt_Enabled(),
+                    candidate_leaf_queue2_task_capacity,
+                    d_candidate_leaf_queue2_task_counter,
+                    d_candidate_leaf_queue2_task_work_cursor,
+                    d_sci_candidate_leaf_counts,
+                    d_candidate_leaf_queue2_task_leaf_counts,
+                    d_candidate_leaf_queue2_task_sci_ids,
+                    d_candidate_leaf_queue2_task_nodes);
+            }
+            candidate_leaf_numbers = Exclusive_Scan_Counts(
+                this, candidate_sci_numbers, d_sci_candidate_leaf_counts,
+                d_sci_candidate_leaf_offsets);
+            const int candidate_leaf_numbers_by_task =
+                h_queue2_tasks > 0
+                    ? Exclusive_Scan_Counts(
+                          this, h_queue2_tasks,
+                          d_candidate_leaf_queue2_task_leaf_counts,
+                          d_candidate_leaf_queue2_task_leaf_offsets)
+                    : 0;
+            candidate_leaf_queue2_count_used = true;
+            if (candidate_leaf_numbers > 0)
+            {
+                Reserve_Device_Int_Buffer(candidate_leaf_numbers,
+                                          &d_sci_candidate_leaf_ids,
+                                          &candidate_leaf_capacity);
+                deviceMemset(d_candidate_leaf_queue2_task_work_cursor, 0,
+                             sizeof(int));
+                deviceMemset(d_candidate_leaf_queue2_task_overflow, 0,
+                             sizeof(int));
+                {
+                    ClusteredGmxpackedRecordBuilderStageTimer stage_timer(
+                        "candidate-leaf-queue2-device-emit",
+                        record_builder_stage_timers, false);
+                    Launch_Clustered_Gmxpacked_Candidate_Leaf_Root_Child_Device_Counter_Emit(
+                        Clustered_Fixed_Shift_Candidate_Leaf_Queue2_Device_Blocks(),
+                        kClusteredBuilderBlockSize, candidate_sci_numbers,
+                        candidate_sci_supercluster_ids, d_super_cluster_centers,
+                        d_super_cluster_sizes, d_super_cluster_offsets,
+                        d_leaf_cluster_starts, d_leaf_cluster_ends,
+                        d_leaf_all_local, cell, build_cutoff, d_cluster_centers,
+                        d_cluster_extents, d_cluster_valid_masks,
+                        d_cluster_local_masks,
+                        rawPtr(cornerstone_state->octree.prefixes),
+                        rawPtr(cornerstone_state->octree.childOffsets),
+                        rawPtr(cornerstone_state->octree.parents),
+                        rawPtr(cornerstone_state->octree.internalToLeaf),
+                        candidate_shift_ids, central_candidate_halfshell_culling,
+                        use_morton_sfc,
+                        Clustered_Fixed_Shift_Candidate_Leaf_Nodebox_Opt_Enabled(),
+                        candidate_leaf_queue2_task_capacity,
+                        d_candidate_leaf_queue2_task_counter,
+                        d_candidate_leaf_queue2_task_work_cursor,
+                        d_sci_candidate_leaf_counts,
+                        d_sci_candidate_leaf_offsets, d_sci_candidate_leaf_ids,
+                        d_candidate_leaf_queue2_task_leaf_offsets,
+                        d_candidate_leaf_queue2_task_overflow,
+                        d_candidate_leaf_queue2_task_sci_ids,
+                        d_candidate_leaf_queue2_task_nodes);
+                }
+                candidate_leaf_onepass_used = true;
+            }
+            if (record_builder_summary_trace)
+            {
+                int h_queue2_emit_overflow = 0;
+                deviceMemcpy(&h_queue2_emit_overflow,
+                             d_candidate_leaf_queue2_task_overflow, sizeof(int),
+                             deviceMemcpyDeviceToHost);
+                fprintf(stderr,
+                        "[clustered candidate leaf queue2 count] step=%d "
+                        "candidate_sci=%d leaves=%d tasks=%d capacity=%d "
+                        "task_overflow=%d emit_overflow=%d task_leaves=%d "
+                        "depth=%d blocks=%d\n",
+                        md_info.sys.steps, candidate_sci_numbers,
+                        candidate_leaf_numbers, h_queue2_tasks,
+                        candidate_leaf_queue2_task_capacity,
+                        h_queue2_task_overflow, h_queue2_emit_overflow,
+                        candidate_leaf_numbers_by_task,
+                        task_split_depth,
+                        Clustered_Fixed_Shift_Candidate_Leaf_Queue2_Device_Blocks());
+                fflush(stderr);
+            }
+        }
+    }
+    if (!candidate_leaf_onepass_used && !candidate_leaf_queue2_count_used &&
+        fixed_shift_candidates)
     {
         if (use_fixed_shift_candidate_leaf_parallel)
         {
@@ -28872,7 +29202,7 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                 d_sci_candidate_leaf_counts);
         }
     }
-    else if (!candidate_leaf_onepass_used)
+    else if (!candidate_leaf_onepass_used && !candidate_leaf_queue2_count_used)
     {
         Launch_Device_Kernel(
             Count_Supercluster_Candidate_Leaves,
@@ -28891,7 +29221,7 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
     Clustered_Debug_Device_Sync_If_Tracing(
         "Count_Supercluster_Candidate_Leaves");
 #endif
-    if (!candidate_leaf_onepass_used)
+    if (!candidate_leaf_onepass_used && !candidate_leaf_queue2_count_used)
     {
         candidate_leaf_numbers = Exclusive_Scan_Counts(
             this, candidate_sci_numbers, d_sci_candidate_leaf_counts,
@@ -28985,6 +29315,99 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
             "Fill_Supercluster_Candidate_Leaves");
     }
 #endif
+    const int final_candidate_leaf_sample_interval =
+        Clustered_Gmxpacked_Candidate_Leaf_Sample_Interval();
+    if (!candidate_leaf_onepass_used && fixed_shift_candidates &&
+        use_fixed_shift_candidate_leaf_parallel &&
+        final_candidate_leaf_sample_interval > 0 &&
+        (md_info.sys.steps % final_candidate_leaf_sample_interval) == 0)
+    {
+        static int* d_candidate_leaf_sample_counts = NULL;
+        static int candidate_leaf_sample_count_capacity = 0;
+        Reserve_Device_Int_Buffer(candidate_sci_numbers,
+                                  &d_candidate_leaf_sample_counts,
+                                  &candidate_leaf_sample_count_capacity);
+        deviceMemset(d_candidate_leaf_sample_counts, 0,
+                     sizeof(int) * candidate_sci_numbers);
+        const int candidate_leaf_groups_per_block =
+            kClusteredBuilderBlockSize / kFixedShiftCandidateLeafSubgroupSize;
+        const int candidate_leaf_sample_blocks =
+            (candidate_sci_numbers + candidate_leaf_groups_per_block - 1) /
+            candidate_leaf_groups_per_block;
+        Launch_Clustered_Gmxpacked_Candidate_Leaf_Probe(
+            ClusteredGmxpackedCandidateLeafProbeMode::Screen,
+            candidate_leaf_sample_blocks, kClusteredBuilderBlockSize,
+            candidate_sci_numbers, candidate_sci_supercluster_ids,
+            d_super_cluster_centers, d_super_cluster_sizes,
+            d_super_cluster_offsets, d_leaf_cluster_starts,
+            d_leaf_cluster_ends, d_leaf_all_local, cell, build_cutoff,
+            d_cluster_centers, d_cluster_extents, d_cluster_valid_masks,
+            d_cluster_local_masks, rawPtr(cornerstone_state->octree.prefixes),
+            rawPtr(cornerstone_state->octree.childOffsets),
+            rawPtr(cornerstone_state->octree.parents),
+            rawPtr(cornerstone_state->octree.internalToLeaf),
+            candidate_shift_ids, central_candidate_halfshell_culling,
+            use_morton_sfc,
+            Clustered_Fixed_Shift_Candidate_Leaf_Nodebox_Opt_Enabled(), false,
+            false, IntMax(candidate_leaf_numbers, 1), d_candidate_leaf_sample_counts,
+            NULL, NULL, NULL);
+#ifndef USE_CPU
+        Clustered_Debug_Device_Sync_If_Tracing(
+            "Probe_Candidate_Leaf_Collect_Screen_Sample");
+#endif
+        std::vector<int> h_probe_counts = Copy_Device_Buffer_To_Host(
+            d_candidate_leaf_sample_counts,
+            static_cast<size_t>(candidate_sci_numbers));
+        long long total_probe_leaves = 0;
+        int nonzero_sci = 0;
+        int max_leaves = 0;
+        for (int count : h_probe_counts)
+        {
+            total_probe_leaves += count;
+            if (count > 0)
+            {
+                nonzero_sci += 1;
+                max_leaves = IntMax(max_leaves, count);
+            }
+        }
+        std::sort(h_probe_counts.begin(), h_probe_counts.end(),
+                  [](int lhs, int rhs) { return lhs > rhs; });
+        long long top5_leaves = 0;
+        const size_t top5_count =
+            std::max<size_t>(1, (h_probe_counts.size() + 19) / 20);
+        for (size_t i = 0; i < std::min(top5_count, h_probe_counts.size());
+             i += 1)
+        {
+            top5_leaves += h_probe_counts[i];
+        }
+        const int zero_sci = candidate_sci_numbers - nonzero_sci;
+        const double zero_pct =
+            candidate_sci_numbers > 0
+                ? 100.0 * static_cast<double>(zero_sci) /
+                      static_cast<double>(candidate_sci_numbers)
+                : 0.0;
+        const double avg_leaves =
+            candidate_sci_numbers > 0
+                ? static_cast<double>(total_probe_leaves) /
+                      static_cast<double>(candidate_sci_numbers)
+                : 0.0;
+        const double top5_share =
+            total_probe_leaves > 0
+                ? static_cast<double>(top5_leaves) /
+                      static_cast<double>(total_probe_leaves)
+                : 0.0;
+        fprintf(stderr,
+                "[clustered candidate leaf probe] step=%d mode=screen_sample "
+                "candidate_sci=%d production_leaves=%d probe_total=%lld "
+                "zero_sci=%d zero_pct=%.2f nonzero_sci=%d max_per_sci=%d "
+                "avg_per_sci=%.6f cursor=-1 overflow=-1 capacity=%d "
+                "top5_share=%.6f sample=1\n",
+                md_info.sys.steps, candidate_sci_numbers,
+                candidate_leaf_numbers, total_probe_leaves, zero_sci, zero_pct,
+                nonzero_sci, max_leaves, avg_leaves,
+                IntMax(candidate_leaf_numbers, 1), top5_share);
+        fflush(stderr);
+    }
     if (fixed_shift_leaf_screening)
     {
         const int candidate_leaf_mask_blocks =
@@ -29591,6 +30014,8 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
             use_gmxpacked_count_parallel_accum &&
             capture_fill_prune_reuse_sources &&
             use_gmxpacked_fill_prune_reuse_light;
+        const bool candidate_leaf_fixed_shift_payload_ready =
+            candidate_leaf_onepass_used || candidate_leaf_queue2_count_used;
         const bool use_gmxpacked_fixed_shift_builder_specialized =
             Clustered_Gmxpacked_Fixed_Shift_Builder_Specialized_Enabled() &&
             runtime_gmxpacked_direct_requested &&
@@ -29598,7 +30023,8 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
             Clustered_Gmxpacked_Active_View_Enabled() &&
             dense_shift_partitioned_candidates && candidate_shift_ids == NULL &&
             fixed_shift_candidates && fixed_shift_leaf_screening &&
-            candidate_leaf_onepass_used && run_gmxpacked_primary_builder &&
+            candidate_leaf_fixed_shift_payload_ready &&
+            run_gmxpacked_primary_builder &&
             Clustered_Gmxpacked_Subgroup_Builder_Enabled() &&
             use_gmxpacked_count_parallel_accum &&
             use_gmxpacked_count_fragment_parallel_emit &&
@@ -31925,6 +32351,29 @@ void LJ_CLUSTER_LAYOUT::Clear()
     Free_Single_Device_Pointer(
         (void**)&d_candidate_leaf_onepass_prev_running_max_ends);
     Free_Single_Device_Pointer((void**)&d_candidate_leaf_onepass_cursor);
+    Free_Single_Device_Pointer((void**)&d_candidate_leaf_queue2_task_counter);
+    Free_Single_Device_Pointer((void**)&d_candidate_leaf_queue2_task_overflow);
+    Free_Single_Device_Pointer(
+        (void**)&d_candidate_leaf_queue2_task_work_cursor);
+    Free_Single_Device_Pointer((void**)&d_candidate_leaf_queue2_task_sci_ids);
+    Free_Single_Device_Pointer((void**)&d_candidate_leaf_queue2_task_nodes);
+    Free_Single_Device_Pointer(
+        (void**)&d_candidate_leaf_queue2_task_sort_keys);
+    Free_Single_Device_Pointer((void**)&d_candidate_leaf_queue2_task_pairs);
+    Free_Single_Device_Pointer(
+        (void**)&d_candidate_leaf_queue2_task_leaf_counts);
+    Free_Single_Device_Pointer(
+        (void**)&d_candidate_leaf_queue2_task_leaf_offsets);
+    candidate_leaf_queue2_counter_capacity = 0;
+    candidate_leaf_queue2_overflow_capacity = 0;
+    candidate_leaf_queue2_work_cursor_capacity = 0;
+    candidate_leaf_queue2_task_sci_capacity = 0;
+    candidate_leaf_queue2_task_node_capacity = 0;
+    candidate_leaf_queue2_task_sort_key_capacity = 0;
+    candidate_leaf_queue2_task_pair_capacity = 0;
+    candidate_leaf_queue2_task_leaf_count_capacity = 0;
+    candidate_leaf_queue2_task_leaf_offset_capacity = 0;
+    candidate_leaf_queue2_task_capacity = 0;
     Free_Single_Device_Pointer((void**)&d_candidate_leaf_reach_masks);
     Free_Single_Device_Pointer((void**)&d_candidate_sci_offsets);
     Free_Single_Device_Pointer((void**)&d_candidate_shift_ids);

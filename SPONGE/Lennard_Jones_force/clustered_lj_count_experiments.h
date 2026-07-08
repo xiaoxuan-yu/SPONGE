@@ -25,6 +25,18 @@ struct LJ_CLUSTERED_GMXPACKED_CANDIDATE_LEAF_PROBE_RECORD
     int prev_running_max_end = 0;
 };
 
+struct LJ_CLUSTERED_GMXPACKED_CANDIDATE_LEAF_PROBE_STATS
+{
+    int node_visits = 0;
+    int overlap_tests = 0;
+    int endpoint_leaves = 0;
+    int halfshell_rejects = 0;
+    int screen_tests = 0;
+    int screen_accepts = 0;
+    int root_rejects = 0;
+    int accepted_leaves = 0;
+};
+
 struct LJ_CLUSTERED_GMXPACKED_COUNT_EXPERIMENT_LIGHT_FRAGMENT
 {
     int sci_id = -1;
@@ -100,9 +112,57 @@ void Launch_Clustered_Gmxpacked_Candidate_Leaf_Probe(
     const int* child_offsets, const int* parents, const int* internal_to_leaf,
     const int* candidate_shift_ids, bool central_halfshell_culling,
     bool use_morton_sfc, bool use_fast_node_overlap,
-    bool use_cooperative_traversal, int onepass_capacity, int* probe_counts,
+    bool use_cooperative_traversal, bool use_root_child_split,
+    int onepass_capacity, int* probe_counts,
     LJ_CLUSTERED_GMXPACKED_CANDIDATE_LEAF_PROBE_RECORD* probe_records,
-    int* probe_cursor, int* probe_overflow);
+    int* probe_cursor, int* probe_overflow,
+    LJ_CLUSTERED_GMXPACKED_CANDIDATE_LEAF_PROBE_STATS* probe_stats = nullptr,
+    const int* candidate_sci_index_map = nullptr,
+    const int* root_child_task_sci_ids = nullptr,
+    const int* root_child_task_nodes = nullptr);
+
+void Launch_Clustered_Gmxpacked_Candidate_Leaf_Root_Child_Task_Build(
+    int task_build_blocks, int task_build_block_size, int candidate_sci_numbers,
+    const int* sci_supercluster_ids, const VECTOR* super_cluster_centers,
+    const VECTOR* super_cluster_sizes, const uint64_t* node_prefixes,
+    const int* child_offsets, const int* candidate_shift_ids,
+    bool use_morton_sfc, bool use_fast_node_overlap, int task_capacity,
+    int* task_counter, int* task_overflow, int* task_sci_ids,
+    int* task_nodes, int task_split_depth = 1);
+
+void Launch_Clustered_Gmxpacked_Candidate_Leaf_Root_Child_Device_Counter_Probe(
+    int collect_blocks, int builder_block_size, int candidate_sci_numbers,
+    const int* sci_supercluster_ids, const VECTOR* super_cluster_centers,
+    const VECTOR* super_cluster_sizes, const int* super_cluster_offsets,
+    const int* leaf_cluster_starts, const int* leaf_cluster_ends,
+    const int* leaf_all_local, LTMatrix3 cell, float cutoff,
+    const VECTOR* cluster_centers, const VECTOR* cluster_extents,
+    const unsigned int* cluster_valid_masks,
+    const unsigned int* cluster_local_masks, const uint64_t* node_prefixes,
+    const int* child_offsets, const int* parents, const int* internal_to_leaf,
+    const int* candidate_shift_ids, bool central_halfshell_culling,
+    bool use_morton_sfc, bool use_fast_node_overlap, int task_capacity,
+    const int* task_counter, int* task_work_cursor, int* probe_counts,
+    int* task_leaf_counts, const int* root_child_task_sci_ids,
+    const int* root_child_task_nodes);
+
+void Launch_Clustered_Gmxpacked_Candidate_Leaf_Root_Child_Device_Counter_Emit(
+    int collect_blocks, int builder_block_size, int candidate_sci_numbers,
+    const int* sci_supercluster_ids, const VECTOR* super_cluster_centers,
+    const VECTOR* super_cluster_sizes, const int* super_cluster_offsets,
+    const int* leaf_cluster_starts, const int* leaf_cluster_ends,
+    const int* leaf_all_local, LTMatrix3 cell, float cutoff,
+    const VECTOR* cluster_centers, const VECTOR* cluster_extents,
+    const unsigned int* cluster_valid_masks,
+    const unsigned int* cluster_local_masks, const uint64_t* node_prefixes,
+    const int* child_offsets, const int* parents, const int* internal_to_leaf,
+    const int* candidate_shift_ids, bool central_halfshell_culling,
+    bool use_morton_sfc, bool use_fast_node_overlap, int task_capacity,
+    const int* task_counter, int* task_work_cursor, int* emit_counts,
+    const int* candidate_leaf_offsets, int* candidate_leaf_ids,
+    const int* task_leaf_offsets, int* emit_overflow,
+    const int* root_child_task_sci_ids,
+    const int* root_child_task_nodes);
 
 void Launch_Clustered_Gmxpacked_Count_Fixed_Light_Dedicated(
     int candidate_sci_blocks, int builder_block_size,

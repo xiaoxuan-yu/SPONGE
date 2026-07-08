@@ -191,6 +191,26 @@ Alternating-run averages: baseline `117.040726 ns/day`, dedicated
 `130.340355 ns/day` (`+11.363%`); baseline `Calculate_Force`
 `6.886942 s`, dedicated `6.138545 s` (`-10.867%`).
 
+2026-07-08 current-binary peak sanity check:
+
+```text
+/tmp/sponge-dedicated-recheck-20260708
+```
+
+Same wat160k 10000-step force-only input with
+`clustered_rebuild_skin = 11.0`:
+
+| configuration | speed | `Calculate_Force` | note |
+|---|---:|---:|---|
+| dedicated count only | `122.342957 ns/day` | `6.287283 s` | not the current peak count path |
+| dedicated + cooperative count | `129.247757 ns/day` | `5.908831 s` | current peak count path |
+
+The peak env for post-cooperative-count comparisons must include both
+`SPONGE_CLUSTERED_GMXPACKED_COUNT_FIXED_LIGHT_DEDICATED=1` and
+`SPONGE_CLUSTERED_GMXPACKED_COUNT_FIXED_LIGHT_COOPERATIVE=1`. Omitting the
+cooperative gate drops wat160k back to the `122-124 ns/day` range and should not
+be treated as a regression of the count optimization.
+
 NCU first count launch:
 
 | configuration | count kernel | registers/thread | eligible warps/scheduler | issued warps/scheduler | local spill |

@@ -1,11 +1,33 @@
 #pragma once
 
+#include <cstdint>
+#include <vector>
+
 #include "../common.h"
 #include "../control.h"
+#ifndef USE_CPU
+#include "../third_party/cornerstone_octree/include/cstone/cuda/device_vector.h"
+#include "../third_party/cornerstone_octree/include/cstone/execution.hpp"
+#endif
+#include "../third_party/cornerstone_octree/include/cstone/tree/octree.hpp"
 
 struct VECTOR_LJ;
 struct VECTOR_LJ_SOFT_TYPE;
-struct LJ_CORNERSTONE_STATE;
+
+struct LJ_CORNERSTONE_STATE
+{
+#ifndef USE_CPU
+    cstone::DeviceVector<uint64_t> leaves;
+    cstone::DeviceVector<uint64_t> tmp_leaves;
+    cstone::DeviceVector<unsigned> leaf_counts;
+    cstone::DeviceVector<cstone::TreeNodeIndex> work_array;
+    cstone::OctreeData<uint64_t, cstone::execution::Gpu> octree;
+#else
+    std::vector<uint64_t> leaves;
+    std::vector<unsigned> leaf_counts;
+    cstone::OctreeData<uint64_t, cstone::execution::Cpu> octree;
+#endif
+};
 
 constexpr int kClusteredClusterSize = 8;
 constexpr int kClusteredSuperClusterClusters = 8;
@@ -483,6 +505,25 @@ struct LJ_CLUSTER_LAYOUT
     int* d_candidate_leaf_onepass_leaf_ids = NULL;
     int* d_candidate_leaf_onepass_prev_running_max_ends = NULL;
     int* d_candidate_leaf_onepass_cursor = NULL;
+    int* d_candidate_leaf_queue2_task_counter = NULL;
+    int* d_candidate_leaf_queue2_task_overflow = NULL;
+    int* d_candidate_leaf_queue2_task_work_cursor = NULL;
+    int* d_candidate_leaf_queue2_task_sci_ids = NULL;
+    int* d_candidate_leaf_queue2_task_nodes = NULL;
+    uint64_t* d_candidate_leaf_queue2_task_sort_keys = NULL;
+    uint64_t* d_candidate_leaf_queue2_task_pairs = NULL;
+    int* d_candidate_leaf_queue2_task_leaf_counts = NULL;
+    int* d_candidate_leaf_queue2_task_leaf_offsets = NULL;
+    int candidate_leaf_queue2_counter_capacity = 0;
+    int candidate_leaf_queue2_overflow_capacity = 0;
+    int candidate_leaf_queue2_work_cursor_capacity = 0;
+    int candidate_leaf_queue2_task_sci_capacity = 0;
+    int candidate_leaf_queue2_task_node_capacity = 0;
+    int candidate_leaf_queue2_task_sort_key_capacity = 0;
+    int candidate_leaf_queue2_task_pair_capacity = 0;
+    int candidate_leaf_queue2_task_leaf_count_capacity = 0;
+    int candidate_leaf_queue2_task_leaf_offset_capacity = 0;
+    int candidate_leaf_queue2_task_capacity = 0;
     unsigned int* d_candidate_leaf_reach_masks = NULL;
     int* d_candidate_sci_offsets = NULL;
     int* d_candidate_shift_ids = NULL;
