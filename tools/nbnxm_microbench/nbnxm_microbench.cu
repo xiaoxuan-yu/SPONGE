@@ -6008,6 +6008,7 @@ void PrintUsage(const char* argv0)
                  "production-gmxpacked-specialized-shiftvec|"
                  "production-gmxpacked-shift-virial|"
                  "production-gmxpacked-refresh|"
+                 "production-gmxpacked-record-stream-inner-active|"
                  "production-gmxpacked-collect-traversal|"
                  "production-gmxpacked-collect-screen|"
                  "production-gmxpacked-collect-emit|"
@@ -10047,6 +10048,260 @@ void RunSpongeProductionGmxpackedRefreshRootChildQueue2(
               "cudaFree(super_cluster_offsets)");
 }
 
+void RunSpongeProductionGmxpackedRecordStreamInnerActive(
+    const SpongeGmxpackedForceOnlySnapshot& snapshot, int warmup, int iters,
+    const char* snapshotLabel)
+{
+    if (snapshot.sci.empty() || snapshot.cjpacked.empty() ||
+        snapshot.cluster_centers.empty() || snapshot.sorted_atom_ids.empty() ||
+        snapshot.sorted_xq.empty())
+    {
+        std::fprintf(
+            stderr,
+            "production-gmxpacked record-stream-inner-active replay requires "
+            "a production gmxpacked snapshot with builder metadata and coords\n");
+        std::exit(1);
+    }
+
+    const int sciNumbers = static_cast<int>(snapshot.sci.size());
+    const int totalAtomNumbers =
+        static_cast<int>(snapshot.header.total_atom_numbers);
+    int sourceCapacity = 0;
+    for (const SpongeGmxpackedSciPOD& sci : snapshot.sci)
+    {
+        for (int packedIdx = sci.cjpacked_begin; packedIdx < sci.cjpacked_end;
+             packedIdx += 1)
+        {
+            const SpongeGmxpackedCjPOD& packed =
+                snapshot.cjpacked[static_cast<size_t>(packedIdx)];
+            for (int jm = 0; jm < kJGroupSize; jm += 1)
+            {
+                if (packed.cj[jm] < 0)
+                {
+                    continue;
+                }
+                for (int split = 0; split < kWarpSplitCount; split += 1)
+                {
+                    const unsigned int imask =
+                        (packed.split[split].imask >>
+                         (jm * kSuperClusterClusters)) &
+                        ((1u << kSuperClusterClusters) - 1u);
+                    sourceCapacity += imask != 0u ? 1 : 0;
+                }
+            }
+        }
+    }
+    if (sourceCapacity <= 0)
+    {
+        std::fprintf(stderr,
+                     "record-stream-inner-active replay found no sources\n");
+        std::exit(1);
+    }
+
+    std::vector<::VECTOR> clusterCenters =
+        MakeProbeVector(snapshot.cluster_centers);
+    std::vector<::VECTOR> crd(static_cast<size_t>(totalAtomNumbers));
+    for (size_t sortedIdx = 0; sortedIdx < snapshot.sorted_xq.size();
+         sortedIdx += 1)
+    {
+        const int atomId = snapshot.sorted_atom_ids[sortedIdx];
+        if (atomId < 0 || atomId >= totalAtomNumbers)
+        {
+            continue;
+        }
+        const Float4POD& xq = snapshot.sorted_xq[sortedIdx];
+        crd[static_cast<size_t>(atomId)] = {xq.x, xq.y, xq.z};
+    }
+    std::vector<int> identityOffsets(static_cast<size_t>(sourceCapacity));
+    std::iota(identityOffsets.begin(), identityOffsets.end(), 0);
+
+    int* dClusterOffsets = CopyVectorToDevice(snapshot.cluster_offsets);
+    int* dSuperClusterOffsets =
+        CopyVectorToDevice(snapshot.super_cluster_offsets);
+    unsigned int* dClusterLocalMasks =
+        CopyVectorToDevice(snapshot.cluster_local_masks);
+    ::VECTOR* dClusterCenters = CopyVectorToDevice(clusterCenters);
+    ::VECTOR* dCrd = CopyVectorToDevice(crd);
+    int* dPermutation = CopyVectorToDevice(snapshot.sorted_atom_ids);
+    LJ_CLUSTERED_GMXPACKED_SCI* dSci =
+        reinterpret_cast<LJ_CLUSTERED_GMXPACKED_SCI*>(
+            CopyVectorToDevice(snapshot.sci));
+    LJ_CLUSTERED_GMXPACKED_CJ* dCjpacked =
+        reinterpret_cast<LJ_CLUSTERED_GMXPACKED_CJ*>(
+            CopyVectorToDevice(snapshot.cjpacked));
+    LJ_CLUSTERED_GMXPACKED_EXCLUSION* dExcl =
+        reinterpret_cast<LJ_CLUSTERED_GMXPACKED_EXCLUSION*>(
+            CopyVectorToDevice(snapshot.excl));
+    LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* dSources = nullptr;
+    LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* dActiveSources = nullptr;
+    int* dSourceCursor = nullptr;
+    int* dOverflowRows = nullptr;
+    int* dActiveFlags = nullptr;
+    unsigned int* dActiveImasks = nullptr;
+    int* dActiveOffsets = CopyVectorToDevice(identityOffsets);
+    CheckCuda(cudaMalloc(reinterpret_cast<void**>(&dSources),
+                         sizeof(*dSources) * sourceCapacity),
+              "cudaMalloc(record_stream_sources)");
+    CheckCuda(cudaMalloc(reinterpret_cast<void**>(&dActiveSources),
+                         sizeof(*dActiveSources) * sourceCapacity),
+              "cudaMalloc(record_stream_active_sources)");
+    CheckCuda(cudaMalloc(reinterpret_cast<void**>(&dSourceCursor), sizeof(int)),
+              "cudaMalloc(record_stream_source_cursor)");
+    CheckCuda(cudaMalloc(reinterpret_cast<void**>(&dOverflowRows), sizeof(int)),
+              "cudaMalloc(record_stream_overflow_rows)");
+    CheckCuda(cudaMalloc(reinterpret_cast<void**>(&dActiveFlags),
+                         sizeof(int) * sourceCapacity),
+              "cudaMalloc(record_stream_active_flags)");
+    CheckCuda(cudaMalloc(reinterpret_cast<void**>(&dActiveImasks),
+                         sizeof(unsigned int) * sourceCapacity),
+              "cudaMalloc(record_stream_active_imasks)");
+
+    CheckCuda(cudaMemset(dSourceCursor, 0, sizeof(int)),
+              "cudaMemset(record_stream_source_cursor)");
+    CheckCuda(cudaMemset(dOverflowRows, 0, sizeof(int)),
+              "cudaMemset(record_stream_overflow_rows)");
+    const int materializeBlockSize =
+        GetOptionalEnvInt("SPONGE_RECORD_STREAM_MATERIALIZE_BLOCK_SIZE", 256);
+    Launch_Clustered_Gmxpacked_Record_Stream_Source_Materialize_From_Gmxpacked(
+        sciNumbers, materializeBlockSize, dSci, dCjpacked, dExcl,
+        sourceCapacity, dSources, dSourceCursor, dOverflowRows);
+    CheckCuda(cudaGetLastError(), "launch record-stream materialize");
+    CheckCuda(cudaDeviceSynchronize(),
+              "cudaDeviceSynchronize(record-stream materialize)");
+    int sourceRows = 0;
+    int overflowRows = 0;
+    CheckCuda(cudaMemcpy(&sourceRows, dSourceCursor, sizeof(int),
+                         cudaMemcpyDeviceToHost),
+              "cudaMemcpy(record_stream_source_cursor)");
+    CheckCuda(cudaMemcpy(&overflowRows, dOverflowRows, sizeof(int),
+                         cudaMemcpyDeviceToHost),
+              "cudaMemcpy(record_stream_overflow_rows)");
+    if (sourceRows <= 0 || sourceRows > sourceCapacity || overflowRows != 0)
+    {
+        std::fprintf(stderr,
+                     "record-stream materialize failed: source_rows=%d "
+                     "overflow=%d capacity=%d\n",
+                     sourceRows, overflowRows, sourceCapacity);
+        std::exit(1);
+    }
+
+    const ::LTMatrix3 cell = MakeProbeMatrix(snapshot.header.cell);
+    const LTMatrix3 hostRcell = InvertCellMatrix(MakeMatrix(snapshot.header.cell));
+    const ::LTMatrix3 rcell = {hostRcell.a11, hostRcell.a21, hostRcell.a22,
+                               hostRcell.a31, hostRcell.a32, hostRcell.a33};
+    const float cutoffSq = snapshot.header.cutoff * snapshot.header.cutoff;
+    const int innerBlockSize =
+        GetOptionalEnvInt("SPONGE_RECORD_STREAM_INNER_ACTIVE_BLOCK_SIZE", 1024);
+
+    auto launchCount = [&]() {
+        Launch_Clustered_Gmxpacked_Record_Stream_Inner_Active_Count_Probe(
+            sourceRows, innerBlockSize, dSources, dPermutation,
+            dClusterOffsets, dSuperClusterOffsets, dClusterLocalMasks,
+            dClusterCenters, dCrd, cell, rcell, cutoffSq, dActiveFlags,
+            dActiveImasks);
+        CheckCuda(cudaGetLastError(), "launch record-stream inner count");
+    };
+    auto launchFillRecompute = [&]() {
+        Launch_Clustered_Gmxpacked_Record_Stream_Inner_Active_Fill_Probe(
+            sourceRows, innerBlockSize, dSources, dPermutation,
+            dClusterOffsets, dSuperClusterOffsets, dClusterLocalMasks,
+            dClusterCenters, dCrd, cell, rcell, cutoffSq, dActiveOffsets,
+            dActiveSources);
+        CheckCuda(cudaGetLastError(),
+                  "launch record-stream inner fill recompute");
+    };
+    auto launchFillCached = [&]() {
+        Launch_Clustered_Gmxpacked_Record_Stream_Inner_Active_Fill_Cached_Probe(
+            sourceRows, innerBlockSize, dSources, dActiveImasks,
+            dActiveOffsets, dActiveSources);
+        CheckCuda(cudaGetLastError(), "launch record-stream inner fill cached");
+    };
+
+    auto timeKernel = [&](const auto& launch) {
+        for (int i = 0; i < warmup; i += 1)
+        {
+            launch();
+        }
+        CheckCuda(cudaDeviceSynchronize(),
+                  "cudaDeviceSynchronize(record-stream warmup)");
+        cudaEvent_t start, stop;
+        CheckCuda(cudaEventCreate(&start), "cudaEventCreate");
+        CheckCuda(cudaEventCreate(&stop), "cudaEventCreate");
+        CheckCuda(cudaEventRecord(start), "cudaEventRecord(start)");
+        for (int i = 0; i < iters; i += 1)
+        {
+            launch();
+        }
+        CheckCuda(cudaEventRecord(stop), "cudaEventRecord(stop)");
+        CheckCuda(cudaEventSynchronize(stop), "cudaEventSynchronize(stop)");
+        float totalMs = 0.0f;
+        CheckCuda(cudaEventElapsedTime(&totalMs, start, stop),
+                  "cudaEventElapsedTime");
+        CheckCuda(cudaEventDestroy(start), "cudaEventDestroy(start)");
+        CheckCuda(cudaEventDestroy(stop), "cudaEventDestroy(stop)");
+        return totalMs / static_cast<float>(iters);
+    };
+
+    const float countMs = timeKernel(launchCount);
+    const float fillRecomputeMs = timeKernel(launchFillRecompute);
+    launchCount();
+    CheckCuda(cudaDeviceSynchronize(),
+              "cudaDeviceSynchronize(record-stream cached prep)");
+    const float fillCachedMs = timeKernel(launchFillCached);
+    const float pairRecomputeMs = timeKernel([&]() {
+        launchCount();
+        launchFillRecompute();
+    });
+    const float pairCachedMs = timeKernel([&]() {
+        launchCount();
+        launchFillCached();
+    });
+
+    launchCount();
+    CheckCuda(cudaDeviceSynchronize(),
+              "cudaDeviceSynchronize(record-stream final count)");
+    std::vector<int> activeFlags(static_cast<size_t>(sourceRows));
+    CheckCuda(cudaMemcpy(activeFlags.data(), dActiveFlags,
+                         sizeof(int) * activeFlags.size(),
+                         cudaMemcpyDeviceToHost),
+              "cudaMemcpy(record_stream_active_flags)");
+    int activeRows = 0;
+    for (int flag : activeFlags)
+    {
+        activeRows += flag != 0 ? 1 : 0;
+    }
+
+    std::printf(
+        "kernel=sponge_production_gmxpacked_record_stream_inner_active "
+        "snapshot=%s iters=%d source_rows=%d source_capacity=%d active_rows=%d "
+        "overflow=%d inner_block_size=%d materialize_block_size=%d "
+        "count_ms=%.6f fill_recompute_ms=%.6f fill_cached_ms=%.6f "
+        "pair_recompute_ms=%.6f pair_cached_ms=%.6f\n",
+        snapshotLabel, iters, sourceRows, sourceCapacity, activeRows,
+        overflowRows, innerBlockSize, materializeBlockSize, countMs,
+        fillRecomputeMs, fillCachedMs, pairRecomputeMs, pairCachedMs);
+
+    CheckCuda(cudaFree(dActiveImasks), "cudaFree(record_stream_active_imasks)");
+    CheckCuda(cudaFree(dActiveFlags), "cudaFree(record_stream_active_flags)");
+    CheckCuda(cudaFree(dOverflowRows), "cudaFree(record_stream_overflow_rows)");
+    CheckCuda(cudaFree(dSourceCursor), "cudaFree(record_stream_source_cursor)");
+    CheckCuda(cudaFree(dActiveSources),
+              "cudaFree(record_stream_active_sources)");
+    CheckCuda(cudaFree(dSources), "cudaFree(record_stream_sources)");
+    CheckCuda(cudaFree(dActiveOffsets),
+              "cudaFree(record_stream_active_offsets)");
+    CheckCuda(cudaFree(dExcl), "cudaFree(excl)");
+    CheckCuda(cudaFree(dCjpacked), "cudaFree(cjpacked)");
+    CheckCuda(cudaFree(dSci), "cudaFree(sci)");
+    CheckCuda(cudaFree(dPermutation), "cudaFree(permutation)");
+    CheckCuda(cudaFree(dCrd), "cudaFree(crd)");
+    CheckCuda(cudaFree(dClusterCenters), "cudaFree(cluster_centers)");
+    CheckCuda(cudaFree(dClusterLocalMasks), "cudaFree(cluster_local_masks)");
+    CheckCuda(cudaFree(dSuperClusterOffsets),
+              "cudaFree(super_cluster_offsets)");
+    CheckCuda(cudaFree(dClusterOffsets), "cudaFree(cluster_offsets)");
+}
+
 struct CollectSuperStats
 {
     long long leaves = 0;
@@ -10392,6 +10647,7 @@ void RunSpongeProductionGmxpackedCollect(
     int* d_root_child_task_counter = nullptr;
     int* d_root_child_task_overflow = nullptr;
     int* d_root_child_task_work_cursor = nullptr;
+    int* d_root_child_task_leaf_counts = nullptr;
     int rootChildTaskCapacity = 0;
     int rootChildDeviceCounterBlocks = 0;
     int rootChildTaskCount = 0;
@@ -10426,6 +10682,10 @@ void RunSpongeProductionGmxpackedCollect(
                           reinterpret_cast<void**>(&d_root_child_task_work_cursor),
                           sizeof(int)),
                       "cudaMalloc(root_child_task_work_cursor)");
+            CheckCuda(cudaMalloc(
+                          reinterpret_cast<void**>(&d_root_child_task_leaf_counts),
+                          sizeof(int) * rootChildTaskCapacity),
+                      "cudaMalloc(root_child_task_leaf_counts)");
             rootChildDeviceCounterBlocks =
                 GetOptionalEnvInt("SPONGE_ROOT_CHILD_DEVICE_COUNTER_BLOCKS",
                                   256);
@@ -10705,7 +10965,8 @@ void RunSpongeProductionGmxpackedCollect(
                                                      : d_candidate_shift_ids,
                 true, false, !cooperativeTraversal, rootChildTaskCapacity,
                 d_root_child_task_counter, d_root_child_task_work_cursor,
-                d_counts, d_root_child_task_sci_ids, d_root_child_task_nodes);
+                d_counts, d_root_child_task_leaf_counts,
+                d_root_child_task_sci_ids, d_root_child_task_nodes);
         }
         else
         {
@@ -10849,6 +11110,8 @@ void RunSpongeProductionGmxpackedCollect(
               "cudaFree(active_sci_indices)");
     CheckCuda(cudaFree(d_root_child_task_work_cursor),
               "cudaFree(root_child_task_work_cursor)");
+    CheckCuda(cudaFree(d_root_child_task_leaf_counts),
+              "cudaFree(root_child_task_leaf_counts)");
     CheckCuda(cudaFree(d_root_child_task_overflow),
               "cudaFree(root_child_task_overflow)");
     CheckCuda(cudaFree(d_root_child_task_counter),
@@ -12552,6 +12815,14 @@ int main(int argc, char** argv)
                     "native-production-gmxpacked-refresh-rootchild-queue2");
                 return 0;
             }
+            if (args.spongeLjMode ==
+                "production-gmxpacked-record-stream-inner-active")
+            {
+                RunSpongeProductionGmxpackedRecordStreamInnerActive(
+                    productionGmxpackedSnapshot, args.warmup, args.iters,
+                    "native-production-gmxpacked-record-stream-inner-active");
+                return 0;
+            }
             if (args.spongeLjMode == "production-gmxpacked-collect-traversal" ||
                 args.spongeLjMode == "production-gmxpacked-collect-screen" ||
                 args.spongeLjMode == "production-gmxpacked-collect-emit" ||
@@ -12675,6 +12946,7 @@ int main(int argc, char** argv)
                          "production-gmxpacked-shift-virial|"
                          "production-gmxpacked-refresh|"
                          "production-gmxpacked-refresh-rootchild-queue2|"
+                         "production-gmxpacked-record-stream-inner-active|"
                          "production-gmxpacked-collect-traversal|"
                          "production-gmxpacked-collect-screen|"
                          "production-gmxpacked-collect-screen-active|"

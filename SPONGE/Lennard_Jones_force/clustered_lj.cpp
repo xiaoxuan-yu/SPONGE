@@ -12457,6 +12457,12 @@ static bool Clustered_Gmxpacked_Fill_Prune_Reuse_Light_Enabled()
         "SPONGE_CLUSTERED_GMXPACKED_FILL_PRUNE_REUSE_LIGHT");
 }
 
+static bool Clustered_Gmxpacked_Inner_Active_Cached_Fill_Enabled()
+{
+    const char* name = "SPONGE_CLUSTERED_GMXPACKED_INNER_ACTIVE_CACHED_FILL";
+    return Clustered_Gmxpacked_Env_Flag_Enabled(name);
+}
+
 static bool
 Clustered_Gmxpacked_Record_Builder_Rolling_Outer_Source_Reuse_Enabled()
 {
@@ -16321,15 +16327,37 @@ static int Prune_Gmxpacked_Record_Stream_To_Inner_Active_Sources(
         LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE* active_sources =
             reinterpret_cast<LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE*>(
                 layout->d_sort_value_buffer);
-        Launch_Device_Kernel(
-            Fill_Gmxpacked_Record_Stream_Inner_Active_Sources,
-            (source_rows + CONTROLLER::device_max_thread - 1) /
-                CONTROLLER::device_max_thread,
-            CONTROLLER::device_max_thread, 0, NULL, source_rows,
-            layout->d_gmxpacked_record_stream_sources, layout->d_sort_permutation,
-            layout->d_cluster_offsets, layout->d_super_cluster_offsets,
-            layout->d_cluster_local_masks, layout->d_cluster_centers, crd, cell,
-            rcell, cutoff_sq, layout->d_jentry_offsets, active_sources);
+        const bool use_cached_fill =
+            Clustered_Gmxpacked_Inner_Active_Cached_Fill_Enabled() &&
+            record_active_imasks &&
+            layout->gmxpacked_inner_active_source_imasks_ready &&
+            layout->gmxpacked_inner_active_source_imask_numbers == source_rows &&
+            layout->d_gmxpacked_inner_active_source_imasks != NULL;
+        if (use_cached_fill)
+        {
+            Launch_Device_Kernel(
+                Fill_Gmxpacked_Record_Stream_Active_View_Sources,
+                (source_rows + CONTROLLER::device_max_thread - 1) /
+                    CONTROLLER::device_max_thread,
+                CONTROLLER::device_max_thread, 0, NULL, source_rows,
+                layout->d_gmxpacked_record_stream_sources,
+                layout->d_gmxpacked_inner_active_source_imasks,
+                layout->d_jentry_offsets, active_sources);
+        }
+        else
+        {
+            Launch_Device_Kernel(
+                Fill_Gmxpacked_Record_Stream_Inner_Active_Sources,
+                (source_rows + CONTROLLER::device_max_thread - 1) /
+                    CONTROLLER::device_max_thread,
+                CONTROLLER::device_max_thread, 0, NULL, source_rows,
+                layout->d_gmxpacked_record_stream_sources,
+                layout->d_sort_permutation, layout->d_cluster_offsets,
+                layout->d_super_cluster_offsets,
+                layout->d_cluster_local_masks, layout->d_cluster_centers, crd,
+                cell, rcell, cutoff_sq, layout->d_jentry_offsets,
+                active_sources);
+        }
         deviceMemcpy(
             layout->d_gmxpacked_record_stream_sources, active_sources,
             sizeof(LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE) *

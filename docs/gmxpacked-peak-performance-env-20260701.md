@@ -48,8 +48,12 @@ SPONGE_CLUSTERED_FIXED_SHIFT_CANDIDATE_LEAF_PARALLEL=1
 SPONGE_CLUSTERED_FIXED_SHIFT_CANDIDATE_LEAF_ONEPASS=1
 SPONGE_CLUSTERED_GMXPACKED_FIXED_SHIFT_BUILDER_SPECIALIZED=1
 SPONGE_CLUSTERED_GMXPACKED_COUNT_FIXED_LIGHT_DEDICATED=1
+SPONGE_CLUSTERED_GMXPACKED_COUNT_FIXED_LIGHT_COOPERATIVE=1
 SPONGE_CLUSTERED_GMXPACKED_DIRTY_J_PARALLEL_SCAN=1
 SPONGE_CLUSTERED_GMXPACKED_ACTIVE_VIEW_ZERO_DIRTY_SOURCE_REUSE=1
+SPONGE_CLUSTERED_FIXED_SHIFT_CANDIDATE_LEAF_QUEUE2_COUNT=1
+SPONGE_CLUSTERED_FIXED_SHIFT_CANDIDATE_LEAF_QUEUE2_DEVICE_BLOCKS=256
+SPONGE_CLUSTERED_FIXED_SHIFT_CANDIDATE_LEAF_QUEUE2_TASK_SPLIT_DEPTH=2
 ```
 
 Do not add these flags to the peak env:
@@ -62,11 +66,15 @@ SPONGE_CLUSTERED_FIXED_SHIFT_CANDIDATE_LEAF_COLLECT_SASS_OPT=1
 SPONGE_CLUSTERED_GMXPACKED_PAIR_SHIFT_SIMPLE_REFRESH=1
 SPONGE_CLUSTERED_GMXPACKED_SORTED_CLUSTER_MAP=1
 SPONGE_CLUSTERED_GMXPACKED_SCI_SHIFT_SPLIT_SKIP_EMPTY=1
+SPONGE_CLUSTERED_GMXPACKED_INNER_ACTIVE_CACHED_FILL=1
 ```
 
 The source-cache patch did not improve the 2026-07-01 peak path. The 2026-07-03
 dirty-gate bundle above was stable with rolling cache off, but it was slower
-than the default-off path.
+than the default-off path. The 2026-07-08 queue2 current-peak retest promoted
+the queue2 count gate only together with the cooperative fixed-light count gate;
+the cached inner-active fill gate remains an opt-in comparison target until the
+multi-system alternating e2e runs justify promoting it.
 
 ## 2026-07-03 rolling source cache decision
 
@@ -370,6 +378,38 @@ kernel. It is:
 - active source fill: the heavy
   `Fill_Gmxpacked_Record_Stream_Active_View_Sources` path is avoided by
   zero-dirty source reuse.
+
+## Queue2 Peak Cached-Fill Alternating Check
+
+2026-07-08 queue2 current-peak 10000-step alternating runs:
+
+```text
+/tmp/sponge-cached-fill-alt5-20260708
+```
+
+Environment: the stable peak env above. DNA_COU additionally used
+`SPONGE_CLUSTERED_GMXPACKED_FULL_DENSE_PADDING=1`. Cached-fill runs additionally
+used:
+
+```sh
+SPONGE_CLUSTERED_GMXPACKED_INNER_ACTIVE_CACHED_FILL=1
+```
+
+All 30 runs completed finite. Water stderr was empty; DNA_COU stderr contained
+only the expected AB-table fallback warning.
+
+| system | cached fill | speed mean | speed range | `Calculate_Force` mean | force delta vs off | speed delta vs off |
+|---|---|---:|---:|---:|---:|---:|
+| wat160k | off | `134.496637 ns/day` | `132.636078-136.152618` | `5.665332 s` | n/a | n/a |
+| wat160k | on | `137.364664 ns/day` | `133.901199-141.295807` | `5.540484 s` | `-2.204%` | `+2.132%` |
+| wat600k | off | `44.111698 ns/day` | `43.336559-44.776684` | `17.745679 s` | n/a | n/a |
+| wat600k | on | `45.340714 ns/day` | `44.251278-45.779572` | `17.255308 s` | `-2.763%` | `+2.786%` |
+| dna_cou | off | `308.222406 ns/day` | `302.058014-310.637268` | `3.886263 s` | n/a | n/a |
+| dna_cou | on | `312.148608 ns/day` | `310.150604-314.439850` | `3.823580 s` | `-1.613%` | `+1.274%` |
+
+This validates cached fill as a positive opt-in comparison gate under the queue2
+current-peak env. It is still listed outside the default peak env until a
+separate decision promotes it.
 
 ## How to avoid repeating this search
 
