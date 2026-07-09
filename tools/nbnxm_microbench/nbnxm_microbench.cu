@@ -5,6 +5,7 @@
 #include <bit>
 #include <chrono>
 #include <cmath>
+#include <cstddef>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -367,33 +368,6 @@ __host__ __device__ inline int GetPairShiftId(uint64_t packed_shift_bits,
     return static_cast<int>(
         (packed_shift_bits >> (static_cast<uint64_t>(i_local) * kPairShiftBits)) &
         kPairShiftMask);
-}
-
-__host__ __device__ inline int ClusteredJmImaskShift(int jm)
-{
-    return jm * kSuperClusterClusters;
-}
-
-__host__ __device__ inline void SetPairShiftId(uint64_t* packed_shift_bits,
-                                               int i_local, int shift_id)
-{
-    const uint64_t shift =
-        static_cast<uint64_t>(i_local) * static_cast<uint64_t>(kPairShiftBits);
-    const uint64_t clear_mask = ~(kPairShiftMask << shift);
-    *packed_shift_bits =
-        (*packed_shift_bits & clear_mask) |
-        ((static_cast<uint64_t>(shift_id) & kPairShiftMask) << shift);
-}
-
-__host__ __device__ inline int DeterminePairShiftId(Vec3 center_i,
-                                                    Vec3 center_j,
-                                                    LTMatrix3 rcell)
-{
-    const Vec3 fractional = (center_j - center_i) * rcell;
-    const int shift_x = static_cast<int>(nearbyintf(fractional.x)) + 1;
-    const int shift_y = static_cast<int>(nearbyintf(fractional.y)) + 1;
-    const int shift_z = static_cast<int>(nearbyintf(fractional.z)) + 1;
-    return shift_x * 9 + shift_y * 3 + shift_z;
 }
 
 __host__ __device__ inline Vec3 GetShiftedDisplacement(VectorLj r2,
@@ -5951,6 +5925,7 @@ struct Arguments
     double exactImaskRadiusScale = 1.0;
     int warmup = 50;
     int iters = 200;
+    int refreshBlockSize = 128;
     bool analyze = false;
     bool computeEnergy = false;
     bool computeVirial = false;
@@ -6018,7 +5993,7 @@ void PrintUsage(const char* argv0)
                  "production-gmxpacked-collect-screen-stats|"
                  "production-gmxpacked-collect-coop-screen-stats] "
                  "[--sponge-gmx-transform baseline] "
-                 "[--warmup N] [--iters N] [--compute-energy] "
+                 "[--warmup N] [--iters N] [--refresh-block-size N] [--compute-energy] "
                  "[--compute-virial] [--analyze]\n",
                  argv0);
 }
@@ -6083,6 +6058,10 @@ Arguments ParseArguments(int argc, char** argv)
         {
             args.iters = std::atoi(argv[++i]);
         }
+        else if (flag == "--refresh-block-size" && i + 1 < argc)
+        {
+            args.refreshBlockSize = std::atoi(argv[++i]);
+        }
         else if (flag == "--analyze")
         {
             args.analyze = true;
@@ -6104,6 +6083,11 @@ Arguments ParseArguments(int argc, char** argv)
     if (args.kernel.empty() || args.snapshot.empty())
     {
         PrintUsage(argv[0]);
+        std::exit(1);
+    }
+    if (args.refreshBlockSize <= 0 || args.refreshBlockSize > 1024)
+    {
+        std::fprintf(stderr, "--refresh-block-size must be in [1, 1024]\n");
         std::exit(1);
     }
     return args;
@@ -8595,6 +8579,85 @@ T* CopyVectorToDevice(const std::vector<T>& values)
     return ptr;
 }
 
+template <typename T>
+std::vector<T> CopyVectorFromDevice(const T* ptr, size_t count)
+{
+    std::vector<T> values(count);
+    if (count != 0)
+    {
+        CheckCuda(cudaMemcpy(values.data(), ptr, sizeof(T) * count,
+                             cudaMemcpyDeviceToHost),
+                  "cudaMemcpy(device vector to host)");
+    }
+    return values;
+}
+
+void PrintRefreshVerification(const SpongeGmxpackedForceOnlySnapshot& snapshot,
+                              const uint64_t* d_pair_shift_bits,
+                              const int* d_sci_shift_safe_flags,
+                              const char* label)
+{
+    const std::vector<uint64_t> pair_shift_bits =
+        CopyVectorFromDevice(d_pair_shift_bits, snapshot.pair_shift_bits.size());
+    size_t pair_mismatches = 0;
+    size_t first_pair_mismatch = static_cast<size_t>(-1);
+    for (size_t i = 0; i < snapshot.pair_shift_bits.size(); ++i)
+    {
+        if (pair_shift_bits[i] != snapshot.pair_shift_bits[i])
+        {
+            if (first_pair_mismatch == static_cast<size_t>(-1))
+            {
+                first_pair_mismatch = i;
+            }
+            pair_mismatches += 1;
+        }
+    }
+
+    size_t flag_mismatches = 0;
+    size_t first_flag_mismatch = static_cast<size_t>(-1);
+    if (d_sci_shift_safe_flags != nullptr &&
+        snapshot.sci_shift_safe_flags.size() == snapshot.sci.size())
+    {
+        const std::vector<int> safe_flags = CopyVectorFromDevice(
+            d_sci_shift_safe_flags, snapshot.sci_shift_safe_flags.size());
+        for (size_t i = 0; i < snapshot.sci_shift_safe_flags.size(); ++i)
+        {
+            if (safe_flags[i] != snapshot.sci_shift_safe_flags[i])
+            {
+                if (first_flag_mismatch == static_cast<size_t>(-1))
+                {
+                    first_flag_mismatch = i;
+                }
+                flag_mismatches += 1;
+            }
+        }
+    }
+
+    std::printf(
+        "verify=%s pair_shift_mismatches=%zu first_pair_mismatch=%zd",
+        label, pair_mismatches,
+        first_pair_mismatch == static_cast<size_t>(-1)
+            ? -1
+            : static_cast<ptrdiff_t>(first_pair_mismatch));
+    if (first_pair_mismatch != static_cast<size_t>(-1))
+    {
+        std::printf(" pair_ref=0x%016llx pair_got=0x%016llx",
+                    static_cast<unsigned long long>(
+                        snapshot.pair_shift_bits[first_pair_mismatch]),
+                    static_cast<unsigned long long>(
+                        pair_shift_bits[first_pair_mismatch]));
+    }
+    if (snapshot.sci_shift_safe_flags.size() == snapshot.sci.size())
+    {
+        std::printf(" sci_safe_flag_mismatches=%zu first_flag_mismatch=%zd",
+                    flag_mismatches,
+                    first_flag_mismatch == static_cast<size_t>(-1)
+                        ? -1
+                        : static_cast<ptrdiff_t>(first_flag_mismatch));
+    }
+    std::printf("\n");
+}
+
 int GetOptionalEnvInt(const char* name, int defaultValue)
 {
     const char* value = std::getenv(name);
@@ -9604,152 +9667,6 @@ void RunSpongeProductionGmxpacked(
     CheckCuda(cudaFree(d_cluster_offsets), "cudaFree(cluster_offsets)");
 }
 
-__global__ void MicrobenchRefreshGmxpackedPairShiftBitsKernel(
-    const int sci_numbers, const int* super_cluster_offsets,
-    const Vec3* cluster_centers, const unsigned int* cluster_valid_masks,
-    const unsigned int* cluster_local_masks,
-    const SpongeGmxpackedSciPOD* gmxpacked_sci,
-    const SpongeGmxpackedCjPOD* gmxpacked_cjpacked,
-    const SpongeGmxpackedExclusionPOD* exclusion_entries,
-    const LTMatrix3 rcell, uint64_t* pair_shift_bits,
-    int* sci_shift_safe_flags, int* sci_shift_safe_count,
-    const bool exact_sci_shift_flags)
-{
-    const int sci = blockIdx.x;
-    if (sci >= sci_numbers)
-    {
-        return;
-    }
-    if (threadIdx.x == 0 && sci_shift_safe_flags != nullptr)
-    {
-        sci_shift_safe_flags[sci] = 1;
-    }
-    __syncthreads();
-
-    const SpongeGmxpackedSciPOD sci_entry = gmxpacked_sci[sci];
-    const int cluster_i_start =
-        super_cluster_offsets[sci_entry.supercluster_id];
-    const int cluster_i_end =
-        super_cluster_offsets[sci_entry.supercluster_id + 1];
-    const int active_cluster_count = cluster_i_end - cluster_i_start;
-    const int packed_count = sci_entry.cjpacked_end - sci_entry.cjpacked_begin;
-    const int total_records = packed_count * kJGroupSize;
-
-    for (int record = threadIdx.x; record < total_records; record += blockDim.x)
-    {
-        const int local_packed = record / kJGroupSize;
-        const int jm = record % kJGroupSize;
-        const int packed_idx = sci_entry.cjpacked_begin + local_packed;
-        const SpongeGmxpackedCjPOD packed = gmxpacked_cjpacked[packed_idx];
-        const int cluster_j = packed.cj[jm];
-
-        uint64_t shift_bits = 0ull;
-        if (cluster_j >= 0)
-        {
-            const unsigned int combined_imask =
-                ((packed.split[0].imask | packed.split[1].imask) >>
-                 ClusteredJmImaskShift(jm)) &
-                ((1u << kSuperClusterClusters) - 1u);
-            const Vec3 center_j = cluster_centers[cluster_j];
-            for (int i_local = 0; i_local < active_cluster_count;
-                 i_local += 1)
-            {
-                int shift_id = kCentralShiftId;
-                if ((combined_imask &
-                     (1u << static_cast<unsigned int>(i_local))) != 0u)
-                {
-                    shift_id = DeterminePairShiftId(
-                        cluster_centers[cluster_i_start + i_local], center_j,
-                        rcell);
-                    if (sci_shift_safe_flags != nullptr &&
-                        shift_id != sci_entry.shift_id)
-                    {
-                        bool effective_pair = !exact_sci_shift_flags;
-                        const int cluster_i = cluster_i_start + i_local;
-                        const unsigned int packed_bit =
-                            1u << static_cast<unsigned int>(
-                                ClusteredJmImaskShift(jm) + i_local);
-                        for (int split = 0;
-                             split < kWarpSplitCount && !effective_pair;
-                             split += 1)
-                        {
-                            const SpongeGmxpackedSplitPOD split_entry =
-                                packed.split[split];
-                            if ((split_entry.imask & packed_bit) == 0u)
-                            {
-                                continue;
-                            }
-                            for (int split_j_lane = 0;
-                                 split_j_lane < kSplitJClusterSize &&
-                                 !effective_pair;
-                                 split_j_lane += 1)
-                            {
-                                const int j_lane =
-                                    split * kSplitJClusterSize + split_j_lane;
-                                if (cluster_valid_masks != nullptr &&
-                                    (cluster_valid_masks[cluster_j] &
-                                     (1u << static_cast<unsigned int>(
-                                          j_lane))) == 0u)
-                                {
-                                    continue;
-                                }
-                                for (int i_lane = 0; i_lane < kClusterSize;
-                                     i_lane += 1)
-                                {
-                                    if (cluster_valid_masks != nullptr &&
-                                        (cluster_valid_masks[cluster_i] &
-                                         (1u << static_cast<unsigned int>(
-                                              i_lane))) == 0u)
-                                    {
-                                        continue;
-                                    }
-                                    if (cluster_local_masks != nullptr &&
-                                        (cluster_local_masks[cluster_i] &
-                                         (1u << static_cast<unsigned int>(
-                                              i_lane))) == 0u)
-                                    {
-                                        continue;
-                                    }
-                                    unsigned int pair_bits = 0xffffffffu;
-                                    if (split_entry.exclusion_index != 0 &&
-                                        exclusion_entries != nullptr)
-                                    {
-                                        pair_bits =
-                                            exclusion_entries
-                                                [split_entry.exclusion_index]
-                                                    .pair[split_j_lane *
-                                                              kClusterSize +
-                                                          i_lane];
-                                    }
-                                    if ((pair_bits & packed_bit) != 0u)
-                                    {
-                                        effective_pair = true;
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                        if (effective_pair)
-                        {
-                            atomicExch(sci_shift_safe_flags + sci, 0);
-                        }
-                    }
-                }
-                SetPairShiftId(&shift_bits, i_local, shift_id);
-            }
-        }
-        pair_shift_bits[packed_idx * kJGroupSize + jm] = shift_bits;
-    }
-    if (sci_shift_safe_flags != nullptr && sci_shift_safe_count != nullptr)
-    {
-        __syncthreads();
-        if (threadIdx.x == 0 && sci_shift_safe_flags[sci] != 0)
-        {
-            atomicAdd(sci_shift_safe_count, 1);
-        }
-    }
-}
-
 std::vector<Vec3> MakeVec3Vector(const std::vector<Float4POD>& values)
 {
     std::vector<Vec3> converted(values.size());
@@ -9777,9 +9694,58 @@ std::vector<::VECTOR> MakeProbeVector(
             value.a31, value.a32, value.a33};
 }
 
+::LTMatrix3 MakeProbeMatrix(const LTMatrix3& value)
+{
+    return {value.a11, value.a21, value.a22,
+            value.a31, value.a32, value.a33};
+}
+
+std::vector<LJ_CLUSTERED_GMXPACKED_SCI> MakeProductionGmxpackedSciVector(
+    const std::vector<SpongeGmxpackedSciPOD>& values)
+{
+    std::vector<LJ_CLUSTERED_GMXPACKED_SCI> converted(values.size());
+    for (size_t i = 0; i < values.size(); ++i)
+    {
+        converted[i].supercluster_id = values[i].supercluster_id;
+        converted[i].shift_id = values[i].shift_id;
+        converted[i].cjpacked_begin = values[i].cjpacked_begin;
+        converted[i].cjpacked_end = values[i].cjpacked_end;
+    }
+    return converted;
+}
+
+std::vector<LJ_CLUSTERED_GMXPACKED_CJ> MakeProductionGmxpackedCjVector(
+    const std::vector<SpongeGmxpackedCjPOD>& values)
+{
+    std::vector<LJ_CLUSTERED_GMXPACKED_CJ> converted(values.size());
+    for (size_t i = 0; i < values.size(); ++i)
+    {
+        std::memcpy(converted[i].cj, values[i].cj, sizeof(converted[i].cj));
+        for (int split = 0; split < kClusteredWarpSplitCount; split += 1)
+        {
+            converted[i].split[split].imask = values[i].split[split].imask;
+            converted[i].split[split].exclusion_index =
+                values[i].split[split].exclusion_index;
+        }
+    }
+    return converted;
+}
+
+std::vector<LJ_CLUSTERED_GMXPACKED_EXCLUSION>
+MakeProductionGmxpackedExclusionVector(
+    const std::vector<SpongeGmxpackedExclusionPOD>& values)
+{
+    std::vector<LJ_CLUSTERED_GMXPACKED_EXCLUSION> converted(values.size());
+    for (size_t i = 0; i < values.size(); ++i)
+    {
+        std::memcpy(converted[i].pair, values[i].pair, sizeof(converted[i].pair));
+    }
+    return converted;
+}
+
 void RunSpongeProductionGmxpackedRefresh(
     const SpongeGmxpackedForceOnlySnapshot& snapshot, int warmup, int iters,
-    const char* snapshotLabel)
+    const char* snapshotLabel, int refreshBlockSize)
 {
     if (snapshot.cluster_centers.empty())
     {
@@ -9789,17 +9755,26 @@ void RunSpongeProductionGmxpackedRefresh(
         std::exit(1);
     }
     const int sci_numbers = static_cast<int>(snapshot.sci.size());
-    std::vector<Vec3> cluster_centers = MakeVec3Vector(snapshot.cluster_centers);
+    std::vector<::VECTOR> cluster_centers =
+        MakeProbeVector(snapshot.cluster_centers);
+    std::vector<LJ_CLUSTERED_GMXPACKED_SCI> gmxpacked_sci =
+        MakeProductionGmxpackedSciVector(snapshot.sci);
+    std::vector<LJ_CLUSTERED_GMXPACKED_CJ> gmxpacked_cjpacked =
+        MakeProductionGmxpackedCjVector(snapshot.cjpacked);
+    std::vector<LJ_CLUSTERED_GMXPACKED_EXCLUSION> gmxpacked_excl =
+        MakeProductionGmxpackedExclusionVector(snapshot.excl);
     int* d_super_cluster_offsets =
         CopyVectorToDevice(snapshot.super_cluster_offsets);
-    Vec3* d_cluster_centers = CopyVectorToDevice(cluster_centers);
+    ::VECTOR* d_cluster_centers = CopyVectorToDevice(cluster_centers);
     unsigned int* d_cluster_valid_masks =
         CopyVectorToDevice(snapshot.cluster_valid_masks);
     unsigned int* d_cluster_local_masks =
         CopyVectorToDevice(snapshot.cluster_local_masks);
-    SpongeGmxpackedSciPOD* d_sci = CopyVectorToDevice(snapshot.sci);
-    SpongeGmxpackedCjPOD* d_cjpacked = CopyVectorToDevice(snapshot.cjpacked);
-    SpongeGmxpackedExclusionPOD* d_excl = CopyVectorToDevice(snapshot.excl);
+    LJ_CLUSTERED_GMXPACKED_SCI* d_sci = CopyVectorToDevice(gmxpacked_sci);
+    LJ_CLUSTERED_GMXPACKED_CJ* d_cjpacked =
+        CopyVectorToDevice(gmxpacked_cjpacked);
+    LJ_CLUSTERED_GMXPACKED_EXCLUSION* d_excl =
+        CopyVectorToDevice(gmxpacked_excl);
     uint64_t* d_pair_shift_bits = nullptr;
     CheckCuda(cudaMalloc(reinterpret_cast<void**>(&d_pair_shift_bits),
                          sizeof(uint64_t) * snapshot.pair_shift_bits.size()),
@@ -9812,14 +9787,15 @@ void RunSpongeProductionGmxpackedRefresh(
     CheckCuda(cudaMalloc(reinterpret_cast<void**>(&d_sci_shift_safe_count),
                          sizeof(int)),
               "cudaMalloc(sci_shift_safe_count)");
-    const LTMatrix3 rcell = InvertCellMatrix(MakeMatrix(snapshot.header.cell));
+    const ::LTMatrix3 rcell =
+        MakeProbeMatrix(InvertCellMatrix(MakeMatrix(snapshot.header.cell)));
     auto launchKernel = [&]() {
         CheckCuda(cudaMemset(d_sci_shift_safe_count, 0, sizeof(int)),
                   "cudaMemset(sci_shift_safe_count)");
-        MicrobenchRefreshGmxpackedPairShiftBitsKernel<<<sci_numbers, 256>>>(
+        Refresh_Gmxpacked_Pair_Shift_Bits<<<sci_numbers, refreshBlockSize>>>(
             sci_numbers, d_super_cluster_offsets, d_cluster_centers,
             d_cluster_valid_masks, d_cluster_local_masks, d_sci, d_cjpacked,
-            d_excl, rcell, d_pair_shift_bits, d_sci_shift_safe_flags,
+            d_excl, rcell, d_pair_shift_bits, NULL, d_sci_shift_safe_flags,
             d_sci_shift_safe_count, true);
         CheckCuda(cudaGetLastError(), "launch production-gmxpacked-refresh");
     };
@@ -9849,10 +9825,12 @@ void RunSpongeProductionGmxpackedRefresh(
               "cudaMemcpy(sci_shift_safe_count)");
     std::printf(
         "kernel=sponge_production_gmxpacked_refresh snapshot=%s avg_ms=%.6f "
-        "iters=%d sci=%d cjpacked=%zu safe_sci=%d unsafe_sci=%d\n",
+        "iters=%d block_size=%d sci=%d cjpacked=%zu safe_sci=%d unsafe_sci=%d\n",
         snapshotLabel, total_ms / static_cast<float>(iters), iters,
-        sci_numbers, snapshot.cjpacked.size(), safe_count,
+        refreshBlockSize, sci_numbers, snapshot.cjpacked.size(), safe_count,
         sci_numbers - safe_count);
+    PrintRefreshVerification(snapshot, d_pair_shift_bits, d_sci_shift_safe_flags,
+                             "sponge_production_gmxpacked_refresh");
 
     CheckCuda(cudaEventDestroy(start), "cudaEventDestroy(start)");
     CheckCuda(cudaEventDestroy(stop), "cudaEventDestroy(stop)");
@@ -9873,7 +9851,7 @@ void RunSpongeProductionGmxpackedRefresh(
 
 void RunSpongeProductionGmxpackedRefreshRootChildQueue2(
     const SpongeGmxpackedForceOnlySnapshot& snapshot, int warmup, int iters,
-    const char* snapshotLabel)
+    const char* snapshotLabel, int refreshBlockSize)
 {
     if (snapshot.cluster_centers.empty() ||
         snapshot.candidate_leaf_offsets.empty() ||
@@ -9891,7 +9869,14 @@ void RunSpongeProductionGmxpackedRefreshRootChildQueue2(
         static_cast<int>(snapshot.candidate_leaf_offsets.size() - 1);
     const int taskCapacity = std::max(1, candidate_sci_numbers * 64);
 
-    std::vector<Vec3> cluster_centers = MakeVec3Vector(snapshot.cluster_centers);
+    std::vector<::VECTOR> cluster_centers =
+        MakeProbeVector(snapshot.cluster_centers);
+    std::vector<LJ_CLUSTERED_GMXPACKED_SCI> gmxpacked_sci =
+        MakeProductionGmxpackedSciVector(snapshot.sci);
+    std::vector<LJ_CLUSTERED_GMXPACKED_CJ> gmxpacked_cjpacked =
+        MakeProductionGmxpackedCjVector(snapshot.cjpacked);
+    std::vector<LJ_CLUSTERED_GMXPACKED_EXCLUSION> gmxpacked_excl =
+        MakeProductionGmxpackedExclusionVector(snapshot.excl);
     std::vector<::VECTOR> super_cluster_centers =
         MakeProbeVector(snapshot.super_cluster_centers);
     std::vector<::VECTOR> super_cluster_sizes =
@@ -9899,14 +9884,16 @@ void RunSpongeProductionGmxpackedRefreshRootChildQueue2(
 
     int* d_super_cluster_offsets =
         CopyVectorToDevice(snapshot.super_cluster_offsets);
-    Vec3* d_cluster_centers = CopyVectorToDevice(cluster_centers);
+    ::VECTOR* d_cluster_centers = CopyVectorToDevice(cluster_centers);
     unsigned int* d_cluster_valid_masks =
         CopyVectorToDevice(snapshot.cluster_valid_masks);
     unsigned int* d_cluster_local_masks =
         CopyVectorToDevice(snapshot.cluster_local_masks);
-    SpongeGmxpackedSciPOD* d_sci = CopyVectorToDevice(snapshot.sci);
-    SpongeGmxpackedCjPOD* d_cjpacked = CopyVectorToDevice(snapshot.cjpacked);
-    SpongeGmxpackedExclusionPOD* d_excl = CopyVectorToDevice(snapshot.excl);
+    LJ_CLUSTERED_GMXPACKED_SCI* d_sci = CopyVectorToDevice(gmxpacked_sci);
+    LJ_CLUSTERED_GMXPACKED_CJ* d_cjpacked =
+        CopyVectorToDevice(gmxpacked_cjpacked);
+    LJ_CLUSTERED_GMXPACKED_EXCLUSION* d_excl =
+        CopyVectorToDevice(gmxpacked_excl);
     uint64_t* d_pair_shift_bits = nullptr;
     CheckCuda(cudaMalloc(reinterpret_cast<void**>(&d_pair_shift_bits),
                          sizeof(uint64_t) * snapshot.pair_shift_bits.size()),
@@ -9944,7 +9931,8 @@ void RunSpongeProductionGmxpackedRefreshRootChildQueue2(
                          sizeof(int) * taskCapacity),
               "cudaMalloc(root_child_task_nodes)");
 
-    const LTMatrix3 rcell = InvertCellMatrix(MakeMatrix(snapshot.header.cell));
+    const ::LTMatrix3 rcell =
+        MakeProbeMatrix(InvertCellMatrix(MakeMatrix(snapshot.header.cell)));
     constexpr int taskBuildBlockSize = 128;
     const int taskBuildItems = candidate_sci_numbers * 8;
     const int taskBuildBlocks =
@@ -9953,10 +9941,10 @@ void RunSpongeProductionGmxpackedRefreshRootChildQueue2(
     auto launchKernel = [&]() {
         CheckCuda(cudaMemset(d_sci_shift_safe_count, 0, sizeof(int)),
                   "cudaMemset(sci_shift_safe_count)");
-        MicrobenchRefreshGmxpackedPairShiftBitsKernel<<<sci_numbers, 256>>>(
+        Refresh_Gmxpacked_Pair_Shift_Bits<<<sci_numbers, refreshBlockSize>>>(
             sci_numbers, d_super_cluster_offsets, d_cluster_centers,
             d_cluster_valid_masks, d_cluster_local_masks, d_sci, d_cjpacked,
-            d_excl, rcell, d_pair_shift_bits, d_sci_shift_safe_flags,
+            d_excl, rcell, d_pair_shift_bits, NULL, d_sci_shift_safe_flags,
             d_sci_shift_safe_count, true);
         CheckCuda(cudaGetLastError(), "launch production-gmxpacked-refresh");
 
@@ -10010,13 +9998,15 @@ void RunSpongeProductionGmxpackedRefreshRootChildQueue2(
 
     std::printf(
         "kernel=sponge_production_gmxpacked_refresh_rootchild_queue2 "
-        "snapshot=%s avg_ms=%.6f iters=%d sci=%d cjpacked=%zu safe_sci=%d "
+        "snapshot=%s avg_ms=%.6f iters=%d block_size=%d sci=%d cjpacked=%zu safe_sci=%d "
         "unsafe_sci=%d candidate_sci=%d root_child_tasks=%d "
         "root_child_task_overflow=%d root_child_task_capacity=%d\n",
         snapshotLabel, total_ms / static_cast<float>(iters), iters,
-        sci_numbers, snapshot.cjpacked.size(), safe_count,
+        refreshBlockSize, sci_numbers, snapshot.cjpacked.size(), safe_count,
         sci_numbers - safe_count, candidate_sci_numbers, task_count,
         task_overflow, taskCapacity);
+    PrintRefreshVerification(snapshot, d_pair_shift_bits, d_sci_shift_safe_flags,
+                             "sponge_production_gmxpacked_refresh_rootchild_queue2");
 
     CheckCuda(cudaEventDestroy(start), "cudaEventDestroy(start)");
     CheckCuda(cudaEventDestroy(stop), "cudaEventDestroy(stop)");
@@ -12804,7 +12794,8 @@ int main(int argc, char** argv)
             {
                 RunSpongeProductionGmxpackedRefresh(
                     productionGmxpackedSnapshot, args.warmup, args.iters,
-                    "native-production-gmxpacked-refresh");
+                    "native-production-gmxpacked-refresh",
+                    args.refreshBlockSize);
                 return 0;
             }
             if (args.spongeLjMode ==
@@ -12812,7 +12803,8 @@ int main(int argc, char** argv)
             {
                 RunSpongeProductionGmxpackedRefreshRootChildQueue2(
                     productionGmxpackedSnapshot, args.warmup, args.iters,
-                    "native-production-gmxpacked-refresh-rootchild-queue2");
+                    "native-production-gmxpacked-refresh-rootchild-queue2",
+                    args.refreshBlockSize);
                 return 0;
             }
             if (args.spongeLjMode ==

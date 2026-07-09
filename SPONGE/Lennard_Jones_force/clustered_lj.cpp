@@ -49,6 +49,7 @@ constexpr int kClusteredBuilderBlockSize = 128;
 constexpr int kClusteredBuilderWarpSize = 32;
 constexpr int kClusteredPruneBlockSize = 64;
 constexpr int kClusteredGmxpackedExclusionBlockSize = 64;
+constexpr int kClusteredGmxpackedPairShiftRefreshBlockSize = 128;
 constexpr int kClusteredMaxSuperClusterClusters = kClusteredSuperClusterClusters;
 constexpr int kFixedShiftCandidateLeafSubgroupSize =
     kClusteredMaxSuperClusterClusters;
@@ -270,6 +271,20 @@ static int Clustered_Gmxpacked_Candidate_Leaf_Sample_Interval()
     }
     const int interval = std::atoi(value);
     return interval > 0 ? interval : 0;
+}
+
+static int Clustered_Gmxpacked_Pair_Shift_Refresh_Block_Size()
+{
+    const char* value = std::getenv(
+        "SPONGE_CLUSTERED_GMXPACKED_PAIR_SHIFT_REFRESH_BLOCK_SIZE");
+    if (value == NULL || value[0] == '\0')
+    {
+        return kClusteredGmxpackedPairShiftRefreshBlockSize;
+    }
+    const int block_size = std::atoi(value);
+    return block_size > 0 && block_size <= CONTROLLER::device_max_thread
+               ? block_size
+               : kClusteredGmxpackedPairShiftRefreshBlockSize;
 }
 
 static bool Clustered_Fixed_Shift_Candidate_Leaf_Queue2_Count_Enabled()
@@ -1948,160 +1963,6 @@ static __global__ void Refresh_Nbnxm_Pair_Shift_Bits(
             }
         }
         pair_shift_bits[packed_idx * kClusteredJGroupSize + jm] = shift_bits;
-    }
-}
-
-static __global__ void Refresh_Gmxpacked_Pair_Shift_Bits(
-    const int sci_numbers, const int* super_cluster_offsets,
-    const VECTOR* cluster_centers, const unsigned int* cluster_valid_masks,
-    const unsigned int* cluster_local_masks,
-    const LJ_CLUSTERED_GMXPACKED_SCI* gmxpacked_sci,
-    const LJ_CLUSTERED_GMXPACKED_CJ* gmxpacked_cjpacked,
-    const LJ_CLUSTERED_GMXPACKED_EXCLUSION* exclusion_entries,
-    const LTMatrix3 rcell, uint64_t* pair_shift_bits,
-    int* sci_shift_only_safe, int* sci_shift_safe_flags,
-    int* sci_shift_safe_count, const bool exact_sci_shift_flags)
-{
-    const int sci = blockIdx.x;
-    if (sci >= sci_numbers)
-    {
-        return;
-    }
-    if (threadIdx.x == 0 && sci_shift_safe_flags != NULL)
-    {
-        sci_shift_safe_flags[sci] = 1;
-    }
-    __syncthreads();
-
-    const LJ_CLUSTERED_GMXPACKED_SCI sci_entry = gmxpacked_sci[sci];
-    const int cluster_i_start =
-        super_cluster_offsets[sci_entry.supercluster_id];
-    const int cluster_i_end =
-        super_cluster_offsets[sci_entry.supercluster_id + 1];
-    const int active_cluster_count = cluster_i_end - cluster_i_start;
-    const int packed_count = sci_entry.cjpacked_end - sci_entry.cjpacked_begin;
-    const int total_records = packed_count * kClusteredJGroupSize;
-
-    for (int record = threadIdx.x; record < total_records; record += blockDim.x)
-    {
-        const int local_packed = record / kClusteredJGroupSize;
-        const int jm = record % kClusteredJGroupSize;
-        const int packed_idx = sci_entry.cjpacked_begin + local_packed;
-        const LJ_CLUSTERED_GMXPACKED_CJ packed = gmxpacked_cjpacked[packed_idx];
-        const int cluster_j = packed.cj[jm];
-
-        uint64_t shift_bits = 0ull;
-        if (cluster_j >= 0)
-        {
-            const unsigned int combined_imask =
-                ((packed.split[0].imask | packed.split[1].imask) >>
-                 Clustered_Jm_Imask_Shift(jm)) &
-                ((1u << kClusteredSuperClusterClusters) - 1u);
-            const VECTOR center_j = cluster_centers[cluster_j];
-            for (int i_local = 0; i_local < active_cluster_count; i_local += 1)
-            {
-                int shift_id = kClusteredCentralShiftId;
-                if ((combined_imask &
-                     (1u << static_cast<unsigned int>(i_local))) != 0u)
-                {
-                    shift_id = Determine_Clustered_Pair_Shift_Id(
-                        cluster_centers[cluster_i_start + i_local], center_j,
-                        rcell);
-                    if ((sci_shift_only_safe != NULL ||
-                         sci_shift_safe_flags != NULL) &&
-                        shift_id != sci_entry.shift_id)
-                    {
-                        bool effective_pair = !exact_sci_shift_flags;
-                        const int cluster_i = cluster_i_start + i_local;
-                        const unsigned int packed_bit =
-                            1u << static_cast<unsigned int>(
-                                Clustered_Jm_Imask_Shift(jm) + i_local);
-                        for (int split = 0;
-                             split < kClusteredWarpSplitCount && !effective_pair;
-                             split += 1)
-                        {
-                            const LJ_CLUSTERED_GMXPACKED_SPLIT split_entry =
-                                packed.split[split];
-                            if ((split_entry.imask & packed_bit) == 0u)
-                            {
-                                continue;
-                            }
-                            for (int split_j_lane = 0;
-                                 split_j_lane < kClusteredSplitJClusterSize &&
-                                 !effective_pair;
-                                 split_j_lane += 1)
-                            {
-                                const int j_lane =
-                                    split * kClusteredSplitJClusterSize +
-                                    split_j_lane;
-                                if (cluster_valid_masks != NULL &&
-                                    (cluster_valid_masks[cluster_j] &
-                                     (1u << static_cast<unsigned int>(j_lane))) ==
-                                        0u)
-                                {
-                                    continue;
-                                }
-                                for (int i_lane = 0;
-                                     i_lane < kClusteredClusterSize; i_lane += 1)
-                                {
-                                    if (cluster_valid_masks != NULL &&
-                                        (cluster_valid_masks[cluster_i] &
-                                         (1u << static_cast<unsigned int>(
-                                              i_lane))) == 0u)
-                                    {
-                                        continue;
-                                    }
-                                    if (cluster_local_masks != NULL &&
-                                        (cluster_local_masks[cluster_i] &
-                                         (1u << static_cast<unsigned int>(
-                                              i_lane))) == 0u)
-                                    {
-                                        continue;
-                                    }
-                                    unsigned int pair_bits = 0xffffffffu;
-                                    if (split_entry.exclusion_index != 0 &&
-                                        exclusion_entries != NULL)
-                                    {
-                                        pair_bits =
-                                            exclusion_entries
-                                                [split_entry.exclusion_index]
-                                                    .pair[split_j_lane *
-                                                              kClusteredClusterSize +
-                                                          i_lane];
-                                    }
-                                    if ((pair_bits & packed_bit) != 0u)
-                                    {
-                                        effective_pair = true;
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                        if (effective_pair)
-                        {
-                            if (sci_shift_only_safe != NULL)
-                            {
-                                atomicExch(sci_shift_only_safe, 0);
-                            }
-                            if (sci_shift_safe_flags != NULL)
-                            {
-                                atomicExch(sci_shift_safe_flags + sci, 0);
-                            }
-                        }
-                    }
-                }
-                Clustered_Set_Pair_Shift_Id(&shift_bits, i_local, shift_id);
-            }
-        }
-        pair_shift_bits[packed_idx * kClusteredJGroupSize + jm] = shift_bits;
-    }
-    if (sci_shift_safe_flags != NULL && sci_shift_safe_count != NULL)
-    {
-        __syncthreads();
-        if (threadIdx.x == 0 && sci_shift_safe_flags[sci] != 0)
-        {
-            atomicAdd(sci_shift_safe_count, 1);
-        }
     }
 }
 
@@ -14094,11 +13955,13 @@ static void Refresh_Gmxpacked_Pair_Shift_Metadata(LJ_CLUSTER_LAYOUT* layout,
     const bool use_simple_refresh =
         Clustered_Gmxpacked_Pair_Shift_Simple_Refresh_Enabled() &&
         !exact_sci_shift_flags;
+    const int refresh_block_size =
+        Clustered_Gmxpacked_Pair_Shift_Refresh_Block_Size();
     if (use_simple_refresh)
     {
         Launch_Device_Kernel(Refresh_Gmxpacked_Pair_Shift_Bits_Simple_Flags,
                              layout->gmxpacked_sci_numbers,
-                             CONTROLLER::device_max_thread, 0, NULL,
+                             refresh_block_size, 0, NULL,
                              layout->gmxpacked_sci_numbers,
                              layout->d_super_cluster_offsets,
                              layout->d_cluster_centers,
@@ -14112,7 +13975,7 @@ static void Refresh_Gmxpacked_Pair_Shift_Metadata(LJ_CLUSTER_LAYOUT* layout,
     {
         Launch_Device_Kernel(Refresh_Gmxpacked_Pair_Shift_Bits,
                              layout->gmxpacked_sci_numbers,
-                             CONTROLLER::device_max_thread, 0, NULL,
+                             refresh_block_size, 0, NULL,
                              layout->gmxpacked_sci_numbers,
                              layout->d_super_cluster_offsets,
                              layout->d_cluster_centers,
@@ -14194,9 +14057,11 @@ static bool Refresh_Gmxpacked_Delta_Pair_Shift_Bits(LJ_CLUSTER_LAYOUT* layout,
         &layout->gmxpacked_delta_pair_shift_capacity);
     const bool exact_sci_shift_flags =
         Clustered_Gmxpacked_Exact_Sci_Shift_Flags_Enabled();
+    const int refresh_block_size =
+        Clustered_Gmxpacked_Pair_Shift_Refresh_Block_Size();
     Launch_Device_Kernel(Refresh_Gmxpacked_Pair_Shift_Bits,
                          layout->gmxpacked_delta_sci_numbers,
-                         CONTROLLER::device_max_thread, 0, NULL,
+                         refresh_block_size, 0, NULL,
                          layout->gmxpacked_delta_sci_numbers,
                          layout->d_super_cluster_offsets,
                          layout->d_cluster_centers,

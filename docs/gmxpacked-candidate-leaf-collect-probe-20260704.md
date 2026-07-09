@@ -624,13 +624,15 @@ cmake --build build-dev-cuda13 --target SPONGE -j 8
 
 passed after the integration.
 
-Production 10000-step e2e comparison, single run per case:
+Production 10000-step e2e comparison, single run per case. This is the first
+production queue2 count integration check and predates the later
+cooperative-count plus cached-fill peak envelope:
 
 ```text
 /tmp/sponge-queue2-prod-e2e-20260708-164104
 ```
 
-Environment: stable peak env; DNA additionally used
+Environment: the stable peak env at the time; DNA additionally used
 `SPONGE_CLUSTERED_GMXPACKED_FULL_DENSE_PADDING=1`. Queue2 runs additionally
 used `SPONGE_CLUSTERED_FIXED_SHIFT_CANDIDATE_LEAF_QUEUE2_COUNT=1`.
 
@@ -640,13 +642,14 @@ used `SPONGE_CLUSTERED_FIXED_SHIFT_CANDIDATE_LEAF_QUEUE2_COUNT=1`.
 | wat600k | 40.516216 ns/day | 39.142693 ns/day | -3.39% | 19.300470 s | 20.083345 s | +4.06% | empty |
 | dna_cou | 279.038544 ns/day | 278.584106 ns/day | -0.16% | 4.360749 s | 4.343490 s | -0.40% | same AB-table fallback warning |
 
-Conclusion from this first e2e check: the phase-1 production queue2 count gate
-is runnable, but it should remain default-off. Replacing onepass candidate-leaf
-collect with queue2 count plus legacy fill loses e2e performance on both water
-systems. The likely reason is that this stage integrates only the count side:
-it still pays legacy candidate-leaf fill and changes the downstream candidate
-leaf ordering, while the standalone sidepath win measured a count/collect replay
-rather than this mixed production path.
+Historical conclusion from this first e2e check: the phase-1 production queue2
+count gate was runnable, but the isolated gate was not ready to promote by
+itself. Replacing onepass candidate-leaf collect with queue2 count plus legacy
+fill lost e2e performance on both water systems. The likely reason was that this
+stage integrated only the count side: it still paid legacy candidate-leaf fill
+and changed the downstream candidate leaf ordering, while the standalone
+sidepath win measured a count/collect replay rather than this mixed production
+path.
 
 Important baseline note from the 2026-07-08 follow-up: this e2e table did not
 enable `SPONGE_CLUSTERED_GMXPACKED_COUNT_FIXED_LIGHT_COOPERATIVE=1`, so the
@@ -655,3 +658,9 @@ post-cooperative-count peak. A same-input retest under
 `/tmp/sponge-dedicated-recheck-20260708` measured `122.342957 ns/day` for
 dedicated only and `129.247757 ns/day` for dedicated plus cooperative count.
 Future queue2 production comparisons should use the latter peak count env.
+
+2026-07-09 superseding peak-env note: queue2 count is part of the current peak
+env only in the later combined stack with cooperative fixed-light count, cached
+inner-active fill, and refresh block 128. Keep the table above as the traceable
+negative result for the intermediate queue2-only production integration stage;
+do not use it as the current peak-env recommendation.

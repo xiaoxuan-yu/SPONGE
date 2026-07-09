@@ -10,6 +10,196 @@
 
 #ifndef USE_CPU
 
+static __host__ __device__ __forceinline__ VECTOR
+Wrap_Clustered_Center_Fractional_Replay(const VECTOR center,
+                                        const LTMatrix3 rcell)
+{
+    VECTOR frac = center * rcell;
+    frac.x -= floorf(frac.x);
+    frac.y -= floorf(frac.y);
+    frac.z -= floorf(frac.z);
+    return frac;
+}
+
+static __host__ __device__ __forceinline__ int
+Encode_Clustered_Pair_Shift_Id_Replay(int sx, int sy, int sz)
+{
+    sx = sx < -1 ? -1 : (sx > 1 ? 1 : sx);
+    sy = sy < -1 ? -1 : (sy > 1 ? 1 : sy);
+    sz = sz < -1 ? -1 : (sz > 1 ? 1 : sz);
+    return (sx + 1) * 9 + (sy + 1) * 3 + (sz + 1);
+}
+
+static __host__ __device__ __forceinline__ int
+Determine_Clustered_Pair_Shift_Id_Replay(const VECTOR center_i,
+                                         const VECTOR center_j,
+                                         const LTMatrix3 rcell)
+{
+    const VECTOR frac_i =
+        Wrap_Clustered_Center_Fractional_Replay(center_i, rcell);
+    const VECTOR frac_j =
+        Wrap_Clustered_Center_Fractional_Replay(center_j, rcell);
+    const VECTOR dfrac = frac_j - frac_i;
+    return Encode_Clustered_Pair_Shift_Id_Replay(
+        static_cast<int>(floorf(dfrac.x + 0.5f)),
+        static_cast<int>(floorf(dfrac.y + 0.5f)),
+        static_cast<int>(floorf(dfrac.z + 0.5f)));
+}
+
+__global__ void Refresh_Gmxpacked_Pair_Shift_Bits(
+    const int sci_numbers, const int* super_cluster_offsets,
+    const VECTOR* cluster_centers, const unsigned int* cluster_valid_masks,
+    const unsigned int* cluster_local_masks,
+    const LJ_CLUSTERED_GMXPACKED_SCI* gmxpacked_sci,
+    const LJ_CLUSTERED_GMXPACKED_CJ* gmxpacked_cjpacked,
+    const LJ_CLUSTERED_GMXPACKED_EXCLUSION* exclusion_entries,
+    const LTMatrix3 rcell, uint64_t* pair_shift_bits,
+    int* sci_shift_only_safe, int* sci_shift_safe_flags,
+    int* sci_shift_safe_count, const bool exact_sci_shift_flags)
+{
+    const int sci = blockIdx.x;
+    if (sci >= sci_numbers)
+    {
+        return;
+    }
+    if (threadIdx.x == 0 && sci_shift_safe_flags != NULL)
+    {
+        sci_shift_safe_flags[sci] = 1;
+    }
+    __syncthreads();
+
+    const LJ_CLUSTERED_GMXPACKED_SCI sci_entry = gmxpacked_sci[sci];
+    const int cluster_i_start =
+        super_cluster_offsets[sci_entry.supercluster_id];
+    const int cluster_i_end =
+        super_cluster_offsets[sci_entry.supercluster_id + 1];
+    const int active_cluster_count = cluster_i_end - cluster_i_start;
+    const int packed_count = sci_entry.cjpacked_end - sci_entry.cjpacked_begin;
+    const int total_records = packed_count * kClusteredJGroupSize;
+
+    for (int record = threadIdx.x; record < total_records; record += blockDim.x)
+    {
+        const int local_packed = record / kClusteredJGroupSize;
+        const int jm = record % kClusteredJGroupSize;
+        const int packed_idx = sci_entry.cjpacked_begin + local_packed;
+        const LJ_CLUSTERED_GMXPACKED_CJ packed = gmxpacked_cjpacked[packed_idx];
+        const int cluster_j = packed.cj[jm];
+
+        uint64_t shift_bits = 0ull;
+        if (cluster_j >= 0)
+        {
+            const unsigned int combined_imask =
+                ((packed.split[0].imask | packed.split[1].imask) >>
+                 Clustered_Jm_Imask_Shift(jm)) &
+                ((1u << kClusteredSuperClusterClusters) - 1u);
+            const VECTOR center_j = cluster_centers[cluster_j];
+            for (int i_local = 0; i_local < active_cluster_count; i_local += 1)
+            {
+                int shift_id = kClusteredCentralShiftId;
+                if ((combined_imask &
+                     (1u << static_cast<unsigned int>(i_local))) != 0u)
+                {
+                    shift_id = Determine_Clustered_Pair_Shift_Id_Replay(
+                        cluster_centers[cluster_i_start + i_local], center_j,
+                        rcell);
+                    if ((sci_shift_only_safe != NULL ||
+                         sci_shift_safe_flags != NULL) &&
+                        shift_id != sci_entry.shift_id)
+                    {
+                        bool effective_pair = !exact_sci_shift_flags;
+                        const int cluster_i = cluster_i_start + i_local;
+                        const unsigned int packed_bit =
+                            1u << static_cast<unsigned int>(
+                                Clustered_Jm_Imask_Shift(jm) + i_local);
+                        for (int split = 0;
+                             split < kClusteredWarpSplitCount && !effective_pair;
+                             split += 1)
+                        {
+                            const LJ_CLUSTERED_GMXPACKED_SPLIT split_entry =
+                                packed.split[split];
+                            if ((split_entry.imask & packed_bit) == 0u)
+                            {
+                                continue;
+                            }
+                            for (int split_j_lane = 0;
+                                 split_j_lane < kClusteredSplitJClusterSize &&
+                                 !effective_pair;
+                                 split_j_lane += 1)
+                            {
+                                const int j_lane =
+                                    split * kClusteredSplitJClusterSize +
+                                    split_j_lane;
+                                if (cluster_valid_masks != NULL &&
+                                    (cluster_valid_masks[cluster_j] &
+                                     (1u << static_cast<unsigned int>(j_lane))) ==
+                                        0u)
+                                {
+                                    continue;
+                                }
+                                for (int i_lane = 0;
+                                     i_lane < kClusteredClusterSize; i_lane += 1)
+                                {
+                                    if (cluster_valid_masks != NULL &&
+                                        (cluster_valid_masks[cluster_i] &
+                                         (1u << static_cast<unsigned int>(
+                                              i_lane))) == 0u)
+                                    {
+                                        continue;
+                                    }
+                                    if (cluster_local_masks != NULL &&
+                                        (cluster_local_masks[cluster_i] &
+                                         (1u << static_cast<unsigned int>(
+                                              i_lane))) == 0u)
+                                    {
+                                        continue;
+                                    }
+                                    unsigned int pair_bits = 0xffffffffu;
+                                    if (split_entry.exclusion_index != 0 &&
+                                        exclusion_entries != NULL)
+                                    {
+                                        pair_bits =
+                                            exclusion_entries
+                                                [split_entry.exclusion_index]
+                                                    .pair[split_j_lane *
+                                                              kClusteredClusterSize +
+                                                          i_lane];
+                                    }
+                                    if ((pair_bits & packed_bit) != 0u)
+                                    {
+                                        effective_pair = true;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        if (effective_pair)
+                        {
+                            if (sci_shift_only_safe != NULL)
+                            {
+                                atomicExch(sci_shift_only_safe, 0);
+                            }
+                            if (sci_shift_safe_flags != NULL)
+                            {
+                                atomicExch(sci_shift_safe_flags + sci, 0);
+                            }
+                        }
+                    }
+                }
+                Clustered_Set_Pair_Shift_Id(&shift_bits, i_local, shift_id);
+            }
+        }
+        pair_shift_bits[packed_idx * kClusteredJGroupSize + jm] = shift_bits;
+    }
+    if (sci_shift_safe_flags != NULL && sci_shift_safe_count != NULL)
+    {
+        __syncthreads();
+        if (threadIdx.x == 0 && sci_shift_safe_flags[sci] != 0)
+        {
+            atomicAdd(sci_shift_safe_count, 1);
+        }
+    }
+}
+
 namespace
 {
 

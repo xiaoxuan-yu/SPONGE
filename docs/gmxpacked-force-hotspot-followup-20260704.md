@@ -1348,12 +1348,16 @@ The `nsys` binary is packaged under the pixi `nsight-compute` installation:
 .pixi/envs/dev-cuda13/nsight-compute-2025.3.1/host/target-linux-x64/nsys
 ```
 
+Historical note: this nsys split predates the later queue2/cooperative-count
+plus cached-fill peak envelope. Keep it for kernel-family attribution, but do
+not use its `Core Run Speed` rows as the current peak-speed target.
+
 Runs:
 
 | case | env | step count | status | Calculate_Force | nsys Core Run Speed |
 |---|---|---:|---|---:|---:|
-| wat160k force-only NVE | stable peak env | 2000 | finite | `1.334775 s` | `117.582184 ns/day` |
-| DNA_COU basic NVT | stable peak env plus `SPONGE_CLUSTERED_GMXPACKED_FULL_DENSE_PADDING=1` | 2000 | finite | `0.869038 s` | `277.370850 ns/day` |
+| wat160k force-only NVE | then-current stable peak env | 2000 | finite | `1.334775 s` | `117.582184 ns/day` |
+| DNA_COU basic NVT | then-current stable peak env plus `SPONGE_CLUSTERED_GMXPACKED_FULL_DENSE_PADDING=1` | 2000 | finite | `0.869038 s` | `277.370850 ns/day` |
 
 Kernel-time split, excluding one-time initialization kernels such as
 `Total_C6_Get`, `get_atom_and_residues_single_domain`, `get_local_device`, and
@@ -1395,8 +1399,9 @@ Interpretation:
 
 ## Nsys Overall Split, 10000-Step Standard
 
-The 2000-step run above is only a quick shape check. Use the following 10000-step
-run as the standard comparison point.
+The 2000-step run above is only a quick shape check. The following 10000-step
+run was the standard comparison point for the 2026-07-06 force/builder split,
+before the later queue2/cooperative-count plus cached-fill peak env update.
 
 Artifacts:
 
@@ -1415,8 +1420,8 @@ Runs:
 
 | case | env | step count | status | Calculate_Force | nsys Core Run Speed |
 |---|---|---:|---|---:|---:|
-| wat160k force-only NVE | stable peak env | 10000 | finite | `6.331339 s` | `123.122169 ns/day` |
-| DNA_COU basic NVT | stable peak env plus `SPONGE_CLUSTERED_GMXPACKED_FULL_DENSE_PADDING=1` | 10000 | finite | `4.448165 s` | `267.975922 ns/day` |
+| wat160k force-only NVE | then-current stable peak env | 10000 | finite | `6.331339 s` | `123.122169 ns/day` |
+| DNA_COU basic NVT | then-current stable peak env plus `SPONGE_CLUSTERED_GMXPACKED_FULL_DENSE_PADDING=1` | 10000 | finite | `4.448165 s` | `267.975922 ns/day` |
 
 Kernel-time split, excluding one-time initialization kernels:
 

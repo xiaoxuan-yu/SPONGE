@@ -106,6 +106,19 @@ static_assert(sizeof(LJ_CLUSTERED_GMXPACKED_EXCLUSION) ==
                   sizeof(unsigned int) * kClusteredGmxpackedExclusionPairCount,
               "Unexpected clustered gmxpacked exclusion size.");
 
+#ifndef USE_CPU
+__global__ void Refresh_Gmxpacked_Pair_Shift_Bits(
+    int sci_numbers, const int* super_cluster_offsets,
+    const VECTOR* cluster_centers, const unsigned int* cluster_valid_masks,
+    const unsigned int* cluster_local_masks,
+    const LJ_CLUSTERED_GMXPACKED_SCI* gmxpacked_sci,
+    const LJ_CLUSTERED_GMXPACKED_CJ* gmxpacked_cjpacked,
+    const LJ_CLUSTERED_GMXPACKED_EXCLUSION* exclusion_entries,
+    LTMatrix3 rcell, uint64_t* pair_shift_bits, int* sci_shift_only_safe,
+    int* sci_shift_safe_flags, int* sci_shift_safe_count,
+    bool exact_sci_shift_flags);
+#endif
+
 // Future production-owned gmxpacked record-stream contract. Hook this stream
 // after cornerstone-sorted atoms already have cluster/supercluster/
 // candidate-leaf, shift, and exclusion metadata, but before finalized native

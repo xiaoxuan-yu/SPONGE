@@ -54,6 +54,68 @@ SPONGE_CLUSTERED_GMXPACKED_ACTIVE_VIEW_ZERO_DIRTY_SOURCE_REUSE=1
 SPONGE_CLUSTERED_FIXED_SHIFT_CANDIDATE_LEAF_QUEUE2_COUNT=1
 SPONGE_CLUSTERED_FIXED_SHIFT_CANDIDATE_LEAF_QUEUE2_DEVICE_BLOCKS=256
 SPONGE_CLUSTERED_FIXED_SHIFT_CANDIDATE_LEAF_QUEUE2_TASK_SPLIT_DEPTH=2
+SPONGE_CLUSTERED_GMXPACKED_INNER_ACTIVE_CACHED_FILL=1
+SPONGE_CLUSTERED_GMXPACKED_PAIR_SHIFT_REFRESH_BLOCK_SIZE=128
+```
+
+For DNA_COU peak checks, add `SPONGE_CLUSTERED_GMXPACKED_FULL_DENSE_PADDING=1`.
+
+## 2026-07-09 current peak recheck
+
+Current 10000-step recheck with the stable peak env above, no nsys wrapper:
+
+```text
+/tmp/sponge-current-peak-recheck-20260709
+```
+
+| system | speed | wall time | notes |
+|---|---:|---:|---|
+| wat160k | 144.195648 ns/day | 5.992458 s | finite |
+| wat600k | 46.822659 ns/day | 18.454450 s | finite |
+| dna_cou | 295.798553 ns/day | 5.842398 s | finite; AB-table fallback warning only |
+
+The older cached-fill nsys run under
+`/tmp/sponge-cached-fill-nsys-20260708` reported `138.727768`,
+`44.781193`, and `293.294006 ns/day` for wat160k, wat600k, and dna_cou.
+Use these current/post-cached-fill groups instead of older
+`sponge-collect-distribution-20260708` results or short smoke runs when
+checking the expected peak envelope.
+
+## 2026-07-09 current peak alternating runs
+
+Five interleaved 10000-step runs per system, no nsys wrapper:
+
+```text
+/tmp/sponge-current-peak-alt5-20260709
+```
+
+Run order was repeated as `wat160k -> wat600k -> dna_cou` for each cycle.
+All 15 runs completed finite. Water stderr was empty; DNA_COU stderr contained
+only the expected AB-table fallback warning. Variance below is population
+variance over `N=5`.
+
+Speed statistics, in `ns/day`:
+
+| system | min | max | mean | median | var |
+|---|---:|---:|---:|---:|---:|
+| wat160k | 139.247086 | 146.888992 | 143.048642 | 143.672241 | 8.378501 |
+| wat600k | 46.469135 | 47.920662 | 47.274160 | 47.240349 | 0.292218 |
+| dna_cou | 295.475128 | 303.096039 | 299.265869 | 300.524048 | 9.525371 |
+
+Wall-time statistics, in seconds:
+
+| system | min | max | mean | median | var |
+|---|---:|---:|---:|---:|---:|
+| wat160k | 5.882581 | 6.205418 | 6.042986 | 6.014289 | 0.015011 |
+| wat600k | 18.031604 | 18.594847 | 18.280593 | 18.291279 | 0.043885 |
+| dna_cou | 5.701734 | 5.848793 | 5.775323 | 5.750531 | 0.003562 |
+
+Individual speed samples:
+
+```text
+wat160k: 146.888992, 145.175507, 139.247086, 140.259384, 143.672241
+wat600k: 47.920662, 46.937073, 46.469135, 47.803581, 47.240349
+dna_cou: 303.096039, 300.524048, 295.475128, 301.459778, 295.774353
 ```
 
 Do not add these flags to the peak env:
@@ -66,15 +128,16 @@ SPONGE_CLUSTERED_FIXED_SHIFT_CANDIDATE_LEAF_COLLECT_SASS_OPT=1
 SPONGE_CLUSTERED_GMXPACKED_PAIR_SHIFT_SIMPLE_REFRESH=1
 SPONGE_CLUSTERED_GMXPACKED_SORTED_CLUSTER_MAP=1
 SPONGE_CLUSTERED_GMXPACKED_SCI_SHIFT_SPLIT_SKIP_EMPTY=1
-SPONGE_CLUSTERED_GMXPACKED_INNER_ACTIVE_CACHED_FILL=1
 ```
 
 The source-cache patch did not improve the 2026-07-01 peak path. The 2026-07-03
 dirty-gate bundle above was stable with rolling cache off, but it was slower
-than the default-off path. The 2026-07-08 queue2 current-peak retest promoted
-the queue2 count gate only together with the cooperative fixed-light count gate;
-the cached inner-active fill gate remains an opt-in comparison target until the
-multi-system alternating e2e runs justify promoting it.
+than the default-off path. The 2026-07-08 queue2 retest first promoted the
+queue2 count gate only together with the cooperative fixed-light count gate; at
+that point cached inner-active fill was still only a comparison target. The
+2026-07-08 cached-fill nsys group and the 2026-07-09 recheck above supersede
+that older caution: cached fill plus refresh block 128 are now part of the
+current peak envelope.
 
 ## 2026-07-03 rolling source cache decision
 
@@ -407,9 +470,9 @@ only the expected AB-table fallback warning.
 | dna_cou | off | `308.222406 ns/day` | `302.058014-310.637268` | `3.886263 s` | n/a | n/a |
 | dna_cou | on | `312.148608 ns/day` | `310.150604-314.439850` | `3.823580 s` | `-1.613%` | `+1.274%` |
 
-This validates cached fill as a positive opt-in comparison gate under the queue2
-current-peak env. It is still listed outside the default peak env until a
-separate decision promotes it.
+This was the promotion evidence for cached fill under the queue2 current-peak
+env. After the 2026-07-09 recheck, cached fill is part of the current stable peak
+env above. Keep this alternating table as the traceable before/after evidence.
 
 ## How to avoid repeating this search
 
@@ -420,7 +483,9 @@ ablate only one layer at a time:
 2. remove `SPONGE_CLUSTERED_GMXPACKED_FIXED_SHIFT_BUILDER_SPECIALIZED`;
 3. remove `SPONGE_CLUSTERED_GMXPACKED_DIRTY_J_PARALLEL_SCAN`;
 4. remove `SPONGE_CLUSTERED_GMXPACKED_ACTIVE_VIEW_ZERO_DIRTY_SOURCE_REUSE`;
-5. remove onepass/count-fragment flags only if the target is candidate-leaf or
+5. remove `SPONGE_CLUSTERED_GMXPACKED_INNER_ACTIVE_CACHED_FILL`;
+6. change or remove `SPONGE_CLUSTERED_GMXPACKED_PAIR_SHIFT_REFRESH_BLOCK_SIZE`;
+7. remove onepass/count-fragment flags only if the target is candidate-leaf or
    count-kernel attribution.
 
 If a run reports around `80-84 ns/day`, check first whether dirty-J parallel
