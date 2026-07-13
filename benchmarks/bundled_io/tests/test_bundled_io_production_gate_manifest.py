@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import replace
 from pathlib import Path
 
@@ -27,6 +29,9 @@ from benchmarks.bundled_io.input_semantics import (
     REQUIRED_INPUT_SEMANTIC_CONTRACTS,
     InputSemanticSpec,
     assert_module_semantics,
+)
+from benchmarks.bundled_io.tests.test_bundled_io_ab_execution_matrix import (
+    MATRIX_RUNTIME_CASES,
 )
 from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
     INPUT_SEMANTIC_SPECS_BY_CASE,
@@ -59,6 +64,9 @@ MODULE_TEST = (
 HIGHFIVE_TEST = REPO_ROOT / "tests/h5_bundle/test_highfive_backend_io.cpp"
 AB_SHADOW_WORKFLOW = REPO_ROOT / ".github/workflows/bundled-io-ab-shadow.yml"
 RELEASE_WORKFLOW = REPO_ROOT / ".github/workflows/release.yml"
+MATRIX_FIXTURE_ROOT = (
+    REPO_ROOT / "benchmarks/bundled_io/fixtures/tip3p_matrix"
+)
 
 
 def _dev_tasks() -> dict[str, object]:
@@ -534,7 +542,7 @@ def _ready_promotion_fixture():
         scenarios.append(
             replace(
                 scenario,
-                status="evidenced",
+                status="executable",
                 case_ids=(case_id,),
                 reason="",
             )
@@ -590,7 +598,8 @@ def _ready_promotion_fixture():
 
 def test_execution_matrix_enumerates_every_required_axis_and_risk_pair():
     matrix = load_execution_matrix()
-    case_ids = {case.name for case in _cases_for_profile()}
+    runtime_cases = {case.scenario_id: case for case in MATRIX_RUNTIME_CASES}
+    case_ids = {case.name for case in _cases_for_profile()} | set(runtime_cases)
 
     validate_execution_matrix(matrix, case_ids)
 
@@ -606,7 +615,47 @@ def test_execution_matrix_enumerates_every_required_axis_and_risk_pair():
     }
     assert matrix.required_consecutive_production_runs == 3
     assert matrix.promotion_state == "shadow"
-    assert all(scenario.status == "deferred" for scenario in matrix.scenarios)
+    executable = [
+        scenario
+        for scenario in matrix.scenarios
+        if scenario.status == "executable"
+    ]
+    assert len(executable) == 12
+    for scenario in executable:
+        assert scenario.case_ids == (scenario.scenario_id,)
+        runtime_case = runtime_cases[scenario.scenario_id]
+        assert scenario.axis_values() == runtime_case.axis_values()
+        assert scenario.barostat == runtime_case.barostat
+        assert scenario.tier == runtime_case.tier
+
+
+def test_execution_matrix_fixture_hashes_are_reviewed_and_pinned():
+    manifest = json.loads(
+        (MATRIX_FIXTURE_ROOT / "manifest.json").read_text(encoding="utf-8")
+    )
+
+    assert manifest["schema_version"] == 1
+    assert manifest["initial_velocity_seed"] == 20260709
+    assert manifest["nonorthogonal_box_angles_degrees"] == [80.0, 100.0, 110.0]
+    assert set(manifest["sha256"]) == {
+        "common/mdin.bundled.spg.toml",
+        "common/legacy_sidecars/LJ_in_file/tip3p_LJ.txt",
+        "common/legacy_sidecars/bond_in_file/tip3p_bond.txt",
+        "common/legacy_sidecars/charge_in_file/tip3p_charge.txt",
+        "common/legacy_sidecars/exclude_in_file/tip3p_exclude.txt",
+        "common/legacy_sidecars/mass_in_file/tip3p_mass.txt",
+        "common/legacy_sidecars/residue_in_file/tip3p_residue.txt",
+        "common/topology.spgt.h5",
+        "common/protocol.spgp.h5",
+        "orthogonal/restart.spgr.h5",
+        "nonorthogonal/restart.spgr.h5",
+        "initial_velocity.txt",
+    }
+    for relative_path, expected in manifest["sha256"].items():
+        actual = hashlib.sha256(
+            (MATRIX_FIXTURE_ROOT / relative_path).read_bytes()
+        ).hexdigest()
+        assert actual == expected, relative_path
 
 
 def test_execution_matrix_rejects_removed_axis_and_unmapped_combination():
@@ -641,7 +690,8 @@ def test_execution_matrix_rejects_removed_axis_and_unmapped_combination():
                 matrix,
                 scenarios=(unknown_case, *matrix.scenarios[1:]),
             ),
-            available_case_ids={case.name for case in _cases_for_profile()},
+            available_case_ids={case.name for case in _cases_for_profile()}
+            | {case.scenario_id for case in MATRIX_RUNTIME_CASES},
         )
 
 
@@ -656,7 +706,9 @@ def test_current_execution_matrix_cannot_be_promoted_by_declarations_only():
 
     assert decision.ready is False
     assert any("promotion_state is shadow" in item for item in decision.blockers)
-    assert any("scenarios lack evidence" in item for item in decision.blockers)
+    assert any(
+        "does not prove environment" in item for item in decision.blockers
+    )
     assert any("contracts lack evidence" in item for item in decision.blockers)
     assert any("consecutive retry-free" in item for item in decision.blockers)
 
@@ -664,6 +716,27 @@ def test_current_execution_matrix_cannot_be_promoted_by_declarations_only():
 def test_promotion_requires_environment_metadata_for_every_scenario():
     matrix, contracts, report, runs = _ready_promotion_fixture()
     assert evaluate_promotion_readiness(matrix, contracts, report, runs).ready
+    contract_id = next(iter(contracts))
+    contract_report = {
+        "cases": {
+            "contract_case": {
+                "records": [
+                    {
+                        "contract_id": contract_id,
+                        "evidence_level": "E3",
+                        "status": "passed",
+                    }
+                ]
+            }
+        }
+    }
+    assert evaluate_promotion_readiness(
+        matrix,
+        contracts,
+        contract_report,
+        runs,
+        scenario_evidence_report=report,
+    ).ready
 
     first = matrix.scenarios[0]
     case_payload = report["cases"][first.case_ids[0]]
@@ -738,7 +811,11 @@ def test_shadow_workflow_runs_tiers_without_becoming_a_release_gate():
     assert "smoke-bundled-io-contract" in workflow
     assert "ab-bundled-io-medium" in workflow
     assert "ab-bundled-io-production" in workflow
-    assert workflow.count("continue-on-error: true") == 2
+    assert "test_bundled_io_ab_execution_matrix.py" in workflow
+    assert workflow.count("SPONGE_BUNDLED_IO_AB_MATRIX_SCENARIOS: cpu-rank1") == 2
+    assert "SPONGE_BUNDLED_IO_AB_MATRIX_SCENARIOS: cpu-rank2" in workflow
+    assert "pixi install -e dev-cpu-mpi" in workflow
+    assert workflow.count("continue-on-error: true") == 3
     assert "schedule:" in workflow
     assert "actions/upload-artifact@v4" in workflow
     assert "bundled-io-ab-shadow" not in release

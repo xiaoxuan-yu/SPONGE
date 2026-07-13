@@ -13,6 +13,8 @@ def trajectory_observable_series(
     shape: tuple[int, ...],
     *,
     atom_weights: Sequence[float] | None = None,
+    box_values: Sequence[float] | None = None,
+    box_shape: tuple[int, ...] | None = None,
 ) -> dict[str, list[float]]:
     """Convert a particle or box trajectory into physical frame observables."""
 
@@ -28,7 +30,13 @@ def trajectory_observable_series(
             "atom weights must be positive and match atom count"
         )
     if dataset.endswith("/position/value"):
-        return _position_observables(values, shape, atom_weights)
+        return _position_observables(
+            values,
+            shape,
+            atom_weights,
+            box_values=box_values,
+            box_shape=box_shape,
+        )
     if dataset.endswith("/velocity/value"):
         return _velocity_observables(values, shape, atom_weights)
     if dataset.endswith("/force/value"):
@@ -80,8 +88,20 @@ def _position_observables(
     values: Sequence[float],
     shape: tuple[int, ...],
     atom_weights: Sequence[float] | None,
+    *,
+    box_values: Sequence[float] | None,
+    box_shape: tuple[int, ...] | None,
 ) -> dict[str, list[float]]:
     frames = _vector_frames(values, shape)
+    boxes = _position_boxes(box_values, box_shape, shape[0])
+    inverses = (
+        [_inverse_matrix(box) for box in boxes] if boxes is not None else None
+    )
+    if boxes is not None:
+        frames = [
+            [_wrap_position(vector, box, inverse) for vector in frame]
+            for frame, box, inverse in zip(frames, boxes, inverses)
+        ]
     origin = frames[0]
     weights = (
         list(atom_weights) if atom_weights is not None else [1.0] * shape[1]
@@ -100,22 +120,34 @@ def _position_observables(
     }
     for atom_index in range(shape[1]):
         result[f"atom_{atom_index}_squared_displacement"] = [
-            sum(
-                (frame[atom_index][axis] - origin[atom_index][axis]) ** 2
-                for axis in range(3)
-            )
-            for frame in frames
-        ]
-    pair_distances = []
-    for frame in frames:
-        distances = [
             _norm(
-                tuple(
-                    frame[right][axis] - frame[left][axis] for axis in range(3)
+                _minimum_image(
+                    tuple(
+                        frame[atom_index][axis] - origin[atom_index][axis]
+                        for axis in range(3)
+                    ),
+                    boxes[frame_index] if boxes is not None else None,
+                    inverses[frame_index] if inverses is not None else None,
                 )
             )
-            for left in range(len(frame))
-            for right in range(left + 1, len(frame))
+            ** 2
+            for frame_index, frame in enumerate(frames)
+        ]
+    pair_distances = []
+    sampled_pairs = _sampled_atom_pairs(shape[1])
+    for frame_index, frame in enumerate(frames):
+        distances = [
+            _norm(
+                _minimum_image(
+                    tuple(
+                        frame[right][axis] - frame[left][axis]
+                        for axis in range(3)
+                    ),
+                    boxes[frame_index] if boxes is not None else None,
+                    inverses[frame_index] if inverses is not None else None,
+                )
+            )
+            for left, right in sampled_pairs
         ]
         pair_distances.append(distances or [0.0])
     for name, fraction in (("q25", 0.25), ("median", 0.5), ("q75", 0.75)):
@@ -123,6 +155,105 @@ def _position_observables(
             _quantile(distances, fraction) for distances in pair_distances
         ]
     return result
+
+
+def _position_boxes(
+    values: Sequence[float] | None,
+    shape: tuple[int, ...] | None,
+    frame_count: int,
+) -> list[tuple[float, ...]] | None:
+    if values is None and shape is None:
+        return None
+    if values is None or shape is None:
+        raise AssertionError("position box values and shape must be provided together")
+    if len(shape) != 3 or shape[1:] != (3, 3) or shape[0] not in {1, frame_count}:
+        raise AssertionError(f"invalid position box shape: {shape}")
+    if len(values) != shape[0] * 9:
+        raise AssertionError("position box shape/value mismatch")
+    matrices = [tuple(values[index * 9 : (index + 1) * 9]) for index in range(shape[0])]
+    if len(matrices) == 1:
+        return matrices * frame_count
+    return matrices
+
+
+def _wrap_position(
+    vector: tuple[float, float, float],
+    box: tuple[float, ...],
+    inverse: tuple[float, ...] | None = None,
+) -> tuple[float, float, float]:
+    inverse = inverse or _inverse_matrix(box)
+    fractional = _row_vector_matrix_product(vector, inverse)
+    wrapped = tuple(value - math.floor(value) for value in fractional)
+    return _row_vector_matrix_product(wrapped, box)
+
+
+def _minimum_image(
+    vector: tuple[float, float, float],
+    box: tuple[float, ...] | None,
+    inverse: tuple[float, ...] | None = None,
+) -> tuple[float, float, float]:
+    if box is None:
+        return vector
+    inverse = inverse or _inverse_matrix(box)
+    fractional = _row_vector_matrix_product(vector, inverse)
+    wrapped = tuple(value - round(value) for value in fractional)
+    return _row_vector_matrix_product(wrapped, box)
+
+
+def _sampled_atom_pairs(
+    atom_count: int, maximum_pairs: int = 4096
+) -> list[tuple[int, int]]:
+    total = atom_count * (atom_count - 1) // 2
+    if total <= 0:
+        return []
+    sample_count = min(total, maximum_pairs)
+    if sample_count == 1:
+        flat_indices = [0]
+    else:
+        flat_indices = [
+            round(index * (total - 1) / (sample_count - 1))
+            for index in range(sample_count)
+        ]
+    pairs = []
+    left = 0
+    prefix = 0
+    for flat_index in flat_indices:
+        while flat_index >= prefix + atom_count - left - 1:
+            prefix += atom_count - left - 1
+            left += 1
+        right = left + 1 + (flat_index - prefix)
+        pairs.append((left, right))
+    return pairs
+
+
+def _row_vector_matrix_product(
+    vector: Sequence[float], matrix: Sequence[float]
+) -> tuple[float, float, float]:
+    return tuple(
+        sum(vector[row] * matrix[row * 3 + column] for row in range(3))
+        for column in range(3)
+    )
+
+
+def _inverse_matrix(values: Sequence[float]) -> tuple[float, ...]:
+    if len(values) != 9:
+        raise AssertionError("box matrix must contain nine values")
+    a, b, c, d, e, f, g, h, i = values
+    determinant = _determinant(values)
+    if not math.isfinite(determinant) or abs(determinant) <= 1.0e-20:
+        raise AssertionError("box matrix must be finite and non-singular")
+    scale = 1.0 / determinant
+    return (
+        (e * i - f * h) * scale,
+        (c * h - b * i) * scale,
+        (b * f - c * e) * scale,
+        (f * g - d * i) * scale,
+        (a * i - c * g) * scale,
+        (c * d - a * f) * scale,
+        (d * h - e * g) * scale,
+        (b * g - a * h) * scale,
+        (a * e - b * d) * scale,
+    )
 
 
 def _velocity_observables(

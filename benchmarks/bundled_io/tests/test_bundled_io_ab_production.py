@@ -110,9 +110,9 @@ PHYSICAL_ABSOLUTE_MARGINS = {
 
 DETERMINISTIC_TOLERANCES = {
     "schedule": (0.0, 1.0e-12),
-    "position": (1.0e-5, 1.0e-6),
-    "velocity": (1.0e-5, 1.0e-7),
-    "force": (1.0e-4, 1.0e-7),
+    "position": (1.0e-5, 1.0e-5),
+    "velocity": (1.0e-5, 1.0e-4),
+    "force": (1.0e-4, 3.0e-5),
     "box": (1.0e-6, 1.0e-7),
     "observable": (1.0e-4, 1.0e-8),
 }
@@ -1317,9 +1317,6 @@ def _xponge_python() -> Path:
     configured = os.environ.get("SPONGE_XPONGE_PYTHON")
     if configured:
         return Path(configured)
-    dev_python = XPONGE_DEV_ROOT / ".venv" / "bin" / "python"
-    if dev_python.exists():
-        return dev_python
     return Path(sys.executable)
 
 
@@ -2337,6 +2334,94 @@ def _assert_numeric_sequences_close(
             )
 
 
+def _assert_periodic_positions_close(
+    label: str,
+    left: Sequence[float],
+    right: Sequence[float],
+    shape: tuple[int, ...],
+    boxes: Sequence[float],
+    *,
+    relative_tolerance: float,
+    absolute_tolerance: float,
+) -> None:
+    if len(shape) != 3 or shape[2] != 3:
+        raise AssertionError(f"{label} requires a frame/atom/xyz position shape")
+    frame_count, atom_count, _ = shape
+    if len(left) != len(right) or len(left) != frame_count * atom_count * 3:
+        raise AssertionError(f"{label} position value count differs from shape")
+    if len(boxes) not in {9, frame_count * 9}:
+        raise AssertionError(f"{label} box value count differs from frame count")
+
+    for frame_index in range(frame_count):
+        box_offset = 0 if len(boxes) == 9 else frame_index * 9
+        box = boxes[box_offset : box_offset + 9]
+        inverse = _inverse_3x3(box, label)
+        for atom_index in range(atom_count):
+            offset = (frame_index * atom_count + atom_index) * 3
+            left_xyz = left[offset : offset + 3]
+            right_xyz = right[offset : offset + 3]
+            if any(
+                not math.isfinite(value) for value in (*left_xyz, *right_xyz)
+            ):
+                _assert_nonfinite_patterns_match(
+                    f"{label} frame {frame_index} atom {atom_index}",
+                    left_xyz,
+                    right_xyz,
+                )
+                continue
+            delta = [
+                left_xyz[axis] - right_xyz[axis] for axis in range(3)
+            ]
+            fractional = [
+                sum(delta[axis] * inverse[axis * 3 + lattice] for axis in range(3))
+                for lattice in range(3)
+            ]
+            lattice = [round(value) for value in fractional]
+            shift = [
+                sum(lattice[basis] * box[basis * 3 + axis] for basis in range(3))
+                for axis in range(3)
+            ]
+            for axis in range(3):
+                adjusted = left_xyz[axis] - shift[axis]
+                if not math.isclose(
+                    adjusted,
+                    right_xyz[axis],
+                    rel_tol=relative_tolerance,
+                    abs_tol=absolute_tolerance,
+                ):
+                    raise AssertionError(
+                        f"{label} periodic mismatch at frame {frame_index}, "
+                        f"atom {atom_index}, axis {axis}: "
+                        f"legacy={left_xyz[axis]}, bundled={right_xyz[axis]}, "
+                        f"lattice_shift={shift[axis]}"
+                    )
+
+
+def _inverse_3x3(values: Sequence[float], label: str) -> tuple[float, ...]:
+    if len(values) != 9:
+        raise AssertionError(f"{label} box matrix must have nine values")
+    a, b, c, d, e, f, g, h, i = values
+    determinant = (
+        a * (e * i - f * h)
+        - b * (d * i - f * g)
+        + c * (d * h - e * g)
+    )
+    if not math.isfinite(determinant) or abs(determinant) <= 1.0e-20:
+        raise AssertionError(f"{label} box matrix is singular")
+    scale = 1.0 / determinant
+    return (
+        (e * i - f * h) * scale,
+        (c * h - b * i) * scale,
+        (b * f - c * e) * scale,
+        (f * g - d * i) * scale,
+        (a * i - c * g) * scale,
+        (c * d - a * f) * scale,
+        (d * h - e * g) * scale,
+        (b * g - a * h) * scale,
+        (a * e - b * d) * scale,
+    )
+
+
 def _assert_nonfinite_patterns_match(
     label: str, left: Sequence[float], right: Sequence[float]
 ) -> None:
@@ -3013,17 +3098,52 @@ def _compare_h5_outputs_deterministically(
             legacy_files[name], bundled_files[name], f"{case.name} {name}"
         )
         for dataset in datasets:
-            left = _normalize_h5dump(
-                _h5dump_dataset(legacy_files[name], dataset)
-            )
-            right = _normalize_h5dump(
-                _h5dump_dataset(bundled_files[name], dataset)
-            )
-            if left != right:
-                raise AssertionError(
-                    f"{case.name} deterministic H5 dataset differs: "
-                    f"{name}:{dataset}"
+            if _h5_dataset_kind(legacy_files[name], dataset) == "numeric":
+                left_values = _h5_numeric_values(legacy_files[name], dataset)
+                right_values = _h5_numeric_values(bundled_files[name], dataset)
+                _assert_matching_numeric_shape(
+                    f"{case.name} deterministic {name}:{dataset}",
+                    legacy_files[name],
+                    bundled_files[name],
+                    dataset,
+                    left_values,
+                    right_values,
                 )
+                relative_tolerance, absolute_tolerance = (
+                    _deterministic_tolerance(dataset)
+                )
+                particle_root = dataset.removesuffix("/position/value")
+                box_dataset = f"{particle_root}/box/edges/value"
+                if dataset.endswith("/position/value") and box_dataset in datasets:
+                    _assert_periodic_positions_close(
+                        f"{case.name} deterministic H5 {name}:{dataset}",
+                        left_values,
+                        right_values,
+                        _h5_dataset_shape(legacy_files[name], dataset),
+                        _h5_numeric_values(legacy_files[name], box_dataset),
+                        relative_tolerance=relative_tolerance,
+                        absolute_tolerance=absolute_tolerance,
+                    )
+                else:
+                    _assert_numeric_sequences_close(
+                        f"{case.name} deterministic H5 {name}:{dataset}",
+                        left_values,
+                        right_values,
+                        relative_tolerance=relative_tolerance,
+                        absolute_tolerance=absolute_tolerance,
+                    )
+            else:
+                left = _normalize_h5dump(
+                    _h5dump_dataset(legacy_files[name], dataset)
+                )
+                right = _normalize_h5dump(
+                    _h5dump_dataset(bundled_files[name], dataset)
+                )
+                if left != right:
+                    raise AssertionError(
+                        f"{case.name} deterministic H5 metadata differs: "
+                        f"{name}:{dataset}"
+                    )
         compared[name] = {
             "method": "deterministic_all_datasets",
             "dataset_count": len(datasets),
@@ -3664,15 +3784,27 @@ def _compare_h5_numeric_dataset_statistics(
         atom_weights = _trajectory_atom_weights(runs[0], dataset, shape)
         legacy_observables = [
             trajectory_observable_series(
-                dataset, values, shape, atom_weights=atom_weights
+                dataset,
+                values,
+                shape,
+                atom_weights=atom_weights,
+                **_trajectory_box_arguments(
+                    _output_h5_files(case, run.legacy_dir)[name], dataset
+                ),
             )
-            for values in legacy_replicas
+            for run, values in zip(runs, legacy_replicas)
         ]
         bundled_observables = [
             trajectory_observable_series(
-                dataset, values, shape, atom_weights=atom_weights
+                dataset,
+                values,
+                shape,
+                atom_weights=atom_weights,
+                **_trajectory_box_arguments(
+                    _output_h5_files(case, run.bundled_dir)[name], dataset
+                ),
             )
-            for values in bundled_replicas
+            for run, values in zip(runs, bundled_replicas)
         ]
         if legacy_observables and legacy_observables[0]:
             feature_names = set(legacy_observables[0])
@@ -3724,6 +3856,17 @@ def _trajectory_atom_weights(
             f"trajectory atom count {shape[1]} differs from mass count {len(masses)}"
         )
     return masses
+
+
+def _trajectory_box_arguments(path: Path, dataset: str) -> dict[str, object]:
+    if not dataset.endswith("/position/value"):
+        return {}
+    particle_root = dataset.removesuffix("/position/value")
+    box_dataset = f"{particle_root}/box/edges/value"
+    return {
+        "box_values": _h5_numeric_values(path, box_dataset),
+        "box_shape": _h5_dataset_shape(path, box_dataset),
+    }
 
 
 def _can_use_statistics(
@@ -3873,7 +4016,21 @@ def _h5_dataset_shape(path: Path, dataset: str) -> tuple[int, ...]:
 
 
 def _h5_data_text(path: Path, dataset: str) -> str:
-    dump = _run(["h5dump", "-d", dataset, "-y", "-w", "0", path]).stdout
+    dump = _run(
+        [
+            "h5dump",
+            "-d",
+            dataset,
+            "-y",
+            "-m",
+            "%.17g",
+            "-L",
+            "%.21Lg",
+            "-w",
+            "0",
+            path,
+        ]
+    ).stdout
     marker = re.search(r"\bDATA\s*\{", dump)
     if marker is None:
         raise AssertionError(

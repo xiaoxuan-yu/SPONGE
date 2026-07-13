@@ -244,10 +244,10 @@ byte equality is not required.
 
 ## 10. PR 7: Execution Matrix and CI Promotion
 
-PR 7 is split into two independently reviewable commits because the promotion
+PR 7 is split into three independently reviewable commits because the promotion
 mechanism can be verified while the runtime matrix is still red. PR 7a must not
-claim behavior coverage or enable a release gate; PR 7b owns the executable
-runtime evidence and the eventual promotion.
+claim behavior coverage or enable a release gate; PR 7b owns portable runtime
+cases and CPU/MPI evidence; PR 7c owns GPU evidence and eventual promotion.
 
 ### PR 7a: Executable Shadow Promotion Guard
 
@@ -269,7 +269,28 @@ Acceptance:
   behavior gaps remain.
 - Release workflows do not consume the shadow result.
 
-### PR 7b: Runtime Matrix Evidence and Promotion
+### PR 7b: Portable Runtime Matrix and CPU/MPI Evidence
+
+- Add pinned same-semantic TIP3P legacy/bundled fixtures for orthogonal and
+  nonorthogonal boxes without requiring an online converter during the gate.
+- Define executable cases for every declared CPU/GPU, OMP, and MPI scenario.
+- Run and compare all CPU rank-1 and rank-2 scenarios, including a single
+  rank-0 H5 finalize report and output ownership under MPI.
+- Make deterministic position comparisons and statistical position features
+  periodic-box aware. Bound pair-distribution work with deterministic sampling.
+- Keep GPU scenarios executable but unproven when no GPU runner is available.
+
+Acceptance:
+
+- CPU rank-1 covers deterministic NVE; middle, Bussi, and NHC NVT; orthogonal
+  and nonorthogonal NPT; all three constraint modes; and OMP 1/4.
+- CPU rank-2 covers deterministic NVE and nonorthogonal statistical NPT, with
+  rank-0 output ownership asserted.
+- Periodic-image-only position changes pass, while material force/position
+  mutations remain rejected.
+- Contract, comparator, matrix manifest, and workflow validation tests pass.
+
+### PR 7c: GPU Evidence and Final Promotion
 
 Add a risk-driven execution matrix:
 
@@ -324,5 +345,6 @@ Append one row immediately after completing and committing each PR.
 | PR 4: Output behavior closure | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; five output/VDS CTest targets; two-step NVE restart continuation; real TIP3P A/B (expected force-schedule failure) | 45 contract tests and all output writer/backend targets pass. Normal VDS-off/on cases now require position, velocity, force, box, structured mdinfo, explicit route provenance/content, and E4 structural restart continuation. The real gate exposes legacy `frc` 51-frame vs H5 50-frame schedule skew; QC SCF non-empty/exact comparison and dynamic restart continuation remain explicit behavior gaps rather than relaxed assertions. |
 | PR 5: Input behavior closure | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; native-topology reader and fixture-equivalence CTest; saved TIP3P and sidecar-rerun production artifacts | 52 contract tests require every supported input contract to produce a present, non-trivial module-owned result and then pass deterministic or statistical A/B comparison. TIP3P mass/charge/LJ pass; the rerun gate rejects the known QC first-frame mismatch (`-34183.44` vs `-34139.92`). Reader/path checks remain E1/E2 only. Residue/exclusions, improper, GB/softcore/subsystem/virtual atoms, SW/EDIP/Tersoff, custom pairwise, constraint/steering, SITS/meta/NHC, and QC type/spin/SCF stay explicitly deferred until dedicated non-trivial fixtures exist. |
 | PR 6: Rerun and failure semantics | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; nine process-level F1 cases; five real rerun boundary cases | 60 contract/manifest tests and all nine textual/binding F1 cases pass. The harness now keeps `crd/box/vel` as legacy rerun inputs and inserts overrides before TOML module tables; this removes the earlier QC first-frame skew (`-33917.02` now matches). The 0/0 limit-1 boundary passes, while the gate exposes optional-velocity potential (`1951.16` vs `1947.41`), strip frame counter (`2` vs `1`), and box-update legacy invalid-free failures. H5 atom/shape/dtype/schema and sidecar-table process mutations, restart absent/dynamic/protocol/full continuation, and owner-state F1 cases remain explicitly deferred. |
-| PR 7a: Executable shadow promotion guard | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; execution-matrix CLI; workflow YAML parse; `git diff --check` | 70 contract/manifest tests pass. The typed matrix and mutation-tested promotion evaluator reject missing axes/combinations/evidence, unproven environment metadata, retries, comparator-mutation gaps, and runtime/finalize/output-size budget overruns. Medium and production jobs are explicit `continue-on-error` shadow jobs and are absent from the release workflow; all ten runtime scenarios remain deferred for PR 7b. |
-| PR 7b: Runtime matrix evidence and promotion | Pending | | | |
+| PR 7a: Executable shadow promotion guard | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; execution-matrix CLI; workflow YAML parse; `git diff --check` | 70 contract/manifest tests pass. The typed matrix and mutation-tested promotion evaluator reject missing axes/combinations/evidence, unproven environment metadata, retries, comparator-mutation gaps, and runtime/finalize/output-size budget overruns. Medium and production jobs are explicit `continue-on-error` shadow jobs and are absent from the release workflow; runtime evidence remained intentionally deferred at this boundary. |
+| PR 7b: Portable runtime matrix and CPU/MPI evidence | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; six CPU rank-1 fast A/B cases; two CPU rank-2 fast A/B cases; Ruff; workflow YAML parse; `git diff --check` | 74 contract/manifest tests and all eight CPU/MPI runtime cases pass. The matrix pins same-semantic fixtures, records backend/OMP/MPI/rank-0 ownership evidence, and compares complete H5 trajectory/observable/restart behavior with periodic-aware deterministic and statistical position checks. Four GPU cases are executable but lack real-device evidence, so promotion remains shadow-only for PR 7c. |
+| PR 7c: GPU evidence and final promotion | Pending | | | |

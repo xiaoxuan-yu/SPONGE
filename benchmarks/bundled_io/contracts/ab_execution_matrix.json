@@ -47,9 +47,9 @@
       "mpi_ranks": 1,
       "comparison": "deterministic",
       "tier": "medium",
-      "status": "deferred",
-      "case_ids": [],
-      "reason": "A same-input deterministic NVE A/B fixture is pending."
+      "status": "executable",
+      "case_ids": ["nve_unconstrained_cpu_omp1_rank1"],
+      "reason": ""
     },
     {
       "scenario_id": "nve_settle_cpu_omp4_rank2",
@@ -63,9 +63,9 @@
       "mpi_ranks": 2,
       "comparison": "deterministic",
       "tier": "production",
-      "status": "deferred",
-      "case_ids": [],
-      "reason": "MPI rank-0 output ownership has no bundled/legacy A/B evidence."
+      "status": "executable",
+      "case_ids": ["nve_settle_cpu_omp4_rank2"],
+      "reason": ""
     },
     {
       "scenario_id": "middle_nvt_shake_cpu_omp1_rank1",
@@ -79,9 +79,9 @@
       "mpi_ranks": 1,
       "comparison": "statistical",
       "tier": "medium",
-      "status": "deferred",
-      "case_ids": ["normal_sits_ff19sb_cmap_peptide"],
-      "reason": "The case runs statistically, but backend/thread identity is not yet asserted as scenario evidence."
+      "status": "executable",
+      "case_ids": ["middle_nvt_shake_cpu_omp1_rank1"],
+      "reason": ""
     },
     {
       "scenario_id": "middle_nvt_settle_gpu_omp4_rank1",
@@ -95,9 +95,9 @@
       "mpi_ranks": 1,
       "comparison": "statistical",
       "tier": "production",
-      "status": "deferred",
-      "case_ids": ["normal_core_h5_output"],
-      "reason": "GPU-specific A/B evidence is pending."
+      "status": "executable",
+      "case_ids": ["middle_nvt_settle_gpu_omp4_rank1"],
+      "reason": ""
     },
     {
       "scenario_id": "bussi_nvt_settle_cpu_omp4_rank1",
@@ -111,9 +111,9 @@
       "mpi_ranks": 1,
       "comparison": "statistical",
       "tier": "production",
-      "status": "deferred",
-      "case_ids": [],
-      "reason": "Bussi A/B replicas and RNG-state continuation are pending."
+      "status": "executable",
+      "case_ids": ["bussi_nvt_settle_cpu_omp4_rank1"],
+      "reason": ""
     },
     {
       "scenario_id": "nhc_nvt_unconstrained_gpu_omp1_rank1",
@@ -127,9 +127,25 @@
       "mpi_ranks": 1,
       "comparison": "statistical",
       "tier": "production",
-      "status": "deferred",
-      "case_ids": [],
-      "reason": "NHC module-owned state/output and continuation A/B are pending."
+      "status": "executable",
+      "case_ids": ["nhc_nvt_unconstrained_gpu_omp1_rank1"],
+      "reason": ""
+    },
+    {
+      "scenario_id": "nhc_nvt_unconstrained_cpu_omp1_rank1",
+      "ensemble": "nvt",
+      "thermostat": "nose_hoover_chain",
+      "barostat": "none",
+      "box_geometry": "orthogonal",
+      "constraint": "unconstrained",
+      "backend": "cpu",
+      "omp_threads": 1,
+      "mpi_ranks": 1,
+      "comparison": "statistical",
+      "tier": "production",
+      "status": "executable",
+      "case_ids": ["nhc_nvt_unconstrained_cpu_omp1_rank1"],
+      "reason": ""
     },
     {
       "scenario_id": "npt_orthogonal_settle_cpu_omp1_rank1",
@@ -143,9 +159,9 @@
       "mpi_ranks": 1,
       "comparison": "statistical",
       "tier": "production",
-      "status": "deferred",
-      "case_ids": [],
-      "reason": "Orthogonal NPT box/pressure A/B evidence is pending."
+      "status": "executable",
+      "case_ids": ["npt_orthogonal_settle_cpu_omp1_rank1"],
+      "reason": ""
     },
     {
       "scenario_id": "npt_nonorthogonal_shake_cpu_omp4_rank2",
@@ -159,9 +175,25 @@
       "mpi_ranks": 2,
       "comparison": "statistical",
       "tier": "production",
-      "status": "deferred",
-      "case_ids": [],
-      "reason": "Nonorthogonal MPI A/B evidence and rank-0 ownership are pending."
+      "status": "executable",
+      "case_ids": ["npt_nonorthogonal_shake_cpu_omp4_rank2"],
+      "reason": ""
+    },
+    {
+      "scenario_id": "npt_nonorthogonal_shake_cpu_omp4_rank1",
+      "ensemble": "npt",
+      "thermostat": "middle_langevin",
+      "barostat": "andersen_barostat",
+      "box_geometry": "nonorthogonal",
+      "constraint": "SHAKE",
+      "backend": "cpu",
+      "omp_threads": 4,
+      "mpi_ranks": 1,
+      "comparison": "statistical",
+      "tier": "production",
+      "status": "executable",
+      "case_ids": ["npt_nonorthogonal_shake_cpu_omp4_rank1"],
+      "reason": ""
     },
     {
       "scenario_id": "npt_nonorthogonal_settle_gpu_omp1_rank2",
@@ -175,9 +207,9 @@
       "mpi_ranks": 2,
       "comparison": "statistical",
       "tier": "production",
-      "status": "deferred",
-      "case_ids": [],
-      "reason": "GPU MPI nonorthogonal A/B evidence is pending."
+      "status": "executable",
+      "case_ids": ["npt_nonorthogonal_settle_gpu_omp1_rank2"],
+      "reason": ""
     },
     {
       "scenario_id": "nve_unconstrained_gpu_omp4_rank1",
@@ -191,9 +223,9 @@
       "mpi_ranks": 1,
       "comparison": "deterministic",
       "tier": "production",
-      "status": "deferred",
-      "case_ids": [],
-      "reason": "GPU deterministic NVE A/B evidence is pending."
+      "status": "executable",
+      "case_ids": ["nve_unconstrained_gpu_omp4_rank1"],
+      "reason": ""
     }
   ]
 }

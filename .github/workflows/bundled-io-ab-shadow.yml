@@ -84,6 +84,17 @@ jobs:
       - name: Run medium A/B tier
         run: pixi run -e dev-cpu ab-bundled-io-medium
 
+      - name: Run CPU rank-1 execution matrix
+        if: always()
+        env:
+          SPONGE_BUNDLED_IO_AB_PROFILE: medium
+          SPONGE_BUNDLED_IO_AB_BACKEND: cpu
+          SPONGE_BUNDLED_IO_AB_MATRIX_SCENARIOS: cpu-rank1
+        run: >-
+          pixi run -e dev-cpu python -X utf8 -m pytest
+          benchmarks/bundled_io/tests/test_bundled_io_ab_execution_matrix.py
+          -s --tb=short
+
       - name: Upload medium evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -123,10 +134,67 @@ jobs:
       - name: Run production A/B tier
         run: pixi run -e dev-cpu ab-bundled-io-production
 
+      - name: Run CPU rank-1 execution matrix
+        if: always()
+        env:
+          SPONGE_BUNDLED_IO_AB_PROFILE: production
+          SPONGE_BUNDLED_IO_AB_BACKEND: cpu
+          SPONGE_BUNDLED_IO_AB_MATRIX_SCENARIOS: cpu-rank1
+        run: >-
+          pixi run -e dev-cpu python -X utf8 -m pytest
+          benchmarks/bundled_io/tests/test_bundled_io_ab_execution_matrix.py
+          -s --tb=short
+
       - name: Upload production evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: bundled-io-ab-production-${{ github.run_id }}
           path: outputs/ab-production
+          if-no-files-found: warn
+
+  production-mpi:
+    name: CPU MPI rank-2 behavior matrix (shadow)
+    if: >-
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' && inputs.tier == 'production')
+    needs: contract
+    continue-on-error: true
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+    env:
+      SPONGE_BUNDLED_IO_AB_RUN_ROOT: ${{ github.workspace }}/outputs/ab-mpi
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Setup Pixi
+        uses: prefix-dev/setup-pixi@v0.9.4
+        with:
+          run-install: false
+
+      - name: Install CPU MPI environment
+        run: pixi install -e dev-cpu-mpi
+
+      - name: Configure and compile SPONGE CPU MPI
+        run: |
+          pixi run -e dev-cpu-mpi configure
+          pixi run -e dev-cpu-mpi compile
+
+      - name: Run CPU rank-2 execution matrix
+        env:
+          SPONGE_BUNDLED_IO_AB_PROFILE: production
+          SPONGE_BUNDLED_IO_AB_BACKEND: cpu
+          SPONGE_BUNDLED_IO_AB_MATRIX_SCENARIOS: cpu-rank2
+        run: >-
+          pixi run -e dev-cpu-mpi python -X utf8 -m pytest
+          benchmarks/bundled_io/tests/test_bundled_io_ab_execution_matrix.py
+          -s --tb=short
+
+      - name: Upload MPI evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bundled-io-ab-mpi-${{ github.run_id }}
+          path: outputs/ab-mpi
           if-no-files-found: warn

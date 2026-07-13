@@ -124,9 +124,6 @@ def _xponge_python() -> Path:
     configured = os.environ.get("SPONGE_XPONGE_PYTHON")
     if configured:
         return Path(configured)
-    dev_python = XPONGE_DEV_ROOT / ".venv" / "bin" / "python"
-    if dev_python.exists():
-        return dev_python
     return Path(sys.executable)
 
 

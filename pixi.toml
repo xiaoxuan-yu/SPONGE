@@ -134,6 +134,7 @@ patchelf = "*"
 xponge = "*"
 ase = "*"
 build = "*"
+h5py = "*"
 
 [feature.ref-gen.target.linux-64.dependencies]
 python = ">=3.9"

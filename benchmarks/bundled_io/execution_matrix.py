@@ -25,7 +25,12 @@ REQUIRED_AXIS_NAMES = {
     "comparison",
 }
 VALID_PROMOTION_STATES = {"shadow", "candidate", "promoted"}
-VALID_SCENARIO_STATUSES = {"evidenced", "deferred", "unsupported"}
+VALID_SCENARIO_STATUSES = {
+    "executable",
+    "evidenced",
+    "deferred",
+    "unsupported",
+}
 VALID_TIERS = {"medium", "production"}
 EVIDENCE_RANK = {"E0": 0, "E1": 1, "E2": 2, "E3": 3, "E4": 4}
 
@@ -192,11 +197,11 @@ def validate_execution_matrix(
             raise AssertionError(
                 f"{scenario.scenario_id} has invalid tier {scenario.tier}"
             )
-        if scenario.status == "evidenced" and not scenario.case_ids:
+        if scenario.status in {"executable", "evidenced"} and not scenario.case_ids:
             raise AssertionError(
-                f"evidenced scenario {scenario.scenario_id} has no case IDs"
+                f"{scenario.status} scenario {scenario.scenario_id} has no case IDs"
             )
-        if scenario.status != "evidenced" and not scenario.reason:
+        if scenario.status in {"deferred", "unsupported"} and not scenario.reason:
             raise AssertionError(
                 f"{scenario.status} scenario {scenario.scenario_id} requires a reason"
             )
@@ -266,6 +271,7 @@ def evaluate_promotion_readiness(
     contracts: Mapping[str, ContractSpec],
     evidence_report: Mapping[str, object] | None,
     production_runs: Sequence[ProductionRun],
+    scenario_evidence_report: Mapping[str, object] | None = None,
 ) -> PromotionDecision:
     validate_execution_matrix(matrix)
     blockers: list[str] = []
@@ -275,7 +281,7 @@ def evaluate_promotion_readiness(
     unresolved = sorted(
         scenario.scenario_id
         for scenario in matrix.scenarios
-        if scenario.status != "evidenced"
+        if scenario.status in {"deferred", "unsupported"}
     )
     if unresolved:
         blockers.append(f"execution scenarios lack evidence: {unresolved}")
@@ -284,6 +290,10 @@ def evaluate_promotion_readiness(
     report_cases = report.get("cases")
     if not isinstance(report_cases, dict):
         report_cases = {}
+    scenario_report = scenario_evidence_report or report
+    scenario_cases = scenario_report.get("cases")
+    if not isinstance(scenario_cases, dict):
+        scenario_cases = {}
     contract_levels = _passed_contract_levels(report_cases)
     missing_contracts = []
     insufficient_contracts = []
@@ -308,10 +318,10 @@ def evaluate_promotion_readiness(
         )
 
     for scenario in matrix.scenarios:
-        if scenario.status != "evidenced":
+        if scenario.status not in {"executable", "evidenced"}:
             continue
         if not any(
-            _case_proves_scenario(report_cases.get(case_id), scenario)
+            _case_proves_scenario(scenario_cases.get(case_id), scenario)
             for case_id in scenario.case_ids
         ):
             blockers.append(
@@ -554,6 +564,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--evaluate", action="store_true")
     parser.add_argument("--contracts", type=Path, default=REGISTRY_PATH)
     parser.add_argument("--evidence", type=Path)
+    parser.add_argument("--matrix-evidence", type=Path)
     parser.add_argument("--history", type=Path)
     args = parser.parse_args(argv)
     matrix = load_execution_matrix(args.matrix)
@@ -561,12 +572,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.evidence is None or args.history is None:
             parser.error("--evaluate requires --evidence and --history")
         evidence = _load_json_object(args.evidence, "A/B evidence report")
+        matrix_evidence = (
+            _load_json_object(args.matrix_evidence, "A/B matrix evidence report")
+            if args.matrix_evidence is not None
+            else None
+        )
         runs = load_production_run_history(args.history)
         decision = evaluate_promotion_readiness(
             matrix,
             load_contract_registry(args.contracts),
             evidence,
             runs,
+            matrix_evidence,
         )
         print(
             json.dumps(
@@ -580,8 +597,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             {
                 "promotion_state": matrix.promotion_state,
                 "scenario_count": len(matrix.scenarios),
-                "evidenced_scenario_count": sum(
-                    scenario.status == "evidenced" for scenario in matrix.scenarios
+                "executable_scenario_count": sum(
+                    scenario.status in {"executable", "evidenced"}
+                    for scenario in matrix.scenarios
                 ),
             },
             sort_keys=True,

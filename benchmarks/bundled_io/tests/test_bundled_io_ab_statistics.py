@@ -13,6 +13,7 @@ from benchmarks.bundled_io.ab_statistics import (
 from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
     _assert_nonfinite_patterns_match,
     _assert_numeric_sequences_close,
+    _assert_periodic_positions_close,
     _deterministic_tolerance,
     _statistical_policy,
 )
@@ -244,6 +245,21 @@ def test_position_and_velocity_observables_use_atom_masses():
     assert velocity["mass_weighted_mean_squared_speed"] == [7.0]
 
 
+def test_position_observables_use_periodic_minimum_images():
+    observables = trajectory_observable_series(
+        "/particles/all/position/value",
+        [9.9, 0.0, 0.0, 0.1, 0.0, 0.0],
+        (2, 1, 3),
+        box_values=[10.0, 0.0, 0.0, 0.0, 10.0, 0.0, 0.0, 0.0, 10.0],
+        box_shape=(1, 3, 3),
+    )
+
+    assert observables["atom_0_squared_displacement"] == [
+        pytest.approx(0.0),
+        pytest.approx(0.04),
+    ]
+
+
 def test_box_observables_include_matrix_volume_lengths_and_angles():
     observables = trajectory_observable_series(
         "/particles/all/box/edges/value",
@@ -266,6 +282,42 @@ def test_comparator_policies_are_quantity_specific():
         "force"
     )
     assert _deterministic_tolerance("step") == (0.0, 1.0e-12)
+
+
+def test_deterministic_force_tolerance_rejects_material_local_offset():
+    relative, absolute = _deterministic_tolerance("force")
+    with pytest.raises(AssertionError, match="mismatch at index 0"):
+        _assert_numeric_sequences_close(
+            "force mutation",
+            [0.0],
+            [1.0e-4],
+            relative_tolerance=relative,
+            absolute_tolerance=absolute,
+        )
+
+
+def test_deterministic_position_comparison_accepts_only_periodic_image_shift():
+    box = [10.0, 0.0, 0.0, 0.0, 10.0, 0.0, 0.0, 0.0, 10.0]
+    relative, absolute = _deterministic_tolerance("position")
+    _assert_periodic_positions_close(
+        "periodic image",
+        [9.9, 0.0, 0.0],
+        [-0.1, 0.0, 0.0],
+        (1, 1, 3),
+        box,
+        relative_tolerance=relative,
+        absolute_tolerance=absolute,
+    )
+    with pytest.raises(AssertionError, match="periodic mismatch"):
+        _assert_periodic_positions_close(
+            "position mutation",
+            [9.9, 0.0, 0.0],
+            [0.2, 0.0, 0.0],
+            (1, 1, 3),
+            box,
+            relative_tolerance=relative,
+            absolute_tolerance=absolute,
+        )
 
 
 def test_nonfinite_pattern_check_does_not_force_finite_frames_to_match():
