@@ -24,8 +24,10 @@ void RESTRAIN_INFORMATION::Init_Com_Cache_If_Needed(
                 h_atom_to_ug[atom] = ug_i;
             }
         }
-        Device_Malloc_And_Copy_Safely((void**)&this->d_atom_to_ug, h_atom_to_ug,
-                                      sizeof(int) * atom_numbers);
+        Device_Malloc_Safely((void**)&this->d_atom_to_ug,
+                             sizeof(int) * atom_numbers);
+        deviceMemcpy(this->d_atom_to_ug, h_atom_to_ug,
+                     sizeof(int) * atom_numbers, deviceMemcpyHostToDevice);
         free(h_atom_to_ug);
 
         Device_Malloc_Safely((void**)&this->d_sum_mass_ug,
@@ -57,9 +59,10 @@ void RESTRAIN_INFORMATION::Init_Com_Cache_If_Needed(
                 h_atom_to_res[atom] = res_i;
             }
         }
-        Device_Malloc_And_Copy_Safely((void**)&this->d_atom_to_res,
-                                      h_atom_to_res,
-                                      sizeof(int) * atom_numbers);
+        Device_Malloc_Safely((void**)&this->d_atom_to_res,
+                             sizeof(int) * atom_numbers);
+        deviceMemcpy(this->d_atom_to_res, h_atom_to_res,
+                     sizeof(int) * atom_numbers, deviceMemcpyHostToDevice);
         free(h_atom_to_res);
 
         Device_Malloc_Safely((void**)&this->d_sum_mass_res,
@@ -91,9 +94,10 @@ void RESTRAIN_INFORMATION::Init_Com_Cache_If_Needed(
                 h_atom_to_mol[atom] = mol_i;
             }
         }
-        Device_Malloc_And_Copy_Safely((void**)&this->d_atom_to_mol,
-                                      h_atom_to_mol,
-                                      sizeof(int) * atom_numbers);
+        Device_Malloc_Safely((void**)&this->d_atom_to_mol,
+                             sizeof(int) * atom_numbers);
+        deviceMemcpy(this->d_atom_to_mol, h_atom_to_mol,
+                     sizeof(int) * atom_numbers, deviceMemcpyHostToDevice);
         free(h_atom_to_mol);
 
         Device_Malloc_Safely((void**)&this->d_sum_mass_mol,

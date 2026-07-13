@@ -42,6 +42,7 @@ from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
     FOCUSED_GB_HYBRID_FIXTURE,
     FOCUSED_IMPROPER_NATIVE_FIXTURE,
     FOCUSED_LJ_SOFT_CORE_FIXTURE,
+    FOCUSED_RESIDUE_COM_RES_FIXTURE,
     FOCUSED_RESIDUE_SIDECAR_FIXTURE,
     FOCUSED_SITS_NK_TYPED_RESTART_FIXTURE,
     FOCUSED_STEERING_CV_SIDECAR_FIXTURE,
@@ -59,6 +60,7 @@ from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
     _assert_exclusion_coulomb_oracle,
     _assert_gb_force_oracle,
     _assert_nontrivial_equivalent_forces,
+    _assert_residue_com_res_virial_oracle,
     _assert_residue_pbc_mapping_oracle,
     _assert_sits_nk_typed_restart_oracle,
     _assert_steering_cv_oracle,
@@ -95,9 +97,7 @@ MODULE_TEST = (
 HIGHFIVE_TEST = REPO_ROOT / "tests/h5_bundle/test_highfive_backend_io.cpp"
 AB_SHADOW_WORKFLOW = REPO_ROOT / ".github/workflows/bundled-io-ab-shadow.yml"
 RELEASE_WORKFLOW = REPO_ROOT / ".github/workflows/release.yml"
-MATRIX_FIXTURE_ROOT = (
-    REPO_ROOT / "benchmarks/bundled_io/fixtures/tip3p_matrix"
-)
+MATRIX_FIXTURE_ROOT = REPO_ROOT / "benchmarks/bundled_io/fixtures/tip3p_matrix"
 
 
 def _dev_tasks() -> dict[str, object]:
@@ -274,6 +274,7 @@ def test_ab_production_harness_has_executable_contract_coverage():
         "normal_custom_pair_nonzero",
         "normal_exclusions_coulomb_oracle",
         "normal_residue_sidecar_pbc_mapping",
+        "normal_residue_sidecar_com_res_virial",
         "normal_gb_hybrid_nonzero",
         "normal_improper_native_nonzero",
         "normal_lj_soft_core_nonzero",
@@ -326,9 +327,7 @@ def test_ab_production_harness_has_executable_contract_coverage():
     repair = contracts["output.vds.complete_prefix_repair"]
     assert repair.status == "supported"
     assert repair.case_ids == ("normal_vds_complete_prefix_noop",)
-    assert repair.assertion_ids == (
-        "h5_complete_prefix_repair_equivalence",
-    )
+    assert repair.assertion_ids == ("h5_complete_prefix_repair_equivalence",)
 
 
 def test_nhc_dynamic_restart_uses_one_checkpoint_and_e4_continuation():
@@ -348,9 +347,7 @@ def test_nhc_dynamic_restart_uses_one_checkpoint_and_e4_continuation():
     assert case.restart_load_policy == "dynamic"
     assert case.statistical_md is False
     assert set(case.contract_ids) == expected_contracts
-    assert case.assertion_ids == (
-        "restart_dynamic_continuation_equivalence",
-    )
+    assert case.assertion_ids == ("restart_dynamic_continuation_equivalence",)
     for contract_id in expected_contracts:
         contract = contracts[contract_id]
         assert contract.status == "supported"
@@ -455,9 +452,7 @@ def test_vds_complete_prefix_case_combines_production_noop_and_tail_repair():
     assert contract.status == "supported"
     assert contract.minimum_evidence == "E3"
     assert contract.case_ids == (case.name,)
-    assert contract.assertion_ids == (
-        "h5_complete_prefix_repair_equivalence",
-    )
+    assert contract.assertion_ids == ("h5_complete_prefix_repair_equivalence",)
 
     source = VDS_TERMINAL_REPAIR_TEST.read_text(encoding="utf-8")
     for token in (
@@ -475,7 +470,14 @@ def test_vds_complete_prefix_case_combines_production_noop_and_tail_repair():
     ("policy", "status", "repaired_count", "frame_count", "manifest", "match"),
     [
         ("strict", "not_applied", 0, 5, ("complete", "complete"), "policy"),
-        ("complete_prefix", "applied", 0, 5, ("complete", "complete"), "status"),
+        (
+            "complete_prefix",
+            "applied",
+            0,
+            5,
+            ("complete", "complete"),
+            "status",
+        ),
         (
             "complete_prefix",
             "not_applied",
@@ -683,9 +685,7 @@ def test_failure_matrix_requires_exit_category_and_stable_tokens():
         "h5_topology_mass_shape": "spongeErrorBadFileFormat",
         "h5_topology_mass_dtype": "spongeErrorBadFileFormat",
     }
-    assert all(
-        case.failure_branches == ("bundled",) for case in metadata_cases
-    )
+    assert all(case.failure_branches == ("bundled",) for case in metadata_cases)
     contracts = load_contract_registry()
     metadata_contract = contracts["failure.h5_metadata.runtime_rejections"]
     assert metadata_contract.status == "supported"
@@ -826,7 +826,9 @@ def test_input_semantic_gate_requires_nontrivial_owned_result():
 def test_focused_edip_case_requires_pure_h5_nonzero_energy_and_force():
     contracts = load_contract_registry()
     case = next(
-        case for case in _cases_for_profile() if case.name == "normal_edip_nonzero"
+        case
+        for case in _cases_for_profile()
+        if case.name == "normal_edip_nonzero"
     )
     spec = INPUT_SEMANTIC_SPECS_BY_CASE[case.name]
 
@@ -868,9 +870,7 @@ def test_focused_sw_case_requires_sidecar_pair_and_three_body_behavior():
         "input.manybody.sw.sidecar",
     )
     assert spec == (
-        InputSemanticSpec(
-            "input.manybody.sw.sidecar", ("SW",), 1.0e-6
-        ),
+        InputSemanticSpec("input.manybody.sw.sidecar", ("SW",), 1.0e-6),
     )
     sidecar = contracts["input.manybody.sw.sidecar"]
     assert sidecar.status == "supported"
@@ -985,9 +985,7 @@ def test_focused_tersoff_gate_rejects_gamma_zero_mutations():
         -144.78313,
         0.0,
     )
-    result = _assert_tersoff_angular_oracle(
-        "Tersoff", rows, full_force
-    )
+    result = _assert_tersoff_angular_oracle("Tersoff", rows, full_force)
     assert result["angular_energy_contribution"] == pytest.approx(22.83)
     assert result["maximum_force_delta_from_gamma_zero"] > 25.0
 
@@ -1028,9 +1026,7 @@ def test_focused_custom_pair_case_requires_pure_h5_nonzero_energy_and_force():
         "input.custom.pairwise",
     )
     assert spec == (
-        InputSemanticSpec(
-            "input.custom.pairwise", ("custom_pair",), 1.0e-6
-        ),
+        InputSemanticSpec("input.custom.pairwise", ("custom_pair",), 1.0e-6),
     )
     assert contracts["input.custom.pairwise"].status == "supported"
     assert contracts["input.custom.pairwise"].case_ids == (case.name,)
@@ -1067,7 +1063,7 @@ def test_focused_exclusions_case_requires_native_payload_and_coulomb_oracle():
     )
 
 
-def test_focused_residue_case_requires_runtime_partition_and_pbc_mapping():
+def test_focused_residue_case_retains_runtime_partition_and_pbc_mapping():
     contracts = load_contract_registry()
     case = next(
         case
@@ -1090,7 +1086,45 @@ def test_focused_residue_case_requires_runtime_partition_and_pbc_mapping():
     )
     sidecar = contracts["input.topology.residue.sidecar"]
     assert sidecar.status == "supported"
-    assert sidecar.case_ids == (case.name,)
+    assert sidecar.case_ids == (
+        "normal_residue_sidecar_pbc_mapping",
+        "normal_residue_sidecar_com_res_virial",
+    )
+    assert sidecar.assertion_ids == ("input_semantic_equivalence",)
+
+
+def test_focused_residue_case_requires_com_res_membership_behavior():
+    contracts = load_contract_registry()
+    case = next(
+        case
+        for case in _cases_for_profile()
+        if case.name == "normal_residue_sidecar_com_res_virial"
+    )
+    spec = INPUT_SEMANTIC_SPECS_BY_CASE[case.name]
+
+    assert case.fixture_case == FOCUSED_RESIDUE_COM_RES_FIXTURE
+    assert case.fixture_case == "focused_residue_sidecar_com_res_four_atom"
+    assert case.statistical_md is False
+    assert case.normal_step_limit == 1
+    assert case.normal_dt == 0.001
+    assert case.input_behavior_only is True
+    assert case.contract_ids == (
+        "output.legacy.mdout",
+        "input.topology.residue.sidecar",
+    )
+    assert spec == (
+        InputSemanticSpec(
+            "input.topology.residue.sidecar",
+            ("bond", "restrain", "pressure", "Pxx"),
+            1.0e-6,
+        ),
+    )
+    sidecar = contracts["input.topology.residue.sidecar"]
+    assert sidecar.status == "supported"
+    assert sidecar.case_ids == (
+        "normal_residue_sidecar_pbc_mapping",
+        "normal_residue_sidecar_com_res_virial",
+    )
     assert sidecar.assertion_ids == ("input_semantic_equivalence",)
     typed = contracts["input.topology.residue"]
     assert typed.status == "deferred"
@@ -1126,7 +1160,9 @@ def test_focused_gb_case_requires_native_state_and_sidecar_activation_behavior()
     assert hybrid.assertion_ids == ("input_semantic_equivalence",)
     native = contracts["input.topology.gb"]
     assert native.status == "deferred"
-    assert "only calls GB initialization when gb_in_file exists" in native.reason
+    assert (
+        "only calls GB initialization when gb_in_file exists" in native.reason
+    )
     assert "tracked separately" in native.reason
 
 
@@ -1598,9 +1634,22 @@ def test_focused_exclusions_oracle_rejects_ignored_or_wrong_payload(
         _assert_exclusion_coulomb_oracle("exclusions", rows, forces)
 
 
-def test_focused_residue_gate_rejects_wrong_partition_or_mapping():
+def test_focused_residue_gate_retains_partition_and_pbc_mutations():
     rows = [{"bond": 2.0}]
-    forces = (4.0, 0.0, 0.0, -4.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    forces = (
+        4.0,
+        0.0,
+        0.0,
+        -4.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+    )
     positions = (
         19.0,
         0.0,
@@ -1646,6 +1695,83 @@ def test_focused_residue_gate_rejects_wrong_partition_or_mapping():
             residue_numbers=2,
             runtime_residue_numbers=2,
             positions=wrong_positions,
+        )
+
+
+def test_focused_residue_gate_rejects_wrong_virial_mapping_or_force():
+    rows = [{"bond": 2.0, "restrain": 2.0, "pressure": 0.04, "Pxx": 0.11}]
+    forces = (
+        0.0033416748,
+        0.0,
+        0.0,
+        -4.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+    )
+    positions = (
+        19.0,
+        0.0,
+        0.0,
+        1.0,
+        0.0,
+        0.0,
+        5.0,
+        0.0,
+        0.0,
+        8.0,
+        0.0,
+        0.0,
+    )
+    result = _assert_residue_com_res_virial_oracle(
+        "residue",
+        rows,
+        forces,
+        residue_numbers=2,
+        positions=positions,
+    )
+    assert result["residue_numbers"] == 2
+    assert result["maximum_abs_force"] == 4.0
+
+    with pytest.raises(AssertionError, match="residue state mismatch"):
+        _assert_residue_com_res_virial_oracle(
+            "wrong-count",
+            rows,
+            forces,
+            residue_numbers=4,
+            positions=positions,
+        )
+
+    with pytest.raises(AssertionError, match="com_res pressure mismatch"):
+        _assert_residue_com_res_virial_oracle(
+            "wrong-pressure",
+            [{"bond": 2.0, "restrain": 2.0, "pressure": 0.0, "Pxx": 0.11}],
+            forces,
+            residue_numbers=2,
+            positions=positions,
+        )
+
+    with pytest.raises(AssertionError, match="com_res Pxx mismatch"):
+        _assert_residue_com_res_virial_oracle(
+            "wrong-Pxx",
+            [{"bond": 2.0, "restrain": 2.0, "pressure": 0.04, "Pxx": 0.0}],
+            forces,
+            residue_numbers=2,
+            positions=positions,
+        )
+
+    with pytest.raises(AssertionError, match="force payload is trivial"):
+        _assert_residue_com_res_virial_oracle(
+            "trivial-force",
+            rows,
+            (0.0,) * 12,
+            residue_numbers=2,
+            positions=positions,
         )
 
 
@@ -2008,7 +2134,9 @@ def test_current_execution_matrix_cannot_be_promoted_by_declarations_only():
     )
 
     assert decision.ready is False
-    assert any("promotion_state is shadow" in item for item in decision.blockers)
+    assert any(
+        "promotion_state is shadow" in item for item in decision.blockers
+    )
     assert any(
         "does not prove environment" in item for item in decision.blockers
     )
@@ -2102,7 +2230,9 @@ def test_promotion_requires_all_comparator_mutations_to_be_rejected():
     decision = evaluate_promotion_readiness(matrix, contracts, report, runs)
 
     assert decision.ready is False
-    assert any("mutations were not all rejected" in item for item in decision.blockers)
+    assert any(
+        "mutations were not all rejected" in item for item in decision.blockers
+    )
 
 
 def test_shadow_workflow_runs_tiers_without_becoming_a_release_gate():
@@ -2115,7 +2245,9 @@ def test_shadow_workflow_runs_tiers_without_becoming_a_release_gate():
     assert "ab-bundled-io-medium" in workflow
     assert "ab-bundled-io-production" in workflow
     assert "test_bundled_io_ab_execution_matrix.py" in workflow
-    assert workflow.count("SPONGE_BUNDLED_IO_AB_MATRIX_SCENARIOS: cpu-rank1") == 2
+    assert (
+        workflow.count("SPONGE_BUNDLED_IO_AB_MATRIX_SCENARIOS: cpu-rank1") == 2
+    )
     assert "SPONGE_BUNDLED_IO_AB_MATRIX_SCENARIOS: cpu-rank2" in workflow
     assert "pixi install -e dev-cpu-mpi" in workflow
     assert workflow.count("continue-on-error: true") == 3

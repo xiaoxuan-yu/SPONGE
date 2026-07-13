@@ -828,7 +828,47 @@ Acceptance:
 - Registry, manifest, real CPU A/B, real-backend VDS smoke, Ruff, and diff
   checks pass, followed by exactly one PR-scoped commit.
 
-## 28. Artifacts and Temporary-Space Policy
+## 28. PR 31: Residue Membership/COM-Virial Follow-up Gate
+
+Strengthen PR 30 from residue-count and whole-molecule evidence to a consumer
+whose result changes with residue membership while keeping the declared residue
+count fixed.
+
+- Retain PR 30's `normal_residue_sidecar_pbc_mapping` case and its residue-count,
+  runtime-partition, force, and whole-molecule PBC mapping mutations. Add the
+  COM-virial case as a second consumer of the same sidecar contract instead of
+  replacing the existing gate.
+- Use two disconnected two-atom molecules with the same `[2,2]` residue
+  partition in the legacy and bundled routes. Isolate `residue_in_file` in the
+  topology H5 sidecar table and retain only the constraint and restraint
+  support bindings in protocol H5.
+- Enable `restrain_refcoord_scaling="com_res"`, restraint virial calculation,
+  and pressure output. Compare complete mdout and force output, and require
+  finite non-trivial `bond`, `restrain`, `pressure`, and `Pxx` behavior.
+- Execute a bundled control with `[1,3]`: the declared residue count remains
+  two, but the disconnected second residue is split by the runtime. Require
+  unchanged bond/restraint energy and force together with a distinct,
+  deterministic pressure/Pxx fingerprint. This prevents sidecar parsing or
+  module initialization alone from satisfying the gate.
+- Fix CPU ownership of atom-to-group maps used by `com_ug`, `com_res`, and
+  `com_mol`: allocate independent device storage before copying and then free
+  the temporary host map. This avoids a dangling CPU alias that is overwritten
+  by later COM scratch allocation.
+- Keep typed `/atoms/residue_index` deferred; this PR closes only the isolated
+  topology-sidecar behavior route.
+
+Acceptance:
+
+- Legacy and bundled `[2,2]` routes produce equivalent finite mdout,
+  trajectory, and non-trivial force behavior at the COM-residue consumer.
+- The `[1,3]` control keeps two declared residues and the same energy/force but
+  changes both pressure and `Pxx`, proving membership-sensitive virial use.
+- Mutation tests reject wrong residue count, pressure, `Pxx`, and trivial force
+  without searching production-test source text for implementation tokens.
+- Registry, manifest, real CPU A/B, Ruff, clang-format, and diff checks pass,
+  followed by exactly one PR-scoped commit.
+
+## 29. Artifacts and Temporary-Space Policy
 
 - Use `SPONGE_BUNDLED_IO_AB_RUN_ROOT` for all heavy runs.
 - Put production artifacts on the workspace filesystem rather than `/tmp`.
@@ -838,7 +878,7 @@ Acceptance:
 - Record artifact byte counts and enforce a configurable per-case quota.
 - Cleanup must only remove directories created by the current gate run.
 
-## 29. PR Completion Log
+## 30. PR Completion Log
 
 Append one row immediately after completing and committing each PR.
 
@@ -876,3 +916,4 @@ Append one row immediately after completing and committing each PR.
 | PR 28: SITS typed Nk restart behavior gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; real `normal_sits_nk_typed_restart_nonzero` CPU A/B; Ruff; `git diff --check` | A two-temperature selective LJ/Coulomb SITS fixture consumes legacy `SITS_nk_in_file` with `Nk=(1,4)` versus typed `/parameters/restart/bias/sits/SITS/nk` under protocol restart load. Both routes produce `SITS_AA_kAB=-1.22`, `SITS_bias=-0.5317`, `SITS_fb=0.7049`, `eff_pot=-1.2829471`, and the same non-zero six-value force with maximum magnitude `0.2489061951637268`; the gate removes embedded/external bundled Nk text and rejects initialization-only output, unscaled force, and the symmetric `Nk=(1,1)` control. Typed `/sits` configuration materialization remains deferred. Registry coverage advances to 70 supported, 12 deferred, and 1 unsupported contract. |
 | PR 29: VDS complete-prefix repair behavior gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; real `normal_vds_complete_prefix_noop` CPU A/B; `SPONGE_H5_ENABLE_RUNTIME_SMOKE=1 ctest --test-dir build-dev-cpu-h5-2 --output-on-failure -R '^test_h5_vds_terminal_resume_smoke$'`; Ruff; `git diff --check` | Legacy-input and bundled-input production routes each retain five deterministic frames in two complete shards with `repair_status=not_applied` and zero repaired shards. The same gate runs a real HighFive helper that injects terminal-shard finalize failure and verifies one-shard complete-prefix repair with rewritten completion metadata. Five metadata mutations are rejected. Cross-process reopen/append remains unsupported. Registry coverage advances to 71 supported, 11 deferred, and 1 unsupported contract. |
 | PR 30: Residue topology-sidecar runtime behavior gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; real `normal_residue_sidecar_pbc_mapping` CPU A/B; Ruff; `git diff --check` | An isolated H5 `residue_in_file` topology-sidecar route matches the legacy `[2,2]` residue partition through runtime domain state, non-zero `bond=2.0`, the complete 12-value force payload with maximum magnitude `4.0`, and the cross-PBC whole-molecule position fingerprint `(19,21,25,28)`. Partition and mapping mutations are rejected. Typed `/atoms/residue_index` remains deferred because it is not materialized into `Xponge::system.residues`. Registry coverage advances to 72 supported, 11 deferred, and 1 unsupported contract. |
+| PR 31: Residue membership/COM-virial follow-up gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract` (119 tests); 79-test production manifest; real `normal_residue_sidecar_pbc_mapping` and `normal_residue_sidecar_com_res_virial` CPU A/B; SPONGE rebuild; Ruff; clang-format; `git diff --check` | PR 30's residue-count, runtime-partition, force, and whole-molecule PBC mapping gate remains active. The second isolated `[2,2]` residue-sidecar case drives `com_res` restraint virial behavior with equivalent `bond=2.0`, `restrain=2.0`, `pressure=0.04`, `Pxx=0.11`, and 12-value force output. A same-count `[1,3]` control preserves energy and force but changes pressure/Pxx to `-11.53/-34.60`, proving membership-sensitive consumption. CPU atom-to-group maps now own their storage instead of aliasing freed host buffers. Typed residue input remains deferred. Registry coverage stays at 72 supported, 11 deferred, and 1 unsupported contract. |

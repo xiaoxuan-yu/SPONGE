@@ -590,7 +590,10 @@
       "minimum_evidence": "E3",
       "legacy_surface": "residue_in_file",
       "bundled_surface": "topology H5 legacy_sidecars residue_in_file binding",
-      "case_ids": ["normal_residue_sidecar_pbc_mapping"],
+      "case_ids": [
+        "normal_residue_sidecar_pbc_mapping",
+        "normal_residue_sidecar_com_res_virial"
+      ],
       "assertion_ids": ["input_semantic_equivalence"],
       "reason": ""
     },
