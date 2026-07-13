@@ -51,6 +51,7 @@ XPONGE_DEV_ROOT = REPO_ROOT.parent / "XPONGE"
 SITS_FF19SB_CMAP_FIXTURE = "sits_ff19sb_cmap_peptide"
 FOCUSED_EDIP_FIXTURE = "focused_edip_two_atom"
 FOCUSED_SW_SIDECAR_FIXTURE = "focused_sw_sidecar_three_atom"
+FOCUSED_TERSOFF_SIDECAR_FIXTURE = "focused_tersoff_sidecar_three_atom"
 FOCUSED_CUSTOM_PAIR_FIXTURE = "focused_custom_pair_two_atom"
 FOCUSED_EXCLUSIONS_FIXTURE = "focused_exclusions_three_atom"
 FOCUSED_GB_HYBRID_FIXTURE = "focused_gb_hybrid_two_atom"
@@ -229,6 +230,11 @@ INPUT_SEMANTIC_SPECS_BY_CASE = {
     "normal_sw_sidecar_pair_three_body": (
         InputSemanticSpec(
             "input.manybody.sw.sidecar", ("SW",), 1.0e-6
+        ),
+    ),
+    "normal_tersoff_sidecar_angular": (
+        InputSemanticSpec(
+            "input.manybody.tersoff.sidecar", ("potential",), 1.0e-6
         ),
     ),
     "normal_custom_pair_nonzero": (
@@ -497,6 +503,28 @@ def _cases_for_profile() -> list[AbCase]:
             contract_ids=(
                 "output.legacy.mdout",
                 "input.manybody.sw.sidecar",
+            ),
+            assertion_ids=(
+                "mdout_deterministic_equivalence",
+                "input_semantic_equivalence",
+            ),
+            normal_step_limit=1,
+            normal_interval=1,
+            normal_dt=0.0,
+            input_behavior_only=True,
+        ),
+        AbCase(
+            name="normal_tersoff_sidecar_angular",
+            fixture_case=FOCUSED_TERSOFF_SIDECAR_FIXTURE,
+            legacy_subdir="generated_legacy",
+            bundled_subdir="generated_bundled",
+            mode="normal",
+            vds=False,
+            statistical_md=False,
+            restart_load_policy="structural",
+            contract_ids=(
+                "output.legacy.mdout",
+                "input.manybody.tersoff.sidecar",
             ),
             assertion_ids=(
                 "mdout_deterministic_equivalence",
@@ -2846,6 +2874,8 @@ def _prepare_case_pair(
             return _prepare_focused_edip_pair(case_root)
         if case.fixture_case == FOCUSED_SW_SIDECAR_FIXTURE:
             return _prepare_focused_sw_sidecar_pair(case_root)
+        if case.fixture_case == FOCUSED_TERSOFF_SIDECAR_FIXTURE:
+            return _prepare_focused_tersoff_sidecar_pair(case_root)
         if case.fixture_case == FOCUSED_CUSTOM_PAIR_FIXTURE:
             return _prepare_focused_custom_pair_pair(case_root)
         if case.fixture_case == FOCUSED_EXCLUSIONS_FIXTURE:
@@ -3350,6 +3380,150 @@ def _validate_focused_sw_sidecar_routes(
         raise AssertionError("focused SW bundled sidecar payload is missing")
     if (bundled_dir / "legacy_sidecars" / "mass_in_file").exists():
         raise AssertionError("focused SW bundled branch retained mass sidecar")
+
+
+def _prepare_focused_tersoff_sidecar_pair(
+    case_root: Path,
+) -> tuple[Path, Path]:
+    legacy_source = case_root / "focused_tersoff_sidecar_source"
+    legacy_dir = case_root / "legacy"
+    converted_dir = case_root / "converted_focused_tersoff_bundle"
+    bundled_dir = case_root / "bundled"
+    for path in (legacy_source, legacy_dir, converted_dir, bundled_dir):
+        if path.exists():
+            shutil.rmtree(path)
+    _write_focused_tersoff_sidecar_input(legacy_source)
+    shutil.copytree(legacy_source, legacy_dir)
+    _convert_legacy_case(legacy_source, converted_dir)
+    shutil.copytree(converted_dir / "bundle", bundled_dir)
+
+    topology_path = bundled_dir / "topology.spgt.h5"
+    sidecar_table = "/parameters/sponge/files/legacy_sidecars"
+    with h5py.File(topology_path, "r+") as topology:
+        if sidecar_table not in topology:
+            raise AssertionError(
+                "focused Tersoff conversion did not emit sidecars"
+            )
+        sidecars = topology[sidecar_table]
+        keys = sidecars["key"].asstr()[...].tolist()
+        paths = sidecars["path"].asstr()[...].tolist()
+        try:
+            tersoff_index = keys.index("TERSOFF_in_file")
+        except ValueError as error:
+            raise AssertionError(
+                "focused Tersoff conversion did not bind TERSOFF_in_file"
+            ) from error
+        del sidecars["key"]
+        del sidecars["path"]
+        string_dtype = h5py.string_dtype(encoding="utf-8")
+        sidecars.create_dataset(
+            "key", data=["TERSOFF_in_file"], dtype=string_dtype
+        )
+        sidecars.create_dataset(
+            "path", data=[paths[tersoff_index]], dtype=string_dtype
+        )
+        if "/manybody/tersoff" in topology:
+            del topology["/manybody/tersoff"]
+
+    mass_sidecar = bundled_dir / "legacy_sidecars" / "mass_in_file"
+    if mass_sidecar.exists():
+        shutil.rmtree(mass_sidecar)
+    _validate_focused_tersoff_sidecar_routes(legacy_dir, bundled_dir)
+    return legacy_dir, bundled_dir
+
+
+def _write_focused_tersoff_sidecar_input(case_dir: Path) -> None:
+    case_dir.mkdir(parents=True, exist_ok=True)
+    (case_dir / "mass.txt").write_text(
+        "3\n28.0855\n28.0855\n28.0855\n", encoding="utf-8"
+    )
+    (case_dir / "coordinate.txt").write_text(
+        "3 0.0\n"
+        "0.0 0.0 0.0\n"
+        "1.8 0.0 0.0\n"
+        "0.0 1.8 0.0\n"
+        "10.0 10.0 10.0\n"
+        "90.0 90.0 90.0\n",
+        encoding="utf-8",
+    )
+    (case_dir / "velocity.txt").write_text(
+        "3\n"
+        "0.0 0.0 0.0\n"
+        "0.0 0.0 0.0\n"
+        "0.0 0.0 0.0\n",
+        encoding="utf-8",
+    )
+    (case_dir / "tersoff.txt").write_text(
+        "3 1\n"
+        "Si\n"
+        "Si Si Si 3.0 1.0 0.0 25000.0 4.3484 -0.89 0.72751 "
+        "0.000000125724 2.199 340.0 1.95 0.05 3.568 1380.0\n"
+        "# Atom types\n"
+        "0 0 0\n",
+        encoding="utf-8",
+    )
+    (case_dir / "mdin.spg.toml").write_text(
+        'md_name = "bundled io ab focused Tersoff sidecar"\n'
+        'mode = "nve"\n'
+        "step_limit = 1\n"
+        "dt = 0.0\n"
+        "cutoff = 4.0\n"
+        "skin = 0.4\n"
+        'mass_in_file = "mass.txt"\n'
+        'coordinate_in_file = "coordinate.txt"\n'
+        'velocity_in_file = "velocity.txt"\n'
+        'TERSOFF_in_file = "tersoff.txt"\n'
+        "print_zeroth_frame = 0\n"
+        "write_mdout_interval = 1\n"
+        "write_information_interval = 1\n",
+        encoding="utf-8",
+    )
+
+
+def _validate_focused_tersoff_sidecar_routes(
+    legacy_dir: Path, bundled_dir: Path
+) -> None:
+    legacy_mdin = (legacy_dir / "mdin.spg.toml").read_text(encoding="utf-8")
+    bundled_mdin = (bundled_dir / "mdin.bundled.spg.toml").read_text(
+        encoding="utf-8"
+    )
+    if not _has_key_line(legacy_mdin, "TERSOFF_in_file"):
+        raise AssertionError(
+            "focused Tersoff legacy branch lost TERSOFF_in_file"
+        )
+    if _has_key_line(bundled_mdin, "TERSOFF_in_file"):
+        raise AssertionError(
+            "focused Tersoff bundled mdin retained TERSOFF_in_file"
+        )
+
+    topology_path = bundled_dir / "topology.spgt.h5"
+    topology_paths = _h5_paths(topology_path)
+    if any(path.startswith("/manybody/tersoff") for path in topology_paths):
+        raise AssertionError(
+            "focused Tersoff bundled topology retained typed Tersoff"
+        )
+    sidecar_root = "/parameters/sponge/files/legacy_sidecars"
+    keys = _h5_string_values(topology_path, f"{sidecar_root}/key")
+    paths = _h5_string_values(topology_path, f"{sidecar_root}/path")
+    if keys != ["TERSOFF_in_file"]:
+        raise AssertionError(
+            f"focused Tersoff bundled sidecar keys changed: {keys}"
+        )
+    if len(paths) != 1 or not paths[0].endswith(
+        "/TERSOFF_in_file/tersoff.txt"
+    ):
+        raise AssertionError(
+            f"focused Tersoff bundled sidecar path changed: {paths}"
+        )
+    tersoff_sidecar = bundled_dir / paths[0]
+    if not tersoff_sidecar.is_file() or tersoff_sidecar.stat().st_size == 0:
+        raise AssertionError(
+            "focused Tersoff bundled sidecar payload is missing"
+        )
+    if (bundled_dir / "legacy_sidecars" / "mass_in_file").exists():
+        raise AssertionError(
+            "focused Tersoff bundled branch retained mass sidecar"
+        )
 
 
 def _prepare_focused_custom_pair_pair(case_root: Path) -> tuple[Path, Path]:
@@ -5138,7 +5312,11 @@ def _compare_input_semantics(
                 spec,
                 deterministic=not case.statistical_md,
             )
-            if spec.contract_id == "input.manybody.sw.sidecar":
+            if spec.contract_id == "input.manybody.tersoff.sidecar":
+                replica_result["oracle"] = (
+                    _compare_focused_tersoff_angular(case, run)
+                )
+            elif spec.contract_id == "input.manybody.sw.sidecar":
                 replica_result["oracle"] = (
                     _compare_focused_sw_pair_three_body(case, run)
                 )
@@ -5185,6 +5363,120 @@ def _compare_input_semantics(
             }
         )
     return results
+
+
+def _compare_focused_tersoff_angular(
+    case: AbCase, run: AbRun
+) -> dict[str, object]:
+    branch_results = {}
+    forces = {}
+    for branch, directory in (
+        ("legacy", run.legacy_dir),
+        ("bundled", run.bundled_dir),
+    ):
+        rows = _read_mdout(directory / "mdout.txt")["rows"]
+        branch_forces = _read_native_float32_file(
+            directory / "output" / "legacy.frc"
+        )
+        branch_results[branch] = _assert_tersoff_angular_oracle(
+            f"{case.name} {branch}", rows, branch_forces
+        )
+        forces[branch] = branch_forces
+    cross_branch_force = _assert_nontrivial_equivalent_forces(
+        f"{case.name} Tersoff force", forces["legacy"], forces["bundled"]
+    )
+    return {
+        "route": "isolated_h5_TERSOFF_in_file_sidecar",
+        "module_owned_energy": "isolated_total_potential",
+        "branches": branch_results,
+        "cross_branch_force": cross_branch_force,
+    }
+
+
+def _assert_tersoff_angular_oracle(
+    label: str,
+    rows: Sequence[dict[str, float]],
+    forces: Sequence[float],
+) -> dict[str, object]:
+    expected_potential = -173.23
+    expected_effective_potential = -173.23468
+    gamma_zero_potential = -196.06
+    expected_force = (
+        135.94907,
+        135.94907,
+        0.0,
+        -119.686844,
+        -16.262218,
+        0.0,
+        -16.262218,
+        -119.686844,
+        0.0,
+    )
+    gamma_zero_force = (
+        144.78313,
+        144.78313,
+        0.0,
+        -144.78313,
+        0.0,
+        0.0,
+        0.0,
+        -144.78313,
+        0.0,
+    )
+    potential = [row["potential"] for row in rows if "potential" in row]
+    effective_potential = [
+        row["eff_pot"] for row in rows if "eff_pot" in row
+    ]
+    _assert_numeric_sequences_close(
+        f"{label} angular Tersoff potential oracle",
+        (expected_potential,),
+        potential,
+        relative_tolerance=1.0e-6,
+        absolute_tolerance=1.0e-6,
+    )
+    _assert_numeric_sequences_close(
+        f"{label} angular Tersoff effective-potential oracle",
+        (expected_effective_potential,),
+        effective_potential,
+        relative_tolerance=1.0e-6,
+        absolute_tolerance=1.0e-6,
+    )
+    relative_tolerance, absolute_tolerance = _deterministic_tolerance("force")
+    _assert_numeric_sequences_close(
+        f"{label} angular Tersoff force oracle",
+        expected_force,
+        forces,
+        relative_tolerance=relative_tolerance,
+        absolute_tolerance=absolute_tolerance,
+    )
+    force_delta_from_gamma_zero = max(
+        abs(actual - control)
+        for actual, control in zip(forces, gamma_zero_force, strict=True)
+    )
+    if force_delta_from_gamma_zero < 1.0:
+        raise AssertionError(
+            f"{label} did not distinguish the gamma=0 Tersoff force"
+        )
+    non_tersoff_maximum = max(
+        abs(row.get(observable, 0.0))
+        for row in rows
+        for observable in ("PM", "temperature")
+    )
+    if non_tersoff_maximum > 1.0e-8:
+        raise AssertionError(
+            f"{label} isolated Tersoff fixture has another non-zero result"
+        )
+    return {
+        "potential": potential[0],
+        "effective_potential": effective_potential[0],
+        "gamma_zero_potential": gamma_zero_potential,
+        "angular_energy_contribution": potential[0] - gamma_zero_potential,
+        "maximum_abs_force": max(abs(value) for value in forces),
+        "maximum_force_delta_from_gamma_zero": force_delta_from_gamma_zero,
+        "three_body_parameter_gamma": 1.0,
+        "isolated_module_owned_potential": True,
+        "angular_bond_order_required": True,
+    }
 
 
 def _compare_focused_sw_pair_three_body(

@@ -33,6 +33,7 @@ REQUIRED_INPUT_SEMANTIC_CONTRACTS = frozenset(
         "input.manybody.sw.sidecar",
         "input.manybody.edip",
         "input.manybody.tersoff",
+        "input.manybody.tersoff.sidecar",
         "input.manybody.reaxff",
         "input.custom.pairwise",
         "input.custom.listed",

@@ -43,6 +43,7 @@ from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
     FOCUSED_IMPROPER_NATIVE_FIXTURE,
     FOCUSED_LJ_SOFT_CORE_FIXTURE,
     FOCUSED_SW_SIDECAR_FIXTURE,
+    FOCUSED_TERSOFF_SIDECAR_FIXTURE,
     FOCUSED_VIRTUAL_ATOMS_ALIAS_FIXTURE,
     FOCUSED_VIRTUAL_ATOMS_ALL_TYPES_FIXTURE,
     FOCUSED_VIRTUAL_ATOMS_PBC_FIXTURE,
@@ -55,6 +56,7 @@ from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
     _assert_gb_force_oracle,
     _assert_nontrivial_equivalent_forces,
     _assert_sw_pair_three_body_oracle,
+    _assert_tersoff_angular_oracle,
     _assert_virtual_atom_oracle,
     _cases_for_profile,
     _expected_rerun_frame_indices,
@@ -258,6 +260,7 @@ def test_ab_production_harness_has_executable_contract_coverage():
         "normal_sits_ff19sb_cmap_peptide",
         "normal_edip_nonzero",
         "normal_sw_sidecar_pair_three_body",
+        "normal_tersoff_sidecar_angular",
         "normal_custom_pair_nonzero",
         "normal_exclusions_coulomb_oracle",
         "normal_gb_hybrid_nonzero",
@@ -755,6 +758,94 @@ def test_focused_sw_gate_rejects_pair_only_energy_and_force_mutations():
     with pytest.raises(AssertionError, match="pair\\+three-body SW force"):
         _assert_sw_pair_three_body_oracle(
             "SW pair-only force", [{"SW": 194.50}], pair_only_force
+        )
+
+
+def test_focused_tersoff_case_requires_isolated_angular_sidecar_behavior():
+    contracts = load_contract_registry()
+    case = next(
+        case
+        for case in _cases_for_profile()
+        if case.name == "normal_tersoff_sidecar_angular"
+    )
+    spec = INPUT_SEMANTIC_SPECS_BY_CASE[case.name]
+
+    assert case.fixture_case == FOCUSED_TERSOFF_SIDECAR_FIXTURE
+    assert case.statistical_md is False
+    assert case.normal_step_limit == 1
+    assert case.normal_dt == 0.0
+    assert case.input_behavior_only is True
+    assert case.contract_ids == (
+        "output.legacy.mdout",
+        "input.manybody.tersoff.sidecar",
+    )
+    assert spec == (
+        InputSemanticSpec(
+            "input.manybody.tersoff.sidecar", ("potential",), 1.0e-6
+        ),
+    )
+    sidecar = contracts["input.manybody.tersoff.sidecar"]
+    assert sidecar.status == "supported"
+    assert sidecar.case_ids == (case.name,)
+    assert sidecar.assertion_ids == ("input_semantic_equivalence",)
+    native = contracts["input.manybody.tersoff"]
+    assert native.status == "deferred"
+    assert "does not materialize" in native.reason
+    assert "tracked separately" in native.reason
+
+
+def test_focused_tersoff_gate_rejects_gamma_zero_mutations():
+    rows = [
+        {
+            "potential": -173.23,
+            "eff_pot": -173.23468,
+            "PM": 0.0,
+            "temperature": 0.0,
+        }
+    ]
+    full_force = (
+        135.94907,
+        135.94907,
+        0.0,
+        -119.686844,
+        -16.262218,
+        0.0,
+        -16.262218,
+        -119.686844,
+        0.0,
+    )
+    gamma_zero_force = (
+        144.78313,
+        144.78313,
+        0.0,
+        -144.78313,
+        0.0,
+        0.0,
+        0.0,
+        -144.78313,
+        0.0,
+    )
+    result = _assert_tersoff_angular_oracle(
+        "Tersoff", rows, full_force
+    )
+    assert result["angular_energy_contribution"] == pytest.approx(22.83)
+    assert result["maximum_force_delta_from_gamma_zero"] > 25.0
+
+    gamma_zero_rows = [
+        {
+            "potential": -196.06,
+            "eff_pot": -196.05984,
+            "PM": 0.0,
+            "temperature": 0.0,
+        }
+    ]
+    with pytest.raises(AssertionError, match="angular Tersoff potential"):
+        _assert_tersoff_angular_oracle(
+            "Tersoff gamma=0", gamma_zero_rows, gamma_zero_force
+        )
+    with pytest.raises(AssertionError, match="angular Tersoff force"):
+        _assert_tersoff_angular_oracle(
+            "Tersoff gamma=0 force", rows, gamma_zero_force
         )
 
 
