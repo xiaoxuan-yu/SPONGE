@@ -42,8 +42,8 @@ def test_real_registry_and_case_matrix_are_symmetric():
 
     assert summary["contract_count"] == len(contracts)
     assert summary["status_counts"] == {
-        "deferred": 1,
-        "supported": 85,
+        "deferred": 0,
+        "supported": 87,
         "unsupported": 1,
     }
 

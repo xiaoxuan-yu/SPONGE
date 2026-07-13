@@ -349,7 +349,11 @@
         "failure_h5_soft_wall_dual_owner",
         "failure_h5_soft_wall_count_shape",
         "failure_h5_soft_wall_name_shape",
-        "failure_h5_soft_wall_potential_shape"
+        "failure_h5_soft_wall_potential_shape",
+        "failure_h5_cv_restraint_dual_owner",
+        "failure_h5_cv_restraint_partial_owner",
+        "failure_h5_cv_restraint_offset_mismatch",
+        "failure_h5_cv_restraint_definition_conflict"
       ],
       "assertion_ids": ["stable_failure_semantics"],
       "reason": ""
@@ -530,13 +534,23 @@
       "contract_id": "input.protocol.cv_restraint",
       "direction": "input",
       "component": "protocol",
-      "status": "deferred",
+      "status": "supported",
       "minimum_evidence": "E3",
       "legacy_surface": "restrain_in_file and restrain_cv_in_file",
       "bundled_surface": "/restraint/config and /restraint/cv/config",
-      "case_ids": [],
-      "assertion_ids": [],
-      "reason": "Typed CV-restraint configuration has structural conversion coverage but no isolated non-zero runtime behavior gate."
+      "case_ids": ["normal_cv_restraint_typed_nonzero", "rerun_full_contract_pure_vds_off", "rerun_full_contract_pure_vds_on"],
+      "assertion_ids": ["input_semantic_equivalence"]
+    },
+    {
+      "contract_id": "input.protocol.cv_restraint.sidecar",
+      "direction": "input",
+      "component": "protocol",
+      "status": "supported",
+      "minimum_evidence": "E3",
+      "legacy_surface": "restrain_in_file and restrain_cv_in_file",
+      "bundled_surface": "protocol legacy sidecar table: restrain_in_file and restrain_cv_in_file",
+      "case_ids": ["normal_cv_restraint_sidecar_nonzero", "rerun_full_contract_sidecar_vds_off", "rerun_full_contract_sidecar_vds_on"],
+      "assertion_ids": ["input_semantic_equivalence"]
     },
     {
       "contract_id": "input.protocol.soft_wall.sidecar",

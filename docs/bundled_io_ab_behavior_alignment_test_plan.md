@@ -1594,7 +1594,49 @@ Acceptance:
 - SPONGE rebuild, fixture-equivalence CTest, contract smoke, Ruff, formatting,
   clang-format, and diff checks pass, followed by one PR-scoped commit.
 
-## 50. Artifacts and Temporary-Space Policy
+## 50. PR 53: Typed and Sidecar CV-Restraint Behavior Contracts
+
+Close the final deferred input contract by making the historical
+`restrain_in_file` and `restrain_cv_in_file` surfaces reach the same
+`RESTRAIN_CV` consumer as typed protocol configuration.
+
+- Extend the CV controller to merge `cv_in_file`, `restrain_in_file`, and
+  `restrain_cv_in_file`. Identical repeated section/key/value definitions are
+  accepted; conflicting definitions fail instead of silently selecting one
+  owner.
+- Read `/cv/config`, `/restraint/config`, and `/restraint/cv/config` through one
+  structured validator. Require the two typed restraint roots together,
+  validate scalar count/vector offsets/key/value structure, reject duplicates,
+  merge identical shared CV definitions, and materialize one canonical
+  `cv_in_file` for the established runtime parser.
+- Add independent two-atom typed and H5-sidecar A/B cases. Both must exercise
+  the real legacy restraint keys, emit an exact non-zero `restrain_cv` energy
+  and complete force fingerprint, then zero only their own weight payload and
+  produce zero energy and force.
+- Make pure and sidecar full-contract fixtures select exactly one composite
+  CV-restraint owner. Include the non-zero module column in the formal rerun
+  input-semantic evidence under both VDS modes.
+- Add process-level failures for typed/legacy dual ownership, a partial typed
+  owner, inconsistent key offsets, and conflicting shared CV definitions.
+
+Acceptance:
+
+- Both focused routes match at `restrain_cv=1.0` with force
+  `(4,0,0,-4,0,0)`. Their independent weight-zero controls have zero
+  CV-restraint energy and force. A reordered duplicate typed CV definition
+  preserves the exact energy and force, proving key order is not semantic.
+- Pure and sidecar full-contract VDS-off/on match every mdout column, complete
+  rerun trajectory, and observable output while exercising
+  `restrain_cv=12.06` in both frames.
+- All four new validation mutations exit through stable
+  conflict/bad-file-format diagnostics, and the complete 33-case failure sweep
+  remains green.
+- Registry coverage reaches 87 supported contracts, zero deferred contracts,
+  and one explicitly unsupported cross-process VDS contract.
+- SPONGE rebuild, fixture-equivalence CTest, contract smoke, Ruff, formatting,
+  clang-format, and diff checks pass, followed by one PR-scoped commit.
+
+## 51. Artifacts and Temporary-Space Policy
 
 - Use `SPONGE_BUNDLED_IO_AB_RUN_ROOT` for all heavy runs.
 - Put production artifacts on the workspace filesystem rather than `/tmp`.
@@ -1604,7 +1646,7 @@ Acceptance:
 - Record artifact byte counts and enforce a configurable per-case quota.
 - Cleanup must only remove directories created by the current gate run.
 
-## 51. PR Completion Log
+## 52. PR Completion Log
 
 Append one row immediately after completing and committing each PR.
 
@@ -1664,3 +1706,4 @@ Append one row immediately after completing and committing each PR.
 | PR 50: Typed EAM funcfl/setfl behavior contracts | Complete | This commit | focused funcfl/setfl CPU A/B plus zero-pair controls; pure full-contract VDS-off/on progression; sidecar full-contract VDS-off/on; unknown-format and table-shape process failures; complete failure sweep; fixture-equivalence CTest; SPONGE rebuild; contract smoke; Ruff; format; clang-format; `git diff --check` | Typed EAM input now materializes both legacy formats and optional atom types through the established EAM runtime parser. Exact energy and full-force oracles plus zero-pair controls prove table consumption, full-contract fixtures enforce exactly one EAM owner, and pure rerun now advances to only restraint/soft-wall gaps. |
 | PR 51: Typed positional-restraint behavior contract | Complete | This commit | focused typed positional-restraint CPU A/B plus three independent payload controls; pure full-contract VDS-off/on progression; sidecar VDS-off/on; two residue COM/virial regressions; dual-owner and weight-shape process failures; 25-case failure sweep; fixture-equivalence CTest; SPONGE rebuild; 142-test smoke; Ruff; format; clang-format; `git diff --check` | Protocol atom IDs/weights and restart reference coordinates now form one validated typed owner and materialize through the established positional-restraint parser. Exact energy/full-force oracles prove all three payload fields are consumed. The registry separates typed and sidecar evidence, retains CV restraint and typed soft wall as deferred, and pure rerun advances to only the soft-wall gap. |
 | PR 52: Typed soft-wall behavior contract | Complete | This commit | focused typed soft-wall CPU A/B plus zero-potential control; pure and sidecar full-contract VDS-off/on; dual-owner and three shape process failures; 29-case failure sweep; fixture-equivalence CTest; SPONGE rebuild; 142-test smoke; Ruff; format; clang-format; `git diff --check` | Typed `/wall/soft/{count,name,potential}` now validates and materializes through the established soft-wall parser. The focused gate matches `z_wall=10.0` and force `(0,0,-2,0,0,-6)` while the typed zero-potential control zeros both. Full-contract fixtures enforce exactly one owner, and pure VDS-off/on now pass the complete rerun behavior gate. Registry coverage reaches 85 supported, one deferred, and one unsupported contract. |
+| PR 53: Typed and sidecar CV-restraint behavior contracts | Complete | This commit | focused typed/sidecar CV-restraint CPU A/B plus weight-zero and reordered-definition controls; pure and sidecar full-contract VDS-off/on E3 gates; dual-owner, partial-owner, offset, and definition-conflict process failures; 33-case failure sweep; fixture-equivalence CTest; SPONGE rebuild; 142-test smoke; Ruff; format; clang-format; `git diff --check` | The CV controller now merges all three legacy configuration surfaces, while typed protocol roots pass one structured, conflict-aware materializer. Focused routes match `restrain_cv=1.0` and force `(4,0,0,-4,0,0)`; full-contract routes exercise `restrain_cv=12.06`. Registry coverage reaches 87 supported, zero deferred, and one unsupported contract. |

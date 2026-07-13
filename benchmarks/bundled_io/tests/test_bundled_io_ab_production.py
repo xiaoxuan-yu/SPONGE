@@ -57,6 +57,8 @@ FOCUSED_EAM_FUNCFL_FIXTURE = "focused_eam_funcfl_two_atom"
 FOCUSED_EAM_SETFL_FIXTURE = "focused_eam_setfl_two_atom"
 FOCUSED_POSITIONAL_RESTRAINT_FIXTURE = "focused_positional_restraint_two_atom"
 FOCUSED_SOFT_WALL_FIXTURE = "focused_soft_wall_two_atom"
+FOCUSED_CV_RESTRAINT_TYPED_FIXTURE = "focused_cv_restraint_typed_two_atom"
+FOCUSED_CV_RESTRAINT_SIDECAR_FIXTURE = "focused_cv_restraint_sidecar_two_atom"
 FOCUSED_SW_SIDECAR_FIXTURE = "focused_sw_sidecar_three_atom"
 FOCUSED_SW_TYPED_FIXTURE = "focused_sw_typed_three_atom"
 FOCUSED_TERSOFF_SIDECAR_FIXTURE = "focused_tersoff_sidecar_three_atom"
@@ -309,6 +311,18 @@ INPUT_SEMANTIC_SPECS_BY_CASE = {
     "normal_soft_wall_typed_nonzero": (
         InputSemanticSpec("input.protocol.soft_wall", ("z_wall",), 1.0e-6),
     ),
+    "normal_cv_restraint_typed_nonzero": (
+        InputSemanticSpec(
+            "input.protocol.cv_restraint", ("restrain_cv",), 1.0e-6
+        ),
+    ),
+    "normal_cv_restraint_sidecar_nonzero": (
+        InputSemanticSpec(
+            "input.protocol.cv_restraint.sidecar",
+            ("restrain_cv",),
+            1.0e-6,
+        ),
+    ),
     "normal_sw_sidecar_pair_three_body": (
         InputSemanticSpec("input.manybody.sw.sidecar", ("SW",), 1.0e-6),
     ),
@@ -453,6 +467,10 @@ RERUN_INPUT_SEMANTIC_SPECS = (
     ),
     InputSemanticSpec("input.protocol.soft_wall", ("z_wall",), 1.0e-6),
     InputSemanticSpec("input.protocol.soft_wall.sidecar", ("z_wall",), 1.0e-6),
+    InputSemanticSpec("input.protocol.cv_restraint", ("restrain_cv",), 1.0e-6),
+    InputSemanticSpec(
+        "input.protocol.cv_restraint.sidecar", ("restrain_cv",), 1.0e-6
+    ),
     InputSemanticSpec("input.protocol.cv", ("distance",), 1.0e-6),
     InputSemanticSpec("input.qc.energy", ("QC",), 1.0e-6),
     InputSemanticSpec("input.qc.spin_square", ("QC_S_sq",), 1.0e-4),
@@ -857,6 +875,50 @@ def _cases_for_profile() -> list[AbCase]:
             contract_ids=(
                 "output.legacy.mdout",
                 "input.protocol.soft_wall",
+            ),
+            assertion_ids=(
+                "mdout_deterministic_equivalence",
+                "input_semantic_equivalence",
+            ),
+            normal_step_limit=1,
+            normal_interval=1,
+            normal_dt=0.0,
+            input_behavior_only=True,
+        ),
+        AbCase(
+            name="normal_cv_restraint_typed_nonzero",
+            fixture_case=FOCUSED_CV_RESTRAINT_TYPED_FIXTURE,
+            legacy_subdir="generated_legacy",
+            bundled_subdir="generated_bundled",
+            mode="normal",
+            vds=False,
+            statistical_md=False,
+            restart_load_policy="structural",
+            contract_ids=(
+                "output.legacy.mdout",
+                "input.protocol.cv_restraint",
+            ),
+            assertion_ids=(
+                "mdout_deterministic_equivalence",
+                "input_semantic_equivalence",
+            ),
+            normal_step_limit=1,
+            normal_interval=1,
+            normal_dt=0.0,
+            input_behavior_only=True,
+        ),
+        AbCase(
+            name="normal_cv_restraint_sidecar_nonzero",
+            fixture_case=FOCUSED_CV_RESTRAINT_SIDECAR_FIXTURE,
+            legacy_subdir="generated_legacy",
+            bundled_subdir="generated_bundled",
+            mode="normal",
+            vds=False,
+            statistical_md=False,
+            restart_load_policy="structural",
+            contract_ids=(
+                "output.legacy.mdout",
+                "input.protocol.cv_restraint.sidecar",
             ),
             assertion_ids=(
                 "mdout_deterministic_equivalence",
@@ -1423,6 +1485,7 @@ def _cases_for_profile() -> list[AbCase]:
                 "input.manybody.eam",
                 "input.protocol.positional_restraint",
                 "input.protocol.soft_wall",
+                "input.protocol.cv_restraint",
                 "input.protocol.cv",
                 "input.qc.energy",
             ),
@@ -1461,6 +1524,7 @@ def _cases_for_profile() -> list[AbCase]:
                 "input.manybody.eam",
                 "input.protocol.positional_restraint",
                 "input.protocol.soft_wall",
+                "input.protocol.cv_restraint",
                 "input.protocol.cv",
                 "input.qc.energy",
             ),
@@ -1499,6 +1563,7 @@ def _cases_for_profile() -> list[AbCase]:
                 "input.manybody.eam",
                 "input.protocol.positional_restraint.sidecar",
                 "input.protocol.soft_wall.sidecar",
+                "input.protocol.cv_restraint.sidecar",
                 "input.protocol.cv",
                 "input.qc.energy",
             ),
@@ -1537,6 +1602,7 @@ def _cases_for_profile() -> list[AbCase]:
                 "input.manybody.eam",
                 "input.protocol.positional_restraint.sidecar",
                 "input.protocol.soft_wall.sidecar",
+                "input.protocol.cv_restraint.sidecar",
                 "input.protocol.cv",
                 "input.qc.energy",
             ),
@@ -2132,6 +2198,53 @@ def _failure_cases() -> list[AbCase]:
             expected_diagnostic_tokens=(
                 "Materialize_H5_Native_Soft_Wall",
                 "/wall/soft/potential must have shape [1]",
+            ),
+            **nb14_metadata_shared,
+        ),
+        AbCase(
+            name="failure_h5_cv_restraint_dual_owner",
+            failure_mutation="h5_cv_restraint_dual_owner",
+            failure_branches=("bundled",),
+            expected_error_category="spongeErrorConflictingCommand",
+            expected_diagnostic_tokens=(
+                "Materialize_H5_CV_Config",
+                "cannot both own CV-restraint state",
+            ),
+            **nb14_metadata_shared,
+        ),
+        AbCase(
+            name="failure_h5_cv_restraint_partial_owner",
+            failure_mutation="h5_cv_restraint_partial_owner",
+            failure_branches=("bundled",),
+            expected_error_category="spongeErrorBadFileFormat",
+            expected_diagnostic_tokens=(
+                "Materialize_H5_CV_Config",
+                "typed CV restraint requires both /restraint/config and "
+                "/restraint/cv/config",
+            ),
+            **nb14_metadata_shared,
+        ),
+        AbCase(
+            name="failure_h5_cv_restraint_offset_mismatch",
+            failure_mutation="h5_cv_restraint_offset_mismatch",
+            failure_branches=("bundled",),
+            expected_error_category="spongeErrorBadFileFormat",
+            expected_diagnostic_tokens=(
+                "Materialize_H5_CV_Config",
+                "/restraint/cv/config section offsets and key/value lengths "
+                "are inconsistent",
+            ),
+            **nb14_metadata_shared,
+        ),
+        AbCase(
+            name="failure_h5_cv_restraint_definition_conflict",
+            failure_mutation="h5_cv_restraint_definition_conflict",
+            failure_branches=("bundled",),
+            expected_error_category="spongeErrorBadFileFormat",
+            expected_diagnostic_tokens=(
+                "Materialize_H5_CV_Config",
+                "/restraint/config conflicts with another typed CV "
+                "definition for distance",
             ),
             **nb14_metadata_shared,
         ),
@@ -3908,6 +4021,10 @@ def _prepare_case_pair(
             return _prepare_focused_positional_restraint_pair(case_root)
         if case.fixture_case == FOCUSED_SOFT_WALL_FIXTURE:
             return _prepare_focused_soft_wall_pair(case_root)
+        if case.fixture_case == FOCUSED_CV_RESTRAINT_TYPED_FIXTURE:
+            return _prepare_focused_cv_restraint_pair(case_root, typed=True)
+        if case.fixture_case == FOCUSED_CV_RESTRAINT_SIDECAR_FIXTURE:
+            return _prepare_focused_cv_restraint_pair(case_root, typed=False)
         if case.fixture_case == FOCUSED_SW_SIDECAR_FIXTURE:
             return _prepare_focused_sw_sidecar_pair(case_root)
         if case.fixture_case == FOCUSED_SW_TYPED_FIXTURE:
@@ -3974,6 +4091,7 @@ def _prepare_case_pair(
     _prepare_full_contract_eam_owner(case, bundled_dir)
     _prepare_full_contract_positional_restraint_owner(case, bundled_dir)
     _prepare_full_contract_soft_wall_owner(case, bundled_dir)
+    _prepare_full_contract_cv_restraint_owner(case, bundled_dir)
     _validate_full_contract_input(case, bundled_dir)
     if "input.restart_load.absent" in case.contract_ids:
         _prepare_restart_absent_inputs(legacy_dir, bundled_dir)
@@ -4138,6 +4256,57 @@ def _prepare_full_contract_soft_wall_owner(
                 "soft-wall representations before owner selection"
             )
         del protocol[typed_root]
+
+
+def _prepare_full_contract_cv_restraint_owner(
+    case: AbCase, bundled_dir: Path
+) -> None:
+    if case.fixture_case != "full_contract_rerun":
+        return
+    protocol_path = bundled_dir / "protocol.spgp.h5"
+    sidecar_root = "/parameters/sponge/files/legacy_sidecars"
+    typed_roots = ("/restraint/config", "/restraint/cv/config")
+    required_sidecar_keys = {"restrain_in_file", "restrain_cv_in_file"}
+    with h5py.File(protocol_path, "r+") as protocol:
+        typed_parts = [path in protocol for path in typed_roots]
+        sidecar_keys: set[str] = set()
+        if sidecar_root in protocol:
+            sidecar_keys = set(protocol[f"{sidecar_root}/key"].asstr()[...])
+        sidecar_parts = [key in sidecar_keys for key in required_sidecar_keys]
+        typed_owner = all(typed_parts)
+        partial_typed_owner = any(typed_parts)
+        sidecar_owner = all(sidecar_parts)
+        partial_sidecar_owner = any(sidecar_parts)
+
+        if partial_typed_owner and not typed_owner:
+            raise AssertionError(
+                f"{case.name} source fixture has an incomplete typed "
+                "CV-restraint owner"
+            )
+        if partial_sidecar_owner and not sidecar_owner:
+            raise AssertionError(
+                f"{case.name} source fixture has an incomplete sidecar "
+                "CV-restraint owner"
+            )
+        if "input.full_contract.pure_native" in case.contract_ids:
+            if not typed_owner or partial_sidecar_owner:
+                raise AssertionError(
+                    f"{case.name} pure full-contract fixture requires only "
+                    "the typed CV-restraint owner"
+                )
+            return
+        if (
+            "input.full_contract.sidecar" not in case.contract_ids
+            and not partial_sidecar_owner
+        ):
+            return
+        if not typed_owner or not sidecar_owner:
+            raise AssertionError(
+                f"{case.name} sidecar source fixture must contain both "
+                "CV-restraint representations before owner selection"
+            )
+        del protocol["/restraint/cv"]
+        del protocol["/restraint/config"]
 
 
 def _prepare_unrestricted_qc_inputs(
@@ -5050,6 +5219,159 @@ def _validate_focused_soft_wall_routes(
             )
         if "/parameters/sponge/files/legacy_sidecars" in protocol:
             raise AssertionError("focused soft-wall protocol retained sidecars")
+
+
+def _prepare_focused_cv_restraint_pair(
+    case_root: Path, *, typed: bool
+) -> tuple[Path, Path]:
+    route = "typed" if typed else "sidecar"
+    legacy_source = case_root / f"focused_cv_restraint_{route}_source"
+    legacy_dir = case_root / "legacy"
+    converted_dir = case_root / f"converted_cv_restraint_{route}_bundle"
+    bundled_dir = case_root / "bundled"
+    for path in (legacy_source, legacy_dir, converted_dir, bundled_dir):
+        if path.exists():
+            shutil.rmtree(path)
+    _write_focused_cv_restraint_input(legacy_source)
+    shutil.copytree(legacy_source, legacy_dir)
+    _convert_legacy_case(legacy_source, converted_dir)
+    shutil.copytree(converted_dir / "bundle", bundled_dir)
+
+    topology_path = bundled_dir / "topology.spgt.h5"
+    topology_sidecars = "/parameters/sponge/files/legacy_sidecars"
+    with h5py.File(topology_path, "r+") as topology:
+        if topology_sidecars in topology:
+            del topology[topology_sidecars]
+    mass_sidecar = bundled_dir / "legacy_sidecars" / "mass_in_file"
+    if mass_sidecar.exists():
+        shutil.rmtree(mass_sidecar)
+
+    protocol_path = bundled_dir / "protocol.spgp.h5"
+    protocol_sidecars = "/parameters/sponge/files/legacy_sidecars"
+    with h5py.File(protocol_path, "r+") as protocol:
+        if typed:
+            if protocol_sidecars in protocol:
+                del protocol[protocol_sidecars]
+        elif "/restraint" in protocol:
+            del protocol["/restraint"]
+    if typed:
+        sidecar_dir = bundled_dir / "legacy_sidecars"
+        if sidecar_dir.exists():
+            shutil.rmtree(sidecar_dir)
+    _validate_focused_cv_restraint_routes(legacy_dir, bundled_dir, typed=typed)
+    return legacy_dir, bundled_dir
+
+
+def _write_focused_cv_restraint_input(case_dir: Path) -> None:
+    case_dir.mkdir(parents=True, exist_ok=True)
+    (case_dir / "mass.txt").write_text("2\n1.0\n1.0\n", encoding="utf-8")
+    (case_dir / "coordinate.txt").write_text(
+        "2 0.0\n0.0 0.0 0.0\n2.0 0.0 0.0\n10.0 10.0 10.0\n90.0 90.0 90.0\n",
+        encoding="utf-8",
+    )
+    (case_dir / "velocity.txt").write_text(
+        "2\n0.0 0.0 0.0\n0.0 0.0 0.0\n", encoding="utf-8"
+    )
+    (case_dir / "restrain.txt").write_text(
+        "distance\n{\n    CV_type = distance\n    atom = 0 1\n}\n",
+        encoding="utf-8",
+    )
+    (case_dir / "restrain_cv.txt").write_text(
+        "restrain\n"
+        "{\n"
+        "    CV = distance\n"
+        "    weight = 4.0\n"
+        "    reference = 1.5\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    (case_dir / "mdin.spg.toml").write_text(
+        'md_name = "bundled io ab focused CV restraint"\n'
+        'mode = "nve"\n'
+        "step_limit = 1\n"
+        "dt = 0.0\n"
+        "cutoff = 4.0\n"
+        'mass_in_file = "mass.txt"\n'
+        'coordinate_in_file = "coordinate.txt"\n'
+        'velocity_in_file = "velocity.txt"\n'
+        'restrain_in_file = "restrain.txt"\n'
+        'restrain_cv_in_file = "restrain_cv.txt"\n'
+        "force_whole_output = true\n"
+        "print_zeroth_frame = 0\n"
+        "write_mdout_interval = 1\n"
+        "write_information_interval = 1\n",
+        encoding="utf-8",
+    )
+
+
+def _validate_focused_cv_restraint_routes(
+    legacy_dir: Path, bundled_dir: Path, *, typed: bool
+) -> None:
+    legacy_mdin = (legacy_dir / "mdin.spg.toml").read_text(encoding="utf-8")
+    bundled_mdin = (bundled_dir / "mdin.bundled.spg.toml").read_text(
+        encoding="utf-8"
+    )
+    owner_keys = ("restrain_in_file", "restrain_cv_in_file")
+    for key in owner_keys:
+        if not _has_key_line(legacy_mdin, key):
+            raise AssertionError(f"focused CV-restraint legacy lost {key}")
+        if _has_key_line(bundled_mdin, key):
+            raise AssertionError(f"focused CV-restraint bundled retained {key}")
+
+    protocol_path = bundled_dir / "protocol.spgp.h5"
+    sidecar_root = "/parameters/sponge/files/legacy_sidecars"
+    typed_paths = {
+        "/restraint/config/section/count",
+        "/restraint/config/section/name",
+        "/restraint/config/section/key_offset",
+        "/restraint/config/key",
+        "/restraint/config/value",
+        "/restraint/cv/config/section/count",
+        "/restraint/cv/config/section/name",
+        "/restraint/cv/config/section/key_offset",
+        "/restraint/cv/config/key",
+        "/restraint/cv/config/value",
+    }
+    protocol_paths = _h5_paths(protocol_path)
+    if typed:
+        missing = sorted(typed_paths - protocol_paths)
+        if missing:
+            raise AssertionError(
+                f"focused typed CV restraint is missing datasets: {missing}"
+            )
+        if sidecar_root in protocol_paths:
+            raise AssertionError("focused typed CV restraint retained sidecars")
+        if (bundled_dir / "legacy_sidecars").exists():
+            raise AssertionError(
+                "focused typed CV restraint retained sidecar files"
+            )
+        return
+
+    if typed_paths & protocol_paths:
+        raise AssertionError("focused sidecar CV restraint retained typed data")
+    keys = _h5_string_values(protocol_path, f"{sidecar_root}/key")
+    paths = _h5_string_values(protocol_path, f"{sidecar_root}/path")
+    expected = {
+        "restrain_in_file": ("legacy_sidecars/restrain_in_file/restrain.txt"),
+        "restrain_cv_in_file": (
+            "legacy_sidecars/restrain_cv_in_file/restrain_cv.txt"
+        ),
+    }
+    actual = dict(zip(keys, paths, strict=True))
+    if actual != expected:
+        raise AssertionError(
+            f"focused CV-restraint sidecar bindings changed: {actual}"
+        )
+    for key, relative_path in expected.items():
+        source_name = (
+            "restrain.txt" if key == "restrain_in_file" else "restrain_cv.txt"
+        )
+        if (legacy_dir / source_name).read_bytes() != (
+            bundled_dir / relative_path
+        ).read_bytes():
+            raise AssertionError(
+                f"focused CV-restraint sidecar payload changed for {key}"
+            )
 
 
 def _prepare_focused_edip_pair(case_root: Path) -> tuple[Path, Path]:
@@ -8517,6 +8839,8 @@ def _mutate_failure_mdin(case: AbCase, mdin_path: Path, branch: str) -> None:
         additions.append('restrain_atom_id = "duplicate_restrain_atom_id.txt"')
     elif mutation == "h5_soft_wall_dual_owner":
         additions.append('soft_walls_in_file = "duplicate_soft_walls.txt"')
+    elif mutation == "h5_cv_restraint_dual_owner":
+        additions.append('restrain_cv_in_file = "duplicate_restrain_cv.txt"')
     elif mutation in {
         "unsupported_sidecar_key",
         "sidecar_length_mismatch",
@@ -8533,6 +8857,9 @@ def _mutate_failure_mdin(case: AbCase, mdin_path: Path, branch: str) -> None:
         "h5_soft_wall_count_shape",
         "h5_soft_wall_name_shape",
         "h5_soft_wall_potential_shape",
+        "h5_cv_restraint_partial_owner",
+        "h5_cv_restraint_offset_mismatch",
+        "h5_cv_restraint_definition_conflict",
         "restart_dynamic_without_owner",
         "restart_protocol_without_owner",
         "restart_full_without_owner",
@@ -8570,6 +8897,9 @@ def _mutate_failure_h5(case: AbCase, case_dir: Path, branch: str) -> None:
         "h5_soft_wall_count_shape",
         "h5_soft_wall_name_shape",
         "h5_soft_wall_potential_shape",
+        "h5_cv_restraint_partial_owner",
+        "h5_cv_restraint_offset_mismatch",
+        "h5_cv_restraint_definition_conflict",
     }
     if (
         mutation
@@ -8596,7 +8926,10 @@ def _mutate_failure_h5(case: AbCase, case_dir: Path, branch: str) -> None:
                 protocol.create_dataset(
                     "/wall/soft/count", data=[1], dtype="i8"
                 )
-            else:
+            elif mutation in {
+                "h5_soft_wall_name_shape",
+                "h5_soft_wall_potential_shape",
+            }:
                 dataset_name = (
                     "name"
                     if mutation == "h5_soft_wall_name_shape"
@@ -8607,6 +8940,24 @@ def _mutate_failure_h5(case: AbCase, case_dir: Path, branch: str) -> None:
                 protocol.create_dataset(
                     path,
                     data=[],
+                    dtype=h5py.string_dtype(encoding="utf-8"),
+                )
+            elif mutation == "h5_cv_restraint_partial_owner":
+                del protocol["/restraint/cv"]
+            elif mutation == "h5_cv_restraint_offset_mismatch":
+                protocol["/restraint/cv/config/section/key_offset"][...] = [
+                    0,
+                    2,
+                ]
+            else:
+                root = "/restraint/config"
+                keys = protocol[f"{root}/key"].asstr()[...].tolist()
+                values = protocol[f"{root}/value"].asstr()[...].tolist()
+                values[keys.index("atom")] = "0 0"
+                del protocol[f"{root}/value"]
+                protocol.create_dataset(
+                    f"{root}/value",
+                    data=values,
                     dtype=h5py.string_dtype(encoding="utf-8"),
                 )
         return
@@ -9351,6 +9702,16 @@ def _compare_input_semantics(
             ):
                 replica_result["oracle"] = _compare_focused_soft_wall_behavior(
                     case, run
+                )
+            elif spec.contract_id in {
+                "input.protocol.cv_restraint",
+                "input.protocol.cv_restraint.sidecar",
+            } and case.fixture_case in {
+                FOCUSED_CV_RESTRAINT_TYPED_FIXTURE,
+                FOCUSED_CV_RESTRAINT_SIDECAR_FIXTURE,
+            }:
+                replica_result["oracle"] = (
+                    _compare_focused_cv_restraint_behavior(case, run)
                 )
             elif spec.contract_id == "input.qc.type":
                 replica_result["oracle"] = _compare_typed_qc_type(case, run)
@@ -10914,6 +11275,237 @@ def _run_soft_wall_zero_potential_control(
         )
     result = {
         "energy": rows[0]["z_wall"],
+        "force": _read_native_float32_file(
+            control_dir / "output" / "legacy.frc"
+        ),
+    }
+    shutil.rmtree(control_dir)
+    return result
+
+
+def _compare_focused_cv_restraint_behavior(
+    case: AbCase, run: AbRun
+) -> dict[str, object]:
+    typed = case.fixture_case == FOCUSED_CV_RESTRAINT_TYPED_FIXTURE
+    if not typed and case.fixture_case != FOCUSED_CV_RESTRAINT_SIDECAR_FIXTURE:
+        raise AssertionError(f"{case.name} has no focused CV-restraint oracle")
+    materialized = run.bundled_dir / ".sponge_h5_native_protocol" / "cv.txt"
+    if typed:
+        if not materialized.exists() or materialized.stat().st_size == 0:
+            raise AssertionError(
+                f"{case.name} did not materialize typed CV-restraint config"
+            )
+        materialized_text = materialized.read_text(encoding="utf-8")
+        for token in (
+            "distance",
+            "CV_type = distance",
+            "atom = 0 1",
+            "restrain",
+            "weight = 4.0",
+            "reference = 1.5",
+        ):
+            if token not in materialized_text:
+                raise AssertionError(
+                    f"{case.name} materialized config is missing {token!r}"
+                )
+    elif materialized.exists():
+        raise AssertionError(
+            f"{case.name} sidecar route unexpectedly materialized typed config"
+        )
+
+    legacy_force = _read_native_float32_file(
+        run.legacy_dir / "output" / "legacy.frc"
+    )
+    bundled_force = _read_native_float32_file(
+        run.bundled_dir / "output" / "legacy.frc"
+    )
+    force_result = _assert_nontrivial_equivalent_forces(
+        f"{case.name} CV-restraint force", legacy_force, bundled_force
+    )
+    rows = _read_mdout(run.bundled_dir / "mdout.txt")["rows"]
+    if len(rows) != 1 or not math.isfinite(
+        rows[0].get("restrain_cv", math.nan)
+    ):
+        raise AssertionError(
+            f"{case.name} did not emit one finite CV-restraint result"
+        )
+    _assert_numeric_sequences_close(
+        f"{case.name} CV-restraint energy oracle",
+        (1.0,),
+        (rows[0]["restrain_cv"],),
+        relative_tolerance=0.0,
+        absolute_tolerance=1.0e-6,
+    )
+    _assert_numeric_sequences_close(
+        f"{case.name} CV-restraint force oracle",
+        (4.0, 0.0, 0.0, -4.0, 0.0, 0.0),
+        bundled_force,
+        relative_tolerance=0.0,
+        absolute_tolerance=1.0e-6,
+    )
+
+    control = _run_cv_restraint_zero_weight_control(case, run, typed=typed)
+    _assert_numeric_sequences_close(
+        f"{case.name} zero-weight energy oracle",
+        (0.0,),
+        (control["energy"],),
+        relative_tolerance=0.0,
+        absolute_tolerance=1.0e-6,
+    )
+    _assert_numeric_sequences_close(
+        f"{case.name} zero-weight force oracle",
+        (0.0,) * 6,
+        control["force"],
+        relative_tolerance=0.0,
+        absolute_tolerance=1.0e-6,
+    )
+    result = {
+        "energy": rows[0]["restrain_cv"],
+        "force": force_result,
+        "zero_weight_control": control,
+        "route": "typed" if typed else "sidecar",
+    }
+    if typed:
+        reordered = _run_cv_restraint_reordered_definition_control(case, run)
+        _assert_numeric_sequences_close(
+            f"{case.name} reordered-definition energy oracle",
+            (1.0,),
+            (reordered["energy"],),
+            relative_tolerance=0.0,
+            absolute_tolerance=1.0e-6,
+        )
+        _assert_numeric_sequences_close(
+            f"{case.name} reordered-definition force oracle",
+            (4.0, 0.0, 0.0, -4.0, 0.0, 0.0),
+            reordered["force"],
+            relative_tolerance=0.0,
+            absolute_tolerance=1.0e-6,
+        )
+        result["reordered_definition_control"] = reordered
+        result["bundled_materialized_path"] = str(
+            materialized.relative_to(run.bundled_dir)
+        )
+    return result
+
+
+def _run_cv_restraint_zero_weight_control(
+    case: AbCase, run: AbRun, *, typed: bool
+) -> dict[str, object]:
+    route = "typed" if typed else "sidecar"
+    control_dir = run.bundled_dir.parent / f"bundled_cv_restraint_{route}_zero"
+    if control_dir.exists():
+        shutil.rmtree(control_dir)
+    shutil.copytree(run.bundled_dir, control_dir)
+    for path in (
+        control_dir / "output",
+        control_dir / ".sponge_h5_native_protocol",
+    ):
+        if path.exists():
+            shutil.rmtree(path)
+    (control_dir / "output").mkdir()
+    for file_name in ("mdout.txt", "mdinfo.txt", "run.stdout", "run.stderr"):
+        path = control_dir / file_name
+        if path.exists():
+            path.unlink()
+
+    if typed:
+        with h5py.File(control_dir / "protocol.spgp.h5", "r+") as protocol:
+            root = "/restraint/cv/config"
+            keys = protocol[f"{root}/key"].asstr()[...].tolist()
+            values = protocol[f"{root}/value"].asstr()[...].tolist()
+            weight_index = keys.index("weight")
+            values[weight_index] = "0.0"
+            del protocol[f"{root}/value"]
+            protocol.create_dataset(
+                f"{root}/value",
+                data=values,
+                dtype=h5py.string_dtype(encoding="utf-8"),
+            )
+    else:
+        sidecar_path = (
+            control_dir
+            / "legacy_sidecars"
+            / "restrain_cv_in_file"
+            / "restrain_cv.txt"
+        )
+        text = sidecar_path.read_text(encoding="utf-8")
+        if "weight = 4.0" not in text:
+            raise AssertionError(
+                f"{case.name} sidecar control cannot find the weight"
+            )
+        sidecar_path.write_text(
+            text.replace("weight = 4.0", "weight = 0.0"), encoding="utf-8"
+        )
+
+    outcome = _run_sponge_process(control_dir, _mdin_name(control_dir))
+    if outcome.returncode != 0:
+        raise AssertionError(
+            f"{case.name} zero-weight control failed with code "
+            f"{outcome.returncode}\n{outcome.stdout}\n{outcome.stderr}"
+        )
+    rows = _read_mdout(control_dir / "mdout.txt")["rows"]
+    if len(rows) != 1:
+        raise AssertionError(
+            f"{case.name} zero-weight control emitted {len(rows)} rows"
+        )
+    result = {
+        "energy": rows[0]["restrain_cv"],
+        "force": _read_native_float32_file(
+            control_dir / "output" / "legacy.frc"
+        ),
+    }
+    shutil.rmtree(control_dir)
+    return result
+
+
+def _run_cv_restraint_reordered_definition_control(
+    case: AbCase, run: AbRun
+) -> dict[str, object]:
+    control_dir = (
+        run.bundled_dir.parent / "bundled_cv_restraint_reordered_definition"
+    )
+    if control_dir.exists():
+        shutil.rmtree(control_dir)
+    shutil.copytree(run.bundled_dir, control_dir)
+    for path in (
+        control_dir / "output",
+        control_dir / ".sponge_h5_native_protocol",
+    ):
+        if path.exists():
+            shutil.rmtree(path)
+    (control_dir / "output").mkdir()
+    for file_name in ("mdout.txt", "mdinfo.txt", "run.stdout", "run.stderr"):
+        path = control_dir / file_name
+        if path.exists():
+            path.unlink()
+
+    string_dtype = h5py.string_dtype(encoding="utf-8")
+    with h5py.File(control_dir / "protocol.spgp.h5", "r+") as protocol:
+        config = protocol.create_group("/cv/config")
+        section = config.create_group("section")
+        section.create_dataset("count", data=1, dtype="i8")
+        section.create_dataset("name", data=["distance"], dtype=string_dtype)
+        section.create_dataset("key_offset", data=[0, 2], dtype="i8")
+        config.create_dataset(
+            "key", data=["atom", "CV_type"], dtype=string_dtype
+        )
+        config.create_dataset(
+            "value", data=["0 1", "distance"], dtype=string_dtype
+        )
+
+    outcome = _run_sponge_process(control_dir, _mdin_name(control_dir))
+    if outcome.returncode != 0:
+        raise AssertionError(
+            f"{case.name} reordered-definition control failed with code "
+            f"{outcome.returncode}\n{outcome.stdout}\n{outcome.stderr}"
+        )
+    rows = _read_mdout(control_dir / "mdout.txt")["rows"]
+    if len(rows) != 1:
+        raise AssertionError(
+            f"{case.name} reordered-definition control emitted {len(rows)} rows"
+        )
+    result = {
+        "energy": rows[0]["restrain_cv"],
         "force": _read_native_float32_file(
             control_dir / "output" / "legacy.frc"
         ),
@@ -13261,6 +13853,11 @@ def _validate_full_contract_input(
             effective_required_paths.discard("/restraint/default/weight")
         if file_name == "protocol.spgp.h5" and "/wall/soft" not in paths:
             effective_required_paths.discard("/wall/soft/potential")
+        if file_name == "protocol.spgp.h5" and "/restraint/config" not in paths:
+            effective_required_paths.discard("/restraint/config/section/name")
+            effective_required_paths.discard(
+                "/restraint/cv/config/section/name"
+            )
         if file_name == "restart.spgr.h5":
             reference_path = (
                 "/parameters/restart/references/restraint/default/coordinate"
@@ -13350,12 +13947,30 @@ def _validate_full_contract_input(
             path in protocol for path in soft_wall_typed_paths
         ]
         sidecar_soft_wall_owner = "soft_walls_in_file" in protocol_sidecar_keys
+        cv_restraint_typed_paths = (
+            "/restraint/config",
+            "/restraint/cv/config",
+        )
+        typed_cv_restraint_parts = [
+            path in protocol for path in cv_restraint_typed_paths
+        ]
+        cv_restraint_sidecar_keys = (
+            "restrain_in_file",
+            "restrain_cv_in_file",
+        )
+        sidecar_cv_restraint_parts = [
+            key in protocol_sidecar_keys for key in cv_restraint_sidecar_keys
+        ]
     typed_restraint_owner = all(typed_restraint_parts)
     partial_typed_restraint_owner = any(typed_restraint_parts)
     sidecar_restraint_owner = all(sidecar_restraint_parts)
     partial_sidecar_restraint_owner = any(sidecar_restraint_parts)
     typed_soft_wall_owner = all(typed_soft_wall_parts)
     partial_typed_soft_wall_owner = any(typed_soft_wall_parts)
+    typed_cv_restraint_owner = all(typed_cv_restraint_parts)
+    partial_typed_cv_restraint_owner = any(typed_cv_restraint_parts)
+    sidecar_cv_restraint_owner = all(sidecar_cv_restraint_parts)
+    partial_sidecar_cv_restraint_owner = any(sidecar_cv_restraint_parts)
     if partial_typed_owner and not typed_owner:
         raise AssertionError(
             f"{case.name} full-contract input has an incomplete typed residue "
@@ -13410,6 +14025,24 @@ def _validate_full_contract_input(
         raise AssertionError(
             f"{case.name} full-contract input requires exactly one soft-wall "
             f"owner, found {owner_count}"
+        )
+    if partial_typed_cv_restraint_owner and not typed_cv_restraint_owner:
+        raise AssertionError(
+            f"{case.name} full-contract input has an incomplete typed "
+            "CV-restraint owner"
+        )
+    if partial_sidecar_cv_restraint_owner and not sidecar_cv_restraint_owner:
+        raise AssertionError(
+            f"{case.name} full-contract input has an incomplete sidecar "
+            "CV-restraint owner"
+        )
+    if typed_cv_restraint_owner == sidecar_cv_restraint_owner:
+        owner_count = int(typed_cv_restraint_owner) + int(
+            sidecar_cv_restraint_owner
+        )
+        raise AssertionError(
+            f"{case.name} full-contract input requires exactly one "
+            f"CV-restraint owner, found {owner_count}"
         )
 
     has_sidecars = any("legacy_sidecars" in path for path in all_paths)
