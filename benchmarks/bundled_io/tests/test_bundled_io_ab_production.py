@@ -50,6 +50,7 @@ FIXTURE_ROOT = REPO_ROOT / "tests" / "h5_bundle" / "fixtures" / "input_matrix"
 XPONGE_DEV_ROOT = REPO_ROOT.parent / "XPONGE"
 SITS_FF19SB_CMAP_FIXTURE = "sits_ff19sb_cmap_peptide"
 FOCUSED_EDIP_FIXTURE = "focused_edip_two_atom"
+FOCUSED_CUSTOM_PAIR_FIXTURE = "focused_custom_pair_two_atom"
 SITS_FF19SB_CMAP_SOURCE = (
     REPO_ROOT / "benchmarks" / "performance" / "sits" / "statics" / "ala2_sits"
 )
@@ -210,6 +211,9 @@ INPUT_SEMANTIC_SPECS_BY_CASE = {
     ),
     "normal_edip_nonzero": (
         InputSemanticSpec("input.manybody.edip", ("EDIP",), 1.0e-6),
+    ),
+    "normal_custom_pair_nonzero": (
+        InputSemanticSpec("input.custom.pairwise", ("custom_pair",), 1.0e-6),
     ),
 }
 
@@ -390,6 +394,28 @@ def _cases_for_profile() -> list[AbCase]:
             contract_ids=(
                 "output.legacy.mdout",
                 "input.manybody.edip",
+            ),
+            assertion_ids=(
+                "mdout_deterministic_equivalence",
+                "input_semantic_equivalence",
+            ),
+            normal_step_limit=1,
+            normal_interval=1,
+            normal_dt=0.0,
+            input_behavior_only=True,
+        ),
+        AbCase(
+            name="normal_custom_pair_nonzero",
+            fixture_case=FOCUSED_CUSTOM_PAIR_FIXTURE,
+            legacy_subdir="generated_legacy",
+            bundled_subdir="generated_bundled",
+            mode="normal",
+            vds=False,
+            statistical_md=False,
+            restart_load_policy="structural",
+            contract_ids=(
+                "output.legacy.mdout",
+                "input.custom.pairwise",
             ),
             assertion_ids=(
                 "mdout_deterministic_equivalence",
@@ -1367,6 +1393,8 @@ def _prepare_case_pair(
             return _prepare_sits_ff19sb_cmap_pair(case_root, replica_seed)
         if case.fixture_case == FOCUSED_EDIP_FIXTURE:
             return _prepare_focused_edip_pair(case_root)
+        if case.fixture_case == FOCUSED_CUSTOM_PAIR_FIXTURE:
+            return _prepare_focused_custom_pair_pair(case_root)
         return _prepare_normal_tip3p_pair(case_root, replica_seed)
 
     legacy_dir = _copy_case(case, "legacy", case.legacy_subdir, case_root)
@@ -1596,6 +1624,129 @@ def _validate_focused_edip_routes(
     if missing:
         raise AssertionError(
             f"focused EDIP bundled topology is missing datasets: {missing}"
+        )
+
+
+def _prepare_focused_custom_pair_pair(case_root: Path) -> tuple[Path, Path]:
+    legacy_source = case_root / "focused_custom_pair_source"
+    legacy_dir = case_root / "legacy"
+    converted_dir = case_root / "converted_focused_custom_pair_bundle"
+    bundled_dir = case_root / "bundled"
+    for path in (legacy_source, legacy_dir, converted_dir, bundled_dir):
+        if path.exists():
+            shutil.rmtree(path)
+    _write_focused_custom_pair_input(legacy_source)
+    shutil.copytree(legacy_source, legacy_dir)
+    _convert_legacy_case(legacy_source, converted_dir)
+    shutil.copytree(converted_dir / "bundle", bundled_dir)
+
+    bundled_mdin = bundled_dir / "mdin.bundled.spg.toml"
+    bundled_mdin.write_text(
+        _remove_key_lines(
+            bundled_mdin.read_text(encoding="utf-8"),
+            {"pairwise_force_in_file", "custom_pair_in_file"},
+        ).rstrip()
+        + "\n",
+        encoding="utf-8",
+    )
+    topology_path = bundled_dir / "topology.spgt.h5"
+    with h5py.File(topology_path, "r+") as topology:
+        sidecar_table = "/parameters/sponge/files/legacy_sidecars"
+        if sidecar_table in topology:
+            del topology[sidecar_table]
+    legacy_sidecars = bundled_dir / "legacy_sidecars"
+    if legacy_sidecars.exists():
+        shutil.rmtree(legacy_sidecars)
+    _validate_focused_custom_pair_routes(legacy_dir, bundled_dir)
+    return legacy_dir, bundled_dir
+
+
+def _write_focused_custom_pair_input(case_dir: Path) -> None:
+    case_dir.mkdir(parents=True, exist_ok=True)
+    (case_dir / "mass.txt").write_text(
+        "2\n12.0\n12.0\n", encoding="utf-8"
+    )
+    (case_dir / "coordinate.txt").write_text(
+        "2 0.0\n"
+        "0.0 0.0 0.0\n"
+        "1.5 0.0 0.0\n"
+        "10.0 10.0 10.0\n"
+        "90.0 90.0 90.0\n",
+        encoding="utf-8",
+    )
+    (case_dir / "velocity.txt").write_text(
+        "2\n0.0 0.0 0.0\n0.0 0.0 0.0\n", encoding="utf-8"
+    )
+    (case_dir / "pairwise_force.txt").write_text(
+        "[[[ custom_pair ]]]\n"
+        "[[ potential ]]\n"
+        "E = epsilon_ij * powf(sigma_ij / r_ij, 12.0f);\n"
+        "[[ parameters ]]\n"
+        "float epsilon_ij, float sigma_ij\n"
+        "[[ with_ele ]]\n"
+        "false\n"
+        "[[ end ]]\n",
+        encoding="utf-8",
+    )
+    (case_dir / "custom_pair.txt").write_text(
+        "2 1\n1.0\n2.0\n0\n0\n", encoding="utf-8"
+    )
+    (case_dir / "mdin.spg.toml").write_text(
+        'md_name = "bundled io ab focused custom pair"\n'
+        'mode = "nve"\n'
+        "step_limit = 1\n"
+        "dt = 0.0\n"
+        "cutoff = 4.0\n"
+        "skin = 0.4\n"
+        'mass_in_file = "mass.txt"\n'
+        'coordinate_in_file = "coordinate.txt"\n'
+        'velocity_in_file = "velocity.txt"\n'
+        'pairwise_force_in_file = "pairwise_force.txt"\n'
+        'custom_pair_in_file = "custom_pair.txt"\n'
+        "print_zeroth_frame = 0\n"
+        "write_mdout_interval = 1\n"
+        "write_information_interval = 1\n",
+        encoding="utf-8",
+    )
+
+
+def _validate_focused_custom_pair_routes(
+    legacy_dir: Path, bundled_dir: Path
+) -> None:
+    legacy_mdin = (legacy_dir / "mdin.spg.toml").read_text(encoding="utf-8")
+    bundled_mdin = (bundled_dir / "mdin.bundled.spg.toml").read_text(
+        encoding="utf-8"
+    )
+    legacy_keys = {"pairwise_force_in_file", "custom_pair_in_file"}
+    if not all(_has_key_line(legacy_mdin, key) for key in legacy_keys):
+        raise AssertionError("focused custom-pair legacy routes are incomplete")
+    retained = sorted(
+        key for key in legacy_keys if _has_key_line(bundled_mdin, key)
+    )
+    if retained:
+        raise AssertionError(
+            f"focused custom-pair bundled branch retained legacy keys: {retained}"
+        )
+    if (bundled_dir / "legacy_sidecars").exists():
+        raise AssertionError("focused custom-pair bundle retained sidecars")
+    topology_paths = _h5_paths(bundled_dir / "topology.spgt.h5")
+    if "/parameters/sponge/files/legacy_sidecars" in topology_paths:
+        raise AssertionError("focused custom-pair topology retained sidecars")
+    required = {
+        "/forcefield/custom_force/pairwise/name",
+        "/forcefield/custom_force/pairwise/potential",
+        "/forcefield/custom_force/pairwise/parameters/name",
+        "/forcefield/custom_force/pairwise/parameters/type",
+        "/forcefield/custom_force/pairwise/data/custom_pair/atom_type",
+        "/forcefield/custom_force/pairwise/data/custom_pair/parameter/name",
+        "/forcefield/custom_force/pairwise/data/custom_pair/parameter/type",
+        "/forcefield/custom_force/pairwise/data/custom_pair/parameter/value",
+    }
+    missing = sorted(required - topology_paths)
+    if missing:
+        raise AssertionError(
+            "focused custom-pair topology is missing datasets: "
+            f"{missing}"
         )
 
 
@@ -2393,6 +2544,10 @@ def _compare_input_semantics(
                 replica_result["force"] = _compare_focused_edip_forces(
                     case, run
                 )
+            elif spec.contract_id == "input.custom.pairwise":
+                replica_result["force"] = _compare_focused_custom_pair_forces(
+                    case, run
+                )
             replica_results.append(replica_result)
         results.append(
             {
@@ -2429,6 +2584,39 @@ def _compare_focused_edip_forces(
     result["bundled_materialized_path"] = str(
         materialized.relative_to(run.bundled_dir)
     )
+    return result
+
+
+def _compare_focused_custom_pair_forces(
+    case: AbCase, run: AbRun
+) -> dict[str, object]:
+    materialized_root = run.bundled_dir / ".sponge_h5_native_custom_force"
+    materialized = (
+        materialized_root / "pairwise_force.txt",
+        materialized_root / "custom_pair.txt",
+    )
+    missing = [
+        path
+        for path in materialized
+        if not path.exists() or path.stat().st_size == 0
+    ]
+    if missing:
+        raise AssertionError(
+            f"{case.name} did not materialize bundled custom-pair payloads: "
+            f"{missing}"
+        )
+    legacy = _read_native_float32_file(
+        run.legacy_dir / "output" / "legacy.frc"
+    )
+    bundled = _read_native_float32_file(
+        run.bundled_dir / "output" / "legacy.frc"
+    )
+    result = _assert_nontrivial_equivalent_forces(
+        f"{case.name} custom-pair force", legacy, bundled
+    )
+    result["bundled_materialized_paths"] = [
+        str(path.relative_to(run.bundled_dir)) for path in materialized
+    ]
     return result
 
 

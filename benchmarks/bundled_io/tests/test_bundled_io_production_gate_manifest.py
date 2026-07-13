@@ -34,6 +34,7 @@ from benchmarks.bundled_io.tests.test_bundled_io_ab_execution_matrix import (
     MATRIX_RUNTIME_CASES,
 )
 from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
+    FOCUSED_CUSTOM_PAIR_FIXTURE,
     FOCUSED_EDIP_FIXTURE,
     INPUT_SEMANTIC_SPECS_BY_CASE,
     MDINFO_CONTRACT_KEYS,
@@ -238,6 +239,7 @@ def test_ab_production_harness_has_executable_contract_coverage():
         "normal_core_h5_output",
         "normal_sits_ff19sb_cmap_peptide",
         "normal_edip_nonzero",
+        "normal_custom_pair_nonzero",
         "normal_vds_chunk_minus_one",
         "normal_vds_chunk_exact",
         "normal_vds_chunk_plus_one",
@@ -558,6 +560,36 @@ def test_focused_edip_case_requires_pure_h5_nonzero_energy_and_force():
     assert contracts["input.manybody.edip"].status == "supported"
     assert contracts["input.manybody.edip"].case_ids == (case.name,)
     assert contracts["input.manybody.edip"].assertion_ids == (
+        "input_semantic_equivalence",
+    )
+
+
+def test_focused_custom_pair_case_requires_pure_h5_nonzero_energy_and_force():
+    contracts = load_contract_registry()
+    case = next(
+        case
+        for case in _cases_for_profile()
+        if case.name == "normal_custom_pair_nonzero"
+    )
+    spec = INPUT_SEMANTIC_SPECS_BY_CASE[case.name]
+
+    assert case.fixture_case == FOCUSED_CUSTOM_PAIR_FIXTURE
+    assert case.statistical_md is False
+    assert case.normal_step_limit == 1
+    assert case.normal_dt == 0.0
+    assert case.input_behavior_only is True
+    assert case.contract_ids == (
+        "output.legacy.mdout",
+        "input.custom.pairwise",
+    )
+    assert spec == (
+        InputSemanticSpec(
+            "input.custom.pairwise", ("custom_pair",), 1.0e-6
+        ),
+    )
+    assert contracts["input.custom.pairwise"].status == "supported"
+    assert contracts["input.custom.pairwise"].case_ids == (case.name,)
+    assert contracts["input.custom.pairwise"].assertion_ids == (
         "input_semantic_equivalence",
     )
 

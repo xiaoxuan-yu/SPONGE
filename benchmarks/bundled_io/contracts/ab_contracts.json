@@ -666,13 +666,12 @@
       "contract_id": "input.custom.pairwise",
       "direction": "input",
       "component": "custom_force",
-      "status": "deferred",
+      "status": "supported",
       "minimum_evidence": "E3",
       "legacy_surface": "pairwise_force_in_file and payload",
       "bundled_surface": "/forcefield/custom_force/pairwise",
-      "case_ids": [],
-      "assertion_ids": [],
-      "reason": "The broad fixture custom_pair result is zero; a distinguishable payload/result case is pending."
+      "case_ids": ["normal_custom_pair_nonzero"],
+      "assertion_ids": ["input_semantic_equivalence"]
     },
     {
       "contract_id": "input.protocol.constraint",

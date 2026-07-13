@@ -415,7 +415,28 @@ Acceptance:
 - Registry, manifest, all three real CPU failure cases, Ruff, and diff checks
   pass.
 
-## 15. Artifacts and Temporary-Space Policy
+## 15. PR 12: Focused Non-Zero Custom-Pair Input Gate
+
+Close the custom-pair input contract with a minimal deterministic fixture whose
+module-owned energy and force cannot pass trivially.
+
+- Generate a two-atom legacy input with a named custom pair potential and a
+  non-zero parameter payload.
+- Convert it to `/forcefield/custom_force/pairwise`, then remove both legacy
+  custom-force mdin keys, the H5 sidecar table, and the sidecar directory from
+  the bundled branch.
+- Require non-zero, cross-branch equivalent `custom_pair` energy and force.
+- Require both native materialized inputs to be present and non-empty.
+
+Acceptance:
+
+- The bundled branch has no `pairwise_force_in_file` or
+  `custom_pair_in_file`, yet materializes both inputs from native H5 data.
+- Complete deterministic mdout rows match, `custom_pair` is non-zero in both
+  branches, and all legacy force-route values match within the force tolerance.
+- Registry, manifest, real focused CPU A/B, Ruff, and diff checks pass.
+
+## 16. Artifacts and Temporary-Space Policy
 
 - Use `SPONGE_BUNDLED_IO_AB_RUN_ROOT` for all heavy runs.
 - Put production artifacts on the workspace filesystem rather than `/tmp`.
@@ -425,7 +446,7 @@ Acceptance:
 - Record artifact byte counts and enforce a configurable per-case quota.
 - Cleanup must only remove directories created by the current gate run.
 
-## 16. PR Completion Log
+## 17. PR Completion Log
 
 Append one row immediately after completing and committing each PR.
 
@@ -444,3 +465,4 @@ Append one row immediately after completing and committing each PR.
 | PR 9: Focused non-zero EDIP input behavior gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; real `normal_edip_nonzero` CPU A/B; Ruff; `git diff --check` | 79 contract/manifest/comparator tests and the focused real A/B pass. The pure bundled branch removes the sidecar table and directory, materializes `/manybody/edip`, and matches legacy at non-zero `EDIP=52.98159` and maximum force `400.30548`. The independently exposed H5 zeroth-frame/force-payload schedule gap remains outside this input-only contract. |
 | PR 10: H5 sidecar-table failure semantics | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; three real bundled CPU failure cases; Ruff; `git diff --check` | 79 contract/manifest/comparator tests and all three F1 process cases pass. Unsupported key, key/path length mismatch, and same-key different-path conflict each exit with code 238 and `spongeErrorValueErrorCommand`, while retaining route-specific stable diagnostic tokens. |
 | PR 11: Restart owner-state failure semantics | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; three real bundled CPU failure cases; Ruff; `git diff --check` | 79 contract/manifest/comparator tests and all three F1 process cases pass. Dynamic, protocol, and full policies each exit with code 235 and `spongeErrorConflictingCommand`; diagnostics distinguish missing Nose-Hoover-chain and metadynamics owners. |
+| PR 12: Focused non-zero custom-pair input gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; real `normal_custom_pair_nonzero` CPU A/B; Ruff; `git diff --check` | 80 contract/manifest/comparator tests and the focused real A/B pass. The pure bundled branch has no legacy custom-force keys or sidecars, materializes both native inputs, and matches legacy at `custom_pair=31.57` with maximum force `252.554443359375`. |
