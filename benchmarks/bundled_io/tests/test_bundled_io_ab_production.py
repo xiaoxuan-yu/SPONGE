@@ -83,6 +83,7 @@ FOCUSED_STEERING_CV_SIDECAR_FIXTURE = "focused_steering_cv_sidecar_two_atom"
 FOCUSED_STEERING_CV_TYPED_FIXTURE = "focused_steering_cv_typed_two_atom"
 FOCUSED_SITS_NK_TYPED_RESTART_FIXTURE = "focused_sits_nk_typed_restart_two_atom"
 FOCUSED_SITS_TYPED_CONFIG_FIXTURE = "focused_sits_typed_config_two_atom"
+FOCUSED_SITS_TYPED_INACTIVE_FIXTURE = "focused_sits_typed_inactive_two_atom"
 SUPPORTED_TOPOLOGY_SCHEMA_VERSIONS = (
     "0",
     "1",
@@ -650,6 +651,25 @@ def _cases_for_profile() -> list[AbCase]:
                 "mdout_deterministic_equivalence",
                 "input_semantic_equivalence",
             ),
+            normal_step_limit=1,
+            normal_interval=1,
+            normal_dt=0.0,
+            input_behavior_only=True,
+        ),
+        AbCase(
+            name="normal_sits_typed_inactive_configuration",
+            fixture_case=FOCUSED_SITS_TYPED_INACTIVE_FIXTURE,
+            legacy_subdir="generated_legacy",
+            bundled_subdir="generated_bundled",
+            mode="normal",
+            vds=False,
+            statistical_md=False,
+            restart_load_policy="structural",
+            contract_ids=(
+                "output.legacy.mdout",
+                "input.protocol.sits",
+            ),
+            assertion_ids=("mdout_deterministic_equivalence",),
             normal_step_limit=1,
             normal_interval=1,
             normal_dt=0.0,
@@ -3584,6 +3604,8 @@ def _prepare_case_pair(
             return _prepare_focused_sits_nk_typed_restart_pair(case_root)
         if case.fixture_case == FOCUSED_SITS_TYPED_CONFIG_FIXTURE:
             return _prepare_focused_sits_typed_config_pair(case_root)
+        if case.fixture_case == FOCUSED_SITS_TYPED_INACTIVE_FIXTURE:
+            return _prepare_focused_sits_typed_inactive_pair(case_root)
         if case.fixture_case == FOCUSED_EDIP_FIXTURE:
             return _prepare_focused_edip_pair(case_root)
         if case.fixture_case == FOCUSED_SW_SIDECAR_FIXTURE:
@@ -6875,6 +6897,139 @@ def _prepare_focused_sits_typed_config_pair(
     return legacy_dir, bundled_dir
 
 
+def _prepare_focused_sits_typed_inactive_pair(
+    case_root: Path,
+) -> tuple[Path, Path]:
+    legacy_source = case_root / "focused_sits_typed_inactive_source"
+    legacy_dir = case_root / "legacy"
+    converted_dir = case_root / "converted_focused_sits_typed_inactive"
+    bundled_dir = case_root / "bundled"
+    for path in (legacy_source, legacy_dir, converted_dir, bundled_dir):
+        if path.exists():
+            shutil.rmtree(path)
+    _write_focused_sits_typed_inactive_input(legacy_source)
+    shutil.copytree(legacy_source, legacy_dir)
+    _convert_legacy_case(legacy_source, converted_dir)
+    shutil.copytree(converted_dir / "bundle", bundled_dir)
+
+    protocol_path = bundled_dir / "protocol.spgp.h5"
+    with h5py.File(protocol_path, "r+") as protocol:
+        if "/sits/config" not in protocol:
+            raise AssertionError(
+                "inactive SITS conversion did not emit typed configuration"
+            )
+    _remove_h5_sidecar_binding(protocol_path, "SITS_in_file")
+
+    restart_path = bundled_dir / "restart.spgr.h5"
+    with h5py.File(restart_path, "r+") as restart:
+        embedded = "/parameters/restart/protocol_sidecars/SITS_in_file"
+        if embedded in restart:
+            del restart[embedded]
+    _remove_h5_sidecar_binding(restart_path, "SITS_in_file")
+
+    sits_sidecar = bundled_dir / "legacy_sidecars" / "SITS_in_file"
+    if sits_sidecar.exists():
+        shutil.rmtree(sits_sidecar)
+    _validate_focused_sits_typed_inactive_routes(legacy_dir, bundled_dir)
+    return legacy_dir, bundled_dir
+
+
+def _remove_h5_sidecar_binding(h5_path: Path, removed_key: str) -> None:
+    sidecar_root = "/parameters/sponge/files/legacy_sidecars"
+    with h5py.File(h5_path, "r+") as h5_file:
+        if sidecar_root not in h5_file:
+            return
+        sidecars = h5_file[sidecar_root]
+        keys = sidecars["key"].asstr()[...].tolist()
+        paths = sidecars["path"].asstr()[...].tolist()
+        retained = [
+            item
+            for item in zip(keys, paths, strict=True)
+            if item[0] != removed_key
+        ]
+        if len(retained) == len(keys):
+            return
+        if not retained:
+            del h5_file[sidecar_root]
+            return
+
+        del sidecars["key"]
+        del sidecars["path"]
+        string_dtype = h5py.string_dtype(encoding="utf-8")
+        sidecars.create_dataset(
+            "key", data=[item[0] for item in retained], dtype=string_dtype
+        )
+        sidecars.create_dataset(
+            "path", data=[item[1] for item in retained], dtype=string_dtype
+        )
+
+
+def _write_focused_sits_typed_inactive_input(case_dir: Path) -> None:
+    case_dir.mkdir(parents=True, exist_ok=True)
+    (case_dir / "mass.txt").write_text("2\n12.0\n12.0\n", encoding="utf-8")
+    (case_dir / "coordinate.txt").write_text(
+        "2 0.0\n0.0 0.0 0.0\n2.0 0.0 0.0\n1000.0 1000.0 1000.0\n90.0 90.0 90.0\n",
+        encoding="utf-8",
+    )
+    (case_dir / "velocity.txt").write_text(
+        "2\n0.0 0.0 0.0\n0.0 0.0 0.0\n", encoding="utf-8"
+    )
+    (case_dir / "sits.txt").write_text(
+        "SITS\n{\n    CV = distance\n    nk = 2\n}\n", encoding="utf-8"
+    )
+    (case_dir / "mdin.spg.toml").write_text(
+        'md_name = "bundled io ab inactive typed SITS"\n'
+        'mode = "nve"\n'
+        "pbc = false\n"
+        "step_limit = 1\n"
+        "dt = 0.0\n"
+        "cutoff = 8.0\n"
+        'mass_in_file = "mass.txt"\n'
+        'coordinate_in_file = "coordinate.txt"\n'
+        'velocity_in_file = "velocity.txt"\n'
+        'SITS_in_file = "sits.txt"\n'
+        "force_whole_output = true\n"
+        "print_zeroth_frame = 0\n"
+        "write_mdout_interval = 1\n"
+        "write_information_interval = 1\n",
+        encoding="utf-8",
+    )
+
+
+def _validate_focused_sits_typed_inactive_routes(
+    legacy_dir: Path, bundled_dir: Path
+) -> None:
+    legacy_mdin = (legacy_dir / "mdin.spg.toml").read_text(encoding="utf-8")
+    bundled_mdin = (bundled_dir / "mdin.bundled.spg.toml").read_text(
+        encoding="utf-8"
+    )
+    if not _has_key_line(legacy_mdin, "SITS_in_file"):
+        raise AssertionError("inactive SITS legacy route lost SITS_in_file")
+    if _has_key_line(bundled_mdin, "SITS_in_file"):
+        raise AssertionError("inactive typed SITS route retained SITS_in_file")
+
+    protocol_path = bundled_dir / "protocol.spgp.h5"
+    keys = _h5_string_values(protocol_path, "/sits/config/key")
+    values = _h5_string_values(protocol_path, "/sits/config/value")
+    if keys != ["CV", "nk"] or values != ["distance", "2"]:
+        raise AssertionError(
+            f"inactive typed SITS payload changed: keys={keys}, values={values}"
+        )
+    if "mode" in keys:
+        raise AssertionError(
+            "inactive typed SITS fixture unexpectedly has mode"
+        )
+    sidecar_root = "/parameters/sponge/files/legacy_sidecars"
+    if sidecar_root in _h5_paths(protocol_path):
+        sidecar_keys = _h5_string_values(protocol_path, f"{sidecar_root}/key")
+        if "SITS_in_file" in sidecar_keys:
+            raise AssertionError(
+                "inactive typed SITS retained protocol sidecar"
+            )
+    if (bundled_dir / "legacy_sidecars" / "SITS_in_file").exists():
+        raise AssertionError("inactive typed SITS retained external sidecar")
+
+
 def _write_focused_sits_nk_typed_restart_input(case_dir: Path) -> None:
     case_dir.mkdir(parents=True, exist_ok=True)
     (case_dir / "mass.txt").write_text("2\n12.0\n12.0\n", encoding="utf-8")
@@ -7758,6 +7913,10 @@ def _compare_outputs(
         "mdout": mdout_comparison,
         "h5": h5_comparison,
     }
+    if case.fixture_case == FOCUSED_SITS_TYPED_INACTIVE_FIXTURE:
+        comparison["inactive_sits"] = _compare_sits_inactive_configuration(
+            runs[0]
+        )
     if "rerun_selection_equivalence" in case.assertion_ids:
         rerun_selection = _compare_rerun_selection(case, runs[0])
         comparison["rerun_selection"] = rerun_selection
@@ -7861,6 +8020,36 @@ def _compare_outputs(
             )
         )
     return comparison, tuple(evidence)
+
+
+def _compare_sits_inactive_configuration(run: AbRun) -> dict[str, object]:
+    legacy_mdout = _read_mdout(run.legacy_dir / "mdout.txt")
+    bundled_mdout = _read_mdout(run.bundled_dir / "mdout.txt")
+    for branch, mdout in (
+        ("legacy", legacy_mdout),
+        ("bundled", bundled_mdout),
+    ):
+        sits_columns = [
+            column for column in mdout["columns"] if column.startswith("SITS")
+        ]
+        if sits_columns:
+            raise AssertionError(
+                f"inactive SITS {branch} route emitted columns: {sits_columns}"
+            )
+
+    materialized = run.bundled_dir / ".sponge_h5_native_protocol" / "sits.txt"
+    if not materialized.exists():
+        raise AssertionError("inactive typed SITS config was not materialized")
+    legacy_config = run.legacy_dir / "sits.txt"
+    if materialized.read_bytes() != legacy_config.read_bytes():
+        raise AssertionError(
+            "inactive typed SITS materialization differs from legacy config"
+        )
+    return {
+        "mode_present": False,
+        "module_initialized": False,
+        "materialization": "exact_legacy_text",
+    }
 
 
 def _expected_rerun_frame_indices(case: AbCase, frame_count: int) -> list[int]:

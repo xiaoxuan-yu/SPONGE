@@ -55,6 +55,7 @@ from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
     FOCUSED_RESIDUE_TYPED_PBC_FIXTURE,
     FOCUSED_SITS_NK_TYPED_RESTART_FIXTURE,
     FOCUSED_SITS_TYPED_CONFIG_FIXTURE,
+    FOCUSED_SITS_TYPED_INACTIVE_FIXTURE,
     FOCUSED_STEERING_CV_SIDECAR_FIXTURE,
     FOCUSED_STEERING_CV_TYPED_FIXTURE,
     FOCUSED_SUBSYSTEM_DIVISION_FIXTURE,
@@ -316,6 +317,7 @@ def test_ab_production_harness_has_executable_contract_coverage():
         "normal_constraint_typed_projection",
         "normal_sits_nk_typed_restart_nonzero",
         "normal_sits_typed_configuration_nonzero",
+        "normal_sits_typed_inactive_configuration",
         "normal_steering_cv_sidecar_nonzero",
         "normal_steering_cv_typed_nonzero",
         "normal_vds_chunk_minus_one",
@@ -1834,7 +1836,10 @@ def test_focused_sits_case_requires_typed_nk_bias_and_scaled_force():
     assert typed_restart.assertion_ids == ("input_semantic_equivalence",)
     typed_config = contracts["input.protocol.sits"]
     assert typed_config.status == "supported"
-    assert typed_config.case_ids == ("normal_sits_typed_configuration_nonzero",)
+    assert typed_config.case_ids == (
+        "normal_sits_typed_configuration_nonzero",
+        "normal_sits_typed_inactive_configuration",
+    )
 
 
 def test_focused_typed_sits_case_requires_config_atoms_and_restart_state():
@@ -1872,10 +1877,42 @@ def test_focused_typed_sits_case_requires_config_atoms_and_restart_state():
     typed_config = contracts["input.protocol.sits"]
     assert typed_config.status == "supported"
     assert typed_config.minimum_evidence == "E3"
-    assert typed_config.case_ids == (case.name,)
-    assert typed_config.assertion_ids == ("input_semantic_equivalence",)
+    assert typed_config.case_ids == (
+        case.name,
+        "normal_sits_typed_inactive_configuration",
+    )
+    assert typed_config.assertion_ids == (
+        "input_semantic_equivalence",
+        "mdout_deterministic_equivalence",
+    )
     assert "/sits/config" in typed_config.bundled_surface
     assert "/sits/atom_indices" in typed_config.bundled_surface
+
+
+def test_focused_typed_sits_inactive_case_preserves_missing_mode_semantics():
+    contracts = load_contract_registry()
+    case = next(
+        case
+        for case in _cases_for_profile()
+        if case.name == "normal_sits_typed_inactive_configuration"
+    )
+
+    assert case.fixture_case == FOCUSED_SITS_TYPED_INACTIVE_FIXTURE
+    assert case.statistical_md is False
+    assert case.normal_step_limit == 1
+    assert case.normal_dt == 0.0
+    assert case.restart_load_policy == "structural"
+    assert case.input_behavior_only is True
+    assert case.contract_ids == (
+        "output.legacy.mdout",
+        "input.protocol.sits",
+    )
+    assert case.assertion_ids == ("mdout_deterministic_equivalence",)
+    assert case.name not in INPUT_SEMANTIC_SPECS_BY_CASE
+
+    typed_config = contracts["input.protocol.sits"]
+    assert case.name in typed_config.case_ids
+    assert "mdout_deterministic_equivalence" in typed_config.assertion_ids
 
 
 def test_focused_typed_sits_controls_reject_ignored_payloads():

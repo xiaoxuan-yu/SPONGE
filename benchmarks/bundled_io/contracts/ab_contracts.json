@@ -547,8 +547,14 @@
       "minimum_evidence": "E3",
       "legacy_surface": "inline SITS configuration, SITS_atom_numbers, and SITS_nk_in_file",
       "bundled_surface": "/sits/config, /sits/atom_indices, and typed SITS Nk restart state",
-      "case_ids": ["normal_sits_typed_configuration_nonzero"],
-      "assertion_ids": ["input_semantic_equivalence"],
+      "case_ids": [
+        "normal_sits_typed_configuration_nonzero",
+        "normal_sits_typed_inactive_configuration"
+      ],
+      "assertion_ids": [
+        "input_semantic_equivalence",
+        "mdout_deterministic_equivalence"
+      ],
       "inventory_refs": [
         "protocol_sidecar_keys:SITS_in_file",
         "protocol_sidecar_keys:SITS_atom_in_file",

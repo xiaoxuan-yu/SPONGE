@@ -137,10 +137,8 @@ inline void Materialize_Config(CONTROLLER* controller, HighFive::File* file,
                 "/sits/config/key contains a duplicate key");
         }
     }
-    if (!unique_keys.count("mode"))
-    {
-        throw std::runtime_error("/sits/config must define SITS mode");
-    }
+    // A legacy SITS section without mode is a valid inactive configuration.
+    // Materialize its remaining keys so the runtime preserves that state.
     if (file->exist("/sits/atom_indices") &&
         (unique_keys.count("atom_in_file") ||
          unique_keys.count("atom_numbers")))

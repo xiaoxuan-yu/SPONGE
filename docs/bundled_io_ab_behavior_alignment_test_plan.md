@@ -1409,7 +1409,37 @@ Acceptance:
 - Contract smoke, fixture manifest/equivalence CTests, Ruff, formatting, and
   diff checks pass, followed by one PR-scoped commit.
 
-## 45. Artifacts and Temporary-Space Policy
+## 45. PR 48: Inactive Typed SITS Configuration Semantics
+
+Preserve the legacy meaning of a syntactically valid SITS section that omits
+`mode`: the configuration exists, but the SITS module remains inactive.
+
+- Allow `/sits/config` without a `mode` key to be materialized. Keep all
+  structural, token, duplicate-key, and atom-ownership validation unchanged;
+  the existing SITS initializer remains the authority that requires `mode`
+  before activating the module.
+- Add a focused two-atom A/B case whose legacy `SITS_in_file` and pure typed
+  `/sits/config` both contain only `CV=distance` and `nk=2`. Remove the SITS
+  sidecar owner and embedded restart copy from the bundled branch.
+- Require exact typed payload values, no `mode`, no active SITS sidecar, exact
+  materialized text, no SITS mdout columns, and complete deterministic mdout
+  equivalence.
+- Keep the active typed SITS gate mapped to the same contract. It must still
+  produce non-zero bias and force behavior with a complete production-mode
+  configuration and typed Nk restart state.
+
+Acceptance:
+
+- Active and inactive typed SITS A/B cases both pass, proving both sides of
+  the mode-presence contract rather than accepting initialization alone.
+- The previous full-contract pure-native bad-format failure at
+  `Materialize_H5_SITS_Input` is absent; later module-consumption differences
+  remain visible for independent follow-up.
+- SPONGE rebuild, 141-test contract smoke, registry/manifest mutation checks,
+  Ruff, formatting, clang-format, and diff checks pass, followed by one
+  PR-scoped commit.
+
+## 46. Artifacts and Temporary-Space Policy
 
 - Use `SPONGE_BUNDLED_IO_AB_RUN_ROOT` for all heavy runs.
 - Put production artifacts on the workspace filesystem rather than `/tmp`.
@@ -1419,7 +1449,7 @@ Acceptance:
 - Record artifact byte counts and enforce a configurable per-case quota.
 - Cleanup must only remove directories created by the current gate run.
 
-## 46. PR Completion Log
+## 47. PR Completion Log
 
 Append one row immediately after completing and committing each PR.
 
@@ -1474,3 +1504,4 @@ Append one row immediately after completing and committing each PR.
 | PR 45: CUDA+MPI NCCL discovery prerequisite | Complete | This commit | CUDA 13 + OpenMPI + NCCL configure; 107-step CUDA `SPONGE` target build; `ldd`; cmake-format; `git diff --check` | The project CMake module path can now resolve an available NCCL installation through `NCCL_ROOT`. The real CUDA+MPI executable links HDF5, CUDA 13, OpenMPI, and NCCL without unresolved runtime libraries, enabling the GPU rank-2 behavior gate. |
 | PR 46: Portable GPU MPI device mapping | Complete | This commit | shared/explicit/rank-1 device-map mutation test; real four-replica CUDA+MPI rank-2 NPT+SETTLE statistical A/B; 139-test smoke; Ruff; `git diff --check` | GPU rank-2 defaults to a portable single-GPU shared map and accepts an explicit per-rank multi-GPU map. The real case passes complete mdout and all three H5 families with `mpi_rank_count=2` and rank-0-only output ownership. |
 | PR 47: Production-fixture residue ownership repair | Complete | This commit | four focused residue CPU A/B cases; full-contract sidecar VDS-off/on; 24-case sidecar QC/rerun/failure sweep; CMAP VDS invariant; 140-test smoke; H5 manifest and fixture-equivalence CTests; Ruff; format; `git diff --check` | Full-contract bundles now have exactly one typed residue owner, while focused sidecar cases explicitly replace typed state with one bundle-local sidecar owner. The stale startup conflict is closed across compatibility paths. Independent typed-SITS and rerun boundary behavior failures remain visible for subsequent alignment PRs. |
+| PR 48: Inactive typed SITS configuration semantics | Complete | This commit | focused active and inactive typed SITS CPU A/B; full-contract pure-native progression check; SPONGE rebuild; 141-test smoke; Ruff; format; clang-format; `git diff --check` | Typed SITS config without `mode` now preserves the valid legacy inactive state: exact text is materialized, no SITS columns appear, and complete mdout is equal. The existing production-mode case remains non-trivial. Full-contract pure-native execution advances to independent NB14/EAM/restraint/soft-wall consumption gaps. |
