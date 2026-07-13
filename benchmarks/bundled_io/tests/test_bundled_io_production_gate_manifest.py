@@ -260,6 +260,9 @@ def test_ab_production_harness_has_executable_contract_coverage():
         "failure_missing_protocol_binding",
         "failure_mixed_legacy_h5_trajectory",
         "failure_mixed_legacy_h5_restart",
+        "failure_sidecar_unsupported_key",
+        "failure_sidecar_key_path_length_mismatch",
+        "failure_sidecar_path_conflict",
     }
     assert summary["status_counts"]["supported"] > 0
     assert contracts["output.vds.cross_process_append_resume"].status == (
@@ -371,6 +374,9 @@ def test_failure_matrix_requires_exit_category_and_stable_tokens():
         "missing_protocol",
         "mixed_trajectory",
         "mixed_restart",
+        "unsupported_sidecar_key",
+        "sidecar_length_mismatch",
+        "sidecar_path_conflict",
     }
     assert all(case.expected_error_category for case in cases)
     assert all(case.expected_diagnostic_tokens for case in cases)
@@ -387,6 +393,17 @@ def test_failure_matrix_requires_exit_category_and_stable_tokens():
         "invalid_vds_value",
         "invalid_repair_policy",
     }
+    sidecar_cases = [
+        case
+        for case in cases
+        if case.contract_ids == ("failure.sidecar_table",)
+    ]
+    assert {case.failure_mutation for case in sidecar_cases} == {
+        "unsupported_sidecar_key",
+        "sidecar_length_mismatch",
+        "sidecar_path_conflict",
+    }
+    assert all(case.failure_branches == ("bundled",) for case in sidecar_cases)
 
 
 def test_h5_bundle_runner_defaults_to_current_pixi_build_dir():

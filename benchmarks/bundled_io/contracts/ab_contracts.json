@@ -344,13 +344,16 @@
       "contract_id": "failure.sidecar_table",
       "direction": "runtime",
       "component": "input_validation",
-      "status": "deferred",
+      "status": "supported",
       "minimum_evidence": "F1",
       "legacy_surface": "invalid legacy sidecar bindings",
       "bundled_surface": "unsupported key, key/path length mismatch, and path conflict",
-      "case_ids": [],
-      "assertion_ids": [],
-      "reason": "Process-level H5 sidecar table mutation cases are pending."
+      "case_ids": [
+        "failure_sidecar_unsupported_key",
+        "failure_sidecar_key_path_length_mismatch",
+        "failure_sidecar_path_conflict"
+      ],
+      "assertion_ids": ["stable_failure_semantics"]
     },
     {
       "contract_id": "failure.restart_owner_state",

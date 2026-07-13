@@ -368,7 +368,30 @@ Acceptance:
 - Zero energy, zero force, force mismatch, or mdout mismatch fails the gate.
 - Registry, manifest, comparator, real focused A/B, Ruff, and diff checks pass.
 
-## 13. Artifacts and Temporary-Space Policy
+## 13. PR 10: H5 Sidecar-Table Failure Semantics
+
+Close the deferred F1 contract for malformed bundled sidecar tables with real
+process execution rather than reader-only checks.
+
+- Mutate the topology H5 sidecar table with an unsupported command key.
+- Create unequal key/path dataset lengths.
+- Duplicate an allowed key with a different path to trigger command conflict.
+- Require non-zero exit, `spongeErrorValueErrorCommand`, and stable diagnostic
+  tokens for every mutation.
+- Keep these cases bundled-only because legacy text inputs have no equivalent
+  H5 key/path table representation.
+
+Acceptance:
+
+- All three mutations reach the production sidecar materialization path and are
+  rejected before MD execution.
+- Unsupported-key evidence names the topology binding and invalid key;
+  length-mismatch evidence names the key/path cardinality error; conflict
+  evidence names the key and both existing/H5 paths.
+- Registry, manifest, all three real CPU failure cases, Ruff, and diff checks
+  pass.
+
+## 14. Artifacts and Temporary-Space Policy
 
 - Use `SPONGE_BUNDLED_IO_AB_RUN_ROOT` for all heavy runs.
 - Put production artifacts on the workspace filesystem rather than `/tmp`.
@@ -378,7 +401,7 @@ Acceptance:
 - Record artifact byte counts and enforce a configurable per-case quota.
 - Cleanup must only remove directories created by the current gate run.
 
-## 14. PR Completion Log
+## 15. PR Completion Log
 
 Append one row immediately after completing and committing each PR.
 
@@ -395,3 +418,4 @@ Append one row immediately after completing and committing each PR.
 | PR 7c: GPU evidence and final promotion | Pending | | | |
 | PR 8: VDS chunk-boundary behavior closure | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; four real CPU VDS chunk-boundary A/B cases; Ruff; `git diff --check` | 76 contract/manifest/comparator tests pass. With chunk size 4, same-semantic deterministic NVE branches produce and compare 3/4/5/9 frames with 1/1/2/3 shards. Frame-count and shard-count mutations are rejected. The cases use `dt=0.0001` to isolate chunk/finalize behavior without relaxing deterministic numeric tolerances. |
 | PR 9: Focused non-zero EDIP input behavior gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; real `normal_edip_nonzero` CPU A/B; Ruff; `git diff --check` | 79 contract/manifest/comparator tests and the focused real A/B pass. The pure bundled branch removes the sidecar table and directory, materializes `/manybody/edip`, and matches legacy at non-zero `EDIP=52.98159` and maximum force `400.30548`. The independently exposed H5 zeroth-frame/force-payload schedule gap remains outside this input-only contract. |
+| PR 10: H5 sidecar-table failure semantics | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; three real bundled CPU failure cases; Ruff; `git diff --check` | 79 contract/manifest/comparator tests and all three F1 process cases pass. Unsupported key, key/path length mismatch, and same-key different-path conflict each exit with code 238 and `spongeErrorValueErrorCommand`, while retaining route-specific stable diagnostic tokens. |

@@ -737,6 +737,10 @@ def _failure_cases() -> list[AbCase]:
         "contract_ids": ("failure.input_configuration",),
         "assertion_ids": ("stable_failure_semantics",),
     }
+    sidecar_shared = {
+        **shared,
+        "contract_ids": ("failure.sidecar_table",),
+    }
     return [
         AbCase(
             name="failure_missing_trajectory_binding",
@@ -808,6 +812,41 @@ def _failure_cases() -> list[AbCase]:
                 "legacy coordinate/velocity restart inputs",
             ),
             **shared,
+        ),
+        AbCase(
+            name="failure_sidecar_unsupported_key",
+            failure_mutation="unsupported_sidecar_key",
+            failure_branches=("bundled",),
+            expected_error_category="spongeErrorValueErrorCommand",
+            expected_diagnostic_tokens=(
+                "unsupported H5 legacy sidecar key",
+                "input_h5_topology_path",
+                "not_a_supported_sidecar_key",
+            ),
+            **sidecar_shared,
+        ),
+        AbCase(
+            name="failure_sidecar_key_path_length_mismatch",
+            failure_mutation="sidecar_length_mismatch",
+            failure_branches=("bundled",),
+            expected_error_category="spongeErrorValueErrorCommand",
+            expected_diagnostic_tokens=(
+                "legacy sidecar key/path dataset length mismatch",
+            ),
+            **sidecar_shared,
+        ),
+        AbCase(
+            name="failure_sidecar_path_conflict",
+            failure_mutation="sidecar_path_conflict",
+            failure_branches=("bundled",),
+            expected_error_category="spongeErrorValueErrorCommand",
+            expected_diagnostic_tokens=(
+                "H5 legacy sidecar key conflicts with existing command",
+                "mass_in_file",
+                "existing=",
+                "h5=",
+            ),
+            **sidecar_shared,
         ),
     ]
 
@@ -972,6 +1011,7 @@ def _run_failure_case(case: AbCase, contracts) -> None:
             replica_seed=20260709,
         )
         _mutate_failure_mdin(case, case_dir / mdin_name, branch)
+        _mutate_failure_h5(case, case_dir, branch)
 
     outcomes = {}
     for branch, case_dir in (("legacy", legacy_dir), ("bundled", bundled_dir)):
@@ -1840,6 +1880,12 @@ def _mutate_failure_mdin(case: AbCase, mdin_path: Path, branch: str) -> None:
                 'velocity_in_file = "velocity.txt"',
             ]
         )
+    elif mutation in {
+        "unsupported_sidecar_key",
+        "sidecar_length_mismatch",
+        "sidecar_path_conflict",
+    }:
+        return
     else:
         raise AssertionError(f"unknown failure mutation: {mutation}")
 
@@ -1848,6 +1894,51 @@ def _mutate_failure_mdin(case: AbCase, mdin_path: Path, branch: str) -> None:
     mdin_path.write_text(
         _insert_root_toml_keys(text, additions), encoding="utf-8"
     )
+
+
+def _mutate_failure_h5(case: AbCase, case_dir: Path, branch: str) -> None:
+    mutation = case.failure_mutation
+    sidecar_mutations = {
+        "unsupported_sidecar_key",
+        "sidecar_length_mismatch",
+        "sidecar_path_conflict",
+    }
+    if mutation not in sidecar_mutations or branch not in case.failure_branches:
+        return
+    if branch != "bundled":
+        raise AssertionError(f"{mutation} requires the bundled H5 branch")
+
+    topology_path = case_dir / "topology.spgt.h5"
+    group_path = "/parameters/sponge/files/legacy_sidecars"
+    with h5py.File(topology_path, "r+") as h5:
+        if group_path not in h5:
+            raise AssertionError(f"sidecar table is missing: {topology_path}")
+        group = h5[group_path]
+        keys = group["key"].asstr()[...].tolist()
+        paths = group["path"].asstr()[...].tolist()
+        if len(keys) != len(paths):
+            raise AssertionError(
+                f"source sidecar table is already malformed: {topology_path}"
+            )
+
+        if mutation == "unsupported_sidecar_key":
+            keys.append("not_a_supported_sidecar_key")
+            paths.append("legacy_sidecars/mass_in_file/mass.txt")
+        elif mutation == "sidecar_length_mismatch":
+            paths.pop()
+        else:
+            if "mass_in_file" not in keys:
+                raise AssertionError(
+                    f"mass_in_file is missing from sidecar table: {topology_path}"
+                )
+            keys.append("mass_in_file")
+            paths.append("legacy_sidecars/charge_in_file/charge.txt")
+
+        del group["key"]
+        del group["path"]
+        string_dtype = h5py.string_dtype(encoding="utf-8")
+        group.create_dataset("key", data=keys, dtype=string_dtype)
+        group.create_dataset("path", data=paths, dtype=string_dtype)
 
 
 def _remove_key_lines(text: str, keys: set[str]) -> str:
