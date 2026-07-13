@@ -53,6 +53,8 @@ FOCUSED_EDIP_FIXTURE = "focused_edip_two_atom"
 FOCUSED_CUSTOM_PAIR_FIXTURE = "focused_custom_pair_two_atom"
 FOCUSED_EXCLUSIONS_FIXTURE = "focused_exclusions_three_atom"
 FOCUSED_LJ_SOFT_CORE_FIXTURE = "focused_lj_soft_core_two_atom"
+FOCUSED_VIRTUAL_ATOMS_ALL_TYPES_FIXTURE = "focused_virtual_atoms_all_types"
+FOCUSED_VIRTUAL_ATOMS_PBC_FIXTURE = "focused_virtual_atoms_pbc_boundary"
 SITS_FF19SB_CMAP_SOURCE = (
     REPO_ROOT / "benchmarks" / "performance" / "sits" / "statics" / "ala2_sits"
 )
@@ -222,6 +224,12 @@ INPUT_SEMANTIC_SPECS_BY_CASE = {
     ),
     "normal_lj_soft_core_nonzero": (
         InputSemanticSpec("input.topology.lj_soft_core", ("LJ_soft",), 1.0e-6),
+    ),
+    "normal_virtual_atoms_all_types": (
+        InputSemanticSpec("input.topology.virtual_atoms", ("PM",), 1.0e-6),
+    ),
+    "normal_virtual_atoms_pbc_boundary": (
+        InputSemanticSpec("input.topology.virtual_atoms_pbc", ("PM",), 1.0e-6),
     ),
 }
 
@@ -468,6 +476,50 @@ def _cases_for_profile() -> list[AbCase]:
             contract_ids=(
                 "output.legacy.mdout",
                 "input.topology.lj_soft_core",
+            ),
+            assertion_ids=(
+                "mdout_deterministic_equivalence",
+                "input_semantic_equivalence",
+            ),
+            normal_step_limit=1,
+            normal_interval=1,
+            normal_dt=0.0,
+            input_behavior_only=True,
+        ),
+        AbCase(
+            name="normal_virtual_atoms_all_types",
+            fixture_case=FOCUSED_VIRTUAL_ATOMS_ALL_TYPES_FIXTURE,
+            legacy_subdir="generated_legacy",
+            bundled_subdir="generated_bundled",
+            mode="normal",
+            vds=False,
+            statistical_md=False,
+            restart_load_policy="structural",
+            contract_ids=(
+                "output.legacy.mdout",
+                "input.topology.virtual_atoms",
+            ),
+            assertion_ids=(
+                "mdout_deterministic_equivalence",
+                "input_semantic_equivalence",
+            ),
+            normal_step_limit=1,
+            normal_interval=1,
+            normal_dt=0.0,
+            input_behavior_only=True,
+        ),
+        AbCase(
+            name="normal_virtual_atoms_pbc_boundary",
+            fixture_case=FOCUSED_VIRTUAL_ATOMS_PBC_FIXTURE,
+            legacy_subdir="generated_legacy",
+            bundled_subdir="generated_bundled",
+            mode="normal",
+            vds=False,
+            statistical_md=False,
+            restart_load_policy="structural",
+            contract_ids=(
+                "output.legacy.mdout",
+                "input.topology.virtual_atoms_pbc",
             ),
             assertion_ids=(
                 "mdout_deterministic_equivalence",
@@ -1451,6 +1503,11 @@ def _prepare_case_pair(
             return _prepare_focused_exclusions_pair(case_root)
         if case.fixture_case == FOCUSED_LJ_SOFT_CORE_FIXTURE:
             return _prepare_focused_lj_soft_core_pair(case_root)
+        if case.fixture_case in {
+            FOCUSED_VIRTUAL_ATOMS_ALL_TYPES_FIXTURE,
+            FOCUSED_VIRTUAL_ATOMS_PBC_FIXTURE,
+        }:
+            return _prepare_focused_virtual_atoms_pair(case.fixture_case, case_root)
         return _prepare_normal_tip3p_pair(case_root, replica_seed)
 
     legacy_dir = _copy_case(case, "legacy", case.legacy_subdir, case_root)
@@ -2064,6 +2121,203 @@ def _validate_focused_lj_soft_core_routes(
         raise AssertionError(
             "focused LJ soft-core native payload changed: "
             f"payload={payload}, type_counts={type_counts}"
+        )
+
+
+def _prepare_focused_virtual_atoms_pair(
+    fixture_case: str, case_root: Path
+) -> tuple[Path, Path]:
+    if fixture_case not in {
+        FOCUSED_VIRTUAL_ATOMS_ALL_TYPES_FIXTURE,
+        FOCUSED_VIRTUAL_ATOMS_PBC_FIXTURE,
+    }:
+        raise AssertionError(f"unknown focused virtual-atom fixture: {fixture_case}")
+    legacy_source = case_root / "focused_virtual_atoms_source"
+    legacy_dir = case_root / "legacy"
+    converted_dir = case_root / "converted_focused_virtual_atoms_bundle"
+    bundled_dir = case_root / "bundled"
+    for path in (legacy_source, legacy_dir, converted_dir, bundled_dir):
+        if path.exists():
+            shutil.rmtree(path)
+    _write_focused_virtual_atoms_input(legacy_source, fixture_case)
+    shutil.copytree(legacy_source, legacy_dir)
+    _convert_legacy_case(legacy_source, converted_dir)
+    shutil.copytree(converted_dir / "bundle", bundled_dir)
+
+    bundled_mdin = bundled_dir / "mdin.bundled.spg.toml"
+    bundled_mdin.write_text(
+        _remove_key_lines(
+            bundled_mdin.read_text(encoding="utf-8"),
+            {"virtual_atom_in_file", "virtual_atoms_in_file"},
+        ).rstrip()
+        + "\n",
+        encoding="utf-8",
+    )
+    topology_path = bundled_dir / "topology.spgt.h5"
+    with h5py.File(topology_path, "r+") as topology:
+        sidecar_table = "/parameters/sponge/files/legacy_sidecars"
+        if sidecar_table in topology:
+            del topology[sidecar_table]
+    legacy_sidecars = bundled_dir / "legacy_sidecars"
+    if legacy_sidecars.exists():
+        shutil.rmtree(legacy_sidecars)
+    _validate_focused_virtual_atoms_routes(
+        legacy_dir, bundled_dir, fixture_case
+    )
+    return legacy_dir, bundled_dir
+
+
+def _write_focused_virtual_atoms_input(case_dir: Path, fixture_case: str) -> None:
+    case_dir.mkdir(parents=True, exist_ok=True)
+    if fixture_case == FOCUSED_VIRTUAL_ATOMS_ALL_TYPES_FIXTURE:
+        atom_count = 8
+        masses = [1.0] * atom_count
+        charges = [0.0, 0.5, -0.5, 0.0, 0.0, 0.0, 1.0, -1.0]
+        coordinates = [
+            (0.0, 0.0, 1.0),
+            (9.0, 9.0, 9.0),
+            (9.0, 9.0, 9.0),
+            (2.0, 0.0, 1.0),
+            (0.0, 2.0, 1.0),
+            (4.0, 4.0, 1.0),
+            (9.0, 9.0, 9.0),
+            (9.0, 9.0, 9.0),
+        ]
+        box = (20.0, 20.0, 20.0)
+        virtual_atoms = (
+            "2 1 0 3 4 0.25 0.5\n"
+            "3 2 1 3 4 1.0 0.5\n"
+            "0 6 5 2.0\n"
+            "1 7 3 4 0.25\n"
+        )
+        pbc = True
+        cutoff = 8.0
+    elif fixture_case == FOCUSED_VIRTUAL_ATOMS_PBC_FIXTURE:
+        atom_count = 4
+        masses = [1.0] * atom_count
+        charges = [0.0, 0.0, 1.0, -1.0]
+        coordinates = [
+            (9.5, 0.0, 0.0),
+            (0.5, 0.0, 0.0),
+            (4.0, 0.0, 0.0),
+            (2.0, 0.0, 0.0),
+        ]
+        box = (10.0, 10.0, 10.0)
+        virtual_atoms = "1 2 0 1 0.25\n"
+        pbc = True
+        cutoff = 4.0
+    else:
+        raise AssertionError(f"unknown focused virtual-atom fixture: {fixture_case}")
+
+    (case_dir / "mass.txt").write_text(
+        f"{atom_count}\n" + "".join(f"{value}\n" for value in masses),
+        encoding="utf-8",
+    )
+    (case_dir / "charge.txt").write_text(
+        f"{atom_count}\n" + "".join(f"{value}\n" for value in charges),
+        encoding="utf-8",
+    )
+    coordinate_text = [f"{atom_count} 0.0"]
+    coordinate_text.extend(" ".join(str(value) for value in xyz) for xyz in coordinates)
+    coordinate_text.extend(
+        [" ".join(str(value) for value in box), "90.0 90.0 90.0"]
+    )
+    (case_dir / "coordinate.txt").write_text(
+        "\n".join(coordinate_text) + "\n", encoding="utf-8"
+    )
+    (case_dir / "velocity.txt").write_text(
+        f"{atom_count}\n" + "0.0 0.0 0.0\n" * atom_count,
+        encoding="utf-8",
+    )
+    (case_dir / "virtual_atom.txt").write_text(
+        virtual_atoms, encoding="utf-8"
+    )
+    (case_dir / "mdin.spg.toml").write_text(
+        'md_name = "bundled io ab focused virtual atoms"\n'
+        'mode = "nve"\n'
+        f"pbc = {'true' if pbc else 'false'}\n"
+        "step_limit = 1\n"
+        "dt = 0.0\n"
+        f"cutoff = {cutoff}\n"
+        "skin = 0.4\n"
+        'mass_in_file = "mass.txt"\n'
+        'charge_in_file = "charge.txt"\n'
+        'coordinate_in_file = "coordinate.txt"\n'
+        'velocity_in_file = "velocity.txt"\n'
+        'virtual_atom_in_file = "virtual_atom.txt"\n'
+        "print_zeroth_frame = 0\n"
+        "write_mdout_interval = 1\n"
+        "write_information_interval = 1\n",
+        encoding="utf-8",
+    )
+
+
+def _focused_virtual_atom_payload(fixture_case: str) -> dict[str, list[float]]:
+    if fixture_case == FOCUSED_VIRTUAL_ATOMS_ALL_TYPES_FIXTURE:
+        return {
+            "type": [2, 3, 0, 1],
+            "atom": [1, 2, 6, 7],
+            "from_offset": [0, 3, 6, 7, 9],
+            "from": [0, 3, 4, 1, 3, 4, 5, 3, 4],
+            "parameter_offset": [0, 2, 4, 5, 6],
+            "parameter": [0.25, 0.5, 1.0, 0.5, 2.0, 0.25],
+        }
+    if fixture_case == FOCUSED_VIRTUAL_ATOMS_PBC_FIXTURE:
+        return {
+            "type": [1],
+            "atom": [2],
+            "from_offset": [0, 2],
+            "from": [0, 1],
+            "parameter_offset": [0, 1],
+            "parameter": [0.25],
+        }
+    raise AssertionError(f"unknown focused virtual-atom fixture: {fixture_case}")
+
+
+def _validate_focused_virtual_atoms_routes(
+    legacy_dir: Path, bundled_dir: Path, fixture_case: str
+) -> None:
+    legacy_mdin = (legacy_dir / "mdin.spg.toml").read_text(encoding="utf-8")
+    bundled_mdin = (bundled_dir / "mdin.bundled.spg.toml").read_text(
+        encoding="utf-8"
+    )
+    if not _has_key_line(legacy_mdin, "virtual_atom_in_file"):
+        raise AssertionError("focused virtual-atom legacy route is missing")
+    retained = sorted(
+        key
+        for key in ("virtual_atom_in_file", "virtual_atoms_in_file")
+        if _has_key_line(bundled_mdin, key)
+    )
+    if retained:
+        raise AssertionError(
+            f"focused virtual-atom bundle retained legacy keys: {retained}"
+        )
+    if (bundled_dir / "legacy_sidecars").exists():
+        raise AssertionError("focused virtual-atom bundle retained sidecars")
+
+    topology_path = bundled_dir / "topology.spgt.h5"
+    topology_paths = _h5_paths(topology_path)
+    if "/parameters/sponge/files/legacy_sidecars" in topology_paths:
+        raise AssertionError("focused virtual-atom topology retained sidecars")
+    expected = _focused_virtual_atom_payload(fixture_case)
+    required = {
+        f"/forcefield/virtual_atom/{name}" for name in (*expected, "count")
+    }
+    missing = sorted(required - topology_paths)
+    if missing:
+        raise AssertionError(
+            f"focused virtual-atom topology is missing datasets: {missing}"
+        )
+    with h5py.File(topology_path, "r") as topology:
+        actual = {
+            name: topology[f"/forcefield/virtual_atom/{name}"][...].tolist()
+            for name in expected
+        }
+        count = int(topology["/forcefield/virtual_atom/count"][()])
+    if actual != expected or count != len(expected["type"]):
+        raise AssertionError(
+            "focused virtual-atom native payload changed: "
+            f"payload={actual}, count={count}"
         )
 
 
@@ -2873,6 +3127,13 @@ def _compare_input_semantics(
                 replica_result["force"] = _compare_focused_lj_soft_core_forces(
                     case, run
                 )
+            elif spec.contract_id in {
+                "input.topology.virtual_atoms",
+                "input.topology.virtual_atoms_pbc",
+            }:
+                replica_result["oracle"] = _compare_focused_virtual_atoms_oracle(
+                    case, run
+                )
             replica_results.append(replica_result)
         results.append(
             {
@@ -2987,6 +3248,159 @@ def _compare_focused_lj_soft_core_forces(
     result["bundled_native_path"] = "/forcefield/lj_soft_core"
     result["subsystem_division_present"] = False
     return result
+
+
+def _focused_virtual_atom_coordinate_oracle(
+    fixture_case: str,
+) -> tuple[tuple[float, ...], tuple[int, ...]]:
+    if fixture_case == FOCUSED_VIRTUAL_ATOMS_ALL_TYPES_FIXTURE:
+        return (
+            (
+                0.0,
+                0.0,
+                1.0,
+                0.5,
+                1.0,
+                1.0,
+                1.5,
+                1.0,
+                1.0,
+                2.0,
+                0.0,
+                1.0,
+                0.0,
+                2.0,
+                1.0,
+                4.0,
+                4.0,
+                1.0,
+                4.0,
+                4.0,
+                7.0,
+                1.5,
+                0.5,
+                1.0,
+            ),
+            (1, 2, 6, 7),
+        )
+    if fixture_case == FOCUSED_VIRTUAL_ATOMS_PBC_FIXTURE:
+        return (
+            (
+                9.5,
+                0.0,
+                0.0,
+                0.5,
+                0.0,
+                0.0,
+                9.75,
+                0.0,
+                0.0,
+                2.0,
+                0.0,
+                0.0,
+            ),
+            (2,),
+        )
+    raise AssertionError(f"unknown focused virtual-atom fixture: {fixture_case}")
+
+
+def _compare_focused_virtual_atoms_oracle(
+    case: AbCase, run: AbRun
+) -> dict[str, object]:
+    expected_coordinates, virtual_indices = _focused_virtual_atom_coordinate_oracle(
+        case.fixture_case
+    )
+    branch_results = {}
+    coordinates = {}
+    forces = {}
+    for branch, directory in (
+        ("legacy", run.legacy_dir),
+        ("bundled", run.bundled_dir),
+    ):
+        branch_coordinates = _read_native_float32_file(
+            directory / "output" / "legacy.crd"
+        )
+        branch_forces = _read_native_float32_file(
+            directory / "output" / "legacy.frc"
+        )
+        branch_results[branch] = _assert_virtual_atom_oracle(
+            f"{case.name} {branch}",
+            expected_coordinates,
+            virtual_indices,
+            branch_coordinates,
+            branch_forces,
+        )
+        coordinates[branch] = branch_coordinates
+        forces[branch] = branch_forces
+    position_relative, position_absolute = _deterministic_tolerance("position")
+    _assert_numeric_sequences_close(
+        f"{case.name} virtual-atom coordinates",
+        coordinates["legacy"],
+        coordinates["bundled"],
+        relative_tolerance=position_relative,
+        absolute_tolerance=position_absolute,
+    )
+    force = _assert_nontrivial_equivalent_forces(
+        f"{case.name} redistributed force",
+        forces["legacy"],
+        forces["bundled"],
+    )
+    return {
+        "virtual_types": (
+            [0, 1, 2, 3]
+            if case.fixture_case == FOCUSED_VIRTUAL_ATOMS_ALL_TYPES_FIXTURE
+            else [1]
+        ),
+        "periodic_boundary_crossing": (
+            case.fixture_case == FOCUSED_VIRTUAL_ATOMS_PBC_FIXTURE
+        ),
+        "branches": branch_results,
+        "cross_branch_force": force,
+    }
+
+
+def _assert_virtual_atom_oracle(
+    label: str,
+    expected_coordinates: Sequence[float],
+    virtual_indices: Sequence[int],
+    coordinates: Sequence[float],
+    forces: Sequence[float],
+) -> dict[str, object]:
+    position_relative, position_absolute = _deterministic_tolerance("position")
+    _assert_numeric_sequences_close(
+        f"{label} coordinate oracle",
+        expected_coordinates,
+        coordinates,
+        relative_tolerance=position_relative,
+        absolute_tolerance=position_absolute,
+    )
+    if len(forces) != len(expected_coordinates):
+        raise AssertionError(
+            f"{label} force value count mismatch: "
+            f"expected={len(expected_coordinates)}, actual={len(forces)}"
+        )
+    virtual_components = [
+        forces[3 * atom_index + axis]
+        for atom_index in virtual_indices
+        for axis in range(3)
+    ]
+    virtual_set = set(virtual_indices)
+    real_components = [
+        value
+        for atom_index in range(len(forces) // 3)
+        if atom_index not in virtual_set
+        for value in forces[3 * atom_index : 3 * atom_index + 3]
+    ]
+    if not any(
+        math.isfinite(value) and abs(value) > 1.0e-8 for value in real_components
+    ):
+        raise AssertionError(f"{label} redistributed real-atom force is all trivial")
+    return {
+        "coordinate_value_count": len(coordinates),
+        "virtual_atom_indices": list(virtual_indices),
+        "maximum_abs_real_force": max(abs(value) for value in real_components),
+        "maximum_abs_virtual_force": max(abs(value) for value in virtual_components),
+    }
 
 
 def _assert_exclusion_coulomb_oracle(

@@ -604,25 +604,23 @@
       "contract_id": "input.topology.virtual_atoms",
       "direction": "input",
       "component": "virtual_atom",
-      "status": "deferred",
+      "status": "supported",
       "minimum_evidence": "E3",
       "legacy_surface": "virtual_atom_in_file",
       "bundled_surface": "/forcefield/virtual_atom",
-      "case_ids": [],
-      "assertion_ids": [],
-      "reason": "Reader records are exact, but per-type reconstructed coordinates/forces are not compared at runtime."
+      "case_ids": ["normal_virtual_atoms_all_types"],
+      "assertion_ids": ["input_semantic_equivalence"]
     },
     {
       "contract_id": "input.topology.virtual_atoms_pbc",
       "direction": "input",
       "component": "virtual_atom",
-      "status": "deferred",
+      "status": "supported",
       "minimum_evidence": "E3",
       "legacy_surface": "periodic virtual-atom reconstruction",
       "bundled_surface": "/forcefield/virtual_atom under PBC",
-      "case_ids": [],
-      "assertion_ids": [],
-      "reason": "A boundary-crossing virtual-atom coordinate/force A/B fixture is pending."
+      "case_ids": ["normal_virtual_atoms_pbc_boundary"],
+      "assertion_ids": ["input_semantic_equivalence"]
     },
     {
       "contract_id": "input.manybody.sw",

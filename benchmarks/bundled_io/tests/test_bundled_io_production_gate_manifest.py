@@ -38,12 +38,15 @@ from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
     FOCUSED_EDIP_FIXTURE,
     FOCUSED_EXCLUSIONS_FIXTURE,
     FOCUSED_LJ_SOFT_CORE_FIXTURE,
+    FOCUSED_VIRTUAL_ATOMS_ALL_TYPES_FIXTURE,
+    FOCUSED_VIRTUAL_ATOMS_PBC_FIXTURE,
     INPUT_SEMANTIC_SPECS_BY_CASE,
     MDINFO_CONTRACT_KEYS,
     PROFILE_LIMITS,
     RERUN_INPUT_SEMANTIC_SPECS,
     _assert_exclusion_coulomb_oracle,
     _assert_nontrivial_equivalent_forces,
+    _assert_virtual_atom_oracle,
     _cases_for_profile,
     _expected_rerun_frame_indices,
     _insert_root_toml_keys,
@@ -245,6 +248,8 @@ def test_ab_production_harness_has_executable_contract_coverage():
         "normal_custom_pair_nonzero",
         "normal_exclusions_coulomb_oracle",
         "normal_lj_soft_core_nonzero",
+        "normal_virtual_atoms_all_types",
+        "normal_virtual_atoms_pbc_boundary",
         "normal_vds_chunk_minus_one",
         "normal_vds_chunk_exact",
         "normal_vds_chunk_plus_one",
@@ -672,6 +677,94 @@ def test_focused_lj_soft_core_gate_rejects_trivial_energy_and_force():
     with pytest.raises(AssertionError, match="bundled force is all trivial"):
         _assert_nontrivial_equivalent_forces(
             "LJ soft-core force", [1.0, -1.0], [0.0, 0.0]
+        )
+
+
+@pytest.mark.parametrize(
+    ("case_name", "fixture", "contract_id", "observable"),
+    [
+        (
+            "normal_virtual_atoms_all_types",
+            FOCUSED_VIRTUAL_ATOMS_ALL_TYPES_FIXTURE,
+            "input.topology.virtual_atoms",
+            "PM",
+        ),
+        (
+            "normal_virtual_atoms_pbc_boundary",
+            FOCUSED_VIRTUAL_ATOMS_PBC_FIXTURE,
+            "input.topology.virtual_atoms_pbc",
+            "PM",
+        ),
+    ],
+)
+def test_focused_virtual_atom_cases_require_native_runtime_oracles(
+    case_name: str, fixture: str, contract_id: str, observable: str
+):
+    contracts = load_contract_registry()
+    case = next(case for case in _cases_for_profile() if case.name == case_name)
+
+    assert case.fixture_case == fixture
+    assert case.statistical_md is False
+    assert case.normal_step_limit == 1
+    assert case.normal_dt == 0.0
+    assert case.input_behavior_only is True
+    assert case.contract_ids == ("output.legacy.mdout", contract_id)
+    assert INPUT_SEMANTIC_SPECS_BY_CASE[case.name] == (
+        InputSemanticSpec(contract_id, (observable,), 1.0e-6),
+    )
+    contract = contracts[contract_id]
+    assert contract.status == "supported"
+    assert contract.case_ids == (case.name,)
+    assert contract.assertion_ids == ("input_semantic_equivalence",)
+
+
+def test_focused_virtual_atom_gate_rejects_semantic_mutations():
+    expected_coordinates = (
+        9.5,
+        0.0,
+        0.0,
+        0.5,
+        0.0,
+        0.0,
+        9.75,
+        0.0,
+        0.0,
+        2.0,
+        0.0,
+        0.0,
+    )
+    redistributed_forces = (
+        0.25,
+        0.0,
+        0.0,
+        -0.25,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.5,
+        0.0,
+        0.0,
+    )
+    wrong_pbc_coordinates = list(expected_coordinates)
+    wrong_pbc_coordinates[6] = 7.25
+    with pytest.raises(AssertionError, match="coordinate oracle"):
+        _assert_virtual_atom_oracle(
+            "PBC mutation",
+            expected_coordinates,
+            (2,),
+            wrong_pbc_coordinates,
+            redistributed_forces,
+        )
+
+    with pytest.raises(AssertionError, match="real-atom force is all trivial"):
+        _assert_virtual_atom_oracle(
+            "force redistribution mutation",
+            expected_coordinates,
+            (2,),
+            expected_coordinates,
+            (0.0,) * len(expected_coordinates),
         )
 
 

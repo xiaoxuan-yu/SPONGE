@@ -485,7 +485,35 @@ Acceptance:
   source-semantic parameter values while runtime behavior matches.
 - Registry, manifest, real focused CPU A/B, Ruff, and diff checks pass.
 
-## 18. Artifacts and Temporary-Space Policy
+## 18. PR 15: Focused Native Virtual-Atom Behavior Gates
+
+Close the virtual-atom reconstruction contracts with one all-types fixture and
+one boundary-crossing fixture. Both bundled branches must be pure native H5,
+with no legacy key or sidecar fallback.
+
+- Enumerate types 0, 1, 2, and 3 in one ragged native payload and require exact
+  offsets, parent indices, parameters, reconstructed coordinates, non-zero PM
+  behavior, real-atom force signal, and full legacy/bundled force equivalence.
+- Make type 3 depend on a type 2 site so the runtime case also exercises ordered
+  multi-layer reconstruction.
+- Put the type 1 parents on opposite sides of a periodic box and require the
+  minimum-image coordinate `9.75`; a non-periodic interpolation would produce
+  `7.25` and must fail the oracle.
+- Refresh virtual coordinates from global records before domain decomposition,
+  then switch to local records after `Get_Local`; copy type 3 device records
+  from their populated host source.
+
+Acceptance:
+
+- The bundled topology contains the exact `/forcefield/virtual_atom` ragged
+  datasets and retains neither virtual-atom legacy key nor sidecar metadata.
+- Both branches match the per-type and PBC coordinate oracles, emit finite
+  non-zero PM/force behavior, and match complete force and mdout payloads.
+- Coordinate, PBC, and trivial-real-force mutations are rejected by unit tests.
+- Registry, manifest, real focused CPU A/B, related H5 CTest, Ruff, and diff
+  checks pass.
+
+## 19. Artifacts and Temporary-Space Policy
 
 - Use `SPONGE_BUNDLED_IO_AB_RUN_ROOT` for all heavy runs.
 - Put production artifacts on the workspace filesystem rather than `/tmp`.
@@ -495,7 +523,7 @@ Acceptance:
 - Record artifact byte counts and enforce a configurable per-case quota.
 - Cleanup must only remove directories created by the current gate run.
 
-## 19. PR Completion Log
+## 20. PR Completion Log
 
 Append one row immediately after completing and committing each PR.
 
@@ -517,3 +545,4 @@ Append one row immediately after completing and committing each PR.
 | PR 12: Focused non-zero custom-pair input gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; real `normal_custom_pair_nonzero` CPU A/B; Ruff; `git diff --check` | 80 contract/manifest/comparator tests and the focused real A/B pass. The pure bundled branch has no legacy custom-force keys or sidecars, materializes both native inputs, and matches legacy at `custom_pair=31.57` with maximum force `252.554443359375`. |
 | PR 13: Focused native exclusion semantics gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; real `normal_exclusions_coulomb_oracle` CPU A/B; Ruff; `git diff --check` | 83 contract/manifest/comparator tests and the focused real A/B pass. The pure bundled branch uses offsets/list `[0,1,1,1]`/`[1]`, and both branches match the `-1/12` energy and analytic nine-value force oracle with maximum force `0.1111111119389534`. |
 | PR 14: Focused native LJ soft-core behavior gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; `ctest --test-dir build-dev-cpu-h5-2 --output-on-failure -R 'test_topology_native_h5_reader|test_h5_input_fixture_equivalence'`; real `normal_lj_soft_core_nonzero` CPU A/B; Ruff; `git diff --check` | 85 contract/manifest/comparator tests, both H5 input contract tests, and the focused real A/B pass. The gate first exposed legacy `potential=-0.06` versus bundled `-0.01`; pure native runtime normalization now matches legacy at `LJ_soft=-0.06`, `eff_pot=-0.056708537`, maximum force `0.1920633763074875`, and zero full-mdout error. Subsystem division remains deferred because its mask is not consumed by the force kernel. |
+| PR 15: Focused native virtual-atom behavior gates | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; `ctest --test-dir build-dev-cpu-h5-2 --output-on-failure -R 'test_topology_native_h5_reader|test_h5_input_fixture_equivalence'`; real `normal_virtual_atoms_all_types` and `normal_virtual_atoms_pbc_boundary` CPU A/B; Ruff; clang-format; `git diff --check` | 88 contract/manifest/comparator tests, both H5 input contract tests, and both focused real A/B cases pass. The all-types gate covers exact type 0/1/2/3 ragged payloads, layered type 2-to-3 reconstruction, 24-value coordinate oracles, non-zero PM, and complete force parity; the PBC gate distinguishes `9.75` from the incorrect non-periodic `7.25`. It exposed and fixed the type 3 host/device copy source and the missing global first-frame coordinate refresh. Registry coverage advances to 52 supported, 22 deferred, and 1 unsupported contract. |
