@@ -284,13 +284,16 @@
       "contract_id": "input.restart_load.absent",
       "direction": "input",
       "component": "restart",
-      "status": "deferred",
+      "status": "supported",
       "minimum_evidence": "E3",
       "legacy_surface": "rerun without a restart input",
       "bundled_surface": "rerun without input_h5_restart_path",
-      "case_ids": [],
-      "assertion_ids": [],
-      "reason": "A same-bootstrap-state A/B fixture without either restart route is pending."
+      "case_ids": ["rerun_restart_absent_same_bootstrap_vds_off"],
+      "assertion_ids": [
+        "mdout_deterministic_equivalence",
+        "rerun_selection_equivalence",
+        "h5_rerun_semantic_equivalence"
+      ]
     },
     {
       "contract_id": "input.restart_load.dynamic",

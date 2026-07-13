@@ -260,6 +260,7 @@ def test_ab_production_harness_has_executable_contract_coverage():
         "rerun_full_contract_pure_vds_on",
         "rerun_full_contract_sidecar_vds_off",
         "rerun_full_contract_sidecar_vds_on",
+        "rerun_restart_absent_same_bootstrap_vds_off",
         "rerun_boundary_start0_strip0_limit1_vds_off",
         "rerun_boundary_start1_strip0_unlimited_no_velocity_vds_on",
         "rerun_boundary_start0_strip1_beyond_selected_vds_on",
@@ -372,6 +373,37 @@ def test_rerun_selection_oracle_is_independent_of_runtime_frame_counter(
     assert (
         _expected_rerun_frame_indices(case, frame_count=2) == expected_indices
     )
+
+
+def test_restart_absent_case_requires_same_bootstrap_and_behavior_outputs():
+    contracts = load_contract_registry()
+    case = next(
+        case
+        for case in _cases_for_profile()
+        if case.name == "rerun_restart_absent_same_bootstrap_vds_off"
+    )
+    contract = contracts["input.restart_load.absent"]
+
+    assert case.restart_load_policy == "absent"
+    assert case.statistical_md is False
+    assert case.rerun_frame_limit == 2
+    assert case.rerun_need_box_update is False
+    assert "input.restart_load.structural" not in case.contract_ids
+    assert {
+        "input.restart_load.absent",
+        "output.legacy.mdout",
+        "output.trajectory",
+        "output.observable",
+        "output.trajectory.vds_off",
+    } <= set(case.contract_ids)
+    assert case.assertion_ids == (
+        "mdout_deterministic_equivalence",
+        "rerun_selection_equivalence",
+        "h5_rerun_semantic_equivalence",
+    )
+    assert contract.status == "supported"
+    assert contract.case_ids == (case.name,)
+    assert contract.assertion_ids == case.assertion_ids
 
 
 def test_failure_matrix_requires_exit_category_and_stable_tokens():

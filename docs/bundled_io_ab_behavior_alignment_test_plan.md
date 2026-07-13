@@ -536,7 +536,41 @@ Acceptance:
 - Registry, required-semantic inventory, manifest, real focused CPU A/B,
   related H5 CTest, Ruff, clang-format, and diff checks pass.
 
-## 20. Artifacts and Temporary-Space Policy
+## 20. Restart-Absent Same-Bootstrap Rerun Gate
+
+Goal: prove that omitting restart input has the same behavior in legacy and
+bundled rerun paths, rather than merely proving that both processes start.
+
+Fixture and route requirements:
+
+- Use byte-identical legacy coordinate and velocity files as bootstrap state
+  for both branches.
+- Keep legacy text trajectory input and bundled H5 trajectory input as the
+  only branch-specific state route.
+- Remove `input_h5_restart_path`, `input_h5_restart_load`, and the bundled
+  `restart.spgr.h5` file so an accidental structural fallback cannot satisfy
+  the test.
+- Run two selected frames with box update disabled to isolate restart absence
+  from the known legacy box-update invalid-free defect.
+
+Behavior requirements:
+
+- Compare every mdout row and column deterministically.
+- Check the selected rerun frame indices against an independent oracle.
+- Compare bundled trajectory and observable output against the legacy branch,
+  including position, box, velocity, force, and scalar observables.
+- When no restart exists, derive the expected fixed box from the shared
+  orthogonal bootstrap coordinate file; existing structural cases continue to
+  use the restart H5 box.
+
+Acceptance:
+
+- The route assertions prove identical bootstrap bytes and complete absence of
+  restart bindings and payloads.
+- All three E3 assertions pass in a real CPU run.
+- Registry, manifest, restart/input CTest, Ruff, smoke, and diff checks pass.
+
+## 21. Artifacts and Temporary-Space Policy
 
 - Use `SPONGE_BUNDLED_IO_AB_RUN_ROOT` for all heavy runs.
 - Put production artifacts on the workspace filesystem rather than `/tmp`.
@@ -546,7 +580,7 @@ Acceptance:
 - Record artifact byte counts and enforce a configurable per-case quota.
 - Cleanup must only remove directories created by the current gate run.
 
-## 21. PR Completion Log
+## 22. PR Completion Log
 
 Append one row immediately after completing and committing each PR.
 
@@ -570,3 +604,4 @@ Append one row immediately after completing and committing each PR.
 | PR 14: Focused native LJ soft-core behavior gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; `ctest --test-dir build-dev-cpu-h5-2 --output-on-failure -R 'test_topology_native_h5_reader|test_h5_input_fixture_equivalence'`; real `normal_lj_soft_core_nonzero` CPU A/B; Ruff; `git diff --check` | 85 contract/manifest/comparator tests, both H5 input contract tests, and the focused real A/B pass. The gate first exposed legacy `potential=-0.06` versus bundled `-0.01`; pure native runtime normalization now matches legacy at `LJ_soft=-0.06`, `eff_pot=-0.056708537`, maximum force `0.1920633763074875`, and zero full-mdout error. Subsystem division remains deferred because its mask is not consumed by the force kernel. |
 | PR 15: Focused native virtual-atom behavior gates | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; `ctest --test-dir build-dev-cpu-h5-2 --output-on-failure -R 'test_topology_native_h5_reader|test_h5_input_fixture_equivalence'`; real `normal_virtual_atoms_all_types` and `normal_virtual_atoms_pbc_boundary` CPU A/B; Ruff; clang-format; `git diff --check` | 88 contract/manifest/comparator tests, both H5 input contract tests, and both focused real A/B cases pass. The all-types gate covers exact type 0/1/2/3 ragged payloads, layered type 2-to-3 reconstruction, 24-value coordinate oracles, non-zero PM, and complete force parity; the PBC gate distinguishes `9.75` from the incorrect non-periodic `7.25`. It exposed and fixed the type 3 host/device copy source and the missing global first-frame coordinate refresh. Registry coverage advances to 52 supported, 22 deferred, and 1 unsupported contract. |
 | PR 16: Virtual-atom plural alias behavior gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; `ctest --test-dir build-dev-cpu-h5-2 --output-on-failure -R 'test_topology_native_h5_reader|test_h5_input_fixture_equivalence'`; real `normal_virtual_atoms_plural_alias` CPU A/B; Ruff; clang-format; `git diff --check` | 89 contract/manifest/comparator tests, both H5 input contract tests, and the focused real A/B pass. The legacy branch resolves only `virtual_atoms_in_file`; the bundled branch contains the exact native payload with neither key nor sidecars. Both paths match the boundary-crossing coordinate `9.75`, non-zero PM, complete force, and mdout behavior. Registry coverage advances to 53 supported, 21 deferred, and 1 unsupported contract. |
+| PR 17: Restart-absent same-bootstrap rerun gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; `ctest --test-dir build-dev-cpu-h5-2 --output-on-failure -R 'test_(restart_h5_reader\|h5_input_validation\|h5_restart_load_runtime_closure)$'`; real `rerun_restart_absent_same_bootstrap_vds_off` CPU A/B; Ruff; `git diff --check` | 90 contract/manifest/comparator tests, two related CTest passes (runtime closure skipped by its build guard), and the real two-frame A/B pass. Both branches use byte-identical coordinate/velocity bootstrap files, the bundled branch has no restart binding or payload, and all mdout columns, frame selection, trajectory, and observable semantics pass E3 comparison. Registry coverage advances to 54 supported, 20 deferred, and 1 unsupported contract. |

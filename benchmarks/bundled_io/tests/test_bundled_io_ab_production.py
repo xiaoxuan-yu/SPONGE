@@ -789,6 +789,36 @@ def _rerun_boundary_cases() -> list[AbCase]:
     )
     return [
         AbCase(
+            name="rerun_restart_absent_same_bootstrap_vds_off",
+            fixture_case="full_contract_rerun",
+            legacy_subdir="legacy_input",
+            bundled_subdir="bundled_input_with_legacy_sidecar/bundle",
+            mode="rerun",
+            vds=False,
+            statistical_md=False,
+            restart_load_policy="absent",
+            contract_ids=(
+                "runtime.rerun",
+                "input.rerun.start",
+                "input.rerun.strip",
+                "input.rerun.frame_limit",
+                "input.rerun.box_update",
+                "input.trajectory.velocity_optional",
+                "input.restart_load.absent",
+                "output.legacy.mdout",
+                "output.trajectory",
+                "output.observable",
+                "output.trajectory.vds_off",
+            ),
+            assertion_ids=(
+                "mdout_deterministic_equivalence",
+                "rerun_selection_equivalence",
+                "h5_rerun_semantic_equivalence",
+            ),
+            rerun_frame_limit=2,
+            rerun_need_box_update=False,
+        ),
+        AbCase(
             name="rerun_boundary_start0_strip0_limit1_vds_off",
             fixture_case="full_contract_rerun",
             legacy_subdir="legacy_input",
@@ -1542,8 +1572,66 @@ def _prepare_case_pair(
     legacy_dir = _copy_case(case, "legacy", case.legacy_subdir, case_root)
     bundled_dir = _copy_case(case, "bundled", case.bundled_subdir, case_root)
     _validate_full_contract_input(case, bundled_dir)
+    if "input.restart_load.absent" in case.contract_ids:
+        _prepare_restart_absent_inputs(legacy_dir, bundled_dir)
+        _validate_restart_absent_routes(legacy_dir, bundled_dir)
     _prepare_rerun_trajectory_variant(case, bundled_dir)
     return legacy_dir, bundled_dir
+
+
+def _prepare_restart_absent_inputs(
+    legacy_dir: Path, bundled_dir: Path
+) -> None:
+    for file_name in ("coordinate.txt", "velocity.txt"):
+        shutil.copy2(legacy_dir / file_name, bundled_dir / file_name)
+
+    bundled_mdin = bundled_dir / "mdin.bundled.spg.toml"
+    text = _remove_key_lines(
+        bundled_mdin.read_text(encoding="utf-8"),
+        {"input_h5_restart_path", "input_h5_restart_load"},
+    )
+    text = _insert_root_toml_keys(
+        text,
+        [
+            'coordinate_in_file = "coordinate.txt"',
+            'velocity_in_file = "velocity.txt"',
+        ],
+    )
+    bundled_mdin.write_text(text, encoding="utf-8")
+
+    restart_path = bundled_dir / "restart.spgr.h5"
+    if restart_path.exists():
+        restart_path.unlink()
+
+
+def _validate_restart_absent_routes(
+    legacy_dir: Path, bundled_dir: Path
+) -> None:
+    legacy_mdin = (legacy_dir / "mdin.spg.toml").read_text(encoding="utf-8")
+    bundled_mdin = (bundled_dir / "mdin.bundled.spg.toml").read_text(
+        encoding="utf-8"
+    )
+    for branch, text in (("legacy", legacy_mdin), ("bundled", bundled_mdin)):
+        for key in ("coordinate_in_file", "velocity_in_file"):
+            if not _has_key_line(text, key):
+                raise AssertionError(
+                    f"restart-absent {branch} branch is missing {key} bootstrap"
+                )
+        for key in ("input_h5_restart_path", "input_h5_restart_load"):
+            if _has_key_line(text, key):
+                raise AssertionError(
+                    f"restart-absent {branch} branch retained {key}"
+                )
+
+    for file_name in ("coordinate.txt", "velocity.txt"):
+        legacy_payload = (legacy_dir / file_name).read_bytes()
+        bundled_payload = (bundled_dir / file_name).read_bytes()
+        if legacy_payload != bundled_payload:
+            raise AssertionError(
+                f"restart-absent bootstrap differs for {file_name}"
+            )
+    if (bundled_dir / "restart.spgr.h5").exists():
+        raise AssertionError("restart-absent bundled branch retained restart H5")
 
 
 def _prepare_rerun_trajectory_variant(case: AbCase, bundled_dir: Path) -> None:
@@ -5117,14 +5205,7 @@ def _rerun_expected_position_values(
     if use_trajectory_box:
         restart_box = []
     else:
-        restart_box = _h5_numeric_values(
-            run.bundled_dir / "restart.spgr.h5",
-            "/particles/all/box/edges/value",
-        )
-        if len(restart_box) != box_width:
-            raise AssertionError(
-                "structural rerun restart box has an invalid shape"
-            )
+        restart_box = _rerun_bootstrap_box_values(run, box_width)
 
     expected = []
     for frame_index in matching_indices:
@@ -5165,14 +5246,53 @@ def _rerun_expected_box_values(
                 frame_index * box_width : (frame_index + 1) * box_width
             ]
         ]
-    restart_boxes = _h5_numeric_values(
-        run.bundled_dir / "restart.spgr.h5", "/particles/all/box/edges/value"
-    )
-    if len(restart_boxes) != box_width:
-        raise AssertionError(
-            "structural rerun restart box has an invalid shape"
-        )
+    restart_boxes = _rerun_bootstrap_box_values(run, box_width)
     return restart_boxes * len(matching_indices)
+
+
+def _rerun_bootstrap_box_values(run: AbRun, box_width: int) -> list[float]:
+    restart_path = run.bundled_dir / "restart.spgr.h5"
+    if restart_path.exists():
+        values = _h5_numeric_values(
+            restart_path, "/particles/all/box/edges/value"
+        )
+    else:
+        coordinate_path = run.bundled_dir / "coordinate.txt"
+        lines = [
+            line.strip()
+            for line in coordinate_path.read_text(encoding="utf-8").splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+        atom_count = int(lines[0].split()[0])
+        box_fields = lines[1 + atom_count :]
+        if len(box_fields) != 1 or len(box_fields[0].split()) != 6:
+            raise AssertionError(
+                "restart-absent coordinate bootstrap requires one six-value box row"
+            )
+        length_x, length_y, length_z, alpha, beta, gamma = (
+            float(value) for value in box_fields[0].split()
+        )
+        if not all(
+            math.isclose(angle, 90.0, rel_tol=0.0, abs_tol=1.0e-6)
+            for angle in (alpha, beta, gamma)
+        ):
+            raise AssertionError(
+                "restart-absent coordinate bootstrap must be orthogonal"
+            )
+        values = [
+            length_x,
+            0.0,
+            0.0,
+            0.0,
+            length_y,
+            0.0,
+            0.0,
+            0.0,
+            length_z,
+        ]
+    if len(values) != box_width:
+        raise AssertionError("rerun bootstrap box has an invalid shape")
+    return values
 
 
 def _compare_h5_outputs_statistically(
