@@ -1481,7 +1481,41 @@ Acceptance:
   formatting, clang-format, and diff checks pass, followed by one PR-scoped
   commit.
 
-## 47. Artifacts and Temporary-Space Policy
+## 47. PR 50: Typed EAM Funcfl/Setfl Behavior Contracts
+
+Consume typed `/manybody/eam` input through the same legacy EAM runtime parser
+without weakening payload validation or retaining two active owners.
+
+- Materialize both declared EAM formats. Funcfl reconstructs the raw embedding,
+  Z, and density tables; setfl reconstructs element metadata, embedding,
+  density, and lower-triangular raw pair tables from native pair potentials.
+- Preserve optional `/manybody/eam/atom_type` as the exact
+  `EAM_atom_type_in_file` sequence. Reject typed/legacy ownership conflicts.
+- Validate scalar controls, table dimensions, finite values, supported format,
+  and funcfl/setfl-specific metadata before `EAM::Initial` consumes the
+  materialized files.
+- Add isolated two-atom funcfl and two-type setfl A/B cases. Compare all mdout
+  columns and complete forces, then zero only the typed pair source and require
+  an exact energy/force response.
+- Make full-contract pure and sidecar fixtures select exactly one EAM owner;
+  sidecar inventory no longer requires dormant typed EAM data.
+
+Acceptance:
+
+- Focused funcfl matches at `EAM=267.33` and force
+  `(-165.90681,0,0,165.90681,0,0)`; its zero-Z control has `EAM=46.12` and
+  zero force.
+- Focused setfl matches at `EAM=61.49` and force
+  `(-11.530274,0,0,11.530274,0,0)`; its zero-pair control has `EAM=46.12` and
+  zero force.
+- Pure full-contract VDS-off/on restores the legacy `EAM=23.06` column and
+  advances to only restraint/soft-wall gaps. Sidecar VDS-off/on remains green.
+- Unknown EAM format and invalid embedding-table shape exit through stable
+  bad-file-format diagnostics; the complete failure sweep remains green.
+- SPONGE rebuild, fixture-equivalence CTest, contract smoke, Ruff,
+  clang-format, and diff checks pass, followed by one PR-scoped commit.
+
+## 48. Artifacts and Temporary-Space Policy
 
 - Use `SPONGE_BUNDLED_IO_AB_RUN_ROOT` for all heavy runs.
 - Put production artifacts on the workspace filesystem rather than `/tmp`.
@@ -1491,7 +1525,7 @@ Acceptance:
 - Record artifact byte counts and enforce a configurable per-case quota.
 - Cleanup must only remove directories created by the current gate run.
 
-## 48. PR Completion Log
+## 49. PR Completion Log
 
 Append one row immediately after completing and committing each PR.
 
@@ -1548,3 +1582,4 @@ Append one row immediately after completing and committing each PR.
 | PR 47: Production-fixture residue ownership repair | Complete | This commit | four focused residue CPU A/B cases; full-contract sidecar VDS-off/on; 24-case sidecar QC/rerun/failure sweep; CMAP VDS invariant; 140-test smoke; H5 manifest and fixture-equivalence CTests; Ruff; format; `git diff --check` | Full-contract bundles now have exactly one typed residue owner, while focused sidecar cases explicitly replace typed state with one bundle-local sidecar owner. The stale startup conflict is closed across compatibility paths. Independent typed-SITS and rerun boundary behavior failures remain visible for subsequent alignment PRs. |
 | PR 48: Inactive typed SITS configuration semantics | Complete | This commit | focused active and inactive typed SITS CPU A/B; full-contract pure-native progression check; SPONGE rebuild; 141-test smoke; Ruff; format; clang-format; `git diff --check` | Typed SITS config without `mode` now preserves the valid legacy inactive state: exact text is materialized, no SITS columns appear, and complete mdout is equal. The existing production-mode case remains non-trivial. Full-contract pure-native execution advances to independent NB14/EAM/restraint/soft-wall consumption gaps. |
 | PR 49: Canonical and extra NB14 behavior contracts | Complete | This commit | canonical/extra focused CPU A/B plus zero-LJ controls; pure full-contract VDS-off/on progression; sidecar full-contract VDS-off/on; dual-root and extra-shape process failures; 21-case failure sweep; native topology reader and fixture-equivalence CTests; SPONGE rebuild; 142-test smoke; Ruff; format; clang-format; `git diff --check` | The registry now distinguishes `nb14_in_file` scaling from raw `nb14_extra_in_file` A/B semantics. A small independently owned H5 helper preserves the untracked topology-reader boundary. Both pure typed routes match exact non-zero energies and complete force fingerprints, parameter-zero controls change force, and full-contract fixtures enforce exactly one NB14 owner. Pure full-contract NB14 columns are restored; EAM/restraint/soft-wall remain visible. |
+| PR 50: Typed EAM funcfl/setfl behavior contracts | Complete | This commit | focused funcfl/setfl CPU A/B plus zero-pair controls; pure full-contract VDS-off/on progression; sidecar full-contract VDS-off/on; unknown-format and table-shape process failures; complete failure sweep; fixture-equivalence CTest; SPONGE rebuild; contract smoke; Ruff; format; clang-format; `git diff --check` | Typed EAM input now materializes both legacy formats and optional atom types through the established EAM runtime parser. Exact energy and full-force oracles plus zero-pair controls prove table consumption, full-contract fixtures enforce exactly one EAM owner, and pure rerun now advances to only restraint/soft-wall gaps. |

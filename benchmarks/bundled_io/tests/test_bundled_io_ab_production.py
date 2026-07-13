@@ -53,6 +53,8 @@ FOCUSED_CORE_TOPOLOGY_FIXTURE = "focused_core_topology_two_atom"
 FOCUSED_NB14_SCALED_FIXTURE = "focused_nb14_scaled_two_atom"
 FOCUSED_NB14_EXTRA_FIXTURE = "focused_nb14_extra_two_atom"
 FOCUSED_EDIP_FIXTURE = "focused_edip_two_atom"
+FOCUSED_EAM_FUNCFL_FIXTURE = "focused_eam_funcfl_two_atom"
+FOCUSED_EAM_SETFL_FIXTURE = "focused_eam_setfl_two_atom"
 FOCUSED_SW_SIDECAR_FIXTURE = "focused_sw_sidecar_three_atom"
 FOCUSED_SW_TYPED_FIXTURE = "focused_sw_typed_three_atom"
 FOCUSED_TERSOFF_SIDECAR_FIXTURE = "focused_tersoff_sidecar_three_atom"
@@ -290,6 +292,12 @@ INPUT_SEMANTIC_SPECS_BY_CASE = {
     ),
     "normal_edip_nonzero": (
         InputSemanticSpec("input.manybody.edip", ("EDIP",), 1.0e-6),
+    ),
+    "normal_eam_funcfl_nonzero": (
+        InputSemanticSpec("input.manybody.eam", ("EAM",), 1.0e-6),
+    ),
+    "normal_eam_setfl_nonzero": (
+        InputSemanticSpec("input.manybody.eam", ("EAM",), 1.0e-6),
     ),
     "normal_sw_sidecar_pair_three_body": (
         InputSemanticSpec("input.manybody.sw.sidecar", ("SW",), 1.0e-6),
@@ -745,6 +753,50 @@ def _cases_for_profile() -> list[AbCase]:
             contract_ids=(
                 "output.legacy.mdout",
                 "input.manybody.edip",
+            ),
+            assertion_ids=(
+                "mdout_deterministic_equivalence",
+                "input_semantic_equivalence",
+            ),
+            normal_step_limit=1,
+            normal_interval=1,
+            normal_dt=0.0,
+            input_behavior_only=True,
+        ),
+        AbCase(
+            name="normal_eam_funcfl_nonzero",
+            fixture_case=FOCUSED_EAM_FUNCFL_FIXTURE,
+            legacy_subdir="generated_legacy",
+            bundled_subdir="generated_bundled",
+            mode="normal",
+            vds=False,
+            statistical_md=False,
+            restart_load_policy="structural",
+            contract_ids=(
+                "output.legacy.mdout",
+                "input.manybody.eam",
+            ),
+            assertion_ids=(
+                "mdout_deterministic_equivalence",
+                "input_semantic_equivalence",
+            ),
+            normal_step_limit=1,
+            normal_interval=1,
+            normal_dt=0.0,
+            input_behavior_only=True,
+        ),
+        AbCase(
+            name="normal_eam_setfl_nonzero",
+            fixture_case=FOCUSED_EAM_SETFL_FIXTURE,
+            legacy_subdir="generated_legacy",
+            bundled_subdir="generated_bundled",
+            mode="normal",
+            vds=False,
+            statistical_md=False,
+            restart_load_policy="structural",
+            contract_ids=(
+                "output.legacy.mdout",
+                "input.manybody.eam",
             ),
             assertion_ids=(
                 "mdout_deterministic_equivalence",
@@ -1930,6 +1982,29 @@ def _failure_cases() -> list[AbCase]:
             expected_diagnostic_tokens=(
                 "Materialize_H5_Native_NB14_Extra",
                 "/forcefield/nb14_extra/params must have shape [n,3]",
+            ),
+            **nb14_metadata_shared,
+        ),
+        AbCase(
+            name="failure_h5_eam_unknown_format",
+            failure_mutation="h5_eam_unknown_format",
+            failure_branches=("bundled",),
+            expected_error_category="spongeErrorBadFileFormat",
+            expected_diagnostic_tokens=(
+                "Materialize_H5_Native_EAM",
+                "unsupported native EAM format",
+            ),
+            **nb14_metadata_shared,
+        ),
+        AbCase(
+            name="failure_h5_eam_embed_shape",
+            failure_mutation="h5_eam_embed_shape",
+            failure_branches=("bundled",),
+            expected_error_category="spongeErrorBadFileFormat",
+            expected_diagnostic_tokens=(
+                "Materialize_H5_Native_EAM",
+                "EAM raw embedding table",
+                "must have shape [1,2]",
             ),
             **nb14_metadata_shared,
         ),
@@ -3697,6 +3772,11 @@ def _prepare_case_pair(
             return _prepare_focused_sits_typed_inactive_pair(case_root)
         if case.fixture_case == FOCUSED_EDIP_FIXTURE:
             return _prepare_focused_edip_pair(case_root)
+        if case.fixture_case in {
+            FOCUSED_EAM_FUNCFL_FIXTURE,
+            FOCUSED_EAM_SETFL_FIXTURE,
+        }:
+            return _prepare_focused_eam_pair(case.fixture_case, case_root)
         if case.fixture_case == FOCUSED_SW_SIDECAR_FIXTURE:
             return _prepare_focused_sw_sidecar_pair(case_root)
         if case.fixture_case == FOCUSED_SW_TYPED_FIXTURE:
@@ -3760,6 +3840,7 @@ def _prepare_case_pair(
     if "input.qc.type" in case.contract_ids:
         _prepare_pure_typed_qc_input(bundled_dir)
     _prepare_full_contract_nb14_owner(case, bundled_dir)
+    _prepare_full_contract_eam_owner(case, bundled_dir)
     _validate_full_contract_input(case, bundled_dir)
     if "input.restart_load.absent" in case.contract_ids:
         _prepare_restart_absent_inputs(legacy_dir, bundled_dir)
@@ -3796,6 +3877,39 @@ def _prepare_full_contract_nb14_owner(case: AbCase, bundled_dir: Path) -> None:
         if not typed_owner or not sidecar_owner:
             raise AssertionError(
                 f"{case.name} sidecar source fixture must contain both NB14 "
+                "representations before owner selection"
+            )
+        del topology[typed_root]
+
+
+def _prepare_full_contract_eam_owner(case: AbCase, bundled_dir: Path) -> None:
+    if case.fixture_case != "full_contract_rerun":
+        return
+    topology_path = bundled_dir / "topology.spgt.h5"
+    sidecar_root = "/parameters/sponge/files/legacy_sidecars"
+    typed_root = "/manybody/eam"
+    with h5py.File(topology_path, "r+") as topology:
+        typed_owner = typed_root in topology
+        sidecar_owner = False
+        if sidecar_root in topology:
+            sidecar_keys = topology[f"{sidecar_root}/key"].asstr()[...]
+            sidecar_owner = "EAM_in_file" in sidecar_keys
+
+        if "input.full_contract.pure_native" in case.contract_ids:
+            if not typed_owner or sidecar_owner:
+                raise AssertionError(
+                    f"{case.name} pure full-contract fixture requires only "
+                    "the typed EAM owner"
+                )
+            return
+        if (
+            "input.full_contract.sidecar" not in case.contract_ids
+            and not sidecar_owner
+        ):
+            return
+        if not typed_owner or not sidecar_owner:
+            raise AssertionError(
+                f"{case.name} sidecar source fixture must contain both EAM "
                 "representations before owner selection"
             )
         del topology[typed_root]
@@ -4360,6 +4474,137 @@ def _validate_focused_core_topology_routes(
         raise AssertionError("focused core LJ pair payload changed shape")
     if pair_a[0] <= 0.0 or pair_b[0] <= 0.0:
         raise AssertionError("focused core LJ pair payload is trivial")
+
+
+def _prepare_focused_eam_pair(
+    fixture_case: str, case_root: Path
+) -> tuple[Path, Path]:
+    if fixture_case not in {
+        FOCUSED_EAM_FUNCFL_FIXTURE,
+        FOCUSED_EAM_SETFL_FIXTURE,
+    }:
+        raise AssertionError(f"unsupported focused EAM fixture: {fixture_case}")
+    format_name = (
+        "funcfl" if fixture_case == FOCUSED_EAM_FUNCFL_FIXTURE else "setfl"
+    )
+    legacy_source = case_root / f"focused_eam_{format_name}_source"
+    legacy_dir = case_root / "legacy"
+    converted_dir = case_root / f"converted_focused_eam_{format_name}_bundle"
+    bundled_dir = case_root / "bundled"
+    for path in (legacy_source, legacy_dir, converted_dir, bundled_dir):
+        if path.exists():
+            shutil.rmtree(path)
+    _write_focused_eam_input(legacy_source, format_name)
+    shutil.copytree(legacy_source, legacy_dir)
+    _convert_legacy_case(legacy_source, converted_dir)
+    shutil.copytree(converted_dir / "bundle", bundled_dir)
+
+    topology_path = bundled_dir / "topology.spgt.h5"
+    with h5py.File(topology_path, "r+") as topology:
+        sidecar_table = "/parameters/sponge/files/legacy_sidecars"
+        if sidecar_table in topology:
+            del topology[sidecar_table]
+    legacy_sidecars = bundled_dir / "legacy_sidecars"
+    if legacy_sidecars.exists():
+        shutil.rmtree(legacy_sidecars)
+    _validate_focused_eam_routes(legacy_dir, bundled_dir, format_name)
+    return legacy_dir, bundled_dir
+
+
+def _write_focused_eam_input(case_dir: Path, format_name: str) -> None:
+    case_dir.mkdir(parents=True, exist_ok=True)
+    (case_dir / "mass.txt").write_text("2\n63.55\n63.55\n", encoding="utf-8")
+    (case_dir / "coordinate.txt").write_text(
+        "2 0.0\n0.0 0.0 0.0\n1.5 0.0 0.0\n10.0 10.0 10.0\n90.0 90.0 90.0\n",
+        encoding="utf-8",
+    )
+    (case_dir / "velocity.txt").write_text(
+        "2\n0.0 0.0 0.0\n0.0 0.0 0.0\n", encoding="utf-8"
+    )
+    if format_name == "funcfl":
+        eam_text = (
+            "Focused Cu funcfl\n"
+            "29 63.55 3.615 FCC\n"
+            "4 1.0 8 0.5 4.0\n"
+            "0.0 1.0 1.0 1.0\n"
+            "1.0 1.0 1.0 1.0 1.0 1.0 1.0 1.0\n"
+            "1.0 1.0 1.0 1.0 1.0 1.0 1.0 1.0\n"
+        )
+        atom_type_text = "0\n0\n"
+    elif format_name == "setfl":
+        pair_row = " ".join(["1.0"] * 8)
+        eam_text = (
+            "Focused AB setfl\n"
+            "comment\n"
+            "comment\n"
+            "2 A B\n"
+            "4 1.0 8 0.5 4.0\n"
+            "29 63.55 3.615 FCC\n"
+            "0.0 1.0 1.0 1.0\n"
+            "1.0 1.0 1.0 1.0 1.0 1.0 1.0 1.0\n"
+            "28 58.69 3.52 FCC\n"
+            "0.0 1.0 1.0 1.0\n"
+            "1.0 1.0 1.0 1.0 1.0 1.0 1.0 1.0\n"
+            f"{pair_row}\n{pair_row}\n{pair_row}\n"
+        )
+        atom_type_text = "0\n1\n"
+    else:
+        raise AssertionError(f"unsupported focused EAM format: {format_name}")
+    (case_dir / "eam.txt").write_text(eam_text, encoding="utf-8")
+    (case_dir / "eam_atom_type.txt").write_text(
+        atom_type_text, encoding="utf-8"
+    )
+    (case_dir / "mdin.spg.toml").write_text(
+        'md_name = "bundled io ab focused EAM"\n'
+        'mode = "nve"\n'
+        "step_limit = 1\n"
+        "dt = 0.0\n"
+        "cutoff = 4.0\n"
+        "skin = 0.4\n"
+        'mass_in_file = "mass.txt"\n'
+        'coordinate_in_file = "coordinate.txt"\n'
+        'velocity_in_file = "velocity.txt"\n'
+        'EAM_in_file = "eam.txt"\n'
+        'EAM_atom_type_in_file = "eam_atom_type.txt"\n'
+        "print_zeroth_frame = 0\n"
+        "write_mdout_interval = 1\n"
+        "write_information_interval = 1\n",
+        encoding="utf-8",
+    )
+
+
+def _validate_focused_eam_routes(
+    legacy_dir: Path, bundled_dir: Path, format_name: str
+) -> None:
+    legacy_mdin = (legacy_dir / "mdin.spg.toml").read_text(encoding="utf-8")
+    bundled_mdin = (bundled_dir / "mdin.bundled.spg.toml").read_text(
+        encoding="utf-8"
+    )
+    for key in ("EAM_in_file", "EAM_atom_type_in_file"):
+        if not _has_key_line(legacy_mdin, key):
+            raise AssertionError(f"focused EAM legacy branch lost {key}")
+        if _has_key_line(bundled_mdin, key):
+            raise AssertionError(f"focused EAM bundled branch retained {key}")
+    if (bundled_dir / "legacy_sidecars").exists():
+        raise AssertionError("focused EAM bundled branch retained sidecars")
+    topology_path = bundled_dir / "topology.spgt.h5"
+    with h5py.File(topology_path, "r") as topology:
+        actual_format = topology["/manybody/eam/format"].asstr()[()]
+        if actual_format != format_name:
+            raise AssertionError(
+                f"focused EAM format changed: {actual_format!r}"
+            )
+        required = {
+            "/manybody/eam/atom_type",
+            "/manybody/eam/embed/raw_ev",
+            "/manybody/eam/electron_density/value",
+            "/manybody/eam/pair_potential/value",
+        }
+        missing = sorted(path for path in required if path not in topology)
+        if missing:
+            raise AssertionError(
+                f"focused EAM bundled topology is missing datasets: {missing}"
+            )
 
 
 def _prepare_focused_edip_pair(case_root: Path) -> tuple[Path, Path]:
@@ -7818,6 +8063,8 @@ def _mutate_failure_mdin(case: AbCase, mdin_path: Path, branch: str) -> None:
         "h5_topology_schema_version",
         "h5_nb14_dual_root",
         "h5_nb14_extra_param_shape",
+        "h5_eam_unknown_format",
+        "h5_eam_embed_shape",
         "restart_dynamic_without_owner",
         "restart_protocol_without_owner",
         "restart_full_without_owner",
@@ -7847,6 +8094,8 @@ def _mutate_failure_h5(case: AbCase, case_dir: Path, branch: str) -> None:
         "h5_topology_schema_version",
         "h5_nb14_dual_root",
         "h5_nb14_extra_param_shape",
+        "h5_eam_unknown_format",
+        "h5_eam_embed_shape",
     }
     if (
         mutation not in sidecar_mutations | metadata_mutations
@@ -7881,6 +8130,21 @@ def _mutate_failure_h5(case: AbCase, case_dir: Path, branch: str) -> None:
                 topology.create_dataset(
                     "/forcefield/nb14_extra/params",
                     data=[[1.0, 0.5]],
+                    dtype="f4",
+                )
+                return
+            if mutation == "h5_eam_unknown_format":
+                _replace_h5_string_dataset(
+                    topology,
+                    "/manybody/eam/format",
+                    "unsupported-eam-format",
+                )
+                return
+            if mutation == "h5_eam_embed_shape":
+                del topology["/manybody/eam/embed/raw_ev"]
+                topology.create_dataset(
+                    "/manybody/eam/embed/raw_ev",
+                    data=[[0.0, 1.0, 2.0]],
                     dtype="f4",
                 )
                 return
@@ -8561,6 +8825,13 @@ def _compare_input_semantics(
                 )
             elif spec.contract_id == "input.manybody.edip":
                 replica_result["force"] = _compare_focused_edip_forces(
+                    case, run
+                )
+            elif spec.contract_id == "input.manybody.eam" and case.name in {
+                "normal_eam_funcfl_nonzero",
+                "normal_eam_setfl_nonzero",
+            }:
+                replica_result["oracle"] = _compare_focused_eam_behavior(
                     case, run
                 )
             elif spec.contract_id == "input.qc.type":
@@ -9720,6 +9991,152 @@ def _compare_focused_edip_forces(case: AbCase, run: AbRun) -> dict[str, object]:
     result["bundled_materialized_path"] = str(
         materialized.relative_to(run.bundled_dir)
     )
+    return result
+
+
+def _compare_focused_eam_behavior(
+    case: AbCase, run: AbRun
+) -> dict[str, object]:
+    expected = {
+        FOCUSED_EAM_FUNCFL_FIXTURE: {
+            "format": "funcfl",
+            "energy": 267.33,
+            "force": (-165.90681, 0.0, 0.0, 165.90681, 0.0, 0.0),
+        },
+        FOCUSED_EAM_SETFL_FIXTURE: {
+            "format": "setfl",
+            "energy": 61.49,
+            "force": (-11.530274, 0.0, 0.0, 11.530274, 0.0, 0.0),
+        },
+    }.get(case.fixture_case)
+    if expected is None:
+        raise AssertionError(f"{case.name} has no focused EAM oracle")
+    materialized_root = run.bundled_dir / ".sponge_h5_native_manybody"
+    materialized = (
+        materialized_root / "eam.txt",
+        materialized_root / "eam_atom_type.txt",
+    )
+    missing = [
+        path
+        for path in materialized
+        if not path.exists() or path.stat().st_size == 0
+    ]
+    if missing:
+        raise AssertionError(
+            f"{case.name} did not materialize bundled EAM payloads: {missing}"
+        )
+    legacy_force = _read_native_float32_file(
+        run.legacy_dir / "output" / "legacy.frc"
+    )
+    bundled_force = _read_native_float32_file(
+        run.bundled_dir / "output" / "legacy.frc"
+    )
+    force_result = _assert_nontrivial_equivalent_forces(
+        f"{case.name} EAM force", legacy_force, bundled_force
+    )
+
+    rows = _read_mdout(run.bundled_dir / "mdout.txt")["rows"]
+    if len(rows) != 1 or not math.isfinite(rows[0].get("EAM", math.nan)):
+        raise AssertionError(f"{case.name} did not emit one finite EAM result")
+    if abs(rows[0]["EAM"]) <= 1.0e-3:
+        raise AssertionError(f"{case.name} EAM result is trivial")
+    _assert_numeric_sequences_close(
+        f"{case.name} EAM energy oracle",
+        (expected["energy"],),
+        (rows[0]["EAM"],),
+        relative_tolerance=0.0,
+        absolute_tolerance=1.0e-2,
+    )
+    relative_tolerance, absolute_tolerance = _deterministic_tolerance("force")
+    _assert_numeric_sequences_close(
+        f"{case.name} EAM force oracle",
+        expected["force"],
+        bundled_force,
+        relative_tolerance=relative_tolerance,
+        absolute_tolerance=absolute_tolerance,
+    )
+
+    control_dir = run.bundled_dir.parent / "bundled_eam_pair_zero"
+    if control_dir.exists():
+        shutil.rmtree(control_dir)
+    shutil.copytree(run.bundled_dir, control_dir)
+    for path in (
+        control_dir / "output",
+        control_dir / ".sponge_h5_native_manybody",
+    ):
+        if path.exists():
+            shutil.rmtree(path)
+    (control_dir / "output").mkdir()
+    for file_name in ("mdout.txt", "mdinfo.txt", "run.stdout", "run.stderr"):
+        path = control_dir / file_name
+        if path.exists():
+            path.unlink()
+
+    topology_path = control_dir / "topology.spgt.h5"
+    with h5py.File(topology_path, "r+") as topology:
+        format_name = topology["/manybody/eam/format"].asstr()[()]
+        if format_name != expected["format"]:
+            raise AssertionError(
+                f"{case.name} EAM format changed: {format_name!r}"
+            )
+        if format_name == "funcfl":
+            topology["/manybody/eam/funcfl/z"][...] = 0.0
+        elif format_name == "setfl":
+            topology["/manybody/eam/pair_potential/value"][...] = 0.0
+        else:
+            raise AssertionError(
+                f"{case.name} has unsupported EAM format {format_name!r}"
+            )
+
+    outcome = _run_sponge_process(control_dir, _mdin_name(control_dir))
+    if outcome.returncode != 0:
+        raise AssertionError(
+            f"{case.name} zero-pair control failed with code "
+            f"{outcome.returncode}\n{outcome.stdout}\n{outcome.stderr}"
+        )
+    control_rows = _read_mdout(control_dir / "mdout.txt")["rows"]
+    if len(control_rows) != 1:
+        raise AssertionError(
+            f"{case.name} zero-pair control expected one mdout row"
+        )
+    control_force = _read_native_float32_file(
+        control_dir / "output" / "legacy.frc"
+    )
+    _assert_numeric_sequences_close(
+        f"{case.name} zero-pair EAM energy oracle",
+        (46.12,),
+        (control_rows[0]["EAM"],),
+        relative_tolerance=0.0,
+        absolute_tolerance=1.0e-2,
+    )
+    _assert_numeric_sequences_close(
+        f"{case.name} zero-pair EAM force oracle",
+        (0.0,) * 6,
+        control_force,
+        relative_tolerance=0.0,
+        absolute_tolerance=1.0e-6,
+    )
+    maximum_force_delta = max(
+        abs(full - zero)
+        for full, zero in zip(bundled_force, control_force, strict=True)
+    )
+    energy_delta = abs(rows[0]["EAM"] - control_rows[0]["EAM"])
+    if maximum_force_delta <= 1.0e-3 or energy_delta <= 1.0e-3:
+        raise AssertionError(
+            f"{case.name} EAM pair table did not affect energy and force"
+        )
+    result = {
+        "format": format_name,
+        "energy": rows[0]["EAM"],
+        "zero_pair_energy": control_rows[0]["EAM"],
+        "energy_delta": energy_delta,
+        "maximum_force_delta": maximum_force_delta,
+        "force": force_result,
+        "bundled_materialized_paths": [
+            str(path.relative_to(run.bundled_dir)) for path in materialized
+        ],
+    }
+    shutil.rmtree(control_dir)
     return result
 
 
@@ -12051,7 +12468,10 @@ def _validate_full_contract_input(
     for file_name, required_paths in FULL_CONTRACT_INPUT_REQUIRED_PATHS.items():
         file_path = bundled_dir / file_name
         paths = _h5_paths(file_path)
-        missing = sorted(required_paths - paths)
+        effective_required_paths = set(required_paths)
+        if file_name == "topology.spgt.h5" and "/manybody/eam" not in paths:
+            effective_required_paths.discard("/manybody/eam/atom_type")
+        missing = sorted(effective_required_paths - paths)
         if missing:
             raise AssertionError(
                 f"{case.name} full-contract input {file_name} is missing "
@@ -12088,6 +12508,11 @@ def _validate_full_contract_input(
             and "nb14_extra_in_file"
             in topology[f"{sidecar_root}/key"].asstr()[...]
         )
+        typed_eam_owner = "/manybody/eam" in topology
+        sidecar_eam_owner = (
+            sidecar_root in topology
+            and "EAM_in_file" in topology[f"{sidecar_root}/key"].asstr()[...]
+        )
     if partial_typed_owner and not typed_owner:
         raise AssertionError(
             f"{case.name} full-contract input has an incomplete typed residue "
@@ -12108,6 +12533,12 @@ def _validate_full_contract_input(
         owner_count = int(typed_nb14_owner) + int(sidecar_nb14_owner)
         raise AssertionError(
             f"{case.name} full-contract input requires exactly one NB14 "
+            f"owner, found {owner_count}"
+        )
+    if typed_eam_owner == sidecar_eam_owner:
+        owner_count = int(typed_eam_owner) + int(sidecar_eam_owner)
+        raise AssertionError(
+            f"{case.name} full-contract input requires exactly one EAM "
             f"owner, found {owner_count}"
         )
 

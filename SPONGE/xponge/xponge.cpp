@@ -3,6 +3,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <filesystem>
 #include <sstream>
 #include <stdexcept>
 #include <vector>
@@ -10,6 +11,7 @@
 #include "load/amber.hpp"
 #include "load/gromacs.hpp"
 #include "load/native.hpp"
+#include "load/native/eam_h5.hpp"
 #include "load/native/nb14_extra_h5.hpp"
 #include "utils/h5md/topology_h5_reader.hpp"
 
@@ -116,6 +118,57 @@ void Materialize_H5_Native_NB14_Extra(CONTROLLER* controller,
     nb14.A = state.A;
     nb14.B = state.B;
     nb14.cf_scale_factor = state.cf_scale_factor;
+}
+
+void Materialize_H5_Native_EAM(CONTROLLER* controller)
+{
+    constexpr const char* input_key = "input_h5_topology_path";
+    if (!controller->Command_Exist(input_key))
+    {
+        return;
+    }
+
+    SpongeH5MD::NativeEAMH5Materializer materializer;
+    if (!materializer.Open(controller->Command(input_key)))
+    {
+        controller->Throw_SPONGE_Error(spongeErrorBadFileFormat,
+                                       "Materialize_H5_Native_EAM",
+                                       materializer.Last_Error().c_str());
+    }
+    if (!materializer.Has_EAM())
+    {
+        return;
+    }
+    if (controller->Command_Exist("EAM", "in_file") ||
+        controller->Command_Exist("EAM", "atom_type_in_file"))
+    {
+        controller->Throw_SPONGE_Error(
+            spongeErrorConflictingCommand, "Materialize_H5_Native_EAM",
+            "Reason:\n\tinput.h5.topology provides native EAM parameters, "
+            "but EAM_in_file or EAM_atom_type_in_file is also set. Native H5 "
+            "and legacy text input cannot both own EAM parameters\n");
+    }
+
+    const std::filesystem::path output_dir =
+        std::filesystem::absolute(".sponge_h5_native_manybody")
+            .lexically_normal();
+    const std::filesystem::path parameter_path = output_dir / "eam.txt";
+    const std::filesystem::path atom_type_path =
+        output_dir / "eam_atom_type.txt";
+    bool has_atom_type = false;
+    if (!materializer.Materialize(parameter_path, atom_type_path,
+                                  &has_atom_type))
+    {
+        controller->Throw_SPONGE_Error(spongeErrorBadFileFormat,
+                                       "Materialize_H5_Native_EAM",
+                                       materializer.Last_Error().c_str());
+    }
+    controller->Set_Command("EAM_in_file", parameter_path.string().c_str(), 0);
+    if (has_atom_type)
+    {
+        controller->Set_Command("EAM_atom_type_in_file",
+                                atom_type_path.string().c_str(), 0);
+    }
 }
 
 std::vector<int> Read_H5_Residue_Atom_Numbers(CONTROLLER* controller,
@@ -354,6 +407,7 @@ void Xponge::System::Load_Inputs(CONTROLLER* controller)
     }
     else
     {
+        Materialize_H5_Native_EAM(controller);
         Load_Native_Inputs(this, controller);
         Materialize_H5_Native_NB14_Extra(controller, this);
         const auto residue_atom_numbers =

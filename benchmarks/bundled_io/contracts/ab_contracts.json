@@ -341,7 +341,9 @@
         "failure_h5_topology_mass_dtype",
         "failure_h5_topology_schema_version",
         "failure_h5_nb14_dual_root",
-        "failure_h5_nb14_extra_param_shape"
+        "failure_h5_nb14_extra_param_shape",
+        "failure_h5_eam_unknown_format",
+        "failure_h5_eam_embed_shape"
       ],
       "assertion_ids": ["stable_failure_semantics"],
       "reason": ""
@@ -493,7 +495,7 @@
       "minimum_evidence": "E3",
       "legacy_surface": "EAM_in_file and EAM_atom_type_in_file",
       "bundled_surface": "/manybody/eam",
-      "case_ids": ["rerun_full_contract_pure_vds_off", "rerun_full_contract_pure_vds_on", "rerun_full_contract_sidecar_vds_off", "rerun_full_contract_sidecar_vds_on"],
+      "case_ids": ["normal_eam_funcfl_nonzero", "normal_eam_setfl_nonzero", "rerun_full_contract_pure_vds_off", "rerun_full_contract_pure_vds_on", "rerun_full_contract_sidecar_vds_off", "rerun_full_contract_sidecar_vds_on"],
       "assertion_ids": ["input_semantic_equivalence"]
     },
     {
