@@ -24,6 +24,8 @@ def _synthetic_evidence_level(assertion_id: str) -> str:
         return "E0"
     if assertion_id == "restart_continuation_equivalence":
         return "E4"
+    if assertion_id == "stable_failure_semantics":
+        return "F1"
     return "E3"
 
 

@@ -26,6 +26,8 @@ from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
     PROFILE_LIMITS,
     RERUN_INPUT_SEMANTIC_SPECS,
     _cases_for_profile,
+    _expected_rerun_frame_indices,
+    _insert_root_toml_keys,
     _parse_mdinfo_key_values,
 )
 
@@ -219,12 +221,113 @@ def test_ab_production_harness_has_executable_contract_coverage():
         "rerun_full_contract_pure_vds_on",
         "rerun_full_contract_sidecar_vds_off",
         "rerun_full_contract_sidecar_vds_on",
+        "rerun_boundary_start0_strip0_limit1_vds_off",
+        "rerun_boundary_start1_strip0_unlimited_no_velocity_vds_on",
+        "rerun_boundary_start0_strip1_beyond_selected_vds_on",
+        "rerun_boundary_start0_strip0_exact_eof_box_vds_off",
+        "rerun_boundary_start1_strip1_limit1_selected_no_velocity_vds_off",
+        "failure_missing_trajectory_binding",
+        "failure_invalid_output_chunk_size",
+        "failure_invalid_output_vds_value",
+        "failure_invalid_output_repair_policy",
+        "failure_invalid_restart_policy",
+        "failure_missing_topology_binding",
+        "failure_missing_protocol_binding",
+        "failure_mixed_legacy_h5_trajectory",
+        "failure_mixed_legacy_h5_restart",
     }
     assert summary["status_counts"]["supported"] > 0
     assert contracts["output.vds.cross_process_append_resume"].status == (
         "unsupported"
     )
     assert contracts["output.vds.complete_prefix_repair"].status == "deferred"
+
+
+def test_rerun_boundary_matrix_covers_semantic_axes_and_eof_boundaries():
+    cases = [
+        case
+        for case in _cases_for_profile()
+        if case.name.startswith("rerun_boundary_")
+    ]
+
+    assert {(case.rerun_start, case.rerun_strip) for case in cases} == {
+        (0, 0),
+        (1, 0),
+        (0, 1),
+        (1, 1),
+    }
+    assert {case.rerun_frame_limit for case in cases} == {1, 2, 3, None}
+    assert {case.rerun_need_box_update for case in cases} == {False, True}
+    assert {case.rerun_velocity_present for case in cases} == {False, True}
+    assert {case.trajectory_particle_stream for case in cases} == {
+        "all",
+        "selected",
+    }
+    assert {case.vds for case in cases} == {False, True}
+    assert all(
+        "rerun_selection_equivalence" in case.assertion_ids for case in cases
+    )
+
+
+@pytest.mark.parametrize(
+    ("case_name", "expected_indices"),
+    [
+        ("rerun_boundary_start0_strip0_limit1_vds_off", [0]),
+        (
+            "rerun_boundary_start1_strip0_unlimited_no_velocity_vds_on",
+            [1],
+        ),
+        ("rerun_boundary_start0_strip1_beyond_selected_vds_on", [0]),
+        ("rerun_boundary_start0_strip0_exact_eof_box_vds_off", [0, 1]),
+        (
+            "rerun_boundary_start1_strip1_limit1_selected_no_velocity_vds_off",
+            [1],
+        ),
+    ],
+)
+def test_rerun_selection_oracle_is_independent_of_runtime_frame_counter(
+    case_name, expected_indices
+):
+    case = next(case for case in _cases_for_profile() if case.name == case_name)
+
+    assert (
+        _expected_rerun_frame_indices(case, frame_count=2) == expected_indices
+    )
+
+
+def test_failure_matrix_requires_exit_category_and_stable_tokens():
+    cases = [
+        case
+        for case in _cases_for_profile()
+        if case.name.startswith("failure_")
+    ]
+
+    assert {case.failure_mutation for case in cases} == {
+        "missing_trajectory",
+        "invalid_chunk_size",
+        "invalid_vds_value",
+        "invalid_repair_policy",
+        "invalid_restart_policy",
+        "missing_topology",
+        "missing_protocol",
+        "mixed_trajectory",
+        "mixed_restart",
+    }
+    assert all(case.expected_error_category for case in cases)
+    assert all(case.expected_diagnostic_tokens for case in cases)
+    assert all(
+        case.assertion_ids == ("stable_failure_semantics",) for case in cases
+    )
+    assert {
+        case.failure_mutation
+        for case in cases
+        if set(case.failure_branches) == {"legacy", "bundled"}
+    } == {
+        "missing_trajectory",
+        "invalid_chunk_size",
+        "invalid_vds_value",
+        "invalid_repair_policy",
+    }
 
 
 def test_h5_bundle_runner_defaults_to_current_pixi_build_dir():
@@ -397,3 +500,15 @@ def test_input_semantic_gate_rejects_activation_only_evidence(
             InputSemanticSpec("input.topology.bond", ("bond",)),
             deterministic=True,
         )
+
+
+def test_rerun_overrides_remain_root_keys_before_module_tables():
+    updated = _insert_root_toml_keys(
+        'mode = "rerun"\n[REAXFF]\nin_file = "reaxff.txt"\n',
+        ["rerun_start = 1", 'crd = "traj.dat"'],
+    )
+
+    parsed = tomllib.loads(updated)
+    assert parsed["rerun_start"] == 1
+    assert parsed["crd"] == "traj.dat"
+    assert parsed["REAXFF"] == {"in_file": "reaxff.txt"}

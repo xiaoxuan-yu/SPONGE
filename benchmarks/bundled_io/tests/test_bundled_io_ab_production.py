@@ -253,6 +253,17 @@ class AbCase:
     restart_load_policy: str
     contract_ids: tuple[str, ...]
     assertion_ids: tuple[str, ...]
+    rerun_start: int = 0
+    rerun_strip: int = 0
+    rerun_frame_limit: int | None = 2
+    rerun_need_box_update: bool = False
+    rerun_velocity_present: bool = True
+    trajectory_particle_stream: str = "all"
+    trajectory_file_name: str = "trajectory.spg.h5md"
+    failure_mutation: str | None = None
+    failure_branches: tuple[str, ...] = ("legacy", "bundled")
+    expected_error_category: str = ""
+    expected_diagnostic_tokens: tuple[str, ...] = ()
 
 
 @dataclass
@@ -265,6 +276,14 @@ class AbRun:
     bundled_metrics: dict[str, object]
     legacy_output_contract: dict[str, object]
     bundled_output_contract: dict[str, object]
+
+
+@dataclass(frozen=True)
+class ProcessOutcome:
+    returncode: int
+    stdout: str
+    stderr: str
+    elapsed_s: float
 
 
 @dataclass(frozen=True)
@@ -509,13 +528,217 @@ def _cases_for_profile() -> list[AbCase]:
             ),
         ),
     ]
+    cases.extend(_rerun_boundary_cases())
+    cases.extend(_failure_cases())
     return cases
+
+
+def _rerun_boundary_cases() -> list[AbCase]:
+    shared_contracts = (
+        "runtime.rerun",
+        "input.rerun.start",
+        "input.rerun.strip",
+        "input.rerun.frame_limit",
+        "input.rerun.box_update",
+        "input.trajectory.velocity_optional",
+        "input.restart_load.structural",
+        "output.legacy.mdout",
+    )
+    shared_assertions = (
+        "mdout_deterministic_equivalence",
+        "rerun_selection_equivalence",
+    )
+    return [
+        AbCase(
+            name="rerun_boundary_start0_strip0_limit1_vds_off",
+            fixture_case="full_contract_rerun",
+            legacy_subdir="legacy_input",
+            bundled_subdir="bundled_input_with_legacy_sidecar/bundle",
+            mode="rerun",
+            vds=False,
+            statistical_md=False,
+            restart_load_policy="structural",
+            contract_ids=shared_contracts,
+            assertion_ids=shared_assertions,
+            rerun_frame_limit=1,
+        ),
+        AbCase(
+            name="rerun_boundary_start1_strip0_unlimited_no_velocity_vds_on",
+            fixture_case="full_contract_rerun",
+            legacy_subdir="legacy_input",
+            bundled_subdir="bundled_input_with_legacy_sidecar/bundle",
+            mode="rerun",
+            vds=True,
+            statistical_md=False,
+            restart_load_policy="structural",
+            contract_ids=shared_contracts,
+            assertion_ids=shared_assertions,
+            rerun_start=1,
+            rerun_frame_limit=None,
+            rerun_need_box_update=True,
+            rerun_velocity_present=False,
+            trajectory_file_name="trajectory.no_velocity.spg.h5md",
+        ),
+        AbCase(
+            name="rerun_boundary_start0_strip1_beyond_selected_vds_on",
+            fixture_case="full_contract_rerun",
+            legacy_subdir="legacy_input",
+            bundled_subdir="bundled_input_with_legacy_sidecar/bundle",
+            mode="rerun",
+            vds=True,
+            statistical_md=False,
+            restart_load_policy="structural",
+            contract_ids=(
+                *shared_contracts,
+                "input.trajectory.particle_stream",
+            ),
+            assertion_ids=shared_assertions,
+            rerun_strip=1,
+            rerun_frame_limit=3,
+            trajectory_particle_stream="selected",
+            trajectory_file_name="trajectory.selected.spg.h5md",
+        ),
+        AbCase(
+            name="rerun_boundary_start0_strip0_exact_eof_box_vds_off",
+            fixture_case="full_contract_rerun",
+            legacy_subdir="legacy_input",
+            bundled_subdir="bundled_input_with_legacy_sidecar/bundle",
+            mode="rerun",
+            vds=False,
+            statistical_md=False,
+            restart_load_policy="structural",
+            contract_ids=(
+                *shared_contracts,
+                "output.trajectory",
+                "output.observable",
+                "output.trajectory.vds_off",
+            ),
+            assertion_ids=(
+                *shared_assertions,
+                "h5_rerun_semantic_equivalence",
+            ),
+            rerun_frame_limit=2,
+            rerun_need_box_update=True,
+        ),
+        AbCase(
+            name="rerun_boundary_start1_strip1_limit1_selected_no_velocity_vds_off",
+            fixture_case="full_contract_rerun",
+            legacy_subdir="legacy_input",
+            bundled_subdir="bundled_input_with_legacy_sidecar/bundle",
+            mode="rerun",
+            vds=False,
+            statistical_md=False,
+            restart_load_policy="structural",
+            contract_ids=(
+                *shared_contracts,
+                "input.trajectory.particle_stream",
+            ),
+            assertion_ids=shared_assertions,
+            rerun_start=1,
+            rerun_strip=1,
+            rerun_frame_limit=1,
+            rerun_velocity_present=False,
+            trajectory_particle_stream="selected",
+            trajectory_file_name="trajectory.selected_no_velocity.spg.h5md",
+        ),
+    ]
+
+
+def _failure_cases() -> list[AbCase]:
+    shared = {
+        "fixture_case": "full_contract_rerun",
+        "legacy_subdir": "legacy_input",
+        "bundled_subdir": "bundled_input_with_legacy_sidecar/bundle",
+        "mode": "failure",
+        "vds": False,
+        "statistical_md": False,
+        "restart_load_policy": "structural",
+        "contract_ids": ("failure.input_configuration",),
+        "assertion_ids": ("stable_failure_semantics",),
+    }
+    return [
+        AbCase(
+            name="failure_missing_trajectory_binding",
+            failure_mutation="missing_trajectory",
+            expected_error_category="spongeErrorMissingCommand",
+            expected_diagnostic_tokens=("trajectory",),
+            **shared,
+        ),
+        AbCase(
+            name="failure_invalid_output_chunk_size",
+            failure_mutation="invalid_chunk_size",
+            expected_error_category="spongeErrorValueErrorCommand",
+            expected_diagnostic_tokens=("output_h5_trajectory_chunk_size",),
+            **shared,
+        ),
+        AbCase(
+            name="failure_invalid_output_vds_value",
+            failure_mutation="invalid_vds_value",
+            expected_error_category="spongeErrorValueErrorCommand",
+            expected_diagnostic_tokens=("output_h5_trajectory_vds",),
+            **shared,
+        ),
+        AbCase(
+            name="failure_invalid_output_repair_policy",
+            failure_mutation="invalid_repair_policy",
+            expected_error_category="spongeErrorValueErrorCommand",
+            expected_diagnostic_tokens=("output_h5_trajectory_repair_policy",),
+            **shared,
+        ),
+        AbCase(
+            name="failure_invalid_restart_policy",
+            failure_mutation="invalid_restart_policy",
+            failure_branches=("bundled",),
+            expected_error_category="spongeErrorValueErrorCommand",
+            expected_diagnostic_tokens=("input_h5_restart_load",),
+            **shared,
+        ),
+        AbCase(
+            name="failure_missing_topology_binding",
+            failure_mutation="missing_topology",
+            failure_branches=("bundled",),
+            expected_error_category="spongeErrorValueErrorCommand",
+            expected_diagnostic_tokens=("input_h5_topology_path",),
+            **shared,
+        ),
+        AbCase(
+            name="failure_missing_protocol_binding",
+            failure_mutation="missing_protocol",
+            failure_branches=("bundled",),
+            expected_error_category="spongeErrorValueErrorCommand",
+            expected_diagnostic_tokens=("input_h5_protocol_path",),
+            **shared,
+        ),
+        AbCase(
+            name="failure_mixed_legacy_h5_trajectory",
+            failure_mutation="mixed_trajectory",
+            failure_branches=("bundled",),
+            expected_error_category="spongeErrorValueErrorCommand",
+            expected_diagnostic_tokens=("input_h5_trajectory_path", "crd"),
+            **shared,
+        ),
+        AbCase(
+            name="failure_mixed_legacy_h5_restart",
+            failure_mutation="mixed_restart",
+            failure_branches=("bundled",),
+            expected_error_category="spongeErrorValueErrorCommand",
+            expected_diagnostic_tokens=(
+                "input_h5_restart_path",
+                "legacy coordinate/velocity restart inputs",
+            ),
+            **shared,
+        ),
+    ]
 
 
 def _input_semantic_specs(case: AbCase) -> tuple[InputSemanticSpec, ...]:
     if case.mode == "rerun":
-        return RERUN_INPUT_SEMANTIC_SPECS
-    return INPUT_SEMANTIC_SPECS_BY_CASE.get(case.name, ())
+        candidates = RERUN_INPUT_SEMANTIC_SPECS
+    else:
+        candidates = INPUT_SEMANTIC_SPECS_BY_CASE.get(case.name, ())
+    return tuple(
+        spec for spec in candidates if spec.contract_id in case.contract_ids
+    )
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -550,6 +773,9 @@ def test_legacy_and_bundled_ab_behavior(case: AbCase):
         )
     contracts = load_contract_registry()
     validate_contract_registry(contracts, _cases_for_profile())
+    if case.failure_mutation is not None:
+        _run_failure_case(case, contracts)
+        return
     root = _output_root()
     case_root = root / case.name
     runs = []
@@ -645,6 +871,109 @@ def test_legacy_and_bundled_ab_behavior(case: AbCase):
         EVIDENCE_RUN_ID,
     )
     print(f"\nBundled I/O A/B metrics: {metrics_path}")
+
+
+def _run_failure_case(case: AbCase, contracts) -> None:
+    case_root = _output_root() / case.name
+    legacy_dir, bundled_dir = _prepare_case_pair(case, case_root, 20260709)
+    for branch, case_dir, mdin_name in (
+        ("legacy", legacy_dir, "mdin.spg.toml"),
+        ("bundled", bundled_dir, "mdin.bundled.spg.toml"),
+    ):
+        _prepare_mdin(
+            case_dir,
+            mdin_name,
+            case,
+            branch=branch,
+            replica_seed=20260709,
+        )
+        _mutate_failure_mdin(case, case_dir / mdin_name, branch)
+
+    outcomes = {}
+    for branch, case_dir in (("legacy", legacy_dir), ("bundled", bundled_dir)):
+        if branch not in case.failure_branches:
+            continue
+        outcome = _run_sponge_process(case_dir, _mdin_name(case_dir))
+        if outcome.returncode == 0:
+            raise AssertionError(f"{case.name} {branch} unexpectedly succeeded")
+        category = _failure_category(outcome.stdout + "\n" + outcome.stderr)
+        if not category:
+            raise AssertionError(f"{case.name} {branch} has no error category")
+        if (
+            case.expected_error_category
+            and category != case.expected_error_category
+        ):
+            raise AssertionError(
+                f"{case.name} {branch} category mismatch: "
+                f"expected={case.expected_error_category}, actual={category}"
+            )
+        normalized = (outcome.stdout + "\n" + outcome.stderr).lower()
+        missing_tokens = [
+            token
+            for token in case.expected_diagnostic_tokens
+            if token.lower() not in normalized
+        ]
+        if missing_tokens:
+            raise AssertionError(
+                f"{case.name} {branch} diagnostics are missing tokens: "
+                f"{missing_tokens}"
+            )
+        outcomes[branch] = {
+            "exit_code": outcome.returncode,
+            "category": category,
+            "diagnostic_tokens": list(case.expected_diagnostic_tokens),
+            "elapsed_s": outcome.elapsed_s,
+        }
+
+    if set(case.failure_branches) == {"legacy", "bundled"}:
+        if outcomes["legacy"]["exit_code"] != outcomes["bundled"]["exit_code"]:
+            raise AssertionError(
+                f"{case.name} exit code mismatch: "
+                f"legacy={outcomes['legacy']['exit_code']}, "
+                f"bundled={outcomes['bundled']['exit_code']}"
+            )
+        if outcomes["legacy"]["category"] != outcomes["bundled"]["category"]:
+            raise AssertionError(
+                f"{case.name} error category mismatch: "
+                f"legacy={outcomes['legacy']['category']}, "
+                f"bundled={outcomes['bundled']['category']}"
+            )
+
+    assertion = AssertionEvidence(
+        assertion_id="stable_failure_semantics",
+        evidence_level="F1",
+        details={
+            "mutation": case.failure_mutation,
+            "branches": list(case.failure_branches),
+            "outcomes": outcomes,
+        },
+    )
+    evidence = build_case_evidence(contracts, case, (assertion,))
+    metrics = {
+        "profile": PROFILE,
+        "case": case.name,
+        "contract_ids": list(case.contract_ids),
+        "assertion_ids": list(case.assertion_ids),
+        "evidence": [record.as_dict() for record in evidence],
+        "failure": assertion.details,
+    }
+    metrics_path = case_root / "ab_metrics.json"
+    metrics_path.write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+    update_evidence_report(
+        _output_root() / "ab_evidence.json",
+        contracts,
+        case,
+        evidence,
+        {
+            "profile": PROFILE,
+            "failure_mutation": case.failure_mutation,
+            "branches": list(case.failure_branches),
+            "sponge_executable": str(_sponge_executable()),
+            "metrics_path": str(metrics_path),
+        },
+        EVIDENCE_RUN_ID,
+    )
+    print(f"\nBundled I/O A/B failure metrics: {metrics_path}")
 
 
 def test_sidecar_rerun_cmap_potential_is_branch_and_vds_invariant():
@@ -765,7 +1094,76 @@ def _prepare_case_pair(
     legacy_dir = _copy_case(case, "legacy", case.legacy_subdir, case_root)
     bundled_dir = _copy_case(case, "bundled", case.bundled_subdir, case_root)
     _validate_full_contract_input(case, bundled_dir)
+    _prepare_rerun_trajectory_variant(case, bundled_dir)
     return legacy_dir, bundled_dir
+
+
+def _prepare_rerun_trajectory_variant(case: AbCase, bundled_dir: Path) -> None:
+    if (
+        case.rerun_velocity_present
+        and case.trajectory_particle_stream == "all"
+        and case.trajectory_file_name == "trajectory.spg.h5md"
+    ):
+        return
+
+    source = bundled_dir / "trajectory.spg.h5md"
+    destination = bundled_dir / case.trajectory_file_name
+    if destination == source:
+        raise AssertionError(
+            f"{case.name} trajectory variant must not overwrite its source"
+        )
+    if destination.exists():
+        destination.unlink()
+    h5copy = shutil.which("h5copy")
+    if h5copy is None:
+        raise AssertionError("h5copy is required for rerun trajectory variants")
+
+    def copy(source_path: str, destination_path: str, *, parents: bool = False):
+        command = [
+            h5copy,
+            "-i",
+            source,
+            "-o",
+            destination,
+            "-s",
+            source_path,
+            "-d",
+            destination_path,
+        ]
+        if parents:
+            command.insert(1, "-p")
+        _run(command)
+
+    copy("/h5md", "/h5md")
+    copy("/parameters", "/parameters")
+    source_stream = "/particles/all"
+    destination_stream = f"/particles/{case.trajectory_particle_stream}"
+    copy(
+        f"{source_stream}/step",
+        f"{destination_stream}/step",
+        parents=True,
+    )
+    copy(
+        f"{source_stream}/time",
+        f"{destination_stream}/time",
+        parents=True,
+    )
+    copy(
+        f"{source_stream}/box",
+        f"{destination_stream}/box",
+        parents=True,
+    )
+    copy(
+        f"{source_stream}/position",
+        f"{destination_stream}/position",
+        parents=True,
+    )
+    if case.rerun_velocity_present:
+        copy(
+            f"{source_stream}/velocity",
+            f"{destination_stream}/velocity",
+            parents=True,
+        )
 
 
 def _prepare_normal_tip3p_pair(
@@ -990,6 +1388,8 @@ def _prepare_mdin(
         "rerun_frame_limit",
         "rerun_need_box_update",
         "input_h5_restart_load",
+        "input_h5_trajectory_path",
+        "input_h5_trajectory_particle_stream",
         "mdout",
         "mdinfo",
         "crd",
@@ -1033,16 +1433,33 @@ def _prepare_mdin(
             'rst = "output/legacy_restart"',
         ]
     else:
-        frame_limit = limits["rerun_frame_limit"]
         additions = [
-            "rerun_start = 0",
-            "rerun_strip = 0",
-            f"rerun_frame_limit = {frame_limit}",
-            "rerun_need_box_update = 0",
+            f"rerun_start = {case.rerun_start}",
+            f"rerun_strip = {case.rerun_strip}",
+            f"rerun_need_box_update = {1 if case.rerun_need_box_update else 0}",
             "write_mdout_interval = 1",
             "write_trajectory_interval = 1",
             "write_restart_file_interval = 0",
         ]
+        if case.rerun_frame_limit is not None:
+            additions.append(f"rerun_frame_limit = {case.rerun_frame_limit}")
+        if branch == "legacy":
+            additions.extend(
+                [
+                    'crd = "traj.dat"',
+                    'box = "traj_box.dat"',
+                ]
+            )
+            if case.rerun_velocity_present:
+                additions.append('vel = "traj_vel.dat"')
+        else:
+            additions.extend(
+                [
+                    f'input_h5_trajectory_path = "{case.trajectory_file_name}"',
+                    "input_h5_trajectory_particle_stream = "
+                    f'"{case.trajectory_particle_stream}"',
+                ]
+            )
         if _has_key_line(text, "input_h5_restart_path"):
             additions.append(
                 f'input_h5_restart_load = "{case.restart_load_policy}"'
@@ -1060,10 +1477,71 @@ def _prepare_mdin(
     if case.mode == "normal":
         additions.append(f'output_h5_restart_path = "{RESTART_REL.as_posix()}"')
     mdin_path.write_text(
-        text.rstrip() + "\n" + "\n".join(additions) + "\n",
+        _insert_root_toml_keys(text, additions),
         encoding="utf-8",
     )
     assert branch in {"legacy", "bundled"}
+
+
+def _insert_root_toml_keys(text: str, additions: Sequence[str]) -> str:
+    lines = text.rstrip().splitlines()
+    table_index = next(
+        (
+            index
+            for index, line in enumerate(lines)
+            if line.lstrip().startswith("[")
+        ),
+        len(lines),
+    )
+    updated = [
+        *lines[:table_index],
+        *additions,
+        *lines[table_index:],
+    ]
+    return "\n".join(updated) + "\n"
+
+
+def _mutate_failure_mdin(case: AbCase, mdin_path: Path, branch: str) -> None:
+    mutation = case.failure_mutation
+    if mutation is None or branch not in case.failure_branches:
+        return
+    remove_keys: set[str] = set()
+    additions: list[str] = []
+    if mutation == "missing_trajectory":
+        remove_keys.update({"crd", "box", "vel", "input_h5_trajectory_path"})
+    elif mutation == "invalid_chunk_size":
+        remove_keys.add("output_h5_trajectory_chunk_size")
+        additions.append("output_h5_trajectory_chunk_size = 0")
+    elif mutation == "invalid_vds_value":
+        remove_keys.add("output_h5_trajectory_vds")
+        additions.append('output_h5_trajectory_vds = "invalid"')
+    elif mutation == "invalid_repair_policy":
+        remove_keys.add("output_h5_trajectory_repair_policy")
+        additions.append('output_h5_trajectory_repair_policy = "invalid"')
+    elif mutation == "invalid_restart_policy":
+        remove_keys.add("input_h5_restart_load")
+        additions.append('input_h5_restart_load = "invalid"')
+    elif mutation == "missing_topology":
+        remove_keys.add("input_h5_topology_path")
+    elif mutation == "missing_protocol":
+        remove_keys.add("input_h5_protocol_path")
+    elif mutation == "mixed_trajectory":
+        additions.extend(['crd = "traj.dat"', 'box = "traj_box.dat"'])
+    elif mutation == "mixed_restart":
+        additions.extend(
+            [
+                'coordinate_in_file = "coordinate.txt"',
+                'velocity_in_file = "velocity.txt"',
+            ]
+        )
+    else:
+        raise AssertionError(f"unknown failure mutation: {mutation}")
+
+    text = mdin_path.read_text(encoding="utf-8")
+    text = _remove_key_lines(text, remove_keys)
+    mdin_path.write_text(
+        _insert_root_toml_keys(text, additions), encoding="utf-8"
+    )
 
 
 def _remove_key_lines(text: str, keys: set[str]) -> str:
@@ -1090,6 +1568,16 @@ def _has_key_line(text: str, key: str) -> bool:
 
 
 def _run_sponge(case_dir: Path, mdin_name: str) -> dict[str, object]:
+    outcome = _run_sponge_process(case_dir, mdin_name)
+    if outcome.returncode != 0:
+        raise AssertionError(
+            f"SPONGE failed in {case_dir} with code {outcome.returncode}\n"
+            f"[stdout]\n{outcome.stdout}\n[stderr]\n{outcome.stderr}"
+        )
+    return _collect_metrics(case_dir, outcome.elapsed_s)
+
+
+def _run_sponge_process(case_dir: Path, mdin_name: str) -> ProcessOutcome:
     start = time.perf_counter()
     result = subprocess.run(
         [_sponge_executable(), "-mdin", mdin_name],
@@ -1102,12 +1590,17 @@ def _run_sponge(case_dir: Path, mdin_name: str) -> dict[str, object]:
     elapsed_s = time.perf_counter() - start
     (case_dir / "run.stdout").write_text(result.stdout, encoding="utf-8")
     (case_dir / "run.stderr").write_text(result.stderr, encoding="utf-8")
-    if result.returncode != 0:
-        raise AssertionError(
-            f"SPONGE failed in {case_dir} with code {result.returncode}\n"
-            f"[stdout]\n{result.stdout}\n[stderr]\n{result.stderr}"
-        )
-    return _collect_metrics(case_dir, elapsed_s)
+    return ProcessOutcome(
+        returncode=result.returncode,
+        stdout=result.stdout,
+        stderr=result.stderr,
+        elapsed_s=elapsed_s,
+    )
+
+
+def _failure_category(text: str) -> str:
+    match = re.search(r"\b(spongeError[A-Za-z0-9_]+) raised by\b", text)
+    return match.group(1) if match else ""
 
 
 def _sponge_executable() -> str:
@@ -1224,18 +1717,21 @@ def _compare_outputs(
         )
     else:
         mdout_comparison = _compare_mdout_deterministically(case, runs[0])
-        h5_comparison = _compare_h5_outputs_deterministically(case, runs[0])
-        evidence.extend(
-            (
-                AssertionEvidence(
-                    assertion_id="mdout_deterministic_equivalence",
-                    evidence_level="E3",
-                    details={
-                        "method": mdout_comparison["method"],
-                        "row_count": mdout_comparison["rows"],
-                        "columns": mdout_comparison["columns"],
-                    },
-                ),
+        h5_comparison: dict[str, object] = {"method": "not_requested"}
+        evidence.append(
+            AssertionEvidence(
+                assertion_id="mdout_deterministic_equivalence",
+                evidence_level="E3",
+                details={
+                    "method": mdout_comparison["method"],
+                    "row_count": mdout_comparison["rows"],
+                    "columns": mdout_comparison["columns"],
+                },
+            )
+        )
+        if "h5_rerun_semantic_equivalence" in case.assertion_ids:
+            h5_comparison = _compare_h5_outputs_deterministically(case, runs[0])
+            evidence.append(
                 AssertionEvidence(
                     assertion_id="h5_rerun_semantic_equivalence",
                     evidence_level="E3",
@@ -1245,14 +1741,23 @@ def _compare_outputs(
                             "trajectory_frame_count"
                         ],
                     },
-                ),
+                )
             )
-        )
 
     comparison: dict[str, object] = {
         "mdout": mdout_comparison,
         "h5": h5_comparison,
     }
+    if "rerun_selection_equivalence" in case.assertion_ids:
+        rerun_selection = _compare_rerun_selection(case, runs[0])
+        comparison["rerun_selection"] = rerun_selection
+        evidence.append(
+            AssertionEvidence(
+                assertion_id="rerun_selection_equivalence",
+                evidence_level="E3",
+                details=rerun_selection,
+            )
+        )
     input_semantics = _compare_input_semantics(case, runs)
     if input_semantics:
         comparison["input_semantics"] = input_semantics
@@ -1336,6 +1841,93 @@ def _compare_outputs(
             )
         )
     return comparison, tuple(evidence)
+
+
+def _expected_rerun_frame_indices(case: AbCase, frame_count: int) -> list[int]:
+    indices = []
+    next_index = 0
+    strip = max(0, case.rerun_start)
+    while (
+        case.rerun_frame_limit is None or len(indices) < case.rerun_frame_limit
+    ):
+        frame_index = next_index + strip
+        if frame_index >= frame_count:
+            break
+        indices.append(frame_index)
+        next_index = frame_index + 1
+        strip = max(0, case.rerun_strip)
+    return indices
+
+
+def _compare_rerun_selection(case: AbCase, run: AbRun) -> dict[str, object]:
+    input_trajectory = run.bundled_dir / case.trajectory_file_name
+    stream_root = f"/particles/{case.trajectory_particle_stream}"
+    input_steps = _h5_numeric_values(input_trajectory, f"{stream_root}/step")
+    expected_indices = _expected_rerun_frame_indices(case, len(input_steps))
+    expected_frames = [
+        float(index) for index in range(1, len(expected_indices) + 1)
+    ]
+
+    branch_frames = {}
+    for branch, case_dir in (
+        ("legacy", run.legacy_dir),
+        ("bundled", run.bundled_dir),
+    ):
+        mdout = _read_mdout(case_dir / "mdout.txt")
+        if "frame" not in mdout["columns"]:
+            raise AssertionError(f"{case.name} {branch} mdout is missing frame")
+        actual_frames = [row["frame"] for row in mdout["rows"]]
+        _assert_numeric_sequences_close(
+            f"{case.name} {branch} selected rerun frames",
+            expected_frames,
+            actual_frames,
+            relative_tolerance=0.0,
+            absolute_tolerance=0.0,
+        )
+        branch_frames[branch] = actual_frames
+
+    legacy_stdout = (run.legacy_dir / "run.stdout").read_text(encoding="utf-8")
+    bundled_stdout = (run.bundled_dir / "run.stdout").read_text(
+        encoding="utf-8"
+    )
+    for token in (
+        "Open rerun coordinate trajectory 'traj.dat'",
+        "Open rerun box trajectory 'traj_box.dat'",
+    ):
+        if token not in legacy_stdout:
+            raise AssertionError(
+                f"{case.name} legacy route is missing {token!r}"
+            )
+    velocity_token = "Open rerun velocity trajectory 'traj_vel.dat'"
+    if (velocity_token in legacy_stdout) != case.rerun_velocity_present:
+        raise AssertionError(
+            f"{case.name} legacy velocity route does not match the case"
+        )
+    h5_open_token = f"Open rerun H5MD trajectory '{case.trajectory_file_name}'"
+    if h5_open_token not in bundled_stdout:
+        raise AssertionError(
+            f"{case.name} bundled route is missing {h5_open_token!r}"
+        )
+    velocity_path = f"{stream_root}/velocity/value"
+    bundled_has_velocity = velocity_path in _h5_paths(input_trajectory)
+    if bundled_has_velocity != case.rerun_velocity_present:
+        raise AssertionError(
+            f"{case.name} bundled velocity payload does not match the case"
+        )
+
+    return {
+        "method": "input_step_selection_and_module_owned_mdout_frames",
+        "start": case.rerun_start,
+        "strip": case.rerun_strip,
+        "frame_limit": case.rerun_frame_limit,
+        "input_frame_count": len(input_steps),
+        "selected_indices": expected_indices,
+        "selected_frames": expected_frames,
+        "branch_frames": branch_frames,
+        "box_update": case.rerun_need_box_update,
+        "velocity_present": case.rerun_velocity_present,
+        "particle_stream": case.trajectory_particle_stream,
+    }
 
 
 def _compare_input_semantics(
@@ -2007,7 +2599,7 @@ def _validate_branch_output_contract(
             "bytes": _file_size(path),
         }
 
-    _validate_trajectory_output(case, files["trajectory"])
+    _validate_trajectory_output(case, files["trajectory"], case_dir)
     if case.mode == "normal":
         summary["particle_legacy_coexistence"] = (
             _validate_particle_legacy_coexistence(case, case_dir, files)
@@ -2024,7 +2616,16 @@ def _validate_branch_output_contract(
                     case, case_dir, files["restart"]
                 )
             )
-    if case.vds and _vds_shard_count(files["trajectory"]) <= 0:
+    trajectory_frame_count = int(
+        _h5_numeric_values(
+            files["trajectory"], "/parameters/sponge/output/frame_count"
+        )[-1]
+    )
+    if (
+        case.vds
+        and trajectory_frame_count > 0
+        and _vds_shard_count(files["trajectory"]) <= 0
+    ):
         raise AssertionError(
             f"{case.name} VDS run did not create trajectory shards"
         )
@@ -2218,8 +2819,30 @@ def _validate_particle_legacy_coexistence(
     return compared
 
 
-def _validate_trajectory_output(case: AbCase, path: Path) -> None:
+def _validate_trajectory_output(
+    case: AbCase, path: Path, case_dir: Path
+) -> None:
     paths = _h5_paths(path)
+    expected_output_frames: int | None = None
+    if case.mode == "rerun":
+        input_trajectory = case_dir / case.trajectory_file_name
+        stream_root = f"/particles/{case.trajectory_particle_stream}"
+        input_steps = _h5_numeric_values(
+            input_trajectory, f"{stream_root}/step"
+        )
+        selected = _expected_rerun_frame_indices(case, len(input_steps))
+        expected_output_frames = max(0, len(selected) - 1)
+        if expected_output_frames == 0:
+            frame_counts = _h5_numeric_values(
+                path, "/parameters/sponge/output/frame_count"
+            )
+            if frame_counts != [0.0]:
+                raise AssertionError(
+                    f"{case.name} empty rerun trajectory has invalid completion "
+                    f"frame count: {frame_counts}"
+                )
+            return
+
     required = set(H5_COMPARE_DATASETS)
     if case.mode != "normal":
         required -= {
@@ -2236,11 +2859,19 @@ def _validate_trajectory_output(case: AbCase, path: Path) -> None:
     frame_counts = _h5_numeric_values(
         path, "/parameters/sponge/output/frame_count"
     )
-    if not steps or len(steps) != len(times):
+    if len(steps) != len(times):
         raise AssertionError(
-            f"{case.name} trajectory timeline is empty or inconsistent: "
+            f"{case.name} trajectory timeline is inconsistent: "
             f"steps={len(steps)}, times={len(times)}"
         )
+    if expected_output_frames is not None:
+        if len(steps) != expected_output_frames:
+            raise AssertionError(
+                f"{case.name} rerun trajectory frame count mismatch: "
+                f"expected={expected_output_frames}, actual={len(steps)}"
+            )
+    elif not steps:
+        raise AssertionError(f"{case.name} trajectory timeline is empty")
     if not frame_counts or int(frame_counts[-1]) != len(steps):
         raise AssertionError(
             f"{case.name} trajectory completion frame count does not match "
@@ -2417,14 +3048,15 @@ def _compare_rerun_h5_output(case: AbCase, run: AbRun) -> dict[str, object]:
     output_files = _output_h5_files(case, run.bundled_dir)
     trajectory_output = output_files["trajectory"]
     observable_output = output_files["observable"]
-    input_trajectory = run.bundled_dir / "trajectory.spg.h5md"
+    input_trajectory = run.bundled_dir / case.trajectory_file_name
     if not input_trajectory.exists():
         raise AssertionError(
             f"{case.name} bundled rerun input trajectory is missing: {input_trajectory}"
         )
 
     output_steps = _h5_numeric_values(trajectory_output, "/particles/all/step")
-    input_steps = _h5_numeric_values(input_trajectory, "/particles/all/step")
+    stream_root = f"/particles/{case.trajectory_particle_stream}"
+    input_steps = _h5_numeric_values(input_trajectory, f"{stream_root}/step")
     if not output_steps:
         raise AssertionError(
             f"{case.name} bundled rerun output has no trajectory frames"
@@ -2438,8 +3070,8 @@ def _compare_rerun_h5_output(case: AbCase, run: AbRun) -> dict[str, object]:
                 f"{case.name} output step {output_step} is absent from rerun input"
             ) from error
 
-    input_position_dataset = "/particles/all/position/value"
-    input_box_dataset = "/particles/all/box/edges/value"
+    input_position_dataset = f"{stream_root}/position/value"
+    input_box_dataset = f"{stream_root}/box/edges/value"
     input_position_values = _h5_numeric_values(
         input_trajectory, input_position_dataset
     )
@@ -2460,38 +3092,39 @@ def _compare_rerun_h5_output(case: AbCase, run: AbRun) -> dict[str, object]:
         run, matching_indices, input_box_values, input_box_shape
     )
 
-    for dataset in (
-        input_position_dataset,
-        input_box_dataset,
+    for input_dataset, output_dataset in (
+        (input_position_dataset, "/particles/all/position/value"),
+        (input_box_dataset, "/particles/all/box/edges/value"),
     ):
-        output_values = _h5_numeric_values(trajectory_output, dataset)
+        output_values = _h5_numeric_values(trajectory_output, output_dataset)
         input_shape = (
             input_position_shape
-            if dataset == input_position_dataset
+            if input_dataset == input_position_dataset
             else input_box_shape
         )
-        output_shape = _h5_dataset_shape(trajectory_output, dataset)
+        output_shape = _h5_dataset_shape(trajectory_output, output_dataset)
         if len(input_shape) < 2 or len(output_shape) < 2:
             raise AssertionError(
-                f"{case.name} rerun trajectory payload is not frame-shaped: {dataset}"
+                f"{case.name} rerun trajectory payload is not frame-shaped: "
+                f"{input_dataset}"
             )
         input_frame_width = math.prod(input_shape[1:])
         output_frame_width = math.prod(output_shape[1:])
         if input_frame_width != output_frame_width:
             raise AssertionError(
-                f"{case.name} rerun {dataset} frame width mismatch: "
+                f"{case.name} rerun {input_dataset} frame width mismatch: "
                 f"input={input_frame_width}, output={output_frame_width}"
             )
         expected = (
             expected_positions
-            if dataset == input_position_dataset
+            if input_dataset == input_position_dataset
             else expected_boxes
         )
         relative_tolerance, absolute_tolerance = _deterministic_tolerance(
-            dataset
+            output_dataset
         )
         _assert_numeric_sequences_close(
-            f"{case.name} rerun output matches bundled input {dataset}",
+            f"{case.name} rerun output matches bundled input {input_dataset}",
             expected,
             output_values,
             relative_tolerance=relative_tolerance,

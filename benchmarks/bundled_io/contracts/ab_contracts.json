@@ -105,9 +105,31 @@
       "minimum_evidence": "E3",
       "legacy_surface": "legacy rerun trajectory",
       "bundled_surface": "input_h5_trajectory_path",
-      "case_ids": ["rerun_full_contract_pure_vds_off", "rerun_full_contract_pure_vds_on", "rerun_full_contract_sidecar_vds_off", "rerun_full_contract_sidecar_vds_on"],
+      "case_ids": ["rerun_full_contract_pure_vds_off", "rerun_full_contract_pure_vds_on", "rerun_full_contract_sidecar_vds_off", "rerun_full_contract_sidecar_vds_on", "rerun_boundary_start0_strip0_limit1_vds_off", "rerun_boundary_start1_strip0_unlimited_no_velocity_vds_on", "rerun_boundary_start0_strip1_beyond_selected_vds_on", "rerun_boundary_start0_strip0_exact_eof_box_vds_off", "rerun_boundary_start1_strip1_limit1_selected_no_velocity_vds_off"],
       "assertion_ids": ["mdout_deterministic_equivalence"],
       "inventory_refs": ["h5_input_keys:input_h5_trajectory_path"]
+    },
+    {
+      "contract_id": "input.trajectory.velocity_optional",
+      "direction": "input",
+      "component": "trajectory",
+      "status": "supported",
+      "minimum_evidence": "E3",
+      "legacy_surface": "optional vel rerun trajectory",
+      "bundled_surface": "optional /particles/<stream>/velocity",
+      "case_ids": ["rerun_boundary_start0_strip0_limit1_vds_off", "rerun_boundary_start1_strip0_unlimited_no_velocity_vds_on", "rerun_boundary_start0_strip1_beyond_selected_vds_on", "rerun_boundary_start0_strip0_exact_eof_box_vds_off", "rerun_boundary_start1_strip1_limit1_selected_no_velocity_vds_off"],
+      "assertion_ids": ["rerun_selection_equivalence"]
+    },
+    {
+      "contract_id": "failure.input_configuration",
+      "direction": "runtime",
+      "component": "input_validation",
+      "status": "supported",
+      "minimum_evidence": "F1",
+      "legacy_surface": "legacy input and shared output controls",
+      "bundled_surface": "H5 bindings, conflicts, and shared output controls",
+      "case_ids": ["failure_missing_trajectory_binding", "failure_invalid_output_chunk_size", "failure_invalid_output_vds_value", "failure_invalid_output_repair_policy", "failure_invalid_restart_policy", "failure_missing_topology_binding", "failure_missing_protocol_binding", "failure_mixed_legacy_h5_trajectory", "failure_mixed_legacy_h5_restart"],
+      "assertion_ids": ["stable_failure_semantics"]
     },
     {
       "contract_id": "output.trajectory",
@@ -117,7 +139,7 @@
       "minimum_evidence": "E3",
       "legacy_surface": "crd/box trajectory semantics",
       "bundled_surface": "output_h5_trajectory_path",
-      "case_ids": ["rerun_full_contract_pure_vds_off", "rerun_full_contract_pure_vds_on", "rerun_full_contract_sidecar_vds_off", "rerun_full_contract_sidecar_vds_on"],
+      "case_ids": ["rerun_full_contract_pure_vds_off", "rerun_full_contract_pure_vds_on", "rerun_full_contract_sidecar_vds_off", "rerun_full_contract_sidecar_vds_on", "rerun_boundary_start0_strip0_exact_eof_box_vds_off"],
       "assertion_ids": ["h5_statistical_equivalence", "h5_rerun_semantic_equivalence"],
       "inventory_refs": ["h5_output_keys:output_h5_trajectory_path"]
     },
@@ -129,7 +151,7 @@
       "minimum_evidence": "E3",
       "legacy_surface": "mdout columns",
       "bundled_surface": "output_h5_observable_path",
-      "case_ids": ["rerun_full_contract_pure_vds_off", "rerun_full_contract_pure_vds_on", "rerun_full_contract_sidecar_vds_off", "rerun_full_contract_sidecar_vds_on"],
+      "case_ids": ["rerun_full_contract_pure_vds_off", "rerun_full_contract_pure_vds_on", "rerun_full_contract_sidecar_vds_off", "rerun_full_contract_sidecar_vds_on", "rerun_boundary_start0_strip0_exact_eof_box_vds_off"],
       "assertion_ids": ["h5_statistical_equivalence", "h5_rerun_semantic_equivalence"],
       "inventory_refs": ["h5_output_keys:output_h5_observable_path"]
     },
@@ -153,7 +175,7 @@
       "minimum_evidence": "E3",
       "legacy_surface": "legacy trajectory semantics",
       "bundled_surface": "single-file H5 trajectory",
-      "case_ids": ["normal_core_h5_output", "rerun_full_contract_pure_vds_off", "rerun_full_contract_sidecar_vds_off"],
+      "case_ids": ["normal_core_h5_output", "rerun_full_contract_pure_vds_off", "rerun_full_contract_sidecar_vds_off", "rerun_boundary_start0_strip0_exact_eof_box_vds_off"],
       "assertion_ids": ["h5_statistical_equivalence", "h5_rerun_semantic_equivalence"]
     },
     {
@@ -251,12 +273,96 @@
       "minimum_evidence": "E3",
       "legacy_surface": "legacy structural restart",
       "bundled_surface": "input_h5_restart_load=structural",
-      "case_ids": ["rerun_full_contract_pure_vds_off", "rerun_full_contract_pure_vds_on", "rerun_full_contract_sidecar_vds_off", "rerun_full_contract_sidecar_vds_on"],
+      "case_ids": ["rerun_full_contract_pure_vds_off", "rerun_full_contract_pure_vds_on", "rerun_full_contract_sidecar_vds_off", "rerun_full_contract_sidecar_vds_on", "rerun_boundary_start0_strip0_limit1_vds_off", "rerun_boundary_start1_strip0_unlimited_no_velocity_vds_on", "rerun_boundary_start0_strip1_beyond_selected_vds_on", "rerun_boundary_start0_strip0_exact_eof_box_vds_off", "rerun_boundary_start1_strip1_limit1_selected_no_velocity_vds_off"],
       "assertion_ids": ["mdout_deterministic_equivalence"],
       "inventory_refs": [
         "h5_input_keys:input_h5_restart_path",
         "h5_input_keys:input_h5_restart_load"
       ]
+    },
+    {
+      "contract_id": "input.restart_load.absent",
+      "direction": "input",
+      "component": "restart",
+      "status": "deferred",
+      "minimum_evidence": "E3",
+      "legacy_surface": "rerun without a restart input",
+      "bundled_surface": "rerun without input_h5_restart_path",
+      "case_ids": [],
+      "assertion_ids": [],
+      "reason": "A same-bootstrap-state A/B fixture without either restart route is pending."
+    },
+    {
+      "contract_id": "input.restart_load.dynamic",
+      "direction": "input",
+      "component": "restart",
+      "status": "deferred",
+      "minimum_evidence": "E4",
+      "legacy_surface": "legacy dynamic restart state",
+      "bundled_surface": "input_h5_restart_load=dynamic",
+      "case_ids": [],
+      "assertion_ids": [],
+      "reason": "Dynamic-state load validation exists, but paired continuation behavior is pending."
+    },
+    {
+      "contract_id": "input.restart_load.protocol",
+      "direction": "input",
+      "component": "restart",
+      "status": "deferred",
+      "minimum_evidence": "E4",
+      "legacy_surface": "legacy protocol restart state",
+      "bundled_surface": "input_h5_restart_load=protocol",
+      "case_ids": [],
+      "assertion_ids": [],
+      "reason": "Protocol-state load validation exists, but paired continuation behavior is pending."
+    },
+    {
+      "contract_id": "input.restart_load.full",
+      "direction": "input",
+      "component": "restart",
+      "status": "deferred",
+      "minimum_evidence": "E4",
+      "legacy_surface": "legacy structural, dynamic, and protocol restart state",
+      "bundled_surface": "input_h5_restart_load=full",
+      "case_ids": [],
+      "assertion_ids": [],
+      "reason": "Full-state load validation exists, but paired continuation behavior is pending."
+    },
+    {
+      "contract_id": "failure.h5_metadata",
+      "direction": "runtime",
+      "component": "input_validation",
+      "status": "deferred",
+      "minimum_evidence": "F1",
+      "legacy_surface": "malformed legacy atom counts and payload dimensions",
+      "bundled_surface": "H5 atom count, shape, dtype, and schema-version errors",
+      "case_ids": [],
+      "assertion_ids": [],
+      "reason": "Reader unit tests cover subsets, but process exit/category/token parity for all four mutations is pending."
+    },
+    {
+      "contract_id": "failure.sidecar_table",
+      "direction": "runtime",
+      "component": "input_validation",
+      "status": "deferred",
+      "minimum_evidence": "F1",
+      "legacy_surface": "invalid legacy sidecar bindings",
+      "bundled_surface": "unsupported key, key/path length mismatch, and path conflict",
+      "case_ids": [],
+      "assertion_ids": [],
+      "reason": "Process-level H5 sidecar table mutation cases are pending."
+    },
+    {
+      "contract_id": "failure.restart_owner_state",
+      "direction": "runtime",
+      "component": "input_validation",
+      "status": "deferred",
+      "minimum_evidence": "F1",
+      "legacy_surface": "dynamic/protocol/full state requested without owner module",
+      "bundled_surface": "the same owner-state requests through input_h5_restart_load",
+      "case_ids": [],
+      "assertion_ids": [],
+      "reason": "Validation helpers cover missing payloads; process-level owner-module diagnostics are pending."
     },
     {
       "contract_id": "input.topology.cmap",
@@ -680,7 +786,7 @@
       "minimum_evidence": "E3",
       "legacy_surface": "mdout",
       "bundled_surface": "explicit mdout retained beside H5 output",
-      "case_ids": ["normal_core_h5_output", "normal_sits_ff19sb_cmap_peptide", "rerun_full_contract_pure_vds_off", "rerun_full_contract_pure_vds_on", "rerun_full_contract_sidecar_vds_off", "rerun_full_contract_sidecar_vds_on"],
+      "case_ids": ["normal_core_h5_output", "normal_sits_ff19sb_cmap_peptide", "rerun_full_contract_pure_vds_off", "rerun_full_contract_pure_vds_on", "rerun_full_contract_sidecar_vds_off", "rerun_full_contract_sidecar_vds_on", "rerun_boundary_start0_strip0_limit1_vds_off", "rerun_boundary_start1_strip0_unlimited_no_velocity_vds_on", "rerun_boundary_start0_strip1_beyond_selected_vds_on", "rerun_boundary_start0_strip0_exact_eof_box_vds_off", "rerun_boundary_start1_strip1_limit1_selected_no_velocity_vds_off"],
       "assertion_ids": ["mdout_statistical_equivalence", "mdout_deterministic_equivalence"],
       "inventory_refs": ["legacy_output_keys:mdout"]
     },
@@ -688,14 +794,13 @@
       "contract_id": "input.trajectory.particle_stream",
       "direction": "input",
       "component": "trajectory",
-      "status": "deferred",
+      "status": "supported",
       "minimum_evidence": "E3",
       "legacy_surface": "legacy rerun stream selection",
       "bundled_surface": "input_h5_trajectory_particle_stream",
-      "case_ids": [],
-      "assertion_ids": [],
-      "inventory_refs": ["h5_input_keys:input_h5_trajectory_particle_stream"],
-      "reason": "The default all stream is present, but a non-default stream A/B case is pending."
+      "case_ids": ["rerun_boundary_start0_strip1_beyond_selected_vds_on", "rerun_boundary_start1_strip1_limit1_selected_no_velocity_vds_off"],
+      "assertion_ids": ["rerun_selection_equivalence"],
+      "inventory_refs": ["h5_input_keys:input_h5_trajectory_particle_stream"]
     },
     {
       "contract_id": "input.topology.improper",
@@ -848,53 +953,49 @@
       "contract_id": "input.rerun.start",
       "direction": "input",
       "component": "rerun_selection",
-      "status": "deferred",
+      "status": "supported",
       "minimum_evidence": "E3",
       "legacy_surface": "rerun_start",
       "bundled_surface": "rerun_start with H5 trajectory",
-      "case_ids": [],
-      "assertion_ids": [],
-      "inventory_refs": ["rerun_control_keys:rerun_start"],
-      "reason": "Non-zero start A/B coverage is pending."
+      "case_ids": ["rerun_boundary_start0_strip0_limit1_vds_off", "rerun_boundary_start1_strip0_unlimited_no_velocity_vds_on", "rerun_boundary_start0_strip1_beyond_selected_vds_on", "rerun_boundary_start0_strip0_exact_eof_box_vds_off", "rerun_boundary_start1_strip1_limit1_selected_no_velocity_vds_off"],
+      "assertion_ids": ["rerun_selection_equivalence"],
+      "inventory_refs": ["rerun_control_keys:rerun_start"]
     },
     {
       "contract_id": "input.rerun.strip",
       "direction": "input",
       "component": "rerun_selection",
-      "status": "deferred",
+      "status": "supported",
       "minimum_evidence": "E3",
       "legacy_surface": "rerun_strip",
       "bundled_surface": "rerun_strip with H5 trajectory",
-      "case_ids": [],
-      "assertion_ids": [],
-      "inventory_refs": ["rerun_control_keys:rerun_strip"],
-      "reason": "Non-zero strip A/B coverage is pending."
+      "case_ids": ["rerun_boundary_start0_strip0_limit1_vds_off", "rerun_boundary_start1_strip0_unlimited_no_velocity_vds_on", "rerun_boundary_start0_strip1_beyond_selected_vds_on", "rerun_boundary_start0_strip0_exact_eof_box_vds_off", "rerun_boundary_start1_strip1_limit1_selected_no_velocity_vds_off"],
+      "assertion_ids": ["rerun_selection_equivalence"],
+      "inventory_refs": ["rerun_control_keys:rerun_strip"]
     },
     {
       "contract_id": "input.rerun.frame_limit",
       "direction": "input",
       "component": "rerun_selection",
-      "status": "deferred",
+      "status": "supported",
       "minimum_evidence": "E3",
       "legacy_surface": "rerun_frame_limit",
       "bundled_surface": "rerun_frame_limit with H5 trajectory",
-      "case_ids": [],
-      "assertion_ids": [],
-      "inventory_refs": ["rerun_control_keys:rerun_frame_limit"],
-      "reason": "Boundary and EOF A/B coverage is pending."
+      "case_ids": ["rerun_boundary_start0_strip0_limit1_vds_off", "rerun_boundary_start1_strip0_unlimited_no_velocity_vds_on", "rerun_boundary_start0_strip1_beyond_selected_vds_on", "rerun_boundary_start0_strip0_exact_eof_box_vds_off", "rerun_boundary_start1_strip1_limit1_selected_no_velocity_vds_off"],
+      "assertion_ids": ["rerun_selection_equivalence"],
+      "inventory_refs": ["rerun_control_keys:rerun_frame_limit"]
     },
     {
       "contract_id": "input.rerun.box_update",
       "direction": "input",
       "component": "rerun_selection",
-      "status": "deferred",
+      "status": "supported",
       "minimum_evidence": "E3",
       "legacy_surface": "rerun_need_box_update",
       "bundled_surface": "rerun_need_box_update with H5 trajectory",
-      "case_ids": [],
-      "assertion_ids": [],
-      "inventory_refs": ["rerun_control_keys:rerun_need_box_update"],
-      "reason": "The true branch A/B case is pending."
+      "case_ids": ["rerun_boundary_start0_strip0_limit1_vds_off", "rerun_boundary_start1_strip0_unlimited_no_velocity_vds_on", "rerun_boundary_start0_strip1_beyond_selected_vds_on", "rerun_boundary_start0_strip0_exact_eof_box_vds_off", "rerun_boundary_start1_strip1_limit1_selected_no_velocity_vds_off"],
+      "assertion_ids": ["rerun_selection_equivalence"],
+      "inventory_refs": ["rerun_control_keys:rerun_need_box_update"]
     },
     {
       "contract_id": "output.vds.complete_prefix_repair",
