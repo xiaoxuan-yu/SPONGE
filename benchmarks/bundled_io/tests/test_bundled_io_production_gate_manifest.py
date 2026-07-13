@@ -2582,6 +2582,7 @@ def test_execution_matrix_fixture_hashes_are_reviewed_and_pinned():
     )
 
     assert manifest["schema_version"] == 1
+    assert manifest["generator_commit"] == "2c0dc3e"
     assert manifest["initial_velocity_seed"] == 20260709
     assert manifest["nonorthogonal_box_angles_degrees"] == [80.0, 100.0, 110.0]
     assert set(manifest["sha256"]) == {
@@ -2591,7 +2592,6 @@ def test_execution_matrix_fixture_hashes_are_reviewed_and_pinned():
         "common/legacy_sidecars/charge_in_file/tip3p_charge.txt",
         "common/legacy_sidecars/exclude_in_file/tip3p_exclude.txt",
         "common/legacy_sidecars/mass_in_file/tip3p_mass.txt",
-        "common/legacy_sidecars/residue_in_file/tip3p_residue.txt",
         "common/topology.spgt.h5",
         "common/protocol.spgp.h5",
         "orthogonal/restart.spgr.h5",
@@ -2603,6 +2603,23 @@ def test_execution_matrix_fixture_hashes_are_reviewed_and_pinned():
             (MATRIX_FIXTURE_ROOT / relative_path).read_bytes()
         ).hexdigest()
         assert actual == expected, relative_path
+
+    topology_path = MATRIX_FIXTURE_ROOT / "common/topology.spgt.h5"
+    residue_sidecar = (
+        MATRIX_FIXTURE_ROOT
+        / "common/legacy_sidecars/residue_in_file/tip3p_residue.txt"
+    )
+    assert not residue_sidecar.exists()
+    with h5py.File(topology_path, "r") as topology:
+        assert "/atoms/residue_index" in topology
+        assert "/residues/atom_offset" in topology
+        sidecar_keys = {
+            value.decode() if isinstance(value, bytes) else str(value)
+            for value in topology[
+                "/parameters/sponge/files/legacy_sidecars/key"
+            ][()]
+        }
+        assert "residue_in_file" not in sidecar_keys
 
 
 def test_execution_matrix_rejects_removed_axis_and_unmapped_combination():

@@ -1302,7 +1302,36 @@ Acceptance:
   Ruff, and diff checks pass. XPONGE and SPONGE are committed separately, once
   per independent PR scope.
 
-## 41. Artifacts and Temporary-Space Policy
+## 41. PR 44: Execution-Matrix Residue Ownership Fixture Repair
+
+Repair the pinned TIP3P matrix fixture after the typed residue runtime gate made
+legacy and typed residue inputs mutually exclusive.
+
+- Make XPONGE's canonical `residue_in_file` contract `typed_required`, so
+  `legacy-to-bundle` emits `/atoms/residue_index` and
+  `/residues/atom_offset` without retaining an active residue sidecar owner.
+- Prove reverse conversion consumes typed H5 state by changing one residue into
+  two residues before export and checking the exported legacy partition.
+- Regenerate the pinned topology and matching protocol with the repaired
+  converter, remove the stale residue sidecar, and pin converter provenance and
+  new SHA-256 values in the fixture manifest.
+- Parse the pinned H5 in the manifest gate and require both typed residue
+  datasets, no `residue_in_file` sidecar key, and no external residue sidecar.
+- Re-run same-semantic CPU/GPU deterministic matrix cases and at least one GPU
+  statistical thermostat/constraint case; initialization alone is not
+  acceptance evidence.
+
+Acceptance:
+
+- XPONGE bundle regression tests pass, the real TIP3P conversion has one
+  residue owner, and XPONGE is committed separately from SPONGE.
+- The pinned-fixture hash/ownership gate passes.
+- CPU and GPU deterministic cases pass complete mdout and H5 comparisons, and
+  a four-replica GPU statistical case passes the statistical mdout/H5 gates.
+- The former GPU startup failure naming
+  `Xponge::Read_H5_Residue_Atom_Numbers` is absent.
+
+## 42. Artifacts and Temporary-Space Policy
 
 - Use `SPONGE_BUNDLED_IO_AB_RUN_ROOT` for all heavy runs.
 - Put production artifacts on the workspace filesystem rather than `/tmp`.
@@ -1312,7 +1341,7 @@ Acceptance:
 - Record artifact byte counts and enforce a configurable per-case quota.
 - Cleanup must only remove directories created by the current gate run.
 
-## 42. PR Completion Log
+## 43. PR Completion Log
 
 Append one row immediately after completing and committing each PR.
 
@@ -1363,3 +1392,4 @@ Append one row immediately after completing and committing each PR.
 | PR 41: Typed steering CV behavior gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract` (136 tests); 96-test production manifest; real `normal_steering_cv_typed_nonzero` and `normal_steering_cv_sidecar_nonzero` CPU A/B cases plus typed weight-zero control; two native input CTests; SPONGE rebuild; Ruff; clang-format; `git diff --check` | Pure typed `/cv/config` with no CV command or sidecars matches the legacy `cv_in_file` route at `steer_cv=3.0` and analytic force `(2,0,0,-2,0,0)`. Changing only weight `2.0 -> 0.0` zeros energy and force with maximum force delta `2.0`, proving typed config consumption. The registry now reflects the real `/cv/config` surface instead of the unconsumed `/steer` conversion. Coverage advances to 80 supported, 2 deferred, and 1 unsupported contract. |
 | PR 42: Typed SITS configuration/selection behavior gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract` (138 tests); 98-test production manifest; real `normal_sits_typed_configuration_nonzero` and `normal_sits_nk_typed_restart_nonzero` CPU A/B cases plus typed config/selection/precedence controls; two native input CTests; SPONGE rebuild; Ruff; clang-format; `git diff --check` | Pure typed `/sits/config`, `/sits/atom_indices`, and Nk restart state with no inline SITS owner match legacy at `SITS_AA_kAB=-1.22`, `SITS_bias=-0.5317`, `SITS_fb=0.7049`, and maximum force `0.2489061951637268`. Typed `pe_a=0.5` and atom set `[0]` produce distinct deterministic bias, factor, energy, and force fingerprints; complete inline config wins over typed config without suppressing typed atoms. Duplicate atom and duplicate config-key payloads exit as bad-file-format. Registry coverage advances to 81 supported, 1 deferred, and 1 unsupported contract. |
 | PR 43: End-to-end improper conversion behavior gate | Complete | XPONGE `45e52be`, `b890fbf`; SPONGE this commit | XPONGE 93-test bundle regression; `pixi run -e dev-cpu smoke-bundled-io-contract` (138 tests); 103-test registry/manifest suite; real canonical, alias, and pure-native improper CPU A/B cases plus typed `pk=5` controls; two native input CTests; SPONGE rebuild; Ruff; clang-format; `git diff --check` | XPONGE emits native `/forcefield/improper/pk`, retains `/k` reverse-export fallback, and omits improper sidecars for typed conversion. SPONGE consumes the declared `improper_in_file` alias when canonical input is absent. Unmodified canonical and alias conversions match legacy at `improper_dihedral=31.36` and maximum force `35.415924072265625`; independent `pk=5` controls halve energy and every force component. Coverage reaches 82 supported, 0 deferred, and 1 explicitly unsupported contract. |
+| PR 44: Execution-matrix residue ownership fixture repair | Complete | XPONGE `2c0dc3e`; SPONGE this commit | XPONGE 101-test bundle regression; pinned-fixture hash/ownership gate; CPU and GPU deterministic matrix A/B; four-replica GPU Middle+SETTLE statistical A/B; Ruff; `git diff --check` | XPONGE now emits typed residue state without an active residue sidecar and reverse-exports mutated typed offsets. The regenerated TIP3P fixture has exactly one residue owner. Complete CPU/GPU deterministic and GPU statistical behavior comparisons pass; the former conflicting-owner startup failure is closed. |
