@@ -197,6 +197,7 @@ def _cases_for_profile() -> list[AbCase]:
             restart_load_policy="structural",
             contract_ids=(
                 "runtime.normal_md",
+                "output.legacy.mdout",
                 "output.trajectory",
                 "output.observable",
                 "output.restart",
@@ -218,6 +219,7 @@ def _cases_for_profile() -> list[AbCase]:
             restart_load_policy="structural",
             contract_ids=(
                 "runtime.normal_md",
+                "output.legacy.mdout",
                 "output.trajectory",
                 "output.observable",
                 "output.restart",
@@ -243,6 +245,7 @@ def _cases_for_profile() -> list[AbCase]:
             restart_load_policy="structural",
             contract_ids=(
                 "runtime.rerun",
+                "output.legacy.mdout",
                 "output.trajectory",
                 "output.observable",
                 "output.trajectory.vds_off",
@@ -270,6 +273,7 @@ def _cases_for_profile() -> list[AbCase]:
             restart_load_policy="structural",
             contract_ids=(
                 "runtime.rerun",
+                "output.legacy.mdout",
                 "output.trajectory",
                 "output.observable",
                 "output.trajectory.vds_on",
@@ -297,6 +301,7 @@ def _cases_for_profile() -> list[AbCase]:
             restart_load_policy="structural",
             contract_ids=(
                 "runtime.rerun",
+                "output.legacy.mdout",
                 "output.trajectory",
                 "output.observable",
                 "output.trajectory.vds_off",
@@ -324,6 +329,7 @@ def _cases_for_profile() -> list[AbCase]:
             restart_load_policy="structural",
             contract_ids=(
                 "runtime.rerun",
+                "output.legacy.mdout",
                 "output.trajectory",
                 "output.observable",
                 "output.trajectory.vds_on",

@@ -8,9 +8,11 @@ from benchmarks.bundled_io.ab_contracts import (
     AssertionEvidence,
     build_case_evidence,
     load_contract_registry,
+    load_implementation_inventory,
     update_evidence_report,
     validate_complete_evidence_report,
     validate_contract_registry,
+    validate_implementation_inventory,
 )
 from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
     _cases_for_profile,
@@ -20,6 +22,9 @@ from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
 def test_real_registry_and_case_matrix_are_symmetric():
     contracts = load_contract_registry()
     summary = validate_contract_registry(contracts, _cases_for_profile())
+    validate_implementation_inventory(
+        contracts, load_implementation_inventory()
+    )
 
     assert summary["contract_count"] == len(contracts)
     assert summary["status_counts"]["supported"] > 0

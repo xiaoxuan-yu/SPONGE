@@ -163,7 +163,7 @@ perf-mace = "python -X utf8 -m pytest benchmarks/performance/mace/tests/test_tip
 perf-reaxff = "python -X utf8 -m pytest benchmarks/performance/reaxff/tests -s --tb=short"
 perf-sits = "python -X utf8 -m pytest benchmarks/performance/sits/tests -s --tb=short"
 perf-sinkmeta = "python -X utf8 -m pytest benchmarks/performance/sinkmeta/tests -s --tb=short"
-smoke-bundled-io-contract = "python -X utf8 -m pytest benchmarks/bundled_io/tests/test_bundled_io_contract_smoke.py benchmarks/bundled_io/tests/test_bundled_io_ab_statistics.py benchmarks/bundled_io/tests/test_bundled_io_ab_contract_registry.py benchmarks/bundled_io/tests/test_bundled_io_production_gate_manifest.py -s --tb=short"
+smoke-bundled-io-contract = "python -X utf8 -m pytest benchmarks/bundled_io/tests/test_bundled_io_contract_smoke.py benchmarks/bundled_io/tests/test_bundled_io_ab_statistics.py benchmarks/bundled_io/tests/test_bundled_io_ab_contract_registry.py benchmarks/bundled_io/tests/test_bundled_io_contract_inventory.py benchmarks/bundled_io/tests/test_bundled_io_production_gate_manifest.py -s --tb=short"
 smoke-bundled-io-runtime = "tests/h5_bundle/run_h5_bundle_tests.sh test-smoke-runtime"
 smoke-bundled-io-staged = "tests/h5_bundle/run_h5_bundle_tests.sh staged"
 smoke-bundled-io = { depends-on = ["smoke-bundled-io-contract", "smoke-bundled-io-runtime"] }

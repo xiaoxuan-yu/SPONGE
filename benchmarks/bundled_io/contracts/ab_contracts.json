@@ -1,5 +1,90 @@
 {
   "schema_version": "1",
+  "implementation_inventory": {
+    "h5_input_keys": [
+      "input_h5_topology_path",
+      "input_h5_protocol_path",
+      "input_h5_restart_path",
+      "input_h5_restart_load",
+      "input_h5_trajectory_path",
+      "input_h5_trajectory_particle_stream"
+    ],
+    "h5_output_keys": [
+      "output_h5_trajectory_path",
+      "output_h5_trajectory_vds",
+      "output_h5_trajectory_chunk_size",
+      "output_h5_trajectory_repair_policy",
+      "output_h5_restart_path",
+      "output_h5_observable_path"
+    ],
+    "legacy_output_keys": [
+      "mdout",
+      "mdinfo",
+      "crd",
+      "box",
+      "vel",
+      "frc",
+      "rst",
+      "qc_scf_output"
+    ],
+    "topology_sidecar_keys": [
+      "pairwise_force_in_file",
+      "listed_forces_in_file",
+      "mass_in_file",
+      "charge_in_file",
+      "residue_in_file",
+      "exclude_in_file",
+      "bond_in_file",
+      "angle_in_file",
+      "dihedral_in_file",
+      "improper_in_file",
+      "LJ_in_file",
+      "nb14_in_file",
+      "nb14_extra_in_file",
+      "urey_bradley_in_file",
+      "cmap_in_file",
+      "LJ_soft_core_in_file",
+      "subsys_division_in_file",
+      "gb_in_file",
+      "virtual_atom_in_file",
+      "virtual_atoms_in_file",
+      "EAM_in_file",
+      "EAM_atom_type_in_file",
+      "SW_in_file",
+      "EDIP_in_file",
+      "TERSOFF_in_file",
+      "REAXFF_in_file",
+      "REAXFF_type_in_file",
+      "qc_type_in_file"
+    ],
+    "protocol_sidecar_keys": [
+      "cv_in_file",
+      "constrain_in_file",
+      "restrain_in_file",
+      "pairwise_force_in_file",
+      "listed_forces_in_file",
+      "soft_walls_in_file",
+      "SITS_in_file",
+      "SITS_atom_in_file",
+      "SITS_nk_in_file",
+      "restrain_atom_id",
+      "restrain_coordinate_in_file",
+      "restrain_weight_in_file",
+      "meta_edge_in_file",
+      "meta_potential_in_file",
+      "meta_scatter_in_file",
+      "restrain_cv_in_file",
+      "steer_cv_in_file",
+      "nose_hoover_chain_restart_input",
+      "hills_in_file"
+    ],
+    "rerun_control_keys": [
+      "rerun_start",
+      "rerun_strip",
+      "rerun_frame_limit",
+      "rerun_need_box_update"
+    ]
+  },
   "contracts": [
     {
       "contract_id": "runtime.normal_md",
@@ -21,7 +106,8 @@
       "legacy_surface": "legacy rerun trajectory",
       "bundled_surface": "input_h5_trajectory_path",
       "case_ids": ["rerun_full_contract_pure_vds_off", "rerun_full_contract_pure_vds_on", "rerun_full_contract_sidecar_vds_off", "rerun_full_contract_sidecar_vds_on"],
-      "assertion_ids": ["mdout_deterministic_equivalence"]
+      "assertion_ids": ["mdout_deterministic_equivalence"],
+      "inventory_refs": ["h5_input_keys:input_h5_trajectory_path"]
     },
     {
       "contract_id": "output.trajectory",
@@ -32,7 +118,8 @@
       "legacy_surface": "crd/box trajectory semantics",
       "bundled_surface": "output_h5_trajectory_path",
       "case_ids": ["normal_core_h5_output", "normal_sits_ff19sb_cmap_peptide", "rerun_full_contract_pure_vds_off", "rerun_full_contract_pure_vds_on", "rerun_full_contract_sidecar_vds_off", "rerun_full_contract_sidecar_vds_on"],
-      "assertion_ids": ["h5_statistical_equivalence", "h5_rerun_semantic_equivalence"]
+      "assertion_ids": ["h5_statistical_equivalence", "h5_rerun_semantic_equivalence"],
+      "inventory_refs": ["h5_output_keys:output_h5_trajectory_path"]
     },
     {
       "contract_id": "output.observable",
@@ -43,7 +130,8 @@
       "legacy_surface": "mdout columns",
       "bundled_surface": "output_h5_observable_path",
       "case_ids": ["normal_core_h5_output", "normal_sits_ff19sb_cmap_peptide", "rerun_full_contract_pure_vds_off", "rerun_full_contract_pure_vds_on", "rerun_full_contract_sidecar_vds_off", "rerun_full_contract_sidecar_vds_on"],
-      "assertion_ids": ["h5_statistical_equivalence", "h5_rerun_semantic_equivalence"]
+      "assertion_ids": ["h5_statistical_equivalence", "h5_rerun_semantic_equivalence"],
+      "inventory_refs": ["h5_output_keys:output_h5_observable_path"]
     },
     {
       "contract_id": "output.restart",
@@ -54,7 +142,8 @@
       "legacy_surface": "legacy restart structural state",
       "bundled_surface": "output_h5_restart_path",
       "case_ids": ["normal_core_h5_output", "normal_sits_ff19sb_cmap_peptide"],
-      "assertion_ids": ["h5_statistical_equivalence"]
+      "assertion_ids": ["h5_statistical_equivalence"],
+      "inventory_refs": ["h5_output_keys:output_h5_restart_path"]
     },
     {
       "contract_id": "output.trajectory.vds_off",
@@ -76,7 +165,8 @@
       "legacy_surface": "legacy trajectory semantics",
       "bundled_surface": "VDS wrapper and shards",
       "case_ids": ["rerun_full_contract_pure_vds_on", "rerun_full_contract_sidecar_vds_on"],
-      "assertion_ids": ["h5_rerun_semantic_equivalence"]
+      "assertion_ids": ["h5_rerun_semantic_equivalence"],
+      "inventory_refs": ["h5_output_keys:output_h5_trajectory_vds"]
     },
     {
       "contract_id": "input.full_contract.inventory",
@@ -87,7 +177,49 @@
       "legacy_surface": "full-contract legacy input inventory",
       "bundled_surface": "topology/protocol/restart/trajectory H5 paths",
       "case_ids": ["rerun_full_contract_pure_vds_off", "rerun_full_contract_pure_vds_on", "rerun_full_contract_sidecar_vds_off", "rerun_full_contract_sidecar_vds_on"],
-      "assertion_ids": ["full_contract_input_inventory"]
+      "assertion_ids": ["full_contract_input_inventory"],
+      "inventory_refs": [
+        "h5_input_keys:input_h5_topology_path",
+        "h5_input_keys:input_h5_protocol_path",
+        "topology_sidecar_keys:pairwise_force_in_file",
+        "topology_sidecar_keys:listed_forces_in_file",
+        "topology_sidecar_keys:mass_in_file",
+        "topology_sidecar_keys:charge_in_file",
+        "topology_sidecar_keys:residue_in_file",
+        "topology_sidecar_keys:exclude_in_file",
+        "topology_sidecar_keys:bond_in_file",
+        "topology_sidecar_keys:angle_in_file",
+        "topology_sidecar_keys:dihedral_in_file",
+        "topology_sidecar_keys:LJ_in_file",
+        "topology_sidecar_keys:nb14_extra_in_file",
+        "topology_sidecar_keys:urey_bradley_in_file",
+        "topology_sidecar_keys:LJ_soft_core_in_file",
+        "topology_sidecar_keys:subsys_division_in_file",
+        "topology_sidecar_keys:gb_in_file",
+        "topology_sidecar_keys:virtual_atom_in_file",
+        "topology_sidecar_keys:EAM_in_file",
+        "topology_sidecar_keys:EAM_atom_type_in_file",
+        "topology_sidecar_keys:SW_in_file",
+        "topology_sidecar_keys:EDIP_in_file",
+        "topology_sidecar_keys:TERSOFF_in_file",
+        "topology_sidecar_keys:qc_type_in_file",
+        "protocol_sidecar_keys:cv_in_file",
+        "protocol_sidecar_keys:constrain_in_file",
+        "protocol_sidecar_keys:restrain_in_file",
+        "protocol_sidecar_keys:pairwise_force_in_file",
+        "protocol_sidecar_keys:listed_forces_in_file",
+        "protocol_sidecar_keys:soft_walls_in_file",
+        "protocol_sidecar_keys:restrain_atom_id",
+        "protocol_sidecar_keys:restrain_coordinate_in_file",
+        "protocol_sidecar_keys:restrain_weight_in_file",
+        "protocol_sidecar_keys:meta_edge_in_file",
+        "protocol_sidecar_keys:meta_potential_in_file",
+        "protocol_sidecar_keys:meta_scatter_in_file",
+        "protocol_sidecar_keys:restrain_cv_in_file",
+        "protocol_sidecar_keys:steer_cv_in_file",
+        "protocol_sidecar_keys:nose_hoover_chain_restart_input",
+        "protocol_sidecar_keys:hills_in_file"
+      ]
     },
     {
       "contract_id": "input.full_contract.pure_native",
@@ -120,7 +252,11 @@
       "legacy_surface": "legacy structural restart",
       "bundled_surface": "input_h5_restart_load=structural",
       "case_ids": ["rerun_full_contract_pure_vds_off", "rerun_full_contract_pure_vds_on", "rerun_full_contract_sidecar_vds_off", "rerun_full_contract_sidecar_vds_on"],
-      "assertion_ids": ["mdout_deterministic_equivalence"]
+      "assertion_ids": ["mdout_deterministic_equivalence"],
+      "inventory_refs": [
+        "h5_input_keys:input_h5_restart_path",
+        "h5_input_keys:input_h5_restart_load"
+      ]
     },
     {
       "contract_id": "input.topology.cmap",
@@ -131,7 +267,8 @@
       "legacy_surface": "cmap_in_file",
       "bundled_surface": "/forcefield/cmap",
       "case_ids": ["normal_sits_ff19sb_cmap_peptide", "rerun_full_contract_pure_vds_off", "rerun_full_contract_pure_vds_on", "rerun_full_contract_sidecar_vds_off", "rerun_full_contract_sidecar_vds_on"],
-      "assertion_ids": ["cmap_runtime_equivalence"]
+      "assertion_ids": ["cmap_runtime_equivalence"],
+      "inventory_refs": ["topology_sidecar_keys:cmap_in_file"]
     },
     {
       "contract_id": "input.protocol.sits",
@@ -142,7 +279,12 @@
       "legacy_surface": "SITS legacy inputs",
       "bundled_surface": "/sits and restart SITS state",
       "case_ids": ["normal_sits_ff19sb_cmap_peptide"],
-      "assertion_ids": ["mdout_statistical_equivalence"]
+      "assertion_ids": ["mdout_statistical_equivalence"],
+      "inventory_refs": [
+        "protocol_sidecar_keys:SITS_in_file",
+        "protocol_sidecar_keys:SITS_atom_in_file",
+        "protocol_sidecar_keys:SITS_nk_in_file"
+      ]
     },
     {
       "contract_id": "input.manybody.reaxff",
@@ -153,7 +295,11 @@
       "legacy_surface": "REAXFF_in_file and REAXFF_type_in_file",
       "bundled_surface": "/manybody/reaxff",
       "case_ids": ["rerun_full_contract_pure_vds_off", "rerun_full_contract_pure_vds_on", "rerun_full_contract_sidecar_vds_off", "rerun_full_contract_sidecar_vds_on"],
-      "assertion_ids": ["mdout_deterministic_equivalence"]
+      "assertion_ids": ["mdout_deterministic_equivalence"],
+      "inventory_refs": [
+        "topology_sidecar_keys:REAXFF_in_file",
+        "topology_sidecar_keys:REAXFF_type_in_file"
+      ]
     },
     {
       "contract_id": "system.ff19sb_ace_ala_nme",
@@ -167,6 +313,226 @@
       "assertion_ids": ["mdout_statistical_equivalence"]
     },
     {
+      "contract_id": "output.legacy.mdout",
+      "direction": "output",
+      "component": "legacy_output_route",
+      "status": "supported",
+      "minimum_evidence": "E3",
+      "legacy_surface": "mdout",
+      "bundled_surface": "explicit mdout retained beside H5 output",
+      "case_ids": ["normal_core_h5_output", "normal_sits_ff19sb_cmap_peptide", "rerun_full_contract_pure_vds_off", "rerun_full_contract_pure_vds_on", "rerun_full_contract_sidecar_vds_off", "rerun_full_contract_sidecar_vds_on"],
+      "assertion_ids": ["mdout_statistical_equivalence", "mdout_deterministic_equivalence"],
+      "inventory_refs": ["legacy_output_keys:mdout"]
+    },
+    {
+      "contract_id": "input.trajectory.particle_stream",
+      "direction": "input",
+      "component": "trajectory",
+      "status": "deferred",
+      "minimum_evidence": "E3",
+      "legacy_surface": "legacy rerun stream selection",
+      "bundled_surface": "input_h5_trajectory_particle_stream",
+      "case_ids": [],
+      "assertion_ids": [],
+      "inventory_refs": ["h5_input_keys:input_h5_trajectory_particle_stream"],
+      "reason": "The default all stream is present, but a non-default stream A/B case is pending."
+    },
+    {
+      "contract_id": "input.topology.improper",
+      "direction": "input",
+      "component": "improper",
+      "status": "deferred",
+      "minimum_evidence": "E3",
+      "legacy_surface": "improper_in_file",
+      "bundled_surface": "/forcefield/improper",
+      "case_ids": [],
+      "assertion_ids": [],
+      "inventory_refs": ["topology_sidecar_keys:improper_in_file"],
+      "reason": "The native reader is covered, but a paired legacy/bundled runtime fixture is pending."
+    },
+    {
+      "contract_id": "input.topology.nb14",
+      "direction": "input",
+      "component": "nb14",
+      "status": "deferred",
+      "minimum_evidence": "E3",
+      "legacy_surface": "nb14_in_file",
+      "bundled_surface": "/forcefield/nb14",
+      "case_ids": [],
+      "assertion_ids": [],
+      "inventory_refs": ["topology_sidecar_keys:nb14_in_file"],
+      "reason": "The native reader is covered, but a paired legacy/bundled runtime fixture is pending."
+    },
+    {
+      "contract_id": "input.topology.virtual_atoms_alias",
+      "direction": "input",
+      "component": "virtual_atom",
+      "status": "deferred",
+      "minimum_evidence": "E3",
+      "legacy_surface": "virtual_atoms_in_file",
+      "bundled_surface": "/forcefield/virtual_atom",
+      "case_ids": [],
+      "assertion_ids": [],
+      "inventory_refs": ["topology_sidecar_keys:virtual_atoms_in_file"],
+      "reason": "The singular key is covered; the plural legacy alias needs a dedicated conversion and runtime case."
+    },
+    {
+      "contract_id": "output.trajectory.chunk_size",
+      "direction": "output",
+      "component": "trajectory_vds",
+      "status": "deferred",
+      "minimum_evidence": "E3",
+      "legacy_surface": "legacy trajectory frame sequence",
+      "bundled_surface": "output_h5_trajectory_chunk_size",
+      "case_ids": [],
+      "assertion_ids": [],
+      "inventory_refs": ["h5_output_keys:output_h5_trajectory_chunk_size"],
+      "reason": "Plan parsing is covered; runtime chunk-boundary A/B cases are pending."
+    },
+    {
+      "contract_id": "output.legacy.mdinfo",
+      "direction": "output",
+      "component": "legacy_output_route",
+      "status": "deferred",
+      "minimum_evidence": "E3",
+      "legacy_surface": "mdinfo",
+      "bundled_surface": "explicit mdinfo beside H5 output",
+      "case_ids": [],
+      "assertion_ids": [],
+      "inventory_refs": ["legacy_output_keys:mdinfo"],
+      "reason": "Structured mdinfo comparison is pending."
+    },
+    {
+      "contract_id": "output.legacy.crd",
+      "direction": "output",
+      "component": "legacy_output_route",
+      "status": "deferred",
+      "minimum_evidence": "E3",
+      "legacy_surface": "crd",
+      "bundled_surface": "/particles/all/position/value",
+      "case_ids": [],
+      "assertion_ids": [],
+      "inventory_refs": ["legacy_output_keys:crd"],
+      "reason": "Explicit legacy/H5 coexistence comparison is pending."
+    },
+    {
+      "contract_id": "output.legacy.box",
+      "direction": "output",
+      "component": "legacy_output_route",
+      "status": "deferred",
+      "minimum_evidence": "E3",
+      "legacy_surface": "box",
+      "bundled_surface": "/particles/all/box/edges/value",
+      "case_ids": [],
+      "assertion_ids": [],
+      "inventory_refs": ["legacy_output_keys:box"],
+      "reason": "Explicit legacy/H5 coexistence comparison is pending."
+    },
+    {
+      "contract_id": "output.legacy.velocity",
+      "direction": "output",
+      "component": "legacy_output_route",
+      "status": "deferred",
+      "minimum_evidence": "E3",
+      "legacy_surface": "vel",
+      "bundled_surface": "/particles/all/velocity/value",
+      "case_ids": [],
+      "assertion_ids": [],
+      "inventory_refs": ["legacy_output_keys:vel"],
+      "reason": "Trajectory velocity A/B comparison is pending."
+    },
+    {
+      "contract_id": "output.legacy.force",
+      "direction": "output",
+      "component": "legacy_output_route",
+      "status": "deferred",
+      "minimum_evidence": "E3",
+      "legacy_surface": "frc",
+      "bundled_surface": "/particles/all/force/value",
+      "case_ids": [],
+      "assertion_ids": [],
+      "inventory_refs": ["legacy_output_keys:frc"],
+      "reason": "Trajectory force A/B comparison is pending."
+    },
+    {
+      "contract_id": "output.legacy.restart",
+      "direction": "output",
+      "component": "legacy_output_route",
+      "status": "deferred",
+      "minimum_evidence": "E4",
+      "legacy_surface": "rst",
+      "bundled_surface": "output_h5_restart_path",
+      "case_ids": [],
+      "assertion_ids": [],
+      "inventory_refs": ["legacy_output_keys:rst"],
+      "reason": "Restart output-to-input continuation comparison is pending."
+    },
+    {
+      "contract_id": "output.legacy.qc_scf_output",
+      "direction": "output",
+      "component": "legacy_output_route",
+      "status": "deferred",
+      "minimum_evidence": "E3",
+      "legacy_surface": "qc_scf_output",
+      "bundled_surface": "/parameters/sponge/qc/scf_output",
+      "case_ids": [],
+      "assertion_ids": [],
+      "inventory_refs": ["legacy_output_keys:qc_scf_output"],
+      "reason": "Normalized SCF text comparison is pending."
+    },
+    {
+      "contract_id": "input.rerun.start",
+      "direction": "input",
+      "component": "rerun_selection",
+      "status": "deferred",
+      "minimum_evidence": "E3",
+      "legacy_surface": "rerun_start",
+      "bundled_surface": "rerun_start with H5 trajectory",
+      "case_ids": [],
+      "assertion_ids": [],
+      "inventory_refs": ["rerun_control_keys:rerun_start"],
+      "reason": "Non-zero start A/B coverage is pending."
+    },
+    {
+      "contract_id": "input.rerun.strip",
+      "direction": "input",
+      "component": "rerun_selection",
+      "status": "deferred",
+      "minimum_evidence": "E3",
+      "legacy_surface": "rerun_strip",
+      "bundled_surface": "rerun_strip with H5 trajectory",
+      "case_ids": [],
+      "assertion_ids": [],
+      "inventory_refs": ["rerun_control_keys:rerun_strip"],
+      "reason": "Non-zero strip A/B coverage is pending."
+    },
+    {
+      "contract_id": "input.rerun.frame_limit",
+      "direction": "input",
+      "component": "rerun_selection",
+      "status": "deferred",
+      "minimum_evidence": "E3",
+      "legacy_surface": "rerun_frame_limit",
+      "bundled_surface": "rerun_frame_limit with H5 trajectory",
+      "case_ids": [],
+      "assertion_ids": [],
+      "inventory_refs": ["rerun_control_keys:rerun_frame_limit"],
+      "reason": "Boundary and EOF A/B coverage is pending."
+    },
+    {
+      "contract_id": "input.rerun.box_update",
+      "direction": "input",
+      "component": "rerun_selection",
+      "status": "deferred",
+      "minimum_evidence": "E3",
+      "legacy_surface": "rerun_need_box_update",
+      "bundled_surface": "rerun_need_box_update with H5 trajectory",
+      "case_ids": [],
+      "assertion_ids": [],
+      "inventory_refs": ["rerun_control_keys:rerun_need_box_update"],
+      "reason": "The true branch A/B case is pending."
+    },
+    {
       "contract_id": "output.vds.complete_prefix_repair",
       "direction": "output",
       "component": "trajectory_vds",
@@ -176,6 +542,7 @@
       "bundled_surface": "output_h5_trajectory_repair_policy=complete_prefix",
       "case_ids": [],
       "assertion_ids": [],
+      "inventory_refs": ["h5_output_keys:output_h5_trajectory_repair_policy"],
       "reason": "Writer smoke exists, but production legacy/bundled A/B evidence is not yet registered."
     },
     {

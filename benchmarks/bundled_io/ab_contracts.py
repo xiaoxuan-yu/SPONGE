@@ -15,6 +15,14 @@ except ImportError:  # pragma: no cover - Windows fallback for local inspection
 REGISTRY_PATH = Path(__file__).with_name("contracts") / "ab_contracts.json"
 VALID_STATUSES = {"supported", "deferred", "unsupported"}
 VALID_DIRECTIONS = {"input", "output", "runtime", "system"}
+INVENTORY_SECTIONS = {
+    "h5_input_keys",
+    "h5_output_keys",
+    "legacy_output_keys",
+    "topology_sidecar_keys",
+    "protocol_sidecar_keys",
+    "rerun_control_keys",
+}
 EVIDENCE_RANK = {"E0": 0, "E1": 1, "E2": 2, "E3": 3, "E4": 4}
 VALID_EVIDENCE_LEVELS = set(EVIDENCE_RANK) | {"F1"}
 
@@ -30,6 +38,7 @@ class ContractSpec:
     bundled_surface: str
     case_ids: tuple[str, ...]
     assertion_ids: tuple[str, ...]
+    inventory_refs: tuple[str, ...]
     reason: str = ""
 
 
@@ -85,6 +94,58 @@ def load_contract_registry(
     if not contracts:
         raise AssertionError("A/B contract registry must not be empty")
     return contracts
+
+
+def load_implementation_inventory(
+    path: Path = REGISTRY_PATH,
+) -> dict[str, tuple[str, ...]]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    raw_inventory = payload.get("implementation_inventory")
+    if not isinstance(raw_inventory, dict):
+        raise AssertionError("A/B registry requires implementation_inventory")
+    if set(raw_inventory) != INVENTORY_SECTIONS:
+        raise AssertionError(
+            "A/B implementation inventory sections differ: "
+            f"expected={sorted(INVENTORY_SECTIONS)}, "
+            f"actual={sorted(raw_inventory)}"
+        )
+    inventory = {}
+    for section, raw_values in raw_inventory.items():
+        values = _string_tuple(raw_values, section, "implementation_inventory")
+        _require_unique(values, f"implementation_inventory {section}")
+        inventory[section] = values
+    return inventory
+
+
+def validate_implementation_inventory(
+    contracts: Mapping[str, ContractSpec],
+    inventory: Mapping[str, Sequence[str]],
+) -> dict[str, str]:
+    known_refs = {
+        f"{section}:{value}"
+        for section, values in inventory.items()
+        for value in values
+    }
+    owners: dict[str, str] = {}
+    for spec in contracts.values():
+        for inventory_ref in spec.inventory_refs:
+            if inventory_ref not in known_refs:
+                raise AssertionError(
+                    f"contract {spec.contract_id} owns unknown inventory ref "
+                    f"{inventory_ref}"
+                )
+            if inventory_ref in owners:
+                raise AssertionError(
+                    f"inventory ref {inventory_ref} has multiple owners: "
+                    f"{owners[inventory_ref]}, {spec.contract_id}"
+                )
+            owners[inventory_ref] = spec.contract_id
+    missing = sorted(known_refs - set(owners))
+    if missing:
+        raise AssertionError(
+            f"implementation inventory refs have no contract: {missing}"
+        )
+    return owners
 
 
 def validate_contract_registry(
@@ -333,8 +394,14 @@ def _parse_contract(raw: Mapping[str, object]) -> ContractSpec:
     assertion_ids = _string_tuple(
         raw.get("assertion_ids"), "assertion_ids", values["contract_id"]
     )
+    inventory_refs = _string_tuple(
+        raw.get("inventory_refs", []),
+        "inventory_refs",
+        values["contract_id"],
+    )
     _require_unique(case_ids, f"{values['contract_id']} case_ids")
     _require_unique(assertion_ids, f"{values['contract_id']} assertion_ids")
+    _require_unique(inventory_refs, f"{values['contract_id']} inventory_refs")
     reason = raw.get("reason", "")
     if not isinstance(reason, str):
         raise AssertionError(f"{values['contract_id']} reason must be a string")
@@ -342,6 +409,7 @@ def _parse_contract(raw: Mapping[str, object]) -> ContractSpec:
         **values,
         case_ids=case_ids,
         assertion_ids=assertion_ids,
+        inventory_refs=inventory_refs,
         reason=reason,
     )
 

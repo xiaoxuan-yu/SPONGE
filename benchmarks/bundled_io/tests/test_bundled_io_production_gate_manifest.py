@@ -9,7 +9,9 @@ except ModuleNotFoundError:  # Python 3.10
 
 from benchmarks.bundled_io.ab_contracts import (
     load_contract_registry,
+    load_implementation_inventory,
     validate_contract_registry,
+    validate_implementation_inventory,
 )
 from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
     PROFILE_LIMITS,
@@ -65,6 +67,7 @@ def test_bundled_io_production_gate_keeps_all_required_stages():
     assert "test_bundled_io_contract_smoke.py" in contract
     assert "test_bundled_io_ab_statistics.py" in contract
     assert "test_bundled_io_ab_contract_registry.py" in contract
+    assert "test_bundled_io_contract_inventory.py" in contract
     assert "test_bundled_io_production_gate_manifest.py" in contract
     assert "test_bundled_io_ab_production.py" not in contract
     assert "test-smoke-runtime" in _task_command(
@@ -159,6 +162,9 @@ def test_ab_production_harness_has_executable_contract_coverage():
     contracts = load_contract_registry()
     cases = _cases_for_profile()
     summary = validate_contract_registry(contracts, cases)
+    validate_implementation_inventory(
+        contracts, load_implementation_inventory()
+    )
 
     assert set(PROFILE_LIMITS) == {"medium", "production"}
     assert PROFILE_LIMITS["medium"] == {
