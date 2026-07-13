@@ -777,13 +777,13 @@
       "contract_id": "input.protocol.steering",
       "direction": "input",
       "component": "protocol",
-      "status": "deferred",
+      "status": "supported",
       "minimum_evidence": "E3",
-      "legacy_surface": "steer_cv_in_file",
-      "bundled_surface": "/steering",
-      "case_ids": [],
-      "assertion_ids": [],
-      "reason": "The steering runtime queries the CV controller, which only consumes cv_in_file; steer_cv_in_file has no runtime consumer and typed /steering is not materialized. The working cv_in_file protocol-sidecar route is tracked separately."
+      "legacy_surface": "steer block and referenced CV definitions in cv_in_file",
+      "bundled_surface": "/cv/config",
+      "case_ids": ["normal_steering_cv_typed_nonzero"],
+      "assertion_ids": ["input_semantic_equivalence"],
+      "reason": ""
     },
     {
       "contract_id": "input.protocol.steering.cv_sidecar",

@@ -1177,7 +1177,45 @@ Acceptance:
   SPONGE rebuild, Ruff, changed-line clang-format, and diff checks pass,
   followed by exactly one PR-scoped commit.
 
-## 38. Artifacts and Temporary-Space Policy
+## 38. PR 41: Typed Steering CV Behavior Gate
+
+Close `input.protocol.steering` with a pure typed same-semantic behavior gate,
+using the protocol surface actually consumed by the CV controller.
+
+- Correct the contract inventory: working legacy steering is a `steer` block
+  plus its referenced CV definitions in `cv_in_file`; the equivalent bundled
+  surface is `/cv/config`. Do not promote the unconsumed
+  `steer_cv_in_file`/`/steer` conversion surface.
+- Materialize `/cv/config` through the established CV text parser. Require a
+  positive section count, one-dimensional section/key/value vectors,
+  consistent monotonic key offsets, and config-safe section names, keys, and
+  values. Preserve an existing `cv_in_file` owner so converted sidecar bundles
+  keep migration-route precedence.
+- Reuse the isolated two-atom distance fixture. The legacy branch consumes a
+  `steer` section with weight `2.0` and a distance CV over atoms `0 1`; the
+  bundled branch contains the same definitions only in `/cv/config`, with no
+  `cv_in_file` command, protocol sidecar table, or sidecar directory.
+- Compare the complete deterministic mdout and six-value force payload. Then
+  change only bundled `/cv/config/value` weight from `2.0` to `0.0` and run a
+  process-level control, proving the typed parameter reaches the steering
+  energy and force consumers.
+
+Acceptance:
+
+- Legacy and pure typed routes both produce `steer_cv=3.0` for distance `1.5`
+  and weight `2.0`, with analytic force `(2,0,0,-2,0,0)` and identical complete
+  mdout behavior.
+- The typed route materializes `.sponge_h5_native_protocol/cv.txt`; no legacy
+  CV ownership remains in its command file, H5 sidecar metadata, or files.
+- The weight-zero control produces steering energy `0`, maximum absolute force
+  `0`, and maximum force delta `2.0` from baseline.
+- The existing steering `cv_in_file` protocol-sidecar gate remains green,
+  proving that typed materialization does not override the migration route.
+- Registry, manifest, real CPU A/B, full smoke, related native input CTests,
+  SPONGE rebuild, Ruff, clang-format, and diff checks pass, followed by exactly
+  one PR-scoped commit.
+
+## 39. Artifacts and Temporary-Space Policy
 
 - Use `SPONGE_BUNDLED_IO_AB_RUN_ROOT` for all heavy runs.
 - Put production artifacts on the workspace filesystem rather than `/tmp`.
@@ -1187,7 +1225,7 @@ Acceptance:
 - Record artifact byte counts and enforce a configurable per-case quota.
 - Cleanup must only remove directories created by the current gate run.
 
-## 39. PR Completion Log
+## 40. PR Completion Log
 
 Append one row immediately after completing and committing each PR.
 
@@ -1235,3 +1273,4 @@ Append one row immediately after completing and committing each PR.
 | PR 38: Typed constraint projection behavior gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract` (133 tests); 93-test production manifest; real `normal_constraint_typed_projection` and `normal_constraint_sidecar_projection` CPU A/B cases; input-validation and fixture-equivalence CTests; SPONGE rebuild; Ruff; clang-format; `git diff --check` | Pure typed pair `[0,1]` with `r0=1.5` and no constraint sidecar matches the legacy route across four complete position/velocity frames with zero distance residual and radial velocity residual `3.411315e-6`. A typed `r0=2.0` control follows the new target with residual `0`; out-of-range pair `[0,2]` is rejected as `spongeErrorBadFileFormat`. Sidecar precedence remains unchanged. Registry coverage advances to 77 supported, 5 deferred, and 1 unsupported contract. |
 | PR 39: Typed Tersoff angular behavior gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract` (134 tests); 94-test production manifest; real `normal_tersoff_typed_angular` and `normal_tersoff_sidecar_angular` CPU A/B cases plus two typed failure controls; two native input CTests; SPONGE rebuild; Ruff; clang-format; `git diff --check` | Pure typed `/manybody/tersoff` with no Tersoff command or sidecars matches legacy at `potential=-173.23`, `eff_pot=-173.23468`, and maximum force `135.94906616210938`. A typed gamma-zero control produces `potential=-196.06`, `eff_pot=-196.05984`, and maximum force `144.7831268310547`, proving angular parameter consumption. Conflicting map/entry and raw/runtime parameter payloads are rejected as bad-file-format. Registry coverage advances to 78 supported, 4 deferred, and 1 unsupported contract. |
 | PR 40: Typed QC type-sensitive behavior gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract` (135 tests); 95-test production manifest; real `rerun_qc_type_typed_unrestricted_vds_off` CPU A/B plus singlet control; two native input CTests; SPONGE rebuild; Ruff; changed-line clang-format; `git diff --check` | Typed `/qc/type` with no QC sidecar matches legacy across two complete mdout frames, non-trivial `QC`/`QC_S_sq`, and exact SCF text. Changing only multiplicity `3 -> 1` changes QC by up to `89.27` and spin square by `2.0065`, proving type-sensitive SCF consumption. Registry coverage advances to 79 supported, 3 deferred, and 1 unsupported contract. |
+| PR 41: Typed steering CV behavior gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract` (136 tests); 96-test production manifest; real `normal_steering_cv_typed_nonzero` and `normal_steering_cv_sidecar_nonzero` CPU A/B cases plus typed weight-zero control; two native input CTests; SPONGE rebuild; Ruff; clang-format; `git diff --check` | Pure typed `/cv/config` with no CV command or sidecars matches the legacy `cv_in_file` route at `steer_cv=3.0` and analytic force `(2,0,0,-2,0,0)`. Changing only weight `2.0 -> 0.0` zeros energy and force with maximum force delta `2.0`, proving typed config consumption. The registry now reflects the real `/cv/config` surface instead of the unconsumed `/steer` conversion. Coverage advances to 80 supported, 2 deferred, and 1 unsupported contract. |

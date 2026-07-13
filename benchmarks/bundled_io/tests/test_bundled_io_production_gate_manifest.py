@@ -52,6 +52,7 @@ from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
     FOCUSED_RESIDUE_TYPED_PBC_FIXTURE,
     FOCUSED_SITS_NK_TYPED_RESTART_FIXTURE,
     FOCUSED_STEERING_CV_SIDECAR_FIXTURE,
+    FOCUSED_STEERING_CV_TYPED_FIXTURE,
     FOCUSED_SUBSYSTEM_DIVISION_FIXTURE,
     FOCUSED_SW_SIDECAR_FIXTURE,
     FOCUSED_SW_TYPED_FIXTURE,
@@ -304,6 +305,7 @@ def test_ab_production_harness_has_executable_contract_coverage():
         "normal_constraint_typed_projection",
         "normal_sits_nk_typed_restart_nonzero",
         "normal_steering_cv_sidecar_nonzero",
+        "normal_steering_cv_typed_nonzero",
         "normal_vds_chunk_minus_one",
         "normal_vds_chunk_exact",
         "normal_vds_chunk_plus_one",
@@ -1873,9 +1875,40 @@ def test_focused_steering_case_requires_cv_sidecar_energy_and_force():
     assert sidecar.case_ids == (case.name,)
     assert sidecar.assertion_ids == ("input_semantic_equivalence",)
     typed = contracts["input.protocol.steering"]
-    assert typed.status == "deferred"
-    assert "steer_cv_in_file has no runtime consumer" in typed.reason
-    assert "tracked separately" in typed.reason
+    assert typed.status == "supported"
+    assert typed.case_ids == ("normal_steering_cv_typed_nonzero",)
+
+
+def test_focused_typed_steering_case_requires_cv_config_behavior():
+    contracts = load_contract_registry()
+    case = next(
+        case
+        for case in _cases_for_profile()
+        if case.name == "normal_steering_cv_typed_nonzero"
+    )
+    spec = INPUT_SEMANTIC_SPECS_BY_CASE[case.name]
+
+    assert case.fixture_case == FOCUSED_STEERING_CV_TYPED_FIXTURE
+    assert case.statistical_md is False
+    assert case.normal_step_limit == 1
+    assert case.normal_dt == 0.0
+    assert case.input_behavior_only is True
+    assert case.contract_ids == (
+        "output.legacy.mdout",
+        "input.protocol.steering",
+    )
+    assert spec == (
+        InputSemanticSpec("input.protocol.steering", ("steer_cv",), 1.0e-6),
+    )
+    typed = contracts["input.protocol.steering"]
+    assert typed.status == "supported"
+    assert typed.legacy_surface == (
+        "steer block and referenced CV definitions in cv_in_file"
+    )
+    assert typed.bundled_surface == "/cv/config"
+    assert typed.case_ids == (case.name,)
+    assert typed.assertion_ids == ("input_semantic_equivalence",)
+    assert typed.reason == ""
 
 
 def test_focused_steering_gate_rejects_zero_weight_energy_and_force():

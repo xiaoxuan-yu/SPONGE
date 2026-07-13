@@ -1,11 +1,167 @@
 ﻿#include "collective_variable.h"
 
+#include <cstdint>
+#include <filesystem>
+#include <fstream>
+#include <highfive/highfive.hpp>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+namespace
+{
+std::vector<std::string> Read_H5_String_Vector(HighFive::File* file,
+                                               const std::string& path)
+{
+    HighFive::DataSet dataset = file->getDataSet(path);
+    const auto dimensions = dataset.getSpace().getDimensions();
+    if (dimensions.size() != 1)
+    {
+        throw std::runtime_error(path + " must be a one-dimensional dataset");
+    }
+    std::vector<std::string> values;
+    dataset.read(values);
+    return values;
+}
+
+std::vector<std::int64_t> Read_H5_Int64_Vector(HighFive::File* file,
+                                               const std::string& path)
+{
+    HighFive::DataSet dataset = file->getDataSet(path);
+    const auto dimensions = dataset.getSpace().getDimensions();
+    if (dimensions.size() != 1)
+    {
+        throw std::runtime_error(path + " must be a one-dimensional dataset");
+    }
+    std::vector<std::int64_t> values;
+    dataset.read(values);
+    return values;
+}
+
+void Validate_CV_Config_Token(const std::string& value, const std::string& path,
+                              bool is_key)
+{
+    if (value.empty() || value.find_first_of("\r\n{}") != std::string::npos ||
+        (is_key && value.find('=') != std::string::npos))
+    {
+        throw std::runtime_error(path + " contains an invalid config token");
+    }
+}
+
+void Materialize_H5_CV_Config(CONTROLLER* controller)
+{
+    constexpr const char* input_key = "input_h5_protocol_path";
+    constexpr const char* root = "/cv/config";
+    if (controller->Command_Exist("cv_in_file") ||
+        !controller->Command_Exist(input_key))
+    {
+        return;
+    }
+
+    try
+    {
+        HighFive::File file(controller->Command(input_key),
+                            HighFive::File::ReadOnly);
+        if (!file.exist(root))
+        {
+            return;
+        }
+
+        long long declared_section_count = 0;
+        file.getDataSet(std::string(root) + "/section/count")
+            .read(declared_section_count);
+        const auto section_names =
+            Read_H5_String_Vector(&file, std::string(root) + "/section/name");
+        const auto key_offsets = Read_H5_Int64_Vector(
+            &file, std::string(root) + "/section/key_offset");
+        const auto keys =
+            Read_H5_String_Vector(&file, std::string(root) + "/key");
+        const auto values =
+            Read_H5_String_Vector(&file, std::string(root) + "/value");
+
+        if (declared_section_count <= 0 ||
+            section_names.size() !=
+                static_cast<std::size_t>(declared_section_count))
+        {
+            throw std::runtime_error(
+                "/cv/config/section/count must match a non-empty section/name");
+        }
+        if (key_offsets.size() != section_names.size() + 1 ||
+            key_offsets.front() != 0 || key_offsets.back() < 0 ||
+            static_cast<std::size_t>(key_offsets.back()) != keys.size() ||
+            keys.size() != values.size())
+        {
+            throw std::runtime_error(
+                "/cv/config section offsets and key/value lengths are "
+                "inconsistent");
+        }
+        for (std::size_t section = 0; section < section_names.size(); ++section)
+        {
+            Validate_CV_Config_Token(section_names[section],
+                                     "/cv/config/section/name", true);
+            if (key_offsets[section] < 0 ||
+                key_offsets[section] > key_offsets[section + 1])
+            {
+                throw std::runtime_error(
+                    "/cv/config/section/key_offset must be monotonic");
+            }
+        }
+        for (std::size_t item = 0; item < keys.size(); ++item)
+        {
+            Validate_CV_Config_Token(keys[item], "/cv/config/key", true);
+            Validate_CV_Config_Token(values[item], "/cv/config/value", false);
+        }
+
+        const auto output_path =
+            std::filesystem::absolute(".sponge_h5_native_protocol/cv.txt")
+                .lexically_normal();
+        std::filesystem::create_directories(output_path.parent_path());
+        std::ofstream out(output_path);
+        if (!out)
+        {
+            throw std::runtime_error(
+                "failed to create materialized CV config " +
+                output_path.string());
+        }
+        for (std::size_t section = 0; section < section_names.size(); ++section)
+        {
+            out << section_names[section] << "\n{\n";
+            for (std::int64_t item = key_offsets[section];
+                 item < key_offsets[section + 1]; ++item)
+            {
+                out << "    " << keys[item] << " = " << values[item] << '\n';
+            }
+            out << "}\n";
+        }
+        out.close();
+        if (!out)
+        {
+            throw std::runtime_error("failed to write materialized CV config " +
+                                     output_path.string());
+        }
+        controller->Set_Command("cv_in_file", output_path.string().c_str(), 0);
+    }
+    catch (const std::exception& error)
+    {
+        const std::string message =
+            std::string(
+                "Reason:\n\tfailed to materialize typed CV config from ") +
+            root + ": " + error.what() + "\n";
+        controller->Throw_SPONGE_Error(spongeErrorBadFileFormat,
+                                       "Materialize_H5_CV_Config",
+                                       message.c_str());
+    }
+}
+}  // namespace
+
 CV_MAP_TYPE* CV_MAP = new CV_MAP_TYPE;
 CV_INSTANCE_TYPE* CV_INSTANCE_MAP = new CV_INSTANCE_TYPE;
 
 void COLLECTIVE_VARIABLE_CONTROLLER::Initial(
     CONTROLLER* controller, int* no_direct_interaction_virtual_atom_numbers)
 {
+    Materialize_H5_CV_Config(controller);
     controller->printf("START INITIALIZING CV CONTROLLER:\n");
     strcpy(module_name, "cv_controller");
     this->controller = controller;
