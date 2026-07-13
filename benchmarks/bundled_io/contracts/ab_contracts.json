@@ -139,7 +139,7 @@
       "minimum_evidence": "E3",
       "legacy_surface": "crd/box trajectory semantics",
       "bundled_surface": "output_h5_trajectory_path",
-      "case_ids": ["rerun_full_contract_pure_vds_off", "rerun_full_contract_pure_vds_on", "rerun_full_contract_sidecar_vds_off", "rerun_full_contract_sidecar_vds_on", "rerun_boundary_start0_strip0_exact_eof_box_vds_off", "normal_vds_chunk_minus_one", "normal_vds_chunk_exact", "normal_vds_chunk_plus_one", "normal_vds_chunk_two_plus_one"],
+      "case_ids": ["rerun_full_contract_pure_vds_off", "rerun_full_contract_pure_vds_on", "rerun_full_contract_sidecar_vds_off", "rerun_full_contract_sidecar_vds_on", "rerun_boundary_start0_strip0_exact_eof_box_vds_off", "normal_vds_chunk_minus_one", "normal_vds_chunk_exact", "normal_vds_chunk_plus_one", "normal_vds_chunk_two_plus_one", "normal_vds_complete_prefix_noop"],
       "assertion_ids": ["h5_statistical_equivalence", "h5_rerun_semantic_equivalence", "h5_chunk_boundary_equivalence"],
       "inventory_refs": ["h5_output_keys:output_h5_trajectory_path"]
     },
@@ -186,7 +186,7 @@
       "minimum_evidence": "E3",
       "legacy_surface": "legacy trajectory semantics",
       "bundled_surface": "VDS wrapper and shards",
-      "case_ids": ["normal_sits_ff19sb_cmap_peptide", "rerun_full_contract_pure_vds_on", "rerun_full_contract_sidecar_vds_on", "normal_vds_chunk_minus_one", "normal_vds_chunk_exact", "normal_vds_chunk_plus_one", "normal_vds_chunk_two_plus_one"],
+      "case_ids": ["normal_sits_ff19sb_cmap_peptide", "rerun_full_contract_pure_vds_on", "rerun_full_contract_sidecar_vds_on", "normal_vds_chunk_minus_one", "normal_vds_chunk_exact", "normal_vds_chunk_plus_one", "normal_vds_chunk_two_plus_one", "normal_vds_complete_prefix_noop"],
       "assertion_ids": ["h5_statistical_equivalence", "h5_rerun_semantic_equivalence", "h5_chunk_boundary_equivalence"],
       "inventory_refs": ["h5_output_keys:output_h5_trajectory_vds"]
     },
@@ -944,7 +944,7 @@
       "minimum_evidence": "E3",
       "legacy_surface": "legacy trajectory frame sequence",
       "bundled_surface": "output_h5_trajectory_chunk_size",
-      "case_ids": ["normal_vds_chunk_minus_one", "normal_vds_chunk_exact", "normal_vds_chunk_plus_one", "normal_vds_chunk_two_plus_one"],
+      "case_ids": ["normal_vds_chunk_minus_one", "normal_vds_chunk_exact", "normal_vds_chunk_plus_one", "normal_vds_chunk_two_plus_one", "normal_vds_complete_prefix_noop"],
       "assertion_ids": ["h5_chunk_boundary_equivalence"],
       "inventory_refs": ["h5_output_keys:output_h5_trajectory_chunk_size"],
       "reason": ""
@@ -1096,14 +1096,14 @@
       "contract_id": "output.vds.complete_prefix_repair",
       "direction": "output",
       "component": "trajectory_vds",
-      "status": "deferred",
+      "status": "supported",
       "minimum_evidence": "E3",
       "legacy_surface": "no direct legacy repair surface",
       "bundled_surface": "output_h5_trajectory_repair_policy=complete_prefix",
-      "case_ids": [],
-      "assertion_ids": [],
+      "case_ids": ["normal_vds_complete_prefix_noop"],
+      "assertion_ids": ["h5_complete_prefix_repair_equivalence"],
       "inventory_refs": ["h5_output_keys:output_h5_trajectory_repair_policy"],
-      "reason": "Writer smoke exists, but production legacy/bundled A/B evidence is not yet registered."
+      "reason": ""
     },
     {
       "contract_id": "output.vds.cross_process_append_resume",

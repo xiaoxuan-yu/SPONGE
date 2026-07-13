@@ -345,6 +345,7 @@ class AbCase:
     expected_error_category: str = ""
     expected_diagnostic_tokens: tuple[str, ...] = ()
     output_chunk_size: int = 1
+    output_repair_policy: str = "strict"
     normal_step_limit: int | None = None
     normal_interval: int | None = None
     normal_dt: float | None = None
@@ -1015,7 +1016,7 @@ def _chunk_boundary_cases() -> list[AbCase]:
         "normal_interval": 1,
         "normal_dt": 0.0001,
     }
-    return [
+    cases = [
         AbCase(
             name="normal_vds_chunk_minus_one",
             normal_step_limit=3,
@@ -1041,6 +1042,35 @@ def _chunk_boundary_cases() -> list[AbCase]:
             **shared,
         ),
     ]
+    cases.append(
+        AbCase(
+            name="normal_vds_complete_prefix_noop",
+            fixture_case="tip3p_validation_generated",
+            legacy_subdir="generated_legacy",
+            bundled_subdir="generated_bundled",
+            mode="chunk_boundary",
+            vds=True,
+            statistical_md=False,
+            restart_load_policy="structural",
+            contract_ids=(
+                "output.trajectory",
+                "output.trajectory.vds_on",
+                "output.trajectory.chunk_size",
+                "output.vds.complete_prefix_repair",
+            ),
+            assertion_ids=(
+                "h5_chunk_boundary_equivalence",
+                "h5_complete_prefix_repair_equivalence",
+            ),
+            output_chunk_size=4,
+            output_repair_policy="complete_prefix",
+            normal_step_limit=5,
+            normal_interval=1,
+            normal_dt=0.0001,
+            expected_trajectory_frames=5,
+        )
+    )
+    return cases
 
 
 def _rerun_boundary_cases() -> list[AbCase]:
@@ -2785,12 +2815,47 @@ def _run_chunk_boundary_case(case: AbCase, contracts) -> None:
         "h5_families": sorted(h5),
         "layouts": layouts,
     }
-    assertion = AssertionEvidence(
-        assertion_id="h5_chunk_boundary_equivalence",
-        evidence_level="E3",
-        details=details,
-    )
-    evidence = build_case_evidence(contracts, case, (assertion,))
+    assertions = [
+        AssertionEvidence(
+            assertion_id="h5_chunk_boundary_equivalence",
+            evidence_level="E3",
+            details=details,
+        )
+    ]
+    if "h5_complete_prefix_repair_equivalence" in case.assertion_ids:
+        noops = {
+            "legacy": _assert_complete_prefix_noop_layout(
+                f"{case.name} legacy",
+                legacy_dir / TRAJECTORY_REL,
+                expected_frame_count=case.expected_trajectory_frames,
+                expected_shard_count=math.ceil(
+                    case.expected_trajectory_frames / case.output_chunk_size
+                ),
+            ),
+            "bundled": _assert_complete_prefix_noop_layout(
+                f"{case.name} bundled",
+                bundled_dir / TRAJECTORY_REL,
+                expected_frame_count=case.expected_trajectory_frames,
+                expected_shard_count=math.ceil(
+                    case.expected_trajectory_frames / case.output_chunk_size
+                ),
+            ),
+        }
+        terminal_repair = _run_vds_terminal_repair_smoke()
+        repair_details = {
+            "production_noop": noops,
+            "terminal_tail_repair": terminal_repair,
+            "cross_process_append_resume": "unsupported",
+        }
+        details["complete_prefix"] = repair_details
+        assertions.append(
+            AssertionEvidence(
+                assertion_id="h5_complete_prefix_repair_equivalence",
+                evidence_level="E3",
+                details=repair_details,
+            )
+        )
+    evidence = build_case_evidence(contracts, case, tuple(assertions))
     metrics = {
         "profile": PROFILE,
         "case": case.name,
@@ -2852,6 +2917,97 @@ def _assert_chunk_boundary_layout(
         "frame_count": frame_count,
         "shard_count": shard_count,
         "expected_shard_count": expected_shards,
+    }
+
+
+def _assert_complete_prefix_noop_layout(
+    label: str,
+    trajectory: Path,
+    *,
+    expected_frame_count: int | None,
+    expected_shard_count: int,
+) -> dict[str, object]:
+    if expected_frame_count is None:
+        raise AssertionError(f"{label} has no expected frame count")
+    policy = _h5_string_values(
+        trajectory, "/parameters/sponge/output/repair_policy"
+    )
+    status = _h5_string_values(
+        trajectory, "/parameters/sponge/output/repair_status"
+    )
+    repaired_count = _h5_numeric_values(
+        trajectory, "/parameters/sponge/output/repaired_shard_count"
+    )
+    frame_count = _h5_numeric_values(
+        trajectory, "/parameters/sponge/output/frame_count"
+    )
+    manifest_status = _h5_string_values(
+        trajectory, "/parameters/sponge/output/shard_manifest/status"
+    )
+    if policy != ["complete_prefix"]:
+        raise AssertionError(f"{label} repair policy differs: {policy}")
+    if status != ["not_applied"]:
+        raise AssertionError(f"{label} repair status differs: {status}")
+    if repaired_count != [0.0]:
+        raise AssertionError(
+            f"{label} repaired shard count differs: {repaired_count}"
+        )
+    if not frame_count or int(frame_count[-1]) != expected_frame_count:
+        raise AssertionError(f"{label} completion frame count differs")
+    if len(manifest_status) != expected_shard_count or any(
+        value != "complete" for value in manifest_status
+    ):
+        raise AssertionError(
+            f"{label} manifest is not a complete {expected_shard_count}-shard "
+            f"prefix: {manifest_status}"
+        )
+    return {
+        "policy": policy[0],
+        "status": status[0],
+        "repaired_shard_count": int(repaired_count[0]),
+        "frame_count": int(frame_count[-1]),
+        "manifest_status": manifest_status,
+    }
+
+
+def _run_vds_terminal_repair_smoke() -> dict[str, object]:
+    configured = os.environ.get("SPONGE_BUNDLED_IO_AB_VDS_REPAIR_SMOKE")
+    executable = (
+        Path(configured)
+        if configured
+        else Path(_sponge_executable()).parent
+        / "tests"
+        / "h5_bundle"
+        / "test_h5_vds_terminal_resume_smoke"
+    )
+    if not executable.is_file():
+        raise AssertionError(
+            "VDS terminal repair smoke executable is missing; set "
+            "SPONGE_BUNDLED_IO_AB_VDS_REPAIR_SMOKE or build "
+            "test_h5_vds_terminal_resume_smoke"
+        )
+    env = dict(os.environ)
+    env["SPONGE_H5_ENABLE_RUNTIME_SMOKE"] = "1"
+    outcome = subprocess.run(
+        [str(executable)],
+        cwd=executable.parent,
+        env=env,
+        text=True,
+        capture_output=True,
+        timeout=120,
+        check=False,
+    )
+    if outcome.returncode != 0:
+        raise AssertionError(
+            "VDS terminal repair smoke failed: "
+            f"returncode={outcome.returncode}, stdout={outcome.stdout!r}, "
+            f"stderr={outcome.stderr!r}"
+        )
+    return {
+        "executable": str(executable),
+        "terminal_shard_finalize_failure_injected": True,
+        "repaired_to_complete_prefix": True,
+        "complete_prefix_noop_checked": True,
     }
 
 
@@ -5078,6 +5234,7 @@ def _prepare_mdin(
         "output_h5_trajectory_path",
         "output_h5_trajectory_vds",
         "output_h5_trajectory_chunk_size",
+        "output_h5_trajectory_repair_policy",
         "output_h5_restart_path",
         "output_h5_observable_path",
         "rerun_start",
@@ -5192,6 +5349,8 @@ def _prepare_mdin(
             f'output_h5_trajectory_path = "{TRAJECTORY_REL.as_posix()}"',
             f"output_h5_trajectory_vds = {'true' if case.vds else 'false'}",
             f"output_h5_trajectory_chunk_size = {case.output_chunk_size}",
+            "output_h5_trajectory_repair_policy = "
+            f'"{case.output_repair_policy}"',
             f'output_h5_observable_path = "{OBSERVABLE_REL.as_posix()}"',
         ]
     )

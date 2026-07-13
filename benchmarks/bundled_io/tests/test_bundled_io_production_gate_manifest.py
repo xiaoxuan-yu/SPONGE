@@ -53,6 +53,7 @@ from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
     MDINFO_CONTRACT_KEYS,
     PROFILE_LIMITS,
     RERUN_INPUT_SEMANTIC_SPECS,
+    _assert_complete_prefix_noop_layout,
     _assert_constraint_projection_oracle,
     _assert_exclusion_coulomb_oracle,
     _assert_gb_force_oracle,
@@ -78,6 +79,9 @@ VDS_WRITER_TEST = (
     / "tests"
     / "h5_bundle"
     / "test_vds_trajectory_writer_with_mock_backend.cpp"
+)
+VDS_TERMINAL_REPAIR_TEST = (
+    REPO_ROOT / "tests/h5_bundle/test_h5_vds_terminal_resume_smoke.cpp"
 )
 OUTPUT_PLAN_TEST = REPO_ROOT / "tests/h5_bundle/test_h5_output_plan.cpp"
 WRITER_TEST = (
@@ -280,6 +284,7 @@ def test_ab_production_harness_has_executable_contract_coverage():
         "normal_vds_chunk_exact",
         "normal_vds_chunk_plus_one",
         "normal_vds_chunk_two_plus_one",
+        "normal_vds_complete_prefix_noop",
         "rerun_full_contract_pure_vds_off",
         "rerun_full_contract_pure_vds_on",
         "rerun_full_contract_sidecar_vds_off",
@@ -315,7 +320,12 @@ def test_ab_production_harness_has_executable_contract_coverage():
     assert contracts["output.vds.cross_process_append_resume"].status == (
         "unsupported"
     )
-    assert contracts["output.vds.complete_prefix_repair"].status == "deferred"
+    repair = contracts["output.vds.complete_prefix_repair"]
+    assert repair.status == "supported"
+    assert repair.case_ids == ("normal_vds_complete_prefix_noop",)
+    assert repair.assertion_ids == (
+        "h5_complete_prefix_repair_equivalence",
+    )
 
 
 def test_nhc_dynamic_restart_uses_one_checkpoint_and_e4_continuation():
@@ -400,6 +410,7 @@ def test_vds_chunk_boundary_cases_cover_required_frame_transitions():
         "normal_vds_chunk_exact": (4, 4, 1, 0.0001),
         "normal_vds_chunk_plus_one": (4, 5, 1, 0.0001),
         "normal_vds_chunk_two_plus_one": (4, 9, 1, 0.0001),
+        "normal_vds_complete_prefix_noop": (4, 5, 1, 0.0001),
     }
     assert all(case.vds for case in cases.values())
     assert all(not case.statistical_md for case in cases.values())
@@ -411,6 +422,113 @@ def test_vds_chunk_boundary_cases_cover_required_frame_transitions():
     assert contract.minimum_evidence == "E3"
     assert set(contract.case_ids) == set(cases)
     assert contract.assertion_ids == ("h5_chunk_boundary_equivalence",)
+
+
+def test_vds_complete_prefix_case_combines_production_noop_and_tail_repair():
+    contracts = load_contract_registry()
+    case = next(
+        case
+        for case in _cases_for_profile()
+        if case.name == "normal_vds_complete_prefix_noop"
+    )
+    contract = contracts["output.vds.complete_prefix_repair"]
+
+    assert case.mode == "chunk_boundary"
+    assert case.vds is True
+    assert case.statistical_md is False
+    assert case.output_chunk_size == 4
+    assert case.output_repair_policy == "complete_prefix"
+    assert case.expected_trajectory_frames == 5
+    assert case.contract_ids == (
+        "output.trajectory",
+        "output.trajectory.vds_on",
+        "output.trajectory.chunk_size",
+        "output.vds.complete_prefix_repair",
+    )
+    assert case.assertion_ids == (
+        "h5_chunk_boundary_equivalence",
+        "h5_complete_prefix_repair_equivalence",
+    )
+    assert contract.status == "supported"
+    assert contract.minimum_evidence == "E3"
+    assert contract.case_ids == (case.name,)
+    assert contract.assertion_ids == (
+        "h5_complete_prefix_repair_equivalence",
+    )
+
+    source = VDS_TERMINAL_REPAIR_TEST.read_text(encoding="utf-8")
+    for token in (
+        "SelectiveFailHighFiveBackendFactory",
+        "Finalize_With_Repair",
+        "Test_Vds_Terminal_Tail_Is_Repaired_To_Complete_Prefix",
+        'Require_Common_Wrapper_Metadata(file, "applied", 1)',
+        "Test_Vds_Resume_Policy_Noops_When_Terminal_Shards_Are_Complete",
+        'Require_Common_Wrapper_Metadata(file, "not_applied", 0)',
+    ):
+        assert token in source
+
+
+@pytest.mark.parametrize(
+    ("policy", "status", "repaired_count", "frame_count", "manifest", "match"),
+    [
+        ("strict", "not_applied", 0, 5, ("complete", "complete"), "policy"),
+        ("complete_prefix", "applied", 0, 5, ("complete", "complete"), "status"),
+        (
+            "complete_prefix",
+            "not_applied",
+            1,
+            5,
+            ("complete", "complete"),
+            "repaired shard count",
+        ),
+        (
+            "complete_prefix",
+            "not_applied",
+            0,
+            4,
+            ("complete", "complete"),
+            "completion frame count",
+        ),
+        (
+            "complete_prefix",
+            "not_applied",
+            0,
+            5,
+            ("complete", "open"),
+            "manifest is not",
+        ),
+    ],
+)
+def test_vds_complete_prefix_noop_gate_rejects_metadata_mutations(
+    tmp_path, policy, status, repaired_count, frame_count, manifest, match
+):
+    trajectory = tmp_path / "trajectory.spg.h5md"
+    string_type = h5py.string_dtype(encoding="utf-8")
+    with h5py.File(trajectory, "w") as handle:
+        root = "/parameters/sponge/output"
+        handle.create_dataset(
+            f"{root}/repair_policy", data=policy, dtype=string_type
+        )
+        handle.create_dataset(
+            f"{root}/repair_status", data=status, dtype=string_type
+        )
+        handle.create_dataset(
+            f"{root}/repaired_shard_count", data=[repaired_count]
+        )
+        handle.create_dataset(f"{root}/frame_count", data=[frame_count])
+        handle.create_dataset(
+            f"{root}/shard_manifest/status",
+            data=list(manifest),
+            dtype=string_type,
+        )
+
+    with pytest.raises(AssertionError, match=match):
+        _assert_complete_prefix_noop_layout(
+            "mutation",
+            trajectory,
+            expected_frame_count=5,
+            expected_shard_count=2,
+        )
 
 
 def test_rerun_boundary_matrix_covers_semantic_axes_and_eof_boundaries():

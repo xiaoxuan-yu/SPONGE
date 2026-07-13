@@ -792,7 +792,43 @@ Acceptance:
 - Registry, manifest, real CPU A/B, Ruff, and diff checks pass, followed by
   exactly one PR-scoped commit.
 
-## 27. Artifacts and Temporary-Space Policy
+## 27. PR 29: VDS Complete-Prefix Repair Behavior Gate
+
+Close the VDS repair-policy contract with separate evidence for successful
+production finalization and terminal-shard failure. A normal no-op is required
+behavior, but is not by itself evidence that repair works.
+
+- Run a deterministic five-frame, chunk-size-four SPONGE case from both the
+  legacy-input and bundled-input routes with
+  `output_h5_trajectory_repair_policy=complete_prefix`.
+- Compare every mdout column and every numeric/string H5 dataset across the two
+  routes. Require two complete shards, five materialized frames,
+  `repair_status=not_applied`, and `repaired_shard_count=0` in both wrappers.
+- In the same production gate, execute the real HighFive terminal/resume smoke
+  helper with a backend that fails finalization of the terminal shard. Require
+  `Finalize_With_Repair` to retain only the valid prefix, rewrite completion
+  metadata to one frame, report `repair_status=applied`, and count one repaired
+  shard.
+- Mutation-test the production no-op oracle against strict policy metadata,
+  false applied status, non-zero repaired count, wrong completion frame count,
+  and an open manifest entry.
+- Keep `output.vds.cross_process_append_resume` unsupported. Complete-prefix
+  repair finalizes the current process output; it does not reopen an existing
+  wrapper for append.
+
+Acceptance:
+
+- Legacy-input and bundled-input production runs retain identical complete
+  five-frame semantics and do not report a repair when every shard finalizes.
+- The real backend failure helper proves that a failed terminal shard is
+  removed and the wrapper exposes only the valid complete prefix.
+- Either half of the evidence being absent, any metadata mutation, an
+  incomplete retained manifest, or any cross-branch H5 difference fails the
+  gate.
+- Registry, manifest, real CPU A/B, real-backend VDS smoke, Ruff, and diff
+  checks pass, followed by exactly one PR-scoped commit.
+
+## 28. Artifacts and Temporary-Space Policy
 
 - Use `SPONGE_BUNDLED_IO_AB_RUN_ROOT` for all heavy runs.
 - Put production artifacts on the workspace filesystem rather than `/tmp`.
@@ -802,7 +838,7 @@ Acceptance:
 - Record artifact byte counts and enforce a configurable per-case quota.
 - Cleanup must only remove directories created by the current gate run.
 
-## 28. PR Completion Log
+## 29. PR Completion Log
 
 Append one row immediately after completing and committing each PR.
 
@@ -838,3 +874,4 @@ Append one row immediately after completing and committing each PR.
 | PR 26: H5 topology metadata runtime-rejection gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; three real bundled CPU F1 cases; Ruff; `git diff --check` | Production process gates reject topology atom-count mismatch with exit 238/`spongeErrorValueErrorCommand`, and reject non-vector or string `/atoms/mass` payloads with exit 234/`spongeErrorBadFileFormat`, retaining route-specific stable diagnostic tokens. An incompatible `/schema/version` value is currently accepted, so the complete four-mutation metadata contract remains deferred. Registry coverage advances to 68 supported, 12 deferred, and 1 unsupported contract. |
 | PR 27: Steering CV protocol-sidecar behavior gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; real `normal_steering_cv_sidecar_nonzero` CPU A/B; Ruff; `git diff --check` | An isolated distance CV at `1.5` with weight `2.0` produces `steer_cv=3.0` and the analytic six-value force `(2,0,0,-2,0,0)` through both legacy `cv_in_file` and the H5 protocol sidecar route. The gate removes typed `/cv`, rejects zero-weight energy and force mutations, and keeps the unconsumed `steer_cv_in_file`/typed `/steering` contract deferred. Registry coverage advances to 69 supported, 12 deferred, and 1 unsupported contract. |
 | PR 28: SITS typed Nk restart behavior gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; real `normal_sits_nk_typed_restart_nonzero` CPU A/B; Ruff; `git diff --check` | A two-temperature selective LJ/Coulomb SITS fixture consumes legacy `SITS_nk_in_file` with `Nk=(1,4)` versus typed `/parameters/restart/bias/sits/SITS/nk` under protocol restart load. Both routes produce `SITS_AA_kAB=-1.22`, `SITS_bias=-0.5317`, `SITS_fb=0.7049`, `eff_pot=-1.2829471`, and the same non-zero six-value force with maximum magnitude `0.2489061951637268`; the gate removes embedded/external bundled Nk text and rejects initialization-only output, unscaled force, and the symmetric `Nk=(1,1)` control. Typed `/sits` configuration materialization remains deferred. Registry coverage advances to 70 supported, 12 deferred, and 1 unsupported contract. |
+| PR 29: VDS complete-prefix repair behavior gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; real `normal_vds_complete_prefix_noop` CPU A/B; `SPONGE_H5_ENABLE_RUNTIME_SMOKE=1 ctest --test-dir build-dev-cpu-h5-2 --output-on-failure -R '^test_h5_vds_terminal_resume_smoke$'`; Ruff; `git diff --check` | Legacy-input and bundled-input production routes each retain five deterministic frames in two complete shards with `repair_status=not_applied` and zero repaired shards. The same gate runs a real HighFive helper that injects terminal-shard finalize failure and verifies one-shard complete-prefix repair with rewritten completion metadata. Five metadata mutations are rejected. Cross-process reopen/append remains unsupported. Registry coverage advances to 71 supported, 11 deferred, and 1 unsupported contract. |
