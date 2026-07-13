@@ -315,6 +315,7 @@ def test_ab_production_harness_has_executable_contract_coverage():
         "rerun_full_contract_sidecar_vds_on",
         "rerun_qc_unrestricted_sidecar_vds_off",
         "rerun_qc_unrestricted_sidecar_vds_on",
+        "rerun_qc_type_typed_unrestricted_vds_off",
         "rerun_restart_absent_same_bootstrap_vds_off",
         "rerun_boundary_start0_strip0_limit1_vds_off",
         "rerun_boundary_start1_strip0_unlimited_no_velocity_vds_on",
@@ -2120,12 +2121,15 @@ def test_unrestricted_qc_gate_requires_nontrivial_spin_and_nonempty_scf_text():
         for case in _cases_for_profile()
         if case.name.startswith("rerun_qc_unrestricted_sidecar_vds_")
     }
-    expected_case_ids = {
+    sidecar_case_ids = {
         "rerun_qc_unrestricted_sidecar_vds_off",
         "rerun_qc_unrestricted_sidecar_vds_on",
     }
+    all_case_ids = sidecar_case_ids | {
+        "rerun_qc_type_typed_unrestricted_vds_off"
+    }
 
-    assert set(cases) == expected_case_ids
+    assert set(cases) == sidecar_case_ids
     assert {case.vds for case in cases.values()} == {False, True}
     for case in cases.values():
         assert case.fixture_case == "full_contract_rerun"
@@ -2166,7 +2170,7 @@ def test_unrestricted_qc_gate_requires_nontrivial_spin_and_nonempty_scf_text():
 
     spin_contract = contracts["input.qc.spin_square"]
     assert spin_contract.status == "supported"
-    assert set(spin_contract.case_ids) == expected_case_ids
+    assert set(spin_contract.case_ids) == all_case_ids
     assert spin_contract.assertion_ids == (
         "input_semantic_equivalence",
         "h5_rerun_semantic_equivalence",
@@ -2174,12 +2178,38 @@ def test_unrestricted_qc_gate_requires_nontrivial_spin_and_nonempty_scf_text():
     for contract_id in ("input.qc.scf_text", "output.legacy.qc_scf_output"):
         contract = contracts[contract_id]
         assert contract.status == "supported"
-        assert set(contract.case_ids) == expected_case_ids
+        assert set(contract.case_ids) == all_case_ids
         assert contract.assertion_ids == ("qc_scf_exact_equivalence",)
 
-    qc_type = contracts["input.qc.type"]
-    assert qc_type.status == "deferred"
-    assert "does not materialize /qc/type" in qc_type.reason
+
+def test_typed_qc_type_case_requires_type_sensitive_runtime_behavior():
+    contracts = load_contract_registry()
+    case = next(
+        case
+        for case in _cases_for_profile()
+        if case.name == "rerun_qc_type_typed_unrestricted_vds_off"
+    )
+    spec = next(
+        spec
+        for spec in RERUN_INPUT_SEMANTIC_SPECS
+        if spec.contract_id == "input.qc.type"
+    )
+
+    assert case.fixture_case == "full_contract_rerun"
+    assert case.vds is False
+    assert case.statistical_md is False
+    assert case.contract_ids == (
+        "output.legacy.mdout",
+        "output.legacy.qc_scf_output",
+        "input.qc.spin_square",
+        "input.qc.scf_text",
+        "input.qc.type",
+    )
+    assert spec == InputSemanticSpec("input.qc.type", ("QC", "QC_S_sq"), 1.0e-4)
+    contract = contracts["input.qc.type"]
+    assert contract.status == "supported"
+    assert contract.case_ids == (case.name,)
+    assert contract.assertion_ids == ("input_semantic_equivalence",)
 
 
 def test_h5_string_reader_preserves_multiline_scf_text(tmp_path):

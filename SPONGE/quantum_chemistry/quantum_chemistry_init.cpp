@@ -1,8 +1,131 @@
-﻿#include "basis/basis.h"
+﻿#include <filesystem>
+#include <fstream>
+#include <highfive/highfive.hpp>
+#include <set>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+#include "basis/basis.h"
 #include "ecp/ecp_library.h"
 #include "guess/minao.h"
 #include "guess/sap.h"
 #include "quantum_chemistry.h"
+
+namespace
+{
+void Materialize_H5_QC_Type_Input(CONTROLLER* controller, int atom_numbers)
+{
+    constexpr const char* input_key = "input_h5_topology_path";
+    constexpr const char* root = "/qc/type";
+    if (controller->Command_Exist("qc_type_in_file") ||
+        !controller->Command_Exist(input_key))
+    {
+        return;
+    }
+
+    try
+    {
+        HighFive::File file(controller->Command(input_key),
+                            HighFive::File::ReadOnly);
+        if (!file.exist(root))
+        {
+            return;
+        }
+
+        int count = 0;
+        int charge = 0;
+        int multiplicity = 0;
+        file.getDataSet(std::string(root) + "/count").read(count);
+        file.getDataSet(std::string(root) + "/charge").read(charge);
+        file.getDataSet(std::string(root) + "/multiplicity").read(multiplicity);
+        if (count <= 0 || count > atom_numbers)
+        {
+            throw std::runtime_error(
+                "/qc/type/count must be positive and no larger than the "
+                "runtime atom count");
+        }
+        if (multiplicity <= 0)
+        {
+            throw std::runtime_error("/qc/type/multiplicity must be positive");
+        }
+
+        HighFive::DataSet atom_index_dataset =
+            file.getDataSet(std::string(root) + "/atom_index");
+        HighFive::DataSet symbol_dataset =
+            file.getDataSet(std::string(root) + "/symbol");
+        const auto atom_index_dimensions =
+            atom_index_dataset.getSpace().getDimensions();
+        const auto symbol_dimensions =
+            symbol_dataset.getSpace().getDimensions();
+        if (atom_index_dimensions.size() != 1 ||
+            symbol_dimensions.size() != 1 ||
+            atom_index_dimensions[0] != static_cast<std::size_t>(count) ||
+            symbol_dimensions[0] != static_cast<std::size_t>(count))
+        {
+            throw std::runtime_error(
+                "/qc/type/atom_index and /qc/type/symbol must both have "
+                "shape [count]");
+        }
+        std::vector<int> atom_index;
+        std::vector<std::string> symbols;
+        atom_index_dataset.read(atom_index);
+        symbol_dataset.read(symbols);
+        std::set<int> unique_atom_indices;
+        for (int i = 0; i < count; ++i)
+        {
+            if (atom_index[i] < 0 || atom_index[i] >= atom_numbers ||
+                !unique_atom_indices.insert(atom_index[i]).second)
+            {
+                throw std::runtime_error(
+                    "/qc/type/atom_index contains an out-of-range or duplicate "
+                    "index");
+            }
+            if (symbols[i].empty() ||
+                symbols[i].find_first_of(" \t\r\n") != std::string::npos)
+            {
+                throw std::runtime_error(
+                    "/qc/type/symbol contains an empty or whitespace symbol");
+            }
+        }
+
+        const auto output_path =
+            std::filesystem::absolute(".sponge_h5_native_qc/qc_type.txt")
+                .lexically_normal();
+        std::filesystem::create_directories(output_path.parent_path());
+        std::ofstream out(output_path);
+        if (!out)
+        {
+            throw std::runtime_error("failed to create materialized QC type " +
+                                     output_path.string());
+        }
+        out << count << ' ' << charge << ' ' << multiplicity << '\n';
+        for (int i = 0; i < count; ++i)
+        {
+            out << atom_index[i] << ' ' << symbols[i] << '\n';
+        }
+        out.close();
+        if (!out)
+        {
+            throw std::runtime_error("failed to write materialized QC type " +
+                                     output_path.string());
+        }
+        controller->Set_Command("qc_type_in_file", output_path.string().c_str(),
+                                0);
+    }
+    catch (const std::exception& error)
+    {
+        const std::string message =
+            std::string(
+                "Reason:\n\tfailed to materialize typed QC type from ") +
+            root + ": " + error.what() + "\n";
+        controller->Throw_SPONGE_Error(spongeErrorBadFileFormat,
+                                       "Materialize_H5_QC_Type_Input",
+                                       message.c_str());
+    }
+}
+}  // namespace
 
 static void Init_ERI_Workspace_Params(QUANTUM_CHEMISTRY* qc,
                                       CONTROLLER* controller, int max_l)
@@ -944,6 +1067,7 @@ void QUANTUM_CHEMISTRY::Initial(CONTROLLER* controller, const int atom_numbers,
     }
     if (is_initialized) return;
 
+    Materialize_H5_QC_Type_Input(controller, atom_numbers);
     const char* qc_type_file = NULL;
     std::string basis_set_name;
     const bool need_qc = Parsing_Arguments(controller, atom_numbers,

@@ -380,6 +380,7 @@ RERUN_INPUT_SEMANTIC_SPECS = (
     InputSemanticSpec("input.protocol.cv", ("distance",), 1.0e-6),
     InputSemanticSpec("input.qc.energy", ("QC",), 1.0e-6),
     InputSemanticSpec("input.qc.spin_square", ("QC_S_sq",), 1.0e-4),
+    InputSemanticSpec("input.qc.type", ("QC", "QC_S_sq"), 1.0e-4),
 )
 
 
@@ -1266,6 +1267,29 @@ def _cases_for_profile() -> list[AbCase]:
                 "output.legacy.qc_scf_output",
                 "input.qc.spin_square",
                 "input.qc.scf_text",
+            ),
+            assertion_ids=(
+                "mdout_deterministic_equivalence",
+                "h5_rerun_semantic_equivalence",
+                "qc_scf_exact_equivalence",
+                "input_semantic_equivalence",
+            ),
+        ),
+        AbCase(
+            name="rerun_qc_type_typed_unrestricted_vds_off",
+            fixture_case="full_contract_rerun",
+            legacy_subdir="legacy_input",
+            bundled_subdir="bundled_input_with_legacy_sidecar/bundle",
+            mode="rerun",
+            vds=False,
+            statistical_md=False,
+            restart_load_policy="structural",
+            contract_ids=(
+                "output.legacy.mdout",
+                "output.legacy.qc_scf_output",
+                "input.qc.spin_square",
+                "input.qc.scf_text",
+                "input.qc.type",
             ),
             assertion_ids=(
                 "mdout_deterministic_equivalence",
@@ -3483,7 +3507,13 @@ def _prepare_case_pair(
     legacy_dir = _copy_case(case, "legacy", case.legacy_subdir, case_root)
     bundled_dir = _copy_case(case, "bundled", case.bundled_subdir, case_root)
     if "input.qc.spin_square" in case.contract_ids:
-        _prepare_unrestricted_qc_inputs(legacy_dir, bundled_dir)
+        _prepare_unrestricted_qc_inputs(
+            legacy_dir,
+            bundled_dir,
+            keep_typed_residue="input.qc.type" in case.contract_ids,
+        )
+    if "input.qc.type" in case.contract_ids:
+        _prepare_pure_typed_qc_input(bundled_dir)
     _validate_full_contract_input(case, bundled_dir)
     if "input.restart_load.absent" in case.contract_ids:
         _prepare_restart_absent_inputs(legacy_dir, bundled_dir)
@@ -3493,12 +3523,17 @@ def _prepare_case_pair(
 
 
 def _prepare_unrestricted_qc_inputs(
-    legacy_dir: Path, bundled_dir: Path
+    legacy_dir: Path,
+    bundled_dir: Path,
+    *,
+    keep_typed_residue: bool = False,
 ) -> None:
-    qc_type_paths = (
-        legacy_dir / "qc_type.txt",
-        bundled_dir / "legacy_sidecars" / "qc_type_in_file" / "qc_type.txt",
+    qc_type_paths = [legacy_dir / "qc_type.txt"]
+    bundled_qc_sidecar = (
+        bundled_dir / "legacy_sidecars" / "qc_type_in_file" / "qc_type.txt"
     )
+    if bundled_qc_sidecar.exists():
+        qc_type_paths.append(bundled_qc_sidecar)
     for qc_type_path in qc_type_paths:
         lines = qc_type_path.read_text(encoding="utf-8").splitlines()
         if not lines or lines[0].split() != ["2", "0", "1"]:
@@ -3516,8 +3551,6 @@ def _prepare_unrestricted_qc_inputs(
             "/qc/type/symbol",
             "/qc/type/charge",
             "/qc/type/multiplicity",
-            "/parameters/sponge/files/legacy_sidecars/key",
-            "/parameters/sponge/files/legacy_sidecars/path",
         }
         missing = sorted(path for path in required if path not in topology)
         if missing:
@@ -3541,22 +3574,96 @@ def _prepare_unrestricted_qc_inputs(
             )
         multiplicity[...] = 3
 
-        keys = (
-            topology["/parameters/sponge/files/legacy_sidecars/key"]
-            .asstr()[...]
-            .tolist()
-        )
-        paths = (
-            topology["/parameters/sponge/files/legacy_sidecars/path"]
-            .asstr()[...]
-            .tolist()
-        )
-        bindings = dict(zip(keys, paths, strict=True))
-        expected_sidecar = "legacy_sidecars/qc_type_in_file/qc_type.txt"
-        if bindings.get("qc_type_in_file") != expected_sidecar:
+        sidecar_root = "/parameters/sponge/files/legacy_sidecars"
+        if sidecar_root in topology:
+            keys = topology[f"{sidecar_root}/key"].asstr()[...].tolist()
+            paths = topology[f"{sidecar_root}/path"].asstr()[...].tolist()
+            bindings = dict(zip(keys, paths, strict=True))
+            expected_sidecar = "legacy_sidecars/qc_type_in_file/qc_type.txt"
+            if bindings.get("qc_type_in_file") != expected_sidecar:
+                raise AssertionError(
+                    "unrestricted QC bundle does not bind the expected sidecar"
+                )
+            if "residue_in_file" in keys and not keep_typed_residue:
+                for path in ("/atoms/residue_index", "/residues/atom_offset"):
+                    if path in topology:
+                        del topology[path]
+
+
+def _prepare_pure_typed_qc_input(bundled_dir: Path) -> None:
+    topology_path = bundled_dir / "topology.spgt.h5"
+    sidecar_root = "/parameters/sponge/files/legacy_sidecars"
+    with h5py.File(topology_path, "r+") as topology:
+        sidecars = topology[sidecar_root]
+        keys = sidecars["key"].asstr()[...].tolist()
+        paths = sidecars["path"].asstr()[...].tolist()
+        retained = [
+            (key, path)
+            for key, path in zip(keys, paths, strict=True)
+            if key not in {"qc_type_in_file", "residue_in_file"}
+        ]
+        if len(retained) != len(keys) - 2:
             raise AssertionError(
-                "unrestricted QC bundle does not bind the expected sidecar"
+                "typed QC fixture did not remove the QC and duplicate residue "
+                "bindings"
             )
+        del sidecars["key"]
+        del sidecars["path"]
+        string_dtype = h5py.string_dtype(encoding="utf-8")
+        sidecars.create_dataset(
+            "key", data=[item[0] for item in retained], dtype=string_dtype
+        )
+        sidecars.create_dataset(
+            "path", data=[item[1] for item in retained], dtype=string_dtype
+        )
+    for key in ("qc_type_in_file", "residue_in_file"):
+        sidecar = bundled_dir / "legacy_sidecars" / key
+        if not sidecar.exists():
+            raise AssertionError(
+                f"typed QC fixture lost its source {key} sidecar"
+            )
+        shutil.rmtree(sidecar)
+    _validate_pure_typed_qc_route(bundled_dir)
+
+
+def _validate_pure_typed_qc_route(bundled_dir: Path) -> None:
+    mdin = (bundled_dir / "mdin.bundled.spg.toml").read_text(encoding="utf-8")
+    if _has_key_line(mdin, "qc_type_in_file"):
+        raise AssertionError("typed QC route retained qc_type_in_file")
+    if (bundled_dir / "legacy_sidecars" / "qc_type_in_file").exists():
+        raise AssertionError("typed QC route retained qc_type sidecar data")
+    if (bundled_dir / "legacy_sidecars" / "residue_in_file").exists():
+        raise AssertionError(
+            "typed QC route retained duplicate residue sidecar"
+        )
+
+    topology_path = bundled_dir / "topology.spgt.h5"
+    sidecar_root = "/parameters/sponge/files/legacy_sidecars"
+    with h5py.File(topology_path, "r") as topology:
+        keys = topology[f"{sidecar_root}/key"].asstr()[...].tolist()
+        if {"qc_type_in_file", "residue_in_file"}.intersection(keys):
+            raise AssertionError(
+                "typed QC route retained a removed sidecar binding"
+            )
+        if "/atoms/residue_index" not in topology:
+            raise AssertionError("typed QC route lost typed residue ownership")
+        count = int(topology["/qc/type/count"][()])
+        charge = int(topology["/qc/type/charge"][()])
+        multiplicity = int(topology["/qc/type/multiplicity"][()])
+        atom_index = topology["/qc/type/atom_index"][...].tolist()
+        symbols = topology["/qc/type/symbol"].asstr()[...].tolist()
+    if (
+        count != 2
+        or charge != 0
+        or multiplicity != 3
+        or atom_index != [0, 1]
+        or symbols != ["H", "N"]
+    ):
+        raise AssertionError(
+            "typed QC payload changed: "
+            f"count={count}, charge={charge}, multiplicity={multiplicity}, "
+            f"atom_index={atom_index}, symbols={symbols}"
+        )
 
 
 def _prepare_restart_absent_inputs(legacy_dir: Path, bundled_dir: Path) -> None:
@@ -7412,6 +7519,8 @@ def _compare_input_semantics(
                 replica_result["force"] = _compare_focused_edip_forces(
                     case, run
                 )
+            elif spec.contract_id == "input.qc.type":
+                replica_result["oracle"] = _compare_typed_qc_type(case, run)
             elif spec.contract_id == "input.custom.pairwise":
                 replica_result["force"] = _compare_focused_custom_pair_forces(
                     case, run
@@ -9649,6 +9758,93 @@ def _normalize_line_endings(text: str) -> str:
     return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
+def _compare_typed_qc_type(case: AbCase, run: AbRun) -> dict[str, object]:
+    materialized = run.bundled_dir / ".sponge_h5_native_qc" / "qc_type.txt"
+    expected_text = "2 0 3\n0 H\n1 N\n"
+    if not materialized.is_file():
+        raise AssertionError(f"{case.name} did not materialize typed QC input")
+    if materialized.read_text(encoding="utf-8") != expected_text:
+        raise AssertionError(f"{case.name} materialized QC payload changed")
+
+    baseline_rows = _read_mdout(run.bundled_dir / "mdout.txt")["rows"]
+    baseline_qc = [row["QC"] for row in baseline_rows]
+    baseline_spin = [row["QC_S_sq"] for row in baseline_rows]
+    if not baseline_qc or len(baseline_qc) != len(baseline_spin):
+        raise AssertionError(
+            f"{case.name} baseline QC observables are incomplete"
+        )
+
+    control_dir = run.bundled_dir.parent / "bundled_qc_singlet_control"
+    if control_dir.exists():
+        shutil.rmtree(control_dir)
+    shutil.copytree(run.bundled_dir, control_dir)
+    for path in (
+        control_dir / "output",
+        control_dir / ".sponge_h5_native_qc",
+    ):
+        if path.exists():
+            shutil.rmtree(path)
+    (control_dir / "output").mkdir()
+    for file_name in (
+        "mdout.txt",
+        "mdinfo.txt",
+        "qc_scf.txt",
+        "run.stdout",
+        "run.stderr",
+    ):
+        path = control_dir / file_name
+        if path.exists():
+            path.unlink()
+
+    topology_path = control_dir / "topology.spgt.h5"
+    with h5py.File(topology_path, "r+") as topology:
+        multiplicity = topology["/qc/type/multiplicity"]
+        if int(multiplicity[()]) != 3:
+            raise AssertionError(f"{case.name} QC control lost multiplicity")
+        multiplicity[...] = 1
+
+    outcome = _run_sponge_process(control_dir, _mdin_name(control_dir))
+    if outcome.returncode != 0:
+        raise AssertionError(
+            f"{case.name} multiplicity=1 control failed with code "
+            f"{outcome.returncode}\n{outcome.stdout}\n{outcome.stderr}"
+        )
+    control_rows = _read_mdout(control_dir / "mdout.txt")["rows"]
+    control_qc = [row["QC"] for row in control_rows]
+    control_spin = [row["QC_S_sq"] for row in control_rows]
+    if len(control_qc) != len(baseline_qc) or any(
+        not math.isfinite(value) for value in (*control_qc, *control_spin)
+    ):
+        raise AssertionError(f"{case.name} QC control observables are invalid")
+    maximum_qc_delta = max(
+        abs(baseline - control)
+        for baseline, control in zip(baseline_qc, control_qc, strict=True)
+    )
+    maximum_spin_delta = max(
+        abs(baseline - control)
+        for baseline, control in zip(baseline_spin, control_spin, strict=True)
+    )
+    if max(maximum_qc_delta, maximum_spin_delta) <= 1.0e-3:
+        raise AssertionError(
+            f"{case.name} typed multiplicity did not change QC behavior"
+        )
+    result = {
+        "route": "typed_h5_qc_type",
+        "materialized_path": str(materialized.relative_to(run.bundled_dir)),
+        "baseline_multiplicity": 3,
+        "control_multiplicity": 1,
+        "baseline_qc": baseline_qc,
+        "control_qc": control_qc,
+        "baseline_spin_square": baseline_spin,
+        "control_spin_square": control_spin,
+        "maximum_qc_delta": maximum_qc_delta,
+        "maximum_spin_square_delta": maximum_spin_delta,
+        "exit_code": outcome.returncode,
+    }
+    shutil.rmtree(control_dir)
+    return result
+
+
 def _compare_qc_scf_output(
     case: AbCase, runs: Sequence[AbRun]
 ) -> dict[str, object]:
@@ -10311,7 +10507,13 @@ def _validate_full_contract_input(
     for file_name, required_paths in FULL_CONTRACT_INPUT_REQUIRED_PATHS.items():
         file_path = bundled_dir / file_name
         paths = _h5_paths(file_path)
-        missing = sorted(required_paths - paths)
+        allowed_missing = set()
+        if (
+            "input.qc.spin_square" in case.contract_ids
+            and file_name == "topology.spgt.h5"
+        ):
+            allowed_missing.add("/atoms/residue_index")
+        missing = sorted(required_paths - paths - allowed_missing)
         if missing:
             raise AssertionError(
                 f"{case.name} full-contract input {file_name} is missing "

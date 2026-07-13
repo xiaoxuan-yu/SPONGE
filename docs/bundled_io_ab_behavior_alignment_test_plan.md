@@ -1143,7 +1143,41 @@ Acceptance:
   rebuild, Ruff, clang-format, and diff checks pass, followed by exactly one
   PR-scoped commit.
 
-## 37. Artifacts and Temporary-Space Policy
+## 37. PR 40: Typed QC Type-Sensitive Behavior Gate
+
+Close `input.qc.type` with an unrestricted, type-sensitive rerun gate rather
+than an initialization check.
+
+- The legacy branch consumes `qc_type_in_file`; the bundled branch removes
+  only that binding and payload and consumes `/qc/type` with two atoms,
+  symbols `H/N`, charge `0`, and multiplicity `3`. The fixture also removes
+  the duplicate residue sidecar owner while retaining its typed residue data,
+  so QC is the only newly varied behavior.
+- Materialize the typed QC payload through the existing `qc_type_in_file`
+  parser. Validate count, atom-index and symbol shapes, unique in-range atom
+  indices, non-empty symbols, and positive multiplicity. Preserve explicit
+  `qc_type_in_file` precedence for migration bundles.
+- Compare both rerun frames across the complete mdout column set, including
+  non-trivial `QC` and `QC_S_sq`, and require normalized-exact SCF text
+  equivalence.
+- Change only typed multiplicity from triplet `3` to singlet `1` and rerun the
+  bundled branch. Require a non-trivial response in QC energy or spin square,
+  proving typed electronic state reaches the SCF runtime.
+
+Acceptance:
+
+- Legacy and typed bundled routes match both complete deterministic mdout
+  frames and exact SCF output. The typed route materializes
+  `.sponge_h5_native_qc/qc_type.txt` and contains no QC type sidecar owner.
+- The singlet control changes maximum QC energy by about `89.27` and maximum
+  spin square by about `2.0065` relative to the triplet baseline; both runs
+  remain finite and successful.
+- Existing unrestricted VDS-off/on sidecar QC gates remain green.
+- Registry, manifest, real CPU A/B, full smoke, related native input CTests,
+  SPONGE rebuild, Ruff, changed-line clang-format, and diff checks pass,
+  followed by exactly one PR-scoped commit.
+
+## 38. Artifacts and Temporary-Space Policy
 
 - Use `SPONGE_BUNDLED_IO_AB_RUN_ROOT` for all heavy runs.
 - Put production artifacts on the workspace filesystem rather than `/tmp`.
@@ -1153,7 +1187,7 @@ Acceptance:
 - Record artifact byte counts and enforce a configurable per-case quota.
 - Cleanup must only remove directories created by the current gate run.
 
-## 38. PR Completion Log
+## 39. PR Completion Log
 
 Append one row immediately after completing and committing each PR.
 
@@ -1200,3 +1234,4 @@ Append one row immediately after completing and committing each PR.
 | PR 37: Typed SW pair/three-body behavior gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; real `normal_sw_typed_pair_three_body` and `normal_sw_sidecar_pair_three_body` CPU A/B cases; related native topology CTests; SPONGE rebuild; Ruff; clang-format; `git diff --check` | Pure typed `/manybody/sw` with no SW command or sidecars matches the legacy pair/three-body route at `SW=194.50` and maximum force `404.27862548828125`. A typed lambda-zero control changes energy to `158.79` and maximum force to `343.52105712890625`, proving that the typed three-body payload reaches the force kernel. Registry coverage advances to 76 supported, 6 deferred, and 1 unsupported contract. |
 | PR 38: Typed constraint projection behavior gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract` (133 tests); 93-test production manifest; real `normal_constraint_typed_projection` and `normal_constraint_sidecar_projection` CPU A/B cases; input-validation and fixture-equivalence CTests; SPONGE rebuild; Ruff; clang-format; `git diff --check` | Pure typed pair `[0,1]` with `r0=1.5` and no constraint sidecar matches the legacy route across four complete position/velocity frames with zero distance residual and radial velocity residual `3.411315e-6`. A typed `r0=2.0` control follows the new target with residual `0`; out-of-range pair `[0,2]` is rejected as `spongeErrorBadFileFormat`. Sidecar precedence remains unchanged. Registry coverage advances to 77 supported, 5 deferred, and 1 unsupported contract. |
 | PR 39: Typed Tersoff angular behavior gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract` (134 tests); 94-test production manifest; real `normal_tersoff_typed_angular` and `normal_tersoff_sidecar_angular` CPU A/B cases plus two typed failure controls; two native input CTests; SPONGE rebuild; Ruff; clang-format; `git diff --check` | Pure typed `/manybody/tersoff` with no Tersoff command or sidecars matches legacy at `potential=-173.23`, `eff_pot=-173.23468`, and maximum force `135.94906616210938`. A typed gamma-zero control produces `potential=-196.06`, `eff_pot=-196.05984`, and maximum force `144.7831268310547`, proving angular parameter consumption. Conflicting map/entry and raw/runtime parameter payloads are rejected as bad-file-format. Registry coverage advances to 78 supported, 4 deferred, and 1 unsupported contract. |
+| PR 40: Typed QC type-sensitive behavior gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract` (135 tests); 95-test production manifest; real `rerun_qc_type_typed_unrestricted_vds_off` CPU A/B plus singlet control; two native input CTests; SPONGE rebuild; Ruff; changed-line clang-format; `git diff --check` | Typed `/qc/type` with no QC sidecar matches legacy across two complete mdout frames, non-trivial `QC`/`QC_S_sq`, and exact SCF text. Changing only multiplicity `3 -> 1` changes QC by up to `89.27` and spin square by `2.0065`, proving type-sensitive SCF consumption. Registry coverage advances to 79 supported, 3 deferred, and 1 unsupported contract. |
