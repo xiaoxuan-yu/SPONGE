@@ -163,6 +163,20 @@ perf-mace = "python -X utf8 -m pytest benchmarks/performance/mace/tests/test_tip
 perf-reaxff = "python -X utf8 -m pytest benchmarks/performance/reaxff/tests -s --tb=short"
 perf-sits = "python -X utf8 -m pytest benchmarks/performance/sits/tests -s --tb=short"
 perf-sinkmeta = "python -X utf8 -m pytest benchmarks/performance/sinkmeta/tests -s --tb=short"
+smoke-bundled-io-contract = "python -X utf8 -m pytest benchmarks/bundled_io/tests/test_bundled_io_contract_smoke.py benchmarks/bundled_io/tests/test_bundled_io_ab_statistics.py benchmarks/bundled_io/tests/test_bundled_io_ab_contract_registry.py benchmarks/bundled_io/tests/test_bundled_io_production_gate_manifest.py -s --tb=short"
+smoke-bundled-io-runtime = "tests/h5_bundle/run_h5_bundle_tests.sh test-smoke-runtime"
+smoke-bundled-io-staged = "tests/h5_bundle/run_h5_bundle_tests.sh staged"
+smoke-bundled-io = { depends-on = ["smoke-bundled-io-contract", "smoke-bundled-io-runtime"] }
+smoke-gpu-medium-preflight = "python -X utf8 -m pytest benchmarks/bundled_io/tests/test_cuda_runtime_preflight.py -s --tb=short"
+smoke-gpu-medium-validation = "python -X utf8 -m pytest benchmarks/validation/thermostat/tests/test_thermostat.py::test_thermostat_tip3p_water[middle_langevin] benchmarks/validation/cv/tests/test_dihedral.py::test_simple_and_composite_cv_matches_geometry benchmarks/validation/misc/tests/test_softcore.py -s --tb=short"
+smoke-gpu-medium-reaxff = "python -X utf8 -m pytest benchmarks/performance/reaxff/tests/test_petn_nve_perf.py --steps=1000 -s --tb=short"
+smoke-gpu-medium-nonortho = "python -X utf8 -m pytest benchmarks/performance/nonortho/tests/test_long_run_rdf.py --mode=NVT --steps=2000 -s --tb=short"
+smoke-gpu-medium = { depends-on = ["smoke-gpu-medium-preflight", "smoke-gpu-medium-validation", "smoke-gpu-medium-reaxff", "smoke-gpu-medium-nonortho"] }
+smoke-bundled-io-production = { depends-on = ["smoke-bundled-io-contract", "smoke-bundled-io-runtime", "smoke-bundled-io-staged", "smoke-gpu-medium"] }
+ab-bundled-io-medium-runtime = "SPONGE_BUNDLED_IO_AB_PROFILE=medium python -X utf8 -m pytest benchmarks/bundled_io/tests/test_bundled_io_ab_production.py -s --tb=short"
+ab-bundled-io-production-runtime = "SPONGE_BUNDLED_IO_AB_PROFILE=production python -X utf8 -m pytest benchmarks/bundled_io/tests/test_bundled_io_ab_production.py -s --tb=short"
+ab-bundled-io-medium = { depends-on = ["smoke-bundled-io-contract", "smoke-bundled-io-runtime", "ab-bundled-io-medium-runtime"] }
+ab-bundled-io-production = { depends-on = ["smoke-bundled-io-production", "ab-bundled-io-production-runtime"] }
 format = "GITHOOK_MODIFY=1 GITHOOK_AUTO_ADD=0 GITHOOK_ALL=1 GITHOOK_FILES= python -X utf8 scripts/pre-commit"
 format-check = "GITHOOK_MODIFY=0 GITHOOK_AUTO_ADD=0 GITHOOK_ALL=1 GITHOOK_FILES= python -X utf8 scripts/pre-commit"
 package-conda = "python -X utf8 packaging/conda.py --env $PIXI_ENVIRONMENT_NAME --output-dir packaging/outputs"

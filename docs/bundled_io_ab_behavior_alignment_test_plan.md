@@ -37,8 +37,9 @@ Additional constraints:
 - Follow-up fixes discovered after a completed PR belong to a new, explicitly
   named PR scope and a new commit; do not amend an already verified boundary
   unless the user explicitly requests it.
-- Record the commit hash and verification commands in the PR completion log at
-  the end of this document.
+- Record `This commit` and the verification commands in the PR completion log
+  within that PR's commit. Report the resulting hash after the commit is
+  created; a Git commit cannot contain its own hash.
 
 Recommended commit subjects:
 
@@ -286,7 +287,7 @@ Append one row immediately after completing and committing each PR.
 
 | PR | Status | Commit | Verification | Notes |
 |---|---|---|---|---|
-| PR 1: Executable contract registry | Pending | | | |
+| PR 1: Executable contract registry | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; sidecar rerun VDS-off A/B | 21 contract tests and one real A/B case pass; pure-native rerun exposes a strict column-set gap retained for input behavior closure. |
 | PR 2: Contract enumeration and fixtures | Pending | | | |
 | PR 3: Comparators | Pending | | | |
 | PR 4: Output behavior closure | Pending | | | |
