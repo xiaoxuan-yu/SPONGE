@@ -1,0 +1,132 @@
+name: Bundled I/O A/B Shadow
+
+on:
+  pull_request:
+    branches:
+      - master
+    paths:
+      - "SPONGE/**"
+      - "benchmarks/bundled_io/**"
+      - "tests/h5_bundle/**"
+      - "pixi.toml"
+      - ".github/workflows/bundled-io-ab-shadow.yml"
+  schedule:
+    - cron: "17 18 * * 6"
+  workflow_dispatch:
+    inputs:
+      tier:
+        description: A/B shadow tier
+        required: true
+        default: contract
+        type: choice
+        options:
+          - contract
+          - medium
+          - production
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bundled-io-ab-shadow-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  contract:
+    name: Contract and promotion guards (shadow)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Setup Pixi
+        uses: prefix-dev/setup-pixi@v0.9.4
+        with:
+          run-install: false
+
+      - name: Install CPU environment
+        run: pixi install -e dev-cpu
+
+      - name: Validate contract and promotion guards
+        run: |
+          pixi run -e dev-cpu python -m benchmarks.bundled_io.execution_matrix
+          pixi run -e dev-cpu smoke-bundled-io-contract
+
+  medium:
+    name: Medium behavior matrix (shadow)
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.tier == 'medium'
+    needs: contract
+    continue-on-error: true
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    env:
+      SPONGE_BUNDLED_IO_AB_RUN_ROOT: ${{ github.workspace }}/outputs/ab-medium
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Setup Pixi
+        uses: prefix-dev/setup-pixi@v0.9.4
+        with:
+          run-install: false
+
+      - name: Install CPU environment
+        run: pixi install -e dev-cpu
+
+      - name: Configure and compile SPONGE
+        run: |
+          pixi run -e dev-cpu configure
+          pixi run -e dev-cpu compile
+
+      - name: Run medium A/B tier
+        run: pixi run -e dev-cpu ab-bundled-io-medium
+
+      - name: Upload medium evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bundled-io-ab-medium-${{ github.run_id }}
+          path: outputs/ab-medium
+          if-no-files-found: warn
+
+  production:
+    name: Production behavior matrix (shadow)
+    if: >-
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' && inputs.tier == 'production')
+    needs: contract
+    continue-on-error: true
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+    env:
+      SPONGE_BUNDLED_IO_AB_RUN_ROOT: ${{ github.workspace }}/outputs/ab-production
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Setup Pixi
+        uses: prefix-dev/setup-pixi@v0.9.4
+        with:
+          run-install: false
+
+      - name: Install CPU environment
+        run: pixi install -e dev-cpu
+
+      - name: Configure and compile SPONGE
+        run: |
+          pixi run -e dev-cpu configure
+          pixi run -e dev-cpu compile
+
+      - name: Run production A/B tier
+        run: pixi run -e dev-cpu ab-bundled-io-production
+
+      - name: Upload production evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bundled-io-ab-production-${{ github.run_id }}
+          path: outputs/ab-production
+          if-no-files-found: warn

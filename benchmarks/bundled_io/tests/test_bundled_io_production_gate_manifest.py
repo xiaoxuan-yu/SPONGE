@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -10,10 +11,17 @@ except ModuleNotFoundError:  # Python 3.10
     import tomli as tomllib
 
 from benchmarks.bundled_io.ab_contracts import (
+    ContractSpec,
     load_contract_registry,
     load_implementation_inventory,
     validate_contract_registry,
     validate_implementation_inventory,
+)
+from benchmarks.bundled_io.execution_matrix import (
+    ProductionRun,
+    evaluate_promotion_readiness,
+    load_execution_matrix,
+    validate_execution_matrix,
 )
 from benchmarks.bundled_io.input_semantics import (
     REQUIRED_INPUT_SEMANTIC_CONTRACTS,
@@ -49,6 +57,8 @@ MODULE_TEST = (
     REPO_ROOT / "tests/h5_bundle/test_module_h5_mappings_with_mock_backend.cpp"
 )
 HIGHFIVE_TEST = REPO_ROOT / "tests/h5_bundle/test_highfive_backend_io.cpp"
+AB_SHADOW_WORKFLOW = REPO_ROOT / ".github/workflows/bundled-io-ab-shadow.yml"
+RELEASE_WORKFLOW = REPO_ROOT / ".github/workflows/release.yml"
 
 
 def _dev_tasks() -> dict[str, object]:
@@ -512,3 +522,224 @@ def test_rerun_overrides_remain_root_keys_before_module_tables():
     assert parsed["rerun_start"] == 1
     assert parsed["crd"] == "traj.dat"
     assert parsed["REAXFF"] == {"in_file": "reaxff.txt"}
+
+
+def _ready_promotion_fixture():
+    matrix = load_execution_matrix()
+    contract_id = "runtime.synthetic_matrix"
+    scenarios = []
+    report_cases = {}
+    for index, scenario in enumerate(matrix.scenarios):
+        case_id = f"synthetic_matrix_case_{index}"
+        scenarios.append(
+            replace(
+                scenario,
+                status="evidenced",
+                case_ids=(case_id,),
+                reason="",
+            )
+        )
+        report_cases[case_id] = {
+            "metadata": {
+                **scenario.axis_values(),
+                "omp_num_threads": scenario.omp_threads,
+                "mpi_rank_count": scenario.mpi_ranks,
+                "rank0_output_owner": True,
+            },
+            "records": [
+                {
+                    "contract_id": contract_id,
+                    "evidence_level": "E3",
+                    "status": "passed",
+                }
+            ],
+        }
+    matrix = replace(
+        matrix,
+        promotion_state="candidate",
+        scenarios=tuple(scenarios),
+    )
+    contracts = {
+        contract_id: ContractSpec(
+            contract_id=contract_id,
+            direction="runtime",
+            component="execution_matrix",
+            status="supported",
+            minimum_evidence="E3",
+            legacy_surface="synthetic legacy",
+            bundled_surface="synthetic bundled",
+            case_ids=tuple(report_cases),
+            assertion_ids=("synthetic_equivalence",),
+            inventory_refs=(),
+        )
+    }
+    runs = tuple(
+        ProductionRun(
+            run_id=f"run-{index}",
+            passed=True,
+            retry_count=0,
+            runtime_ratio=1.0,
+            finalize_fraction=0.1,
+            output_bytes_ratio=1.0,
+            comparator_mutations_rejected=True,
+        )
+        for index in range(matrix.required_consecutive_production_runs)
+    )
+    return matrix, contracts, {"cases": report_cases}, runs
+
+
+def test_execution_matrix_enumerates_every_required_axis_and_risk_pair():
+    matrix = load_execution_matrix()
+    case_ids = {case.name for case in _cases_for_profile()}
+
+    validate_execution_matrix(matrix, case_ids)
+
+    assert set(matrix.required_axes) == {
+        "ensemble",
+        "thermostat",
+        "box_geometry",
+        "constraint",
+        "backend",
+        "omp_threads",
+        "mpi_ranks",
+        "comparison",
+    }
+    assert matrix.required_consecutive_production_runs == 3
+    assert matrix.promotion_state == "shadow"
+    assert all(scenario.status == "deferred" for scenario in matrix.scenarios)
+
+
+def test_execution_matrix_rejects_removed_axis_and_unmapped_combination():
+    matrix = load_execution_matrix()
+    axes = dict(matrix.required_axes)
+    axes.pop("mpi_ranks")
+    with pytest.raises(AssertionError, match="axes differ"):
+        validate_execution_matrix(replace(matrix, required_axes=axes))
+
+    impossible = {
+        "ensemble": "npt",
+        "thermostat": "nose_hoover_chain",
+        "comparison": "deterministic",
+    }
+    with pytest.raises(AssertionError, match="has no scenario"):
+        validate_execution_matrix(
+            replace(
+                matrix,
+                required_combinations=(
+                    *matrix.required_combinations,
+                    impossible,
+                ),
+            )
+        )
+
+    unknown_case = replace(
+        matrix.scenarios[0], case_ids=("missing_executable_case",)
+    )
+    with pytest.raises(AssertionError, match="references unknown cases"):
+        validate_execution_matrix(
+            replace(
+                matrix,
+                scenarios=(unknown_case, *matrix.scenarios[1:]),
+            ),
+            available_case_ids={case.name for case in _cases_for_profile()},
+        )
+
+
+def test_current_execution_matrix_cannot_be_promoted_by_declarations_only():
+    matrix = load_execution_matrix()
+    decision = evaluate_promotion_readiness(
+        matrix,
+        load_contract_registry(),
+        evidence_report=None,
+        production_runs=(),
+    )
+
+    assert decision.ready is False
+    assert any("promotion_state is shadow" in item for item in decision.blockers)
+    assert any("scenarios lack evidence" in item for item in decision.blockers)
+    assert any("contracts lack evidence" in item for item in decision.blockers)
+    assert any("consecutive retry-free" in item for item in decision.blockers)
+
+
+def test_promotion_requires_environment_metadata_for_every_scenario():
+    matrix, contracts, report, runs = _ready_promotion_fixture()
+    assert evaluate_promotion_readiness(matrix, contracts, report, runs).ready
+
+    first = matrix.scenarios[0]
+    case_payload = report["cases"][first.case_ids[0]]
+    case_payload["metadata"]["omp_num_threads"] = first.omp_threads + 1
+    decision = evaluate_promotion_readiness(matrix, contracts, report, runs)
+
+    assert decision.ready is False
+    assert any(
+        first.scenario_id in blocker and "does not prove environment" in blocker
+        for blocker in decision.blockers
+    )
+
+
+def test_promotion_requires_three_consecutive_runs_without_retry():
+    matrix, contracts, report, runs = _ready_promotion_fixture()
+    runs = (*runs[:-1], replace(runs[-1], retry_count=1))
+
+    decision = evaluate_promotion_readiness(matrix, contracts, report, runs)
+
+    assert decision.ready is False
+    assert any("got 0" in blocker for blocker in decision.blockers)
+
+
+@pytest.mark.parametrize(
+    ("field", "budget_field", "token"),
+    [
+        ("runtime_ratio", "maximum_runtime_ratio", "runtime_ratio"),
+        (
+            "finalize_fraction",
+            "maximum_finalize_fraction",
+            "finalize_fraction",
+        ),
+        (
+            "output_bytes_ratio",
+            "maximum_output_bytes_ratio",
+            "output_bytes_ratio",
+        ),
+    ],
+)
+def test_promotion_rejects_each_performance_budget_violation(
+    field, budget_field, token
+):
+    matrix, contracts, report, runs = _ready_promotion_fixture()
+    limit = getattr(matrix.performance_budgets, budget_field)
+    runs = (*runs[:-1], replace(runs[-1], **{field: limit + 0.01}))
+
+    decision = evaluate_promotion_readiness(matrix, contracts, report, runs)
+
+    assert decision.ready is False
+    assert any(token in blocker for blocker in decision.blockers)
+
+
+def test_promotion_requires_all_comparator_mutations_to_be_rejected():
+    matrix, contracts, report, runs = _ready_promotion_fixture()
+    runs = (
+        *runs[:-1],
+        replace(runs[-1], comparator_mutations_rejected=False),
+    )
+
+    decision = evaluate_promotion_readiness(matrix, contracts, report, runs)
+
+    assert decision.ready is False
+    assert any("mutations were not all rejected" in item for item in decision.blockers)
+
+
+def test_shadow_workflow_runs_tiers_without_becoming_a_release_gate():
+    workflow = AB_SHADOW_WORKFLOW.read_text(encoding="utf-8")
+    release = RELEASE_WORKFLOW.read_text(encoding="utf-8")
+
+    assert "name: Bundled I/O A/B Shadow" in workflow
+    assert "python -m benchmarks.bundled_io.execution_matrix" in workflow
+    assert "smoke-bundled-io-contract" in workflow
+    assert "ab-bundled-io-medium" in workflow
+    assert "ab-bundled-io-production" in workflow
+    assert workflow.count("continue-on-error: true") == 2
+    assert "schedule:" in workflow
+    assert "actions/upload-artifact@v4" in workflow
+    assert "bundled-io-ab-shadow" not in release
+    assert "ab-bundled-io-production" not in release

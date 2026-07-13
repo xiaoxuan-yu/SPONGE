@@ -50,7 +50,8 @@ test(bundled-io): harden statistical equivalence checks
 test(bundled-io): close bundled output behavior coverage
 test(bundled-io): close bundled input behavior coverage
 test(bundled-io): cover rerun and failure semantics
-ci(bundled-io): promote the complete A/B gate matrix
+ci(bundled-io): add executable shadow promotion guards
+test(bundled-io): complete and promote the A/B gate matrix
 ```
 
 ## 3. Evidence Model
@@ -243,6 +244,33 @@ byte equality is not required.
 
 ## 10. PR 7: Execution Matrix and CI Promotion
 
+PR 7 is split into two independently reviewable commits because the promotion
+mechanism can be verified while the runtime matrix is still red. PR 7a must not
+claim behavior coverage or enable a release gate; PR 7b owns the executable
+runtime evidence and the eventual promotion.
+
+### PR 7a: Executable Shadow Promotion Guard
+
+- Add a machine-readable matrix containing every required axis and risk-driven
+  combination below.
+- Validate the matrix structurally and reject missing axes, combinations,
+  scenario evidence, or non-executable case references.
+- Add a promotion evaluator for supported-contract evidence, scenario status,
+  consecutive retry-free runs, and performance budgets.
+- Run contract, medium, and production tiers in an explicitly non-release,
+  shadow CI workflow. Known runtime failures must remain visible.
+
+Acceptance:
+
+- Mutation tests reject a removed axis, removed risk combination, unresolved
+  scenario, missing evidence, fewer than three retry-free runs, and each
+  performance-budget violation.
+- The current matrix evaluates as not ready while deferred scenarios or
+  behavior gaps remain.
+- Release workflows do not consume the shadow result.
+
+### PR 7b: Runtime Matrix Evidence and Promotion
+
 Add a risk-driven execution matrix:
 
 - Deterministic NVE.
@@ -270,6 +298,9 @@ Production promotion requires:
 - All declared invalid combinations at F1.
 - Three consecutive production runs without retry.
 - All comparator mutation tests reject their injected defects.
+- Every PR 7a matrix scenario is backed by executable case IDs whose evidence
+  metadata proves the declared backend, thread count, MPI rank count, and
+  rank-0 output ownership; a declaration-only scenario cannot be promoted.
 
 ## 11. Artifacts and Temporary-Space Policy
 
@@ -293,4 +324,5 @@ Append one row immediately after completing and committing each PR.
 | PR 4: Output behavior closure | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; five output/VDS CTest targets; two-step NVE restart continuation; real TIP3P A/B (expected force-schedule failure) | 45 contract tests and all output writer/backend targets pass. Normal VDS-off/on cases now require position, velocity, force, box, structured mdinfo, explicit route provenance/content, and E4 structural restart continuation. The real gate exposes legacy `frc` 51-frame vs H5 50-frame schedule skew; QC SCF non-empty/exact comparison and dynamic restart continuation remain explicit behavior gaps rather than relaxed assertions. |
 | PR 5: Input behavior closure | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; native-topology reader and fixture-equivalence CTest; saved TIP3P and sidecar-rerun production artifacts | 52 contract tests require every supported input contract to produce a present, non-trivial module-owned result and then pass deterministic or statistical A/B comparison. TIP3P mass/charge/LJ pass; the rerun gate rejects the known QC first-frame mismatch (`-34183.44` vs `-34139.92`). Reader/path checks remain E1/E2 only. Residue/exclusions, improper, GB/softcore/subsystem/virtual atoms, SW/EDIP/Tersoff, custom pairwise, constraint/steering, SITS/meta/NHC, and QC type/spin/SCF stay explicitly deferred until dedicated non-trivial fixtures exist. |
 | PR 6: Rerun and failure semantics | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; nine process-level F1 cases; five real rerun boundary cases | 60 contract/manifest tests and all nine textual/binding F1 cases pass. The harness now keeps `crd/box/vel` as legacy rerun inputs and inserts overrides before TOML module tables; this removes the earlier QC first-frame skew (`-33917.02` now matches). The 0/0 limit-1 boundary passes, while the gate exposes optional-velocity potential (`1951.16` vs `1947.41`), strip frame counter (`2` vs `1`), and box-update legacy invalid-free failures. H5 atom/shape/dtype/schema and sidecar-table process mutations, restart absent/dynamic/protocol/full continuation, and owner-state F1 cases remain explicitly deferred. |
-| PR 7: Execution matrix and CI promotion | Pending | | | |
+| PR 7a: Executable shadow promotion guard | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; execution-matrix CLI; workflow YAML parse; `git diff --check` | 70 contract/manifest tests pass. The typed matrix and mutation-tested promotion evaluator reject missing axes/combinations/evidence, unproven environment metadata, retries, comparator-mutation gaps, and runtime/finalize/output-size budget overruns. Medium and production jobs are explicit `continue-on-error` shadow jobs and are absent from the release workflow; all ten runtime scenarios remain deferred for PR 7b. |
+| PR 7b: Runtime matrix evidence and promotion | Pending | | | |

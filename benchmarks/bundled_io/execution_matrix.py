@@ -1,0 +1,594 @@
+from __future__ import annotations
+
+import argparse
+import json
+import math
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Mapping, Sequence
+
+from benchmarks.bundled_io.ab_contracts import (
+    REGISTRY_PATH,
+    ContractSpec,
+    load_contract_registry,
+)
+
+MATRIX_PATH = Path(__file__).with_name("contracts") / "ab_execution_matrix.json"
+REQUIRED_AXIS_NAMES = {
+    "ensemble",
+    "thermostat",
+    "box_geometry",
+    "constraint",
+    "backend",
+    "omp_threads",
+    "mpi_ranks",
+    "comparison",
+}
+VALID_PROMOTION_STATES = {"shadow", "candidate", "promoted"}
+VALID_SCENARIO_STATUSES = {"evidenced", "deferred", "unsupported"}
+VALID_TIERS = {"medium", "production"}
+EVIDENCE_RANK = {"E0": 0, "E1": 1, "E2": 2, "E3": 3, "E4": 4}
+
+
+@dataclass(frozen=True)
+class PerformanceBudgets:
+    maximum_runtime_ratio: float
+    maximum_finalize_fraction: float
+    maximum_output_bytes_ratio: float
+
+
+@dataclass(frozen=True)
+class ExecutionScenario:
+    scenario_id: str
+    ensemble: str
+    thermostat: str
+    barostat: str
+    box_geometry: str
+    constraint: str
+    backend: str
+    omp_threads: int
+    mpi_ranks: int
+    comparison: str
+    tier: str
+    status: str
+    case_ids: tuple[str, ...]
+    reason: str
+
+    def axis_values(self) -> dict[str, object]:
+        return {
+            "ensemble": self.ensemble,
+            "thermostat": self.thermostat,
+            "box_geometry": self.box_geometry,
+            "constraint": self.constraint,
+            "backend": self.backend,
+            "omp_threads": self.omp_threads,
+            "mpi_ranks": self.mpi_ranks,
+            "comparison": self.comparison,
+        }
+
+
+@dataclass(frozen=True)
+class ExecutionMatrix:
+    schema_version: int
+    promotion_state: str
+    required_consecutive_production_runs: int
+    performance_budgets: PerformanceBudgets
+    required_axes: Mapping[str, tuple[object, ...]]
+    required_combinations: tuple[Mapping[str, object], ...]
+    scenarios: tuple[ExecutionScenario, ...]
+
+
+@dataclass(frozen=True)
+class ProductionRun:
+    run_id: str
+    passed: bool
+    retry_count: int
+    runtime_ratio: float
+    finalize_fraction: float
+    output_bytes_ratio: float
+    comparator_mutations_rejected: bool
+
+
+@dataclass(frozen=True)
+class PromotionDecision:
+    ready: bool
+    blockers: tuple[str, ...]
+
+
+def load_execution_matrix(path: Path = MATRIX_PATH) -> ExecutionMatrix:
+    payload = _load_json_object(path, "A/B execution matrix")
+    if payload.get("schema_version") != 1:
+        raise AssertionError("A/B execution matrix schema_version must be 1")
+
+    promotion_state = _required_string(payload, "promotion_state", "matrix")
+    consecutive_runs = _required_int(
+        payload,
+        "required_consecutive_production_runs",
+        "matrix",
+        minimum=1,
+    )
+    raw_budgets = _required_object(payload, "performance_budgets", "matrix")
+    budgets = PerformanceBudgets(
+        maximum_runtime_ratio=_required_number(
+            raw_budgets, "maximum_runtime_ratio", "performance_budgets"
+        ),
+        maximum_finalize_fraction=_required_number(
+            raw_budgets, "maximum_finalize_fraction", "performance_budgets"
+        ),
+        maximum_output_bytes_ratio=_required_number(
+            raw_budgets, "maximum_output_bytes_ratio", "performance_budgets"
+        ),
+    )
+
+    raw_axes = _required_object(payload, "required_axes", "matrix")
+    required_axes: dict[str, tuple[object, ...]] = {}
+    for name, values in raw_axes.items():
+        if not isinstance(values, list) or not values:
+            raise AssertionError(f"execution axis {name} must be a non-empty list")
+        if any(not isinstance(value, (str, int)) for value in values):
+            raise AssertionError(f"execution axis {name} has an invalid value")
+        if len(values) != len(set(values)):
+            raise AssertionError(f"execution axis {name} contains duplicates")
+        required_axes[name] = tuple(values)
+
+    raw_combinations = payload.get("required_combinations")
+    if not isinstance(raw_combinations, list) or not raw_combinations:
+        raise AssertionError("required_combinations must be a non-empty list")
+    combinations: list[Mapping[str, object]] = []
+    for index, item in enumerate(raw_combinations):
+        if not isinstance(item, dict) or not item:
+            raise AssertionError(
+                f"required_combinations[{index}] must be a non-empty object"
+            )
+        combinations.append(dict(item))
+
+    raw_scenarios = payload.get("scenarios")
+    if not isinstance(raw_scenarios, list) or not raw_scenarios:
+        raise AssertionError("execution matrix scenarios must be a non-empty list")
+    scenarios = tuple(
+        _parse_scenario(raw, index) for index, raw in enumerate(raw_scenarios)
+    )
+    matrix = ExecutionMatrix(
+        schema_version=1,
+        promotion_state=promotion_state,
+        required_consecutive_production_runs=consecutive_runs,
+        performance_budgets=budgets,
+        required_axes=required_axes,
+        required_combinations=tuple(combinations),
+        scenarios=scenarios,
+    )
+    validate_execution_matrix(matrix)
+    return matrix
+
+
+def validate_execution_matrix(
+    matrix: ExecutionMatrix,
+    available_case_ids: Sequence[str] | None = None,
+) -> None:
+    if matrix.promotion_state not in VALID_PROMOTION_STATES:
+        raise AssertionError(
+            f"invalid execution matrix promotion_state: {matrix.promotion_state}"
+        )
+    if set(matrix.required_axes) != REQUIRED_AXIS_NAMES:
+        raise AssertionError(
+            "execution matrix axes differ: "
+            f"expected={sorted(REQUIRED_AXIS_NAMES)}, "
+            f"actual={sorted(matrix.required_axes)}"
+        )
+    _validate_budgets(matrix.performance_budgets)
+
+    scenario_ids = [scenario.scenario_id for scenario in matrix.scenarios]
+    if len(scenario_ids) != len(set(scenario_ids)):
+        raise AssertionError("execution matrix scenario IDs must be unique")
+
+    known_cases = set(available_case_ids) if available_case_ids is not None else None
+    observed_axes = {name: set() for name in REQUIRED_AXIS_NAMES}
+    for scenario in matrix.scenarios:
+        if scenario.status not in VALID_SCENARIO_STATUSES:
+            raise AssertionError(
+                f"{scenario.scenario_id} has invalid status {scenario.status}"
+            )
+        if scenario.tier not in VALID_TIERS:
+            raise AssertionError(
+                f"{scenario.scenario_id} has invalid tier {scenario.tier}"
+            )
+        if scenario.status == "evidenced" and not scenario.case_ids:
+            raise AssertionError(
+                f"evidenced scenario {scenario.scenario_id} has no case IDs"
+            )
+        if scenario.status != "evidenced" and not scenario.reason:
+            raise AssertionError(
+                f"{scenario.status} scenario {scenario.scenario_id} requires a reason"
+            )
+        if len(scenario.case_ids) != len(set(scenario.case_ids)):
+            raise AssertionError(
+                f"{scenario.scenario_id} contains duplicate case IDs"
+            )
+        if known_cases is not None:
+            unknown = sorted(set(scenario.case_ids) - known_cases)
+            if unknown:
+                raise AssertionError(
+                    f"{scenario.scenario_id} references unknown cases: {unknown}"
+                )
+
+        for name, value in scenario.axis_values().items():
+            if value not in matrix.required_axes[name]:
+                raise AssertionError(
+                    f"{scenario.scenario_id} has undeclared {name}={value!r}"
+                )
+            observed_axes[name].add(value)
+
+    for name, required_values in matrix.required_axes.items():
+        missing = sorted(set(required_values) - observed_axes[name], key=str)
+        if missing:
+            raise AssertionError(
+                f"execution matrix scenarios do not cover {name}: {missing}"
+            )
+
+    canonical_combinations: set[tuple[tuple[str, object], ...]] = set()
+    for combination in matrix.required_combinations:
+        unknown_axes = sorted(set(combination) - REQUIRED_AXIS_NAMES)
+        if unknown_axes:
+            raise AssertionError(
+                f"required combination references unknown axes: {unknown_axes}"
+            )
+        for name, value in combination.items():
+            if value not in matrix.required_axes[name]:
+                raise AssertionError(
+                    f"required combination has undeclared {name}={value!r}"
+                )
+        canonical = tuple(sorted(combination.items()))
+        if canonical in canonical_combinations:
+            raise AssertionError(f"duplicate required combination: {dict(combination)}")
+        canonical_combinations.add(canonical)
+        if not any(_scenario_matches(scenario, combination) for scenario in matrix.scenarios):
+            raise AssertionError(
+                f"required execution combination has no scenario: {dict(combination)}"
+            )
+
+
+def load_production_run_history(path: Path) -> tuple[ProductionRun, ...]:
+    payload = _load_json_object(path, "A/B production run history")
+    if payload.get("schema_version") != 1:
+        raise AssertionError("production run history schema_version must be 1")
+    raw_runs = payload.get("runs")
+    if not isinstance(raw_runs, list):
+        raise AssertionError("production run history runs must be a list")
+    runs = tuple(_parse_production_run(raw, index) for index, raw in enumerate(raw_runs))
+    run_ids = [run.run_id for run in runs]
+    if len(run_ids) != len(set(run_ids)):
+        raise AssertionError("production run IDs must be unique")
+    return runs
+
+
+def evaluate_promotion_readiness(
+    matrix: ExecutionMatrix,
+    contracts: Mapping[str, ContractSpec],
+    evidence_report: Mapping[str, object] | None,
+    production_runs: Sequence[ProductionRun],
+) -> PromotionDecision:
+    validate_execution_matrix(matrix)
+    blockers: list[str] = []
+    if matrix.promotion_state == "shadow":
+        blockers.append("execution matrix promotion_state is shadow")
+
+    unresolved = sorted(
+        scenario.scenario_id
+        for scenario in matrix.scenarios
+        if scenario.status != "evidenced"
+    )
+    if unresolved:
+        blockers.append(f"execution scenarios lack evidence: {unresolved}")
+
+    report = evidence_report or {}
+    report_cases = report.get("cases")
+    if not isinstance(report_cases, dict):
+        report_cases = {}
+    contract_levels = _passed_contract_levels(report_cases)
+    missing_contracts = []
+    insufficient_contracts = []
+    for contract_id, contract in contracts.items():
+        if contract.status != "supported":
+            continue
+        actual = contract_levels.get(contract_id, ())
+        if not actual:
+            missing_contracts.append(contract_id)
+        elif not any(
+            _evidence_satisfies(level, contract.minimum_evidence)
+            for level in actual
+        ):
+            insufficient_contracts.append(
+                f"{contract_id}:{sorted(actual)}<{contract.minimum_evidence}"
+            )
+    if missing_contracts:
+        blockers.append(f"supported contracts lack evidence: {sorted(missing_contracts)}")
+    if insufficient_contracts:
+        blockers.append(
+            f"supported contracts have insufficient evidence: {insufficient_contracts}"
+        )
+
+    for scenario in matrix.scenarios:
+        if scenario.status != "evidenced":
+            continue
+        if not any(
+            _case_proves_scenario(report_cases.get(case_id), scenario)
+            for case_id in scenario.case_ids
+        ):
+            blockers.append(
+                f"scenario metadata does not prove environment: {scenario.scenario_id}"
+            )
+
+    required = matrix.required_consecutive_production_runs
+    qualifying: list[ProductionRun] = []
+    for run in reversed(production_runs):
+        if not run.passed or run.retry_count != 0:
+            break
+        qualifying.append(run)
+        if len(qualifying) == required:
+            break
+    if len(qualifying) < required:
+        blockers.append(
+            f"need {required} consecutive retry-free production runs, got {len(qualifying)}"
+        )
+    else:
+        for run in qualifying:
+            if not run.comparator_mutations_rejected:
+                blockers.append(
+                    f"comparator mutations were not all rejected in run {run.run_id}"
+                )
+            _append_budget_blockers(blockers, matrix.performance_budgets, run)
+
+    return PromotionDecision(ready=not blockers, blockers=tuple(blockers))
+
+
+def _parse_scenario(raw: object, index: int) -> ExecutionScenario:
+    if not isinstance(raw, dict):
+        raise AssertionError(f"scenarios[{index}] must be an object")
+    label = f"scenarios[{index}]"
+    case_ids = raw.get("case_ids")
+    if not isinstance(case_ids, list) or not all(
+        isinstance(case_id, str) and case_id for case_id in case_ids
+    ):
+        raise AssertionError(f"{label} case_ids must be a string list")
+    reason = raw.get("reason", "")
+    if not isinstance(reason, str):
+        raise AssertionError(f"{label} reason must be a string")
+    return ExecutionScenario(
+        scenario_id=_required_string(raw, "scenario_id", label),
+        ensemble=_required_string(raw, "ensemble", label),
+        thermostat=_required_string(raw, "thermostat", label),
+        barostat=_required_string(raw, "barostat", label),
+        box_geometry=_required_string(raw, "box_geometry", label),
+        constraint=_required_string(raw, "constraint", label),
+        backend=_required_string(raw, "backend", label),
+        omp_threads=_required_int(raw, "omp_threads", label, minimum=1),
+        mpi_ranks=_required_int(raw, "mpi_ranks", label, minimum=1),
+        comparison=_required_string(raw, "comparison", label),
+        tier=_required_string(raw, "tier", label),
+        status=_required_string(raw, "status", label),
+        case_ids=tuple(case_ids),
+        reason=reason,
+    )
+
+
+def _parse_production_run(raw: object, index: int) -> ProductionRun:
+    if not isinstance(raw, dict):
+        raise AssertionError(f"runs[{index}] must be an object")
+    label = f"runs[{index}]"
+    passed = raw.get("passed")
+    mutations = raw.get("comparator_mutations_rejected")
+    if not isinstance(passed, bool) or not isinstance(mutations, bool):
+        raise AssertionError(f"{label} boolean fields are invalid")
+    return ProductionRun(
+        run_id=_required_string(raw, "run_id", label),
+        passed=passed,
+        retry_count=_required_int(raw, "retry_count", label, minimum=0),
+        runtime_ratio=_required_number(raw, "runtime_ratio", label, minimum=0.0),
+        finalize_fraction=_required_number(
+            raw, "finalize_fraction", label, minimum=0.0
+        ),
+        output_bytes_ratio=_required_number(
+            raw, "output_bytes_ratio", label, minimum=0.0
+        ),
+        comparator_mutations_rejected=mutations,
+    )
+
+
+def _case_proves_scenario(
+    case_payload: object, scenario: ExecutionScenario
+) -> bool:
+    if not isinstance(case_payload, dict):
+        return False
+    metadata = case_payload.get("metadata")
+    records = case_payload.get("records")
+    if not isinstance(metadata, dict) or not isinstance(records, list):
+        return False
+    if not records or any(
+        not isinstance(record, dict) or record.get("status") != "passed"
+        for record in records
+    ):
+        return False
+    expected = {
+        "ensemble": scenario.ensemble,
+        "thermostat": scenario.thermostat,
+        "box_geometry": scenario.box_geometry,
+        "constraint": scenario.constraint,
+        "backend": scenario.backend,
+        "comparison": scenario.comparison,
+    }
+    if any(metadata.get(name) != value for name, value in expected.items()):
+        return False
+    try:
+        omp_threads = int(metadata.get("omp_num_threads"))
+        mpi_ranks = int(metadata.get("mpi_rank_count"))
+    except (TypeError, ValueError):
+        return False
+    return (
+        omp_threads == scenario.omp_threads
+        and mpi_ranks == scenario.mpi_ranks
+        and metadata.get("rank0_output_owner") is True
+    )
+
+
+def _passed_contract_levels(
+    report_cases: Mapping[str, object],
+) -> dict[str, tuple[str, ...]]:
+    levels: dict[str, list[str]] = {}
+    for case_payload in report_cases.values():
+        if not isinstance(case_payload, dict):
+            continue
+        records = case_payload.get("records", [])
+        if not isinstance(records, list):
+            continue
+        for record in records:
+            if not isinstance(record, dict) or record.get("status") != "passed":
+                continue
+            contract_id = record.get("contract_id")
+            level = record.get("evidence_level")
+            if isinstance(contract_id, str) and isinstance(level, str):
+                levels.setdefault(contract_id, []).append(level)
+    return {name: tuple(values) for name, values in levels.items()}
+
+
+def _evidence_satisfies(actual: str, required: str) -> bool:
+    if actual == "F1" or required == "F1":
+        return actual == required
+    return actual in EVIDENCE_RANK and required in EVIDENCE_RANK and (
+        EVIDENCE_RANK[actual] >= EVIDENCE_RANK[required]
+    )
+
+
+def _append_budget_blockers(
+    blockers: list[str], budgets: PerformanceBudgets, run: ProductionRun
+) -> None:
+    comparisons = (
+        ("runtime_ratio", run.runtime_ratio, budgets.maximum_runtime_ratio),
+        (
+            "finalize_fraction",
+            run.finalize_fraction,
+            budgets.maximum_finalize_fraction,
+        ),
+        (
+            "output_bytes_ratio",
+            run.output_bytes_ratio,
+            budgets.maximum_output_bytes_ratio,
+        ),
+    )
+    for name, actual, maximum in comparisons:
+        if actual > maximum:
+            blockers.append(
+                f"production run {run.run_id} exceeds {name} budget: "
+                f"{actual}>{maximum}"
+            )
+
+
+def _validate_budgets(budgets: PerformanceBudgets) -> None:
+    values = {
+        "maximum_runtime_ratio": budgets.maximum_runtime_ratio,
+        "maximum_finalize_fraction": budgets.maximum_finalize_fraction,
+        "maximum_output_bytes_ratio": budgets.maximum_output_bytes_ratio,
+    }
+    for name, value in values.items():
+        if not math.isfinite(value) or value <= 0.0:
+            raise AssertionError(f"performance budget {name} must be finite and positive")
+
+
+def _scenario_matches(
+    scenario: ExecutionScenario, combination: Mapping[str, object]
+) -> bool:
+    values = scenario.axis_values()
+    return all(values[name] == value for name, value in combination.items())
+
+
+def _load_json_object(path: Path, label: str) -> dict[str, object]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise AssertionError(f"{label} root must be an object")
+    return payload
+
+
+def _required_object(
+    payload: Mapping[str, object], key: str, label: str
+) -> dict[str, object]:
+    value = payload.get(key)
+    if not isinstance(value, dict):
+        raise AssertionError(f"{label} requires object {key}")
+    return dict(value)
+
+
+def _required_string(payload: Mapping[str, object], key: str, label: str) -> str:
+    value = payload.get(key)
+    if not isinstance(value, str) or not value:
+        raise AssertionError(f"{label} requires non-empty string {key}")
+    return value
+
+
+def _required_int(
+    payload: Mapping[str, object], key: str, label: str, *, minimum: int
+) -> int:
+    value = payload.get(key)
+    if not isinstance(value, int) or isinstance(value, bool) or value < minimum:
+        raise AssertionError(f"{label} requires integer {key} >= {minimum}")
+    return value
+
+
+def _required_number(
+    payload: Mapping[str, object],
+    key: str,
+    label: str,
+    *,
+    minimum: float | None = None,
+) -> float:
+    value = payload.get(key)
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise AssertionError(f"{label} requires numeric {key}")
+    result = float(value)
+    if not math.isfinite(result) or (minimum is not None and result < minimum):
+        raise AssertionError(f"{label} has invalid numeric {key}")
+    return result
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Validate bundled I/O A/B matrix")
+    parser.add_argument("--matrix", type=Path, default=MATRIX_PATH)
+    parser.add_argument("--evaluate", action="store_true")
+    parser.add_argument("--contracts", type=Path, default=REGISTRY_PATH)
+    parser.add_argument("--evidence", type=Path)
+    parser.add_argument("--history", type=Path)
+    args = parser.parse_args(argv)
+    matrix = load_execution_matrix(args.matrix)
+    if args.evaluate:
+        if args.evidence is None or args.history is None:
+            parser.error("--evaluate requires --evidence and --history")
+        evidence = _load_json_object(args.evidence, "A/B evidence report")
+        runs = load_production_run_history(args.history)
+        decision = evaluate_promotion_readiness(
+            matrix,
+            load_contract_registry(args.contracts),
+            evidence,
+            runs,
+        )
+        print(
+            json.dumps(
+                {"ready": decision.ready, "blockers": decision.blockers},
+                sort_keys=True,
+            )
+        )
+        return 0 if decision.ready else 1
+    print(
+        json.dumps(
+            {
+                "promotion_state": matrix.promotion_state,
+                "scenario_count": len(matrix.scenarios),
+                "evidenced_scenario_count": sum(
+                    scenario.status == "evidenced" for scenario in matrix.scenarios
+                ),
+            },
+            sort_keys=True,
+        )
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
