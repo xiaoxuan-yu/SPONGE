@@ -49,6 +49,7 @@ from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
     FOCUSED_RESIDUE_SIDECAR_FIXTURE,
     FOCUSED_SITS_NK_TYPED_RESTART_FIXTURE,
     FOCUSED_STEERING_CV_SIDECAR_FIXTURE,
+    FOCUSED_SUBSYSTEM_DIVISION_FIXTURE,
     FOCUSED_SW_SIDECAR_FIXTURE,
     FOCUSED_TERSOFF_SIDECAR_FIXTURE,
     FOCUSED_VIRTUAL_ATOMS_ALIAS_FIXTURE,
@@ -69,6 +70,7 @@ from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
     _assert_residue_pbc_mapping_oracle,
     _assert_sits_nk_typed_restart_oracle,
     _assert_steering_cv_oracle,
+    _assert_subsystem_partition_response,
     _assert_sw_pair_three_body_oracle,
     _assert_tersoff_angular_oracle,
     _assert_virtual_atom_oracle,
@@ -285,6 +287,7 @@ def test_ab_production_harness_has_executable_contract_coverage():
         "normal_gb_native_nonzero",
         "normal_improper_native_nonzero",
         "normal_lj_soft_core_nonzero",
+        "normal_subsystem_division_partition",
         "normal_virtual_atoms_all_types",
         "normal_virtual_atoms_pbc_boundary",
         "normal_virtual_atoms_plural_alias",
@@ -1373,9 +1376,6 @@ def test_focused_lj_soft_core_case_requires_pure_h5_nonzero_energy_and_force():
     assert contract.status == "supported"
     assert contract.case_ids == (case.name,)
     assert contract.assertion_ids == ("input_semantic_equivalence",)
-    subsystem = contracts["input.topology.subsystem_division"]
-    assert subsystem.status == "deferred"
-    assert "not consumed" in subsystem.reason
 
 
 def test_focused_lj_soft_core_gate_rejects_trivial_energy_and_force():
@@ -1394,6 +1394,78 @@ def test_focused_lj_soft_core_gate_rejects_trivial_energy_and_force():
         _assert_nontrivial_equivalent_forces(
             "LJ soft-core force", [1.0, -1.0], [0.0, 0.0]
         )
+
+
+def test_focused_subsystem_division_case_requires_partition_sensitive_behavior():
+    contracts = load_contract_registry()
+    case = next(
+        case
+        for case in _cases_for_profile()
+        if case.name == "normal_subsystem_division_partition"
+    )
+    assert case.fixture_case == FOCUSED_SUBSYSTEM_DIVISION_FIXTURE
+    assert case.statistical_md is False
+    assert case.normal_step_limit == 1
+    assert case.normal_dt == 0.0
+    assert case.input_behavior_only is True
+    assert case.contract_ids == (
+        "output.legacy.mdout",
+        "input.topology.subsystem_division",
+    )
+    assert INPUT_SEMANTIC_SPECS_BY_CASE[case.name] == (
+        InputSemanticSpec(
+            "input.topology.subsystem_division",
+            ("LJ_soft_inter", "LJ_soft_intra"),
+            1.0e-6,
+        ),
+    )
+    contract = contracts["input.topology.subsystem_division"]
+    assert contract.status == "supported"
+    assert contract.case_ids == (case.name,)
+    assert contract.assertion_ids == ("input_semantic_equivalence",)
+
+
+def test_focused_subsystem_division_gate_rejects_weak_partition_oracles():
+    valid = {
+        "baseline_inter": -0.06,
+        "baseline_intra": 0.0,
+        "baseline_total": -0.06,
+        "control_inter": 0.0,
+        "control_intra": -0.06,
+        "control_total": -0.06,
+    }
+    response = _assert_subsystem_partition_response("subsystem", valid)
+    assert response == {
+        "inter_response": 0.06,
+        "intra_response": 0.06,
+        "total_delta": 0.0,
+    }
+
+    mutations = (
+        ("non-finite", {"baseline_inter": math.nan}, "non-finite"),
+        ("trivial inter", {"baseline_inter": 0.0}, "energy is trivial"),
+        ("baseline mixed", {"baseline_intra": -0.02}, "not empty"),
+        ("trivial intra", {"control_intra": 0.0}, "energy is trivial"),
+        ("control mixed", {"control_inter": -0.02}, "retained inter"),
+        (
+            "baseline nonconserving",
+            {"baseline_total": -0.10},
+            "does not conserve",
+        ),
+        (
+            "control nonconserving",
+            {"control_total": -0.10},
+            "does not conserve",
+        ),
+        (
+            "total changed",
+            {"control_intra": -0.08, "control_total": -0.08},
+            "mask changed total",
+        ),
+    )
+    for label, changes, message in mutations:
+        with pytest.raises(AssertionError, match=message):
+            _assert_subsystem_partition_response(label, {**valid, **changes})
 
 
 @pytest.mark.parametrize(

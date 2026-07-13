@@ -645,13 +645,13 @@
       "contract_id": "input.topology.subsystem_division",
       "direction": "input",
       "component": "softcore",
-      "status": "deferred",
+      "status": "supported",
       "minimum_evidence": "E3",
       "legacy_surface": "subsys_division_in_file",
       "bundled_surface": "/forcefield/subsys_division",
-      "case_ids": [],
-      "assertion_ids": [],
-      "reason": "The native subsystem mask reaches LJ_SOFT_CORE state but is not consumed by the current force kernel, so no partition-distinguishing E3 result exists."
+      "case_ids": ["normal_subsystem_division_partition"],
+      "assertion_ids": ["input_semantic_equivalence"],
+      "reason": ""
     },
     {
       "contract_id": "input.topology.virtual_atoms",

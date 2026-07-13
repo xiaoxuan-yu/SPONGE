@@ -61,6 +61,7 @@ FOCUSED_GB_HYBRID_FIXTURE = "focused_gb_hybrid_two_atom"
 FOCUSED_GB_NATIVE_FIXTURE = "focused_gb_native_two_atom"
 FOCUSED_IMPROPER_NATIVE_FIXTURE = "focused_improper_native_four_atom"
 FOCUSED_LJ_SOFT_CORE_FIXTURE = "focused_lj_soft_core_two_atom"
+FOCUSED_SUBSYSTEM_DIVISION_FIXTURE = "focused_subsystem_division_two_atom"
 FOCUSED_VIRTUAL_ATOMS_ALL_TYPES_FIXTURE = "focused_virtual_atoms_all_types"
 FOCUSED_VIRTUAL_ATOMS_ALIAS_FIXTURE = "focused_virtual_atoms_plural_alias"
 FOCUSED_VIRTUAL_ATOMS_PBC_FIXTURE = "focused_virtual_atoms_pbc_boundary"
@@ -300,6 +301,13 @@ INPUT_SEMANTIC_SPECS_BY_CASE = {
     ),
     "normal_lj_soft_core_nonzero": (
         InputSemanticSpec("input.topology.lj_soft_core", ("LJ_soft",), 1.0e-6),
+    ),
+    "normal_subsystem_division_partition": (
+        InputSemanticSpec(
+            "input.topology.subsystem_division",
+            ("LJ_soft_inter", "LJ_soft_intra"),
+            1.0e-6,
+        ),
     ),
     "normal_virtual_atoms_all_types": (
         InputSemanticSpec("input.topology.virtual_atoms", ("PM",), 1.0e-6),
@@ -791,6 +799,28 @@ def _cases_for_profile() -> list[AbCase]:
             contract_ids=(
                 "output.legacy.mdout",
                 "input.topology.lj_soft_core",
+            ),
+            assertion_ids=(
+                "mdout_deterministic_equivalence",
+                "input_semantic_equivalence",
+            ),
+            normal_step_limit=1,
+            normal_interval=1,
+            normal_dt=0.0,
+            input_behavior_only=True,
+        ),
+        AbCase(
+            name="normal_subsystem_division_partition",
+            fixture_case=FOCUSED_SUBSYSTEM_DIVISION_FIXTURE,
+            legacy_subdir="generated_legacy",
+            bundled_subdir="generated_bundled",
+            mode="normal",
+            vds=False,
+            statistical_md=False,
+            restart_load_policy="structural",
+            contract_ids=(
+                "output.legacy.mdout",
+                "input.topology.subsystem_division",
             ),
             assertion_ids=(
                 "mdout_deterministic_equivalence",
@@ -3287,6 +3317,8 @@ def _prepare_case_pair(
             return _prepare_focused_improper_native_pair(case_root)
         if case.fixture_case == FOCUSED_LJ_SOFT_CORE_FIXTURE:
             return _prepare_focused_lj_soft_core_pair(case_root)
+        if case.fixture_case == FOCUSED_SUBSYSTEM_DIVISION_FIXTURE:
+            return _prepare_focused_subsystem_division_pair(case_root)
         if case.fixture_case in {
             FOCUSED_VIRTUAL_ATOMS_ALL_TYPES_FIXTURE,
             FOCUSED_VIRTUAL_ATOMS_ALIAS_FIXTURE,
@@ -5034,6 +5066,44 @@ def _prepare_focused_lj_soft_core_pair(case_root: Path) -> tuple[Path, Path]:
     return legacy_dir, bundled_dir
 
 
+def _prepare_focused_subsystem_division_pair(
+    case_root: Path,
+) -> tuple[Path, Path]:
+    legacy_source = case_root / "focused_subsystem_division_source"
+    legacy_dir = case_root / "legacy"
+    converted_dir = case_root / "converted_focused_subsystem_division_bundle"
+    bundled_dir = case_root / "bundled"
+    for path in (legacy_source, legacy_dir, converted_dir, bundled_dir):
+        if path.exists():
+            shutil.rmtree(path)
+    _write_focused_subsystem_division_input(legacy_source)
+    shutil.copytree(legacy_source, legacy_dir)
+    _convert_legacy_case(legacy_source, converted_dir)
+    shutil.copytree(converted_dir / "bundle", bundled_dir)
+
+    bundled_mdin = bundled_dir / "mdin.bundled.spg.toml"
+    bundled_mdin.write_text(
+        _remove_key_lines(
+            bundled_mdin.read_text(encoding="utf-8"),
+            {"LJ_soft_core_in_file", "subsys_division_in_file"},
+        ).rstrip()
+        + "\n",
+        encoding="utf-8",
+    )
+    topology_path = bundled_dir / "topology.spgt.h5"
+    with h5py.File(topology_path, "r+") as topology:
+        sidecar_table = "/parameters/sponge/files/legacy_sidecars"
+        if sidecar_table in topology:
+            del topology[sidecar_table]
+    legacy_sidecars = bundled_dir / "legacy_sidecars"
+    if legacy_sidecars.exists():
+        shutil.rmtree(legacy_sidecars)
+    _validate_focused_lj_soft_core_routes(
+        legacy_dir, bundled_dir, expect_subsystem=True
+    )
+    return legacy_dir, bundled_dir
+
+
 def _write_focused_lj_soft_core_input(case_dir: Path) -> None:
     case_dir.mkdir(parents=True, exist_ok=True)
     (case_dir / "mass.txt").write_text("2\n12.0\n12.0\n", encoding="utf-8")
@@ -5074,8 +5144,19 @@ def _write_focused_lj_soft_core_input(case_dir: Path) -> None:
     )
 
 
+def _write_focused_subsystem_division_input(case_dir: Path) -> None:
+    _write_focused_lj_soft_core_input(case_dir)
+    (case_dir / "subsys_division.txt").write_text("2\n0\n1\n", encoding="utf-8")
+    mdin = case_dir / "mdin.spg.toml"
+    mdin.write_text(
+        mdin.read_text(encoding="utf-8")
+        + 'subsys_division_in_file = "subsys_division.txt"\n',
+        encoding="utf-8",
+    )
+
+
 def _validate_focused_lj_soft_core_routes(
-    legacy_dir: Path, bundled_dir: Path
+    legacy_dir: Path, bundled_dir: Path, *, expect_subsystem: bool = False
 ) -> None:
     legacy_mdin = (legacy_dir / "mdin.spg.toml").read_text(encoding="utf-8")
     bundled_mdin = (bundled_dir / "mdin.bundled.spg.toml").read_text(
@@ -5090,6 +5171,12 @@ def _validate_focused_lj_soft_core_routes(
     if _has_key_line(bundled_mdin, "subsys_division_in_file"):
         raise AssertionError(
             "focused LJ soft-core bundle unexpectedly retained subsystem input"
+        )
+    if expect_subsystem != _has_key_line(
+        legacy_mdin, "subsys_division_in_file"
+    ):
+        raise AssertionError(
+            "focused LJ soft-core legacy subsystem route does not match fixture"
         )
     if (bundled_dir / "legacy_sidecars").exists():
         raise AssertionError("focused LJ soft-core bundle retained sidecars")
@@ -5113,9 +5200,10 @@ def _validate_focused_lj_soft_core_routes(
         raise AssertionError(
             f"focused LJ soft-core topology is missing datasets: {missing}"
         )
-    if "/forcefield/subsys_division" in topology_paths:
+    subsystem_path = "/forcefield/subsys_division"
+    if expect_subsystem != (subsystem_path in topology_paths):
         raise AssertionError(
-            "focused LJ soft-core case must isolate softcore from subsystem division"
+            "focused LJ soft-core native subsystem route does not match fixture"
         )
     with h5py.File(topology_path, "r") as topology:
         payload = {
@@ -5142,6 +5230,9 @@ def _validate_focused_lj_soft_core_routes(
             int(topology["/forcefield/lj_soft_core/atom_type_count_A"][()]),
             int(topology["/forcefield/lj_soft_core/atom_type_count_B"][()]),
         )
+        subsystem = (
+            topology[subsystem_path][...].tolist() if expect_subsystem else None
+        )
     expected_payload = {
         "atom_type_A": [0, 0],
         "atom_type_B": [0, 0],
@@ -5154,6 +5245,10 @@ def _validate_focused_lj_soft_core_routes(
         raise AssertionError(
             "focused LJ soft-core native payload changed: "
             f"payload={payload}, type_counts={type_counts}"
+        )
+    if expect_subsystem and subsystem != [0, 1]:
+        raise AssertionError(
+            f"focused subsystem native payload changed: {subsystem}"
         )
 
 
@@ -6761,6 +6856,10 @@ def _compare_input_semantics(
                 replica_result["force"] = _compare_focused_lj_soft_core_forces(
                     case, run
                 )
+            elif spec.contract_id == "input.topology.subsystem_division":
+                replica_result["oracle"] = _compare_focused_subsystem_partition(
+                    case, run
+                )
             elif spec.contract_id in {
                 "input.topology.virtual_atoms",
                 "input.topology.virtual_atoms_pbc",
@@ -7854,6 +7953,169 @@ def _compare_focused_lj_soft_core_forces(
     result["bundled_native_path"] = "/forcefield/lj_soft_core"
     result["subsystem_division_present"] = False
     return result
+
+
+def _assert_subsystem_partition_response(
+    label: str, values: dict[str, float]
+) -> dict[str, float]:
+    if not all(math.isfinite(value) for value in values.values()):
+        raise AssertionError(
+            f"{label} has non-finite partition values: {values}"
+        )
+    if abs(values["baseline_inter"]) <= 1.0e-2:
+        raise AssertionError(f"{label} cross-subsystem energy is trivial")
+    if abs(values["baseline_intra"]) > 1.0e-2:
+        raise AssertionError(f"{label} baseline intra energy is not empty")
+    if abs(values["control_intra"]) <= 1.0e-2:
+        raise AssertionError(f"{label} all-intra control energy is trivial")
+    if abs(values["control_inter"]) > 1.0e-2:
+        raise AssertionError(f"{label} all-intra control retained inter energy")
+    for prefix in ("baseline", "control"):
+        partition_sum = values[f"{prefix}_inter"] + values[f"{prefix}_intra"]
+        if not math.isclose(
+            partition_sum,
+            values[f"{prefix}_total"],
+            rel_tol=0.0,
+            abs_tol=1.0e-2,
+        ):
+            raise AssertionError(
+                f"{label} {prefix} partition does not conserve "
+                f"LJ_soft_short: {values}"
+            )
+    total_delta = abs(values["baseline_total"] - values["control_total"])
+    if total_delta > 1.0e-2:
+        raise AssertionError(
+            f"{label} mask changed total soft-core energy: {values}"
+        )
+    return {
+        "inter_response": abs(
+            values["baseline_inter"] - values["control_inter"]
+        ),
+        "intra_response": abs(
+            values["baseline_intra"] - values["control_intra"]
+        ),
+        "total_delta": total_delta,
+    }
+
+
+def _compare_focused_subsystem_partition(
+    case: AbCase, run: AbRun
+) -> dict[str, object]:
+    controls: dict[str, Path] = {}
+    for branch, source_dir in (
+        ("legacy", run.legacy_dir),
+        ("bundled", run.bundled_dir),
+    ):
+        control_dir = (
+            source_dir.parent / f"{branch}_subsystem_partition_control"
+        )
+        if control_dir.exists():
+            shutil.rmtree(control_dir)
+        shutil.copytree(source_dir, control_dir)
+        output_dir = control_dir / "output"
+        if output_dir.exists():
+            shutil.rmtree(output_dir)
+        output_dir.mkdir(parents=True)
+        for file_name in (
+            "mdout.txt",
+            "mdinfo.txt",
+            "run.stdout",
+            "run.stderr",
+        ):
+            path = control_dir / file_name
+            if path.exists():
+                path.unlink()
+        if branch == "legacy":
+            (control_dir / "subsys_division.txt").write_text(
+                "2\n0\n0\n", encoding="utf-8"
+            )
+        else:
+            with h5py.File(control_dir / "topology.spgt.h5", "r+") as topology:
+                topology["/forcefield/subsys_division"][...] = (0, 0)
+        outcome = _run_sponge_process(control_dir, _mdin_name(control_dir))
+        if outcome.returncode != 0:
+            raise AssertionError(
+                f"{case.name} {branch} partition control failed with "
+                f"code {outcome.returncode}\n{outcome.stdout}\n{outcome.stderr}"
+            )
+        controls[branch] = control_dir
+
+    observable_spec = InputSemanticSpec(
+        "input.topology.subsystem_division",
+        ("LJ_soft_inter", "LJ_soft_intra"),
+        1.0e-6,
+    )
+    control_rows = {
+        branch: _read_mdout(path / "mdout.txt")["rows"]
+        for branch, path in controls.items()
+    }
+    assert_module_semantics(
+        f"{case.name} all-intra control",
+        control_rows["legacy"],
+        control_rows["bundled"],
+        observable_spec,
+        deterministic=True,
+    )
+
+    partition_values: dict[str, dict[str, float]] = {}
+    for branch, source_dir in (
+        ("legacy", run.legacy_dir),
+        ("bundled", run.bundled_dir),
+    ):
+        baseline_rows = _read_mdout(source_dir / "mdout.txt")["rows"]
+        if len(baseline_rows) != 1 or len(control_rows[branch]) != 1:
+            raise AssertionError(
+                f"{case.name} {branch} partition oracle expected one mdout row"
+            )
+        baseline = baseline_rows[0]
+        control = control_rows[branch][0]
+        values = {
+            "baseline_inter": float(baseline.get("LJ_soft_inter", math.nan)),
+            "baseline_intra": float(baseline.get("LJ_soft_intra", math.nan)),
+            "baseline_total": float(baseline.get("LJ_soft_short", math.nan)),
+            "control_inter": float(control.get("LJ_soft_inter", math.nan)),
+            "control_intra": float(control.get("LJ_soft_intra", math.nan)),
+            "control_total": float(control.get("LJ_soft_short", math.nan)),
+        }
+        _assert_subsystem_partition_response(f"{case.name} {branch}", values)
+        _assert_nontrivial_equivalent_forces(
+            f"{case.name} {branch} mask-invariant force",
+            _read_native_float32_file(source_dir / "output" / "legacy.frc"),
+            _read_native_float32_file(
+                controls[branch] / "output" / "legacy.frc"
+            ),
+        )
+        partition_values[branch] = values
+
+    _assert_nontrivial_equivalent_forces(
+        f"{case.name} all-intra control A/B force",
+        _read_native_float32_file(controls["legacy"] / "output" / "legacy.frc"),
+        _read_native_float32_file(
+            controls["bundled"] / "output" / "legacy.frc"
+        ),
+    )
+    for observable in partition_values["legacy"]:
+        if not math.isclose(
+            partition_values["legacy"][observable],
+            partition_values["bundled"][observable],
+            rel_tol=0.0,
+            abs_tol=1.0e-8,
+        ):
+            raise AssertionError(
+                f"{case.name} partition A/B mismatch for {observable}: "
+                f"{partition_values}"
+            )
+
+    for path in controls.values():
+        shutil.rmtree(path)
+    return {
+        "bundled_native_path": "/forcefield/subsys_division",
+        "baseline_mask": [0, 1],
+        "control_mask": [0, 0],
+        "partition_values": partition_values,
+        "total_energy_invariant": True,
+        "force_invariant": True,
+    }
 
 
 def _compare_focused_constraint_projection(

@@ -954,7 +954,43 @@ Acceptance:
   Ruff, clang-format, and diff checks pass, followed by exactly one PR-scoped
   commit.
 
-## 32. Artifacts and Temporary-Space Policy
+## 32. PR 35: Subsystem-Division Energy-Partition Behavior Gate
+
+Close the typed subsystem-division contract with a partition-sensitive runtime
+observable while preserving the established soft-core dynamics.
+
+- Treat `subsys_division` as an ownership label for short-range soft-core LJ
+  energy accounting. A pair whose atom masks are equal contributes to
+  `LJ_soft_intra`; a pair whose masks differ contributes to `LJ_soft_inter`.
+- Keep the existing pair energy, total energy, force, virial, and lambda
+  derivative formulas unchanged. Require the explicit conservation invariant
+  `LJ_soft_inter + LJ_soft_intra = LJ_soft_short`.
+- Use a deterministic two-atom soft-core fixture. The legacy branch consumes
+  `subsys_division_in_file`; the bundled branch consumes only typed
+  `/forcefield/subsys_division`, with no retained subsystem command, topology
+  sidecar table, or `legacy_sidecars` directory.
+- Run the same-semantic `[0,1]` A/B pair and require non-zero inter-system
+  energy. Run a second same-semantic `[0,0]` control A/B pair and require the
+  same energy to move entirely to the intra-system observable.
+- Require complete mdout equivalence for both semantic inputs, unchanged total
+  soft-core energy and force across the mask mutation, and exact legacy/bundled
+  partition values. This proves runtime consumption without assigning an
+  unsupported force-filtering meaning to the historical mask.
+
+Acceptance:
+
+- The `[0,1]` routes match at `LJ_soft_inter=-0.06`,
+  `LJ_soft_intra=0.00`, and `LJ_soft_short=-0.06`; the `[0,0]` routes match at
+  `LJ_soft_inter=0.00`, `LJ_soft_intra=-0.06`, and the same total.
+- Both controls retain the complete non-zero six-value force fingerprint, and
+  the bundled branch has only the native subsystem dataset.
+- Mutation tests reject non-finite, trivial, mixed, non-conserving, and
+  total-energy-changing partition evidence.
+- Registry, manifest, real CPU A/B, full smoke, related native-reader CTests,
+  SPONGE rebuild, Ruff, clang-format, and diff checks pass, followed by exactly
+  one PR-scoped commit.
+
+## 33. Artifacts and Temporary-Space Policy
 
 - Use `SPONGE_BUNDLED_IO_AB_RUN_ROOT` for all heavy runs.
 - Put production artifacts on the workspace filesystem rather than `/tmp`.
@@ -964,7 +1000,7 @@ Acceptance:
 - Record artifact byte counts and enforce a configurable per-case quota.
 - Cleanup must only remove directories created by the current gate run.
 
-## 33. PR Completion Log
+## 34. PR Completion Log
 
 Append one row immediately after completing and committing each PR.
 
@@ -1006,3 +1042,4 @@ Append one row immediately after completing and committing each PR.
 | PR 32: Pure native GB behavior gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract` (120 tests); 80-test production manifest; real `normal_gb_native_nonzero` and `normal_gb_hybrid_nonzero` CPU A/B; two native topology reader CTests; SPONGE rebuild; Ruff; changed-line clang-format; `git diff --check` | The pure bundled branch consumes `/forcefield/gb/params` with no `gb_in_file`, sidecar table, or sidecar files. Both routes match `Coulomb=-0.50`, `gb=-0.25`, `potential=-0.75`, the complete six-value force oracle, and all mdout columns. Non-periodic GB initialization now recognizes preloaded native state while preserving the hybrid activation route. Registry coverage advances to 73 supported, 10 deferred, and 1 unsupported contract. |
 | PR 33: Core topology payload-sensitivity gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract` (128 tests); 88-test production manifest; real `normal_core_topology_payload_sensitivity` CPU A/B plus three typed-payload controls; two native topology reader CTests; SPONGE rebuild; Ruff; clang-format; `git diff --check` | Pure typed mass, charge, and LJ routes contain no topology sidecars and match legacy across the complete one-frame mdout and force payload. Independent controls produce temperature `26.21 -> 52.42` with unchanged force, Coulomb `-0.50 -> 0` with maximum force delta `0.25`, and LJ `-0.02 -> 0` with maximum force delta `0.04541015625`, proving each payload reaches its consumer. The broader `normal_core_h5_output` case remains active and still reports its pre-existing legacy/H5 force schedule mismatch (`51` versus `50` frames), which is not weakened by this input gate. Registry coverage remains 73 supported, 10 deferred, and 1 unsupported contract. |
 | PR 34: Complete H5 metadata failure semantics | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract` (130 tests); 90-test production manifest; four real `failure_h5_topology_*` CPU process gates; three supported-schema real controls; three metadata/input CTests; SPONGE rebuild; Ruff; clang-format; `git diff --check` | Atom-count, mass-shape, mass-dtype, and unknown-schema mutations now share one complete F1 contract. Schema versions `0`, `1`, and `xponge.legacy_to_bundle.v1` each start successfully, while `unsupported.topology.v999` exits 238 with `spongeErrorValueErrorCommand` and route-specific diagnostics. The partial metadata registry record is removed; coverage remains 73 supported, advances to 9 deferred, and retains 1 unsupported contract. |
+| PR 35: Subsystem-division energy-partition behavior gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract` (130 tests); 90-test production manifest; real `normal_lj_soft_core_nonzero` and `normal_subsystem_division_partition` CPU A/B plus all-intra legacy/bundled controls; two native topology reader CTests; SPONGE rebuild; Ruff; clang-format; `git diff --check` | The legacy `[0,1]` sidecar and pure typed bundled dataset both produce `LJ_soft_inter=-0.06`, `LJ_soft_intra=0.00`, and the same complete force. Same-semantic `[0,0]` controls move the full `-0.06` to the intra observable while preserving total soft-core energy and force, proving mask consumption without changing dynamics. Registry coverage advances to 74 supported, 8 deferred, and 1 unsupported contract. |
