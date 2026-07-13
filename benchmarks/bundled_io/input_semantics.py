@@ -18,6 +18,7 @@ REQUIRED_INPUT_SEMANTIC_CONTRACTS = frozenset(
         "input.topology.angle",
         "input.topology.dihedral",
         "input.topology.improper",
+        "input.topology.improper.native_runtime",
         "input.topology.urey_bradley",
         "input.topology.cmap",
         "input.topology.gb",

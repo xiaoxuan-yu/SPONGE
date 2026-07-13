@@ -52,6 +52,7 @@ SITS_FF19SB_CMAP_FIXTURE = "sits_ff19sb_cmap_peptide"
 FOCUSED_EDIP_FIXTURE = "focused_edip_two_atom"
 FOCUSED_CUSTOM_PAIR_FIXTURE = "focused_custom_pair_two_atom"
 FOCUSED_EXCLUSIONS_FIXTURE = "focused_exclusions_three_atom"
+FOCUSED_IMPROPER_NATIVE_FIXTURE = "focused_improper_native_four_atom"
 FOCUSED_LJ_SOFT_CORE_FIXTURE = "focused_lj_soft_core_two_atom"
 FOCUSED_VIRTUAL_ATOMS_ALL_TYPES_FIXTURE = "focused_virtual_atoms_all_types"
 FOCUSED_VIRTUAL_ATOMS_ALIAS_FIXTURE = "focused_virtual_atoms_plural_alias"
@@ -228,6 +229,13 @@ INPUT_SEMANTIC_SPECS_BY_CASE = {
     ),
     "normal_exclusions_coulomb_oracle": (
         InputSemanticSpec("input.topology.exclusions", ("Coulomb",), 1.0e-6),
+    ),
+    "normal_improper_native_nonzero": (
+        InputSemanticSpec(
+            "input.topology.improper.native_runtime",
+            ("improper_dihedral",),
+            1.0e-6,
+        ),
     ),
     "normal_lj_soft_core_nonzero": (
         InputSemanticSpec("input.topology.lj_soft_core", ("LJ_soft",), 1.0e-6),
@@ -499,6 +507,28 @@ def _cases_for_profile() -> list[AbCase]:
             contract_ids=(
                 "output.legacy.mdout",
                 "input.topology.exclusions",
+            ),
+            assertion_ids=(
+                "mdout_deterministic_equivalence",
+                "input_semantic_equivalence",
+            ),
+            normal_step_limit=1,
+            normal_interval=1,
+            normal_dt=0.0,
+            input_behavior_only=True,
+        ),
+        AbCase(
+            name="normal_improper_native_nonzero",
+            fixture_case=FOCUSED_IMPROPER_NATIVE_FIXTURE,
+            legacy_subdir="generated_legacy",
+            bundled_subdir="generated_bundled",
+            mode="normal",
+            vds=False,
+            statistical_md=False,
+            restart_load_policy="structural",
+            contract_ids=(
+                "output.legacy.mdout",
+                "input.topology.improper.native_runtime",
             ),
             assertion_ids=(
                 "mdout_deterministic_equivalence",
@@ -2762,6 +2792,8 @@ def _prepare_case_pair(
             return _prepare_focused_custom_pair_pair(case_root)
         if case.fixture_case == FOCUSED_EXCLUSIONS_FIXTURE:
             return _prepare_focused_exclusions_pair(case_root)
+        if case.fixture_case == FOCUSED_IMPROPER_NATIVE_FIXTURE:
+            return _prepare_focused_improper_native_pair(case_root)
         if case.fixture_case == FOCUSED_LJ_SOFT_CORE_FIXTURE:
             return _prepare_focused_lj_soft_core_pair(case_root)
         if case.fixture_case in {
@@ -3355,6 +3387,141 @@ def _validate_focused_exclusions_routes(
         raise AssertionError(
             "focused exclusions native payload changed: "
             f"offsets={offsets}, list={excluded}"
+        )
+
+
+def _prepare_focused_improper_native_pair(
+    case_root: Path,
+) -> tuple[Path, Path]:
+    legacy_source = case_root / "focused_improper_native_source"
+    legacy_dir = case_root / "legacy"
+    converted_dir = case_root / "converted_focused_improper_native_bundle"
+    bundled_dir = case_root / "bundled"
+    for path in (legacy_source, legacy_dir, converted_dir, bundled_dir):
+        if path.exists():
+            shutil.rmtree(path)
+    _write_focused_improper_native_input(legacy_source)
+    shutil.copytree(legacy_source, legacy_dir)
+    _convert_legacy_case(legacy_source, converted_dir)
+    shutil.copytree(converted_dir / "bundle", bundled_dir)
+
+    topology_path = bundled_dir / "topology.spgt.h5"
+    with h5py.File(topology_path, "r+") as topology:
+        improper = topology["/forcefield/improper"]
+        if "pk" not in improper:
+            if "k" not in improper:
+                raise AssertionError(
+                    "focused improper conversion emitted neither k nor pk"
+                )
+            improper.create_dataset("pk", data=improper["k"][...])
+        if "k" in improper:
+            del improper["k"]
+        sidecar_table = "/parameters/sponge/files/legacy_sidecars"
+        if sidecar_table in topology:
+            del topology[sidecar_table]
+    legacy_sidecars = bundled_dir / "legacy_sidecars"
+    if legacy_sidecars.exists():
+        shutil.rmtree(legacy_sidecars)
+    _validate_focused_improper_native_routes(legacy_dir, bundled_dir)
+    return legacy_dir, bundled_dir
+
+
+def _write_focused_improper_native_input(case_dir: Path) -> None:
+    case_dir.mkdir(parents=True, exist_ok=True)
+    (case_dir / "mass.txt").write_text(
+        "4\n12.0\n12.0\n12.0\n12.0\n", encoding="utf-8"
+    )
+    (case_dir / "coordinate.txt").write_text(
+        "4 0.0\n"
+        "1.0 0.0 0.0\n"
+        "0.0 0.0 0.0\n"
+        "0.0 1.0 0.0\n"
+        "0.0 0.0 1.0\n"
+        "10.0 10.0 10.0\n"
+        "90.0 90.0 90.0\n",
+        encoding="utf-8",
+    )
+    (case_dir / "velocity.txt").write_text(
+        "4\n0.0 0.0 0.0\n0.0 0.0 0.0\n0.0 0.0 0.0\n0.0 0.0 0.0\n",
+        encoding="utf-8",
+    )
+    (case_dir / "improper.txt").write_text(
+        "1\n0 1 2 3 10.0 0.2\n", encoding="utf-8"
+    )
+    (case_dir / "mdin.spg.toml").write_text(
+        'md_name = "bundled io ab focused improper native"\n'
+        'mode = "nve"\n'
+        "step_limit = 1\n"
+        "dt = 0.0\n"
+        "cutoff = 4.0\n"
+        'mass_in_file = "mass.txt"\n'
+        'coordinate_in_file = "coordinate.txt"\n'
+        'velocity_in_file = "velocity.txt"\n'
+        'improper_dihedral_in_file = "improper.txt"\n'
+        "print_zeroth_frame = 0\n"
+        "write_mdout_interval = 1\n"
+        "write_information_interval = 1\n",
+        encoding="utf-8",
+    )
+
+
+def _validate_focused_improper_native_routes(
+    legacy_dir: Path, bundled_dir: Path
+) -> None:
+    legacy_mdin = (legacy_dir / "mdin.spg.toml").read_text(encoding="utf-8")
+    bundled_mdin = (bundled_dir / "mdin.bundled.spg.toml").read_text(
+        encoding="utf-8"
+    )
+    if not _has_key_line(legacy_mdin, "improper_dihedral_in_file"):
+        raise AssertionError(
+            "focused improper legacy route lost improper_dihedral_in_file"
+        )
+    retained = sorted(
+        key
+        for key in ("improper_dihedral_in_file", "improper_in_file")
+        if _has_key_line(bundled_mdin, key)
+    )
+    if retained:
+        raise AssertionError(
+            f"focused improper bundle retained legacy keys: {retained}"
+        )
+    if (bundled_dir / "legacy_sidecars").exists():
+        raise AssertionError("focused improper bundle retained sidecars")
+
+    topology_path = bundled_dir / "topology.spgt.h5"
+    topology_paths = _h5_paths(topology_path)
+    if "/parameters/sponge/files/legacy_sidecars" in topology_paths:
+        raise AssertionError("focused improper topology retained sidecars")
+    required = {
+        "/forcefield/improper/atoms",
+        "/forcefield/improper/count",
+        "/forcefield/improper/pk",
+        "/forcefield/improper/phi0",
+    }
+    missing = sorted(required - topology_paths)
+    if missing:
+        raise AssertionError(
+            f"focused improper topology is missing datasets: {missing}"
+        )
+    if "/forcefield/improper/k" in topology_paths:
+        raise AssertionError("focused improper topology retained legacy k")
+    with h5py.File(topology_path, "r") as topology:
+        count = int(topology["/forcefield/improper/count"][()])
+        atoms = topology["/forcefield/improper/atoms"][...].tolist()
+        pk = topology["/forcefield/improper/pk"][...].tolist()
+        phi0 = topology["/forcefield/improper/phi0"][...].tolist()
+    if count != 1 or atoms != [[0, 1, 2, 3]]:
+        raise AssertionError(
+            "focused improper native atom payload changed: "
+            f"count={count}, atoms={atoms}"
+        )
+    if len(pk) != 1 or len(phi0) != 1:
+        raise AssertionError("focused improper native parameters changed shape")
+    if not math.isclose(
+        pk[0], 10.0, rel_tol=0.0, abs_tol=1.0e-7
+    ) or not math.isclose(phi0[0], 0.2, rel_tol=0.0, abs_tol=1.0e-7):
+        raise AssertionError(
+            f"focused improper native parameters changed: pk={pk}, phi0={phi0}"
         )
 
 
@@ -4673,6 +4840,10 @@ def _compare_input_semantics(
                 replica_result["oracle"] = _compare_focused_exclusions_oracle(
                     case, run
                 )
+            elif spec.contract_id == "input.topology.improper.native_runtime":
+                replica_result["force"] = _compare_focused_improper_forces(
+                    case, run
+                )
             elif spec.contract_id == "input.topology.lj_soft_core":
                 replica_result["force"] = _compare_focused_lj_soft_core_forces(
                     case, run
@@ -4783,6 +4954,25 @@ def _compare_focused_exclusions_oracle(
         "branches": branch_results,
         "cross_branch_force": cross_branch,
     }
+
+
+def _compare_focused_improper_forces(
+    case: AbCase, run: AbRun
+) -> dict[str, object]:
+    legacy = _read_native_float32_file(run.legacy_dir / "output" / "legacy.frc")
+    bundled = _read_native_float32_file(
+        run.bundled_dir / "output" / "legacy.frc"
+    )
+    result = _assert_nontrivial_equivalent_forces(
+        f"{case.name} improper force", legacy, bundled
+    )
+    result["bundled_native_paths"] = [
+        "/forcefield/improper/atoms",
+        "/forcefield/improper/pk",
+        "/forcefield/improper/phi0",
+    ]
+    result["converter_schema_normalization"] = "k_to_pk"
+    return result
 
 
 def _compare_focused_lj_soft_core_forces(

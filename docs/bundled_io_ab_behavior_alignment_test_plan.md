@@ -721,7 +721,43 @@ Acceptance:
 - Registry, manifest, real CPU A/B, Ruff, and diff checks pass, followed by
   exactly one PR-scoped commit.
 
-## 25. Artifacts and Temporary-Space Policy
+## 25. PR 22: Native Improper Runtime Gate
+
+Separate SPONGE's executable native improper behavior from the still-broken
+legacy-to-bundle integration, and close only the former with a non-trivial
+four-atom case.
+
+- Generate four non-coplanar equal-mass atoms and one harmonic improper with
+  `pk=10.0` and `phi0=0.2`. Require the legacy canonical
+  `improper_dihedral_in_file` route to produce finite, non-zero
+  `improper_dihedral` energy and force.
+- Convert the input, then explicitly normalize the converter's legacy-schema
+  `/forcefield/improper/k` dataset to the runtime reader's
+  `/forcefield/improper/pk`. Remove the complete H5 sidecar table and sidecar
+  directory so the bundled result can only come from typed native state.
+- Require the bundled mdin to contain neither `improper_dihedral_in_file` nor
+  the `improper_in_file` alias. Validate the exact one-row atom, `pk`, and
+  `phi0` payload before execution.
+- Compare the module-owned energy row, complete mdout row, and complete binary
+  force payload deterministically. Reject trivial energy, trivial force, any
+  shape change, or any cross-branch value mismatch.
+- Track the passing behavior as `input.topology.improper.native_runtime`. Keep
+  `input.topology.improper` deferred for end-to-end conversion: the converter
+  currently writes `/k`, canonical sidecars are not allowlisted, and the
+  allowlisted alias is not consumed by `Native_Load_Impropers`.
+
+Acceptance:
+
+- Legacy canonical text and pure native typed H5 produce the same finite,
+  non-zero improper energy and force without bundled sidecars.
+- Removing or ignoring the typed payload makes the semantic gate fail even if
+  the process and improper module initialization complete.
+- The registry and documentation do not use the native runtime evidence to
+  claim that legacy-to-bundle improper conversion is closed.
+- Registry, manifest, real CPU A/B, Ruff, and diff checks pass, followed by
+  exactly one PR-scoped commit.
+
+## 26. Artifacts and Temporary-Space Policy
 
 - Use `SPONGE_BUNDLED_IO_AB_RUN_ROOT` for all heavy runs.
 - Put production artifacts on the workspace filesystem rather than `/tmp`.
@@ -731,7 +767,7 @@ Acceptance:
 - Record artifact byte counts and enforce a configurable per-case quota.
 - Cleanup must only remove directories created by the current gate run.
 
-## 26. PR Completion Log
+## 27. PR Completion Log
 
 Append one row immediately after completing and committing each PR.
 
@@ -760,3 +796,4 @@ Append one row immediately after completing and committing each PR.
 | PR 19: Protocol/full metadynamics continuation gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; `ctest --test-dir build-dev-cpu-h5-2 --output-on-failure -R 'test_(restart_h5_reader\|h5_restart_load_runtime_closure\|module_h5_mappings_with_mock_backend)$'`; real `normal_meta_protocol_full_restart_continuation` CPU A/B; Ruff; `git diff --check` | 92 contract/manifest/comparator tests, two related CTest passes (runtime closure skipped by its build guard), and the real E4 A/B pass. One producer checkpoint with three non-zero hills forks into pure legacy, H5 `protocol` plus legacy NHC, and H5 `full` routes. All mdout columns, particle/NHC/metadynamics streams, final hill/potential state, observable output, and restart state agree within existing text-precision tolerances. Registry coverage advances to 60 supported, 14 deferred, and 1 unsupported contract. |
 | PR 20: Unrestricted QC observable and SCF text gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; real `rerun_qc_unrestricted_sidecar_vds_off/on` CPU A/B; Ruff; `git diff --check` | Triplet unrestricted QC produces two finite non-zero spin-square frames in both branches and archives a non-empty exact SCF trace in trajectory and observable output under both VDS modes. Empty-output evidence was removed from the old full-contract cases. `input.qc.type` remains deferred because pure `/qc/type` is not consumed. Registry coverage advances to 62 supported, 12 deferred, and 1 unsupported contract. |
 | PR 21: Constraint sidecar projection gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; real `normal_constraint_sidecar_projection` CPU A/B; Ruff; `git diff --check` | 97 contract/manifest/comparator tests and the real four-frame A/B pass. Both branches preserve distance `1.5` with zero measured residual and reduce relative radial speed from `2.0` to `3.411315e-6`; complete position and velocity trajectories are identical. The supported sidecar contract is separated from deferred native typed `/constraint` consumption. Registry coverage advances to 63 supported, 12 deferred, and 1 unsupported contract. |
+| PR 22: Native improper runtime gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; `ctest --test-dir build-dev-cpu-h5-2 --output-on-failure -R 'test_topology_native_h5_reader\|test_h5_input_fixture_equivalence'`; real `normal_improper_native_nonzero` CPU A/B; Ruff; `git diff --check` | 99 contract/manifest/comparator tests, both related H5 input CTests, and the focused real A/B pass. Pure typed `/forcefield/improper/{atoms,pk,phi0}` with no sidecars matches canonical legacy input at `improper_dihedral=31.36`, maximum force `35.415924072265625`, and zero full-mdout error. End-to-end conversion remains deferred for the documented `/k` versus `/pk` and sidecar-key gaps. Registry coverage advances to 64 supported, 12 deferred, and 1 unsupported contract. |

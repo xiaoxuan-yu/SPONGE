@@ -817,12 +817,24 @@
       "component": "improper",
       "status": "deferred",
       "minimum_evidence": "E3",
-      "legacy_surface": "improper_in_file",
-      "bundled_surface": "/forcefield/improper",
+      "legacy_surface": "improper_dihedral_in_file and improper_in_file alias",
+      "bundled_surface": "legacy-to-bundle /forcefield/improper integration",
       "case_ids": [],
       "assertion_ids": [],
       "inventory_refs": ["topology_sidecar_keys:improper_in_file"],
-      "reason": "The native reader is covered, but a paired legacy/bundled runtime fixture is pending."
+      "reason": "The converter emits /forcefield/improper/k while the runtime reader requires /pk. Its canonical improper_dihedral_in_file sidecar key is rejected by the H5 allowlist, while the allowed improper_in_file alias is not consumed by Native_Load_Impropers. Native runtime behavior is tracked separately."
+    },
+    {
+      "contract_id": "input.topology.improper.native_runtime",
+      "direction": "input",
+      "component": "improper_native_runtime",
+      "status": "supported",
+      "minimum_evidence": "E3",
+      "legacy_surface": "improper_dihedral_in_file",
+      "bundled_surface": "/forcefield/improper/{atoms,pk,phi0} without sidecars",
+      "case_ids": ["normal_improper_native_nonzero"],
+      "assertion_ids": ["input_semantic_equivalence"],
+      "reason": ""
     },
     {
       "contract_id": "input.topology.nb14",

@@ -39,6 +39,7 @@ from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
     FOCUSED_CUSTOM_PAIR_FIXTURE,
     FOCUSED_EDIP_FIXTURE,
     FOCUSED_EXCLUSIONS_FIXTURE,
+    FOCUSED_IMPROPER_NATIVE_FIXTURE,
     FOCUSED_LJ_SOFT_CORE_FIXTURE,
     FOCUSED_VIRTUAL_ATOMS_ALIAS_FIXTURE,
     FOCUSED_VIRTUAL_ATOMS_ALL_TYPES_FIXTURE,
@@ -254,6 +255,7 @@ def test_ab_production_harness_has_executable_contract_coverage():
         "normal_edip_nonzero",
         "normal_custom_pair_nonzero",
         "normal_exclusions_coulomb_oracle",
+        "normal_improper_native_nonzero",
         "normal_lj_soft_core_nonzero",
         "normal_virtual_atoms_all_types",
         "normal_virtual_atoms_pbc_boundary",
@@ -734,6 +736,61 @@ def test_focused_exclusions_case_requires_native_payload_and_coulomb_oracle():
     assert contracts["input.topology.exclusions"].assertion_ids == (
         "input_semantic_equivalence",
     )
+
+
+def test_focused_improper_case_requires_pure_native_nonzero_energy_and_force():
+    contracts = load_contract_registry()
+    case = next(
+        case
+        for case in _cases_for_profile()
+        if case.name == "normal_improper_native_nonzero"
+    )
+    spec = INPUT_SEMANTIC_SPECS_BY_CASE[case.name]
+
+    assert case.fixture_case == FOCUSED_IMPROPER_NATIVE_FIXTURE
+    assert case.statistical_md is False
+    assert case.normal_step_limit == 1
+    assert case.normal_dt == 0.0
+    assert case.input_behavior_only is True
+    assert case.contract_ids == (
+        "output.legacy.mdout",
+        "input.topology.improper.native_runtime",
+    )
+    assert spec == (
+        InputSemanticSpec(
+            "input.topology.improper.native_runtime",
+            ("improper_dihedral",),
+            1.0e-6,
+        ),
+    )
+    native = contracts["input.topology.improper.native_runtime"]
+    assert native.status == "supported"
+    assert native.case_ids == (case.name,)
+    assert native.assertion_ids == ("input_semantic_equivalence",)
+    conversion = contracts["input.topology.improper"]
+    assert conversion.status == "deferred"
+    assert "requires /pk" in conversion.reason
+    assert "not consumed" in conversion.reason
+
+
+def test_focused_improper_gate_rejects_activation_only_evidence():
+    spec = InputSemanticSpec(
+        "input.topology.improper.native_runtime",
+        ("improper_dihedral",),
+        1.0e-6,
+    )
+    with pytest.raises(AssertionError, match="all trivial"):
+        assert_module_semantics(
+            "improper",
+            [{"improper_dihedral": 0.0}],
+            [{"improper_dihedral": 0.0}],
+            spec,
+            deterministic=True,
+        )
+    with pytest.raises(AssertionError, match="bundled force is all trivial"):
+        _assert_nontrivial_equivalent_forces(
+            "improper force", [1.0, -1.0], [0.0, 0.0]
+        )
 
 
 def test_focused_lj_soft_core_case_requires_pure_h5_nonzero_energy_and_force():
