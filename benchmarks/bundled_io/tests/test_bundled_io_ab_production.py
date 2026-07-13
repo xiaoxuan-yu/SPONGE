@@ -55,6 +55,7 @@ FOCUSED_NB14_EXTRA_FIXTURE = "focused_nb14_extra_two_atom"
 FOCUSED_EDIP_FIXTURE = "focused_edip_two_atom"
 FOCUSED_EAM_FUNCFL_FIXTURE = "focused_eam_funcfl_two_atom"
 FOCUSED_EAM_SETFL_FIXTURE = "focused_eam_setfl_two_atom"
+FOCUSED_POSITIONAL_RESTRAINT_FIXTURE = "focused_positional_restraint_two_atom"
 FOCUSED_SW_SIDECAR_FIXTURE = "focused_sw_sidecar_three_atom"
 FOCUSED_SW_TYPED_FIXTURE = "focused_sw_typed_three_atom"
 FOCUSED_TERSOFF_SIDECAR_FIXTURE = "focused_tersoff_sidecar_three_atom"
@@ -299,6 +300,11 @@ INPUT_SEMANTIC_SPECS_BY_CASE = {
     "normal_eam_setfl_nonzero": (
         InputSemanticSpec("input.manybody.eam", ("EAM",), 1.0e-6),
     ),
+    "normal_positional_restraint_typed_nonzero": (
+        InputSemanticSpec(
+            "input.protocol.positional_restraint", ("restrain",), 1.0e-6
+        ),
+    ),
     "normal_sw_sidecar_pair_three_body": (
         InputSemanticSpec("input.manybody.sw.sidecar", ("SW",), 1.0e-6),
     ),
@@ -435,8 +441,13 @@ RERUN_INPUT_SEMANTIC_SPECS = (
         ),
         1.0e-6,
     ),
-    InputSemanticSpec("input.protocol.restraint", ("restrain",), 1.0e-6),
-    InputSemanticSpec("input.protocol.soft_wall", ("z_wall",), 1.0e-6),
+    InputSemanticSpec(
+        "input.protocol.positional_restraint", ("restrain",), 1.0e-6
+    ),
+    InputSemanticSpec(
+        "input.protocol.positional_restraint.sidecar", ("restrain",), 1.0e-6
+    ),
+    InputSemanticSpec("input.protocol.soft_wall.sidecar", ("z_wall",), 1.0e-6),
     InputSemanticSpec("input.protocol.cv", ("distance",), 1.0e-6),
     InputSemanticSpec("input.qc.energy", ("QC",), 1.0e-6),
     InputSemanticSpec("input.qc.spin_square", ("QC_S_sq",), 1.0e-4),
@@ -797,6 +808,28 @@ def _cases_for_profile() -> list[AbCase]:
             contract_ids=(
                 "output.legacy.mdout",
                 "input.manybody.eam",
+            ),
+            assertion_ids=(
+                "mdout_deterministic_equivalence",
+                "input_semantic_equivalence",
+            ),
+            normal_step_limit=1,
+            normal_interval=1,
+            normal_dt=0.0,
+            input_behavior_only=True,
+        ),
+        AbCase(
+            name="normal_positional_restraint_typed_nonzero",
+            fixture_case=FOCUSED_POSITIONAL_RESTRAINT_FIXTURE,
+            legacy_subdir="generated_legacy",
+            bundled_subdir="generated_bundled",
+            mode="normal",
+            vds=False,
+            statistical_md=False,
+            restart_load_policy="structural",
+            contract_ids=(
+                "output.legacy.mdout",
+                "input.protocol.positional_restraint",
             ),
             assertion_ids=(
                 "mdout_deterministic_equivalence",
@@ -1361,8 +1394,7 @@ def _cases_for_profile() -> list[AbCase]:
                 "input.topology.dihedral",
                 "input.custom.listed",
                 "input.manybody.eam",
-                "input.protocol.restraint",
-                "input.protocol.soft_wall",
+                "input.protocol.positional_restraint",
                 "input.protocol.cv",
                 "input.qc.energy",
             ),
@@ -1399,8 +1431,7 @@ def _cases_for_profile() -> list[AbCase]:
                 "input.topology.dihedral",
                 "input.custom.listed",
                 "input.manybody.eam",
-                "input.protocol.restraint",
-                "input.protocol.soft_wall",
+                "input.protocol.positional_restraint",
                 "input.protocol.cv",
                 "input.qc.energy",
             ),
@@ -1437,8 +1468,8 @@ def _cases_for_profile() -> list[AbCase]:
                 "input.topology.dihedral",
                 "input.custom.listed",
                 "input.manybody.eam",
-                "input.protocol.restraint",
-                "input.protocol.soft_wall",
+                "input.protocol.positional_restraint.sidecar",
+                "input.protocol.soft_wall.sidecar",
                 "input.protocol.cv",
                 "input.qc.energy",
             ),
@@ -1475,8 +1506,8 @@ def _cases_for_profile() -> list[AbCase]:
                 "input.topology.dihedral",
                 "input.custom.listed",
                 "input.manybody.eam",
-                "input.protocol.restraint",
-                "input.protocol.soft_wall",
+                "input.protocol.positional_restraint.sidecar",
+                "input.protocol.soft_wall.sidecar",
                 "input.protocol.cv",
                 "input.qc.energy",
             ),
@@ -2005,6 +2036,29 @@ def _failure_cases() -> list[AbCase]:
                 "Materialize_H5_Native_EAM",
                 "EAM raw embedding table",
                 "must have shape [1,2]",
+            ),
+            **nb14_metadata_shared,
+        ),
+        AbCase(
+            name="failure_h5_positional_restraint_dual_owner",
+            failure_mutation="h5_positional_restraint_dual_owner",
+            failure_branches=("bundled",),
+            expected_error_category="spongeErrorConflictingCommand",
+            expected_diagnostic_tokens=(
+                "Materialize_H5_Native_Positional_Restraint",
+                "cannot both own positional restraint state",
+            ),
+            **nb14_metadata_shared,
+        ),
+        AbCase(
+            name="failure_h5_positional_restraint_weight_shape",
+            failure_mutation="h5_positional_restraint_weight_shape",
+            failure_branches=("bundled",),
+            expected_error_category="spongeErrorBadFileFormat",
+            expected_diagnostic_tokens=(
+                "Materialize_H5_Native_Positional_Restraint",
+                "restraint weight",
+                "must have shape [2,3]",
             ),
             **nb14_metadata_shared,
         ),
@@ -3777,6 +3831,8 @@ def _prepare_case_pair(
             FOCUSED_EAM_SETFL_FIXTURE,
         }:
             return _prepare_focused_eam_pair(case.fixture_case, case_root)
+        if case.fixture_case == FOCUSED_POSITIONAL_RESTRAINT_FIXTURE:
+            return _prepare_focused_positional_restraint_pair(case_root)
         if case.fixture_case == FOCUSED_SW_SIDECAR_FIXTURE:
             return _prepare_focused_sw_sidecar_pair(case_root)
         if case.fixture_case == FOCUSED_SW_TYPED_FIXTURE:
@@ -3841,6 +3897,7 @@ def _prepare_case_pair(
         _prepare_pure_typed_qc_input(bundled_dir)
     _prepare_full_contract_nb14_owner(case, bundled_dir)
     _prepare_full_contract_eam_owner(case, bundled_dir)
+    _prepare_full_contract_positional_restraint_owner(case, bundled_dir)
     _validate_full_contract_input(case, bundled_dir)
     if "input.restart_load.absent" in case.contract_ids:
         _prepare_restart_absent_inputs(legacy_dir, bundled_dir)
@@ -3913,6 +3970,63 @@ def _prepare_full_contract_eam_owner(case: AbCase, bundled_dir: Path) -> None:
                 "representations before owner selection"
             )
         del topology[typed_root]
+
+
+def _prepare_full_contract_positional_restraint_owner(
+    case: AbCase, bundled_dir: Path
+) -> None:
+    if case.fixture_case != "full_contract_rerun":
+        return
+    protocol_path = bundled_dir / "protocol.spgp.h5"
+    restart_path = bundled_dir / "restart.spgr.h5"
+    sidecar_root = "/parameters/sponge/files/legacy_sidecars"
+    protocol_typed_paths = (
+        "/restraint/default/atom_indices",
+        "/restraint/default/weight",
+    )
+    reference_path = (
+        "/parameters/restart/references/restraint/default/coordinate"
+    )
+    with (
+        h5py.File(protocol_path, "r+") as protocol,
+        h5py.File(restart_path, "r+") as restart,
+    ):
+        typed_parts = [path in protocol for path in protocol_typed_paths]
+        typed_parts.append(reference_path in restart)
+        typed_owner = all(typed_parts)
+        sidecar_keys: set[str] = set()
+        if sidecar_root in protocol:
+            sidecar_keys = set(protocol[f"{sidecar_root}/key"].asstr()[...])
+        if sidecar_root in restart:
+            sidecar_keys.update(restart[f"{sidecar_root}/key"].asstr()[...])
+        required_sidecar_keys = {
+            "restrain_atom_id",
+            "restrain_weight_in_file",
+            "restrain_coordinate_in_file",
+        }
+        sidecar_owner = required_sidecar_keys.issubset(sidecar_keys)
+        partial_sidecar_owner = bool(required_sidecar_keys & sidecar_keys)
+
+        if "input.full_contract.pure_native" in case.contract_ids:
+            if not typed_owner or partial_sidecar_owner:
+                raise AssertionError(
+                    f"{case.name} pure full-contract fixture requires only "
+                    "the typed positional-restraint owner"
+                )
+            return
+        if (
+            "input.full_contract.sidecar" not in case.contract_ids
+            and not partial_sidecar_owner
+        ):
+            return
+        if not typed_owner or not sidecar_owner:
+            raise AssertionError(
+                f"{case.name} sidecar source fixture must contain complete "
+                "typed and sidecar positional-restraint representations "
+                "before owner selection"
+            )
+        del protocol["/restraint/default"]
+        del restart[reference_path]
 
 
 def _prepare_unrestricted_qc_inputs(
@@ -4604,6 +4718,128 @@ def _validate_focused_eam_routes(
         if missing:
             raise AssertionError(
                 f"focused EAM bundled topology is missing datasets: {missing}"
+            )
+
+
+def _prepare_focused_positional_restraint_pair(
+    case_root: Path,
+) -> tuple[Path, Path]:
+    legacy_source = case_root / "focused_positional_restraint_source"
+    legacy_dir = case_root / "legacy"
+    converted_dir = case_root / "converted_positional_restraint_bundle"
+    bundled_dir = case_root / "bundled"
+    for path in (legacy_source, legacy_dir, converted_dir, bundled_dir):
+        if path.exists():
+            shutil.rmtree(path)
+    _write_focused_positional_restraint_input(legacy_source)
+    shutil.copytree(legacy_source, legacy_dir)
+    _convert_legacy_case(legacy_source, converted_dir)
+    shutil.copytree(converted_dir / "bundle", bundled_dir)
+
+    for file_name in ("protocol.spgp.h5", "restart.spgr.h5"):
+        with h5py.File(bundled_dir / file_name, "r+") as bundle:
+            for sidecar_root in (
+                "/parameters/sponge/files/legacy_sidecars",
+                "/parameters/restart/protocol_sidecars",
+            ):
+                if sidecar_root in bundle:
+                    del bundle[sidecar_root]
+    sidecar_dir = bundled_dir / "legacy_sidecars"
+    if sidecar_dir.exists():
+        shutil.rmtree(sidecar_dir)
+    _validate_focused_positional_restraint_routes(legacy_dir, bundled_dir)
+    return legacy_dir, bundled_dir
+
+
+def _write_focused_positional_restraint_input(case_dir: Path) -> None:
+    case_dir.mkdir(parents=True, exist_ok=True)
+    (case_dir / "mass.txt").write_text("2\n1.0\n1.0\n", encoding="utf-8")
+    (case_dir / "coordinate.txt").write_text(
+        "2 0.0\n2.0 0.0 0.0\n0.0 1.5 0.0\n10.0 10.0 10.0\n90.0 90.0 90.0\n",
+        encoding="utf-8",
+    )
+    (case_dir / "velocity.txt").write_text(
+        "2\n0.0 0.0 0.0\n0.0 0.0 0.0\n", encoding="utf-8"
+    )
+    (case_dir / "restrain_atom_id.txt").write_text("0\n1\n", encoding="utf-8")
+    (case_dir / "restrain_weight.txt").write_text(
+        "10.0 0.0 0.0\n0.0 20.0 0.0\n", encoding="utf-8"
+    )
+    (case_dir / "restrain_coordinate.txt").write_text(
+        "2\n0.0 0.0 0.0\n0.0 0.0 0.0\n", encoding="utf-8"
+    )
+    (case_dir / "mdin.spg.toml").write_text(
+        'md_name = "bundled io ab focused positional restraint"\n'
+        'mode = "nve"\n'
+        "step_limit = 1\n"
+        "dt = 0.0\n"
+        "cutoff = 4.0\n"
+        'mass_in_file = "mass.txt"\n'
+        'coordinate_in_file = "coordinate.txt"\n'
+        'velocity_in_file = "velocity.txt"\n'
+        'restrain_atom_id = "restrain_atom_id.txt"\n'
+        'restrain_weight_in_file = "restrain_weight.txt"\n'
+        'restrain_coordinate_in_file = "restrain_coordinate.txt"\n'
+        "force_whole_output = true\n"
+        "print_zeroth_frame = 0\n"
+        "write_mdout_interval = 1\n"
+        "write_information_interval = 1\n",
+        encoding="utf-8",
+    )
+
+
+def _validate_focused_positional_restraint_routes(
+    legacy_dir: Path, bundled_dir: Path
+) -> None:
+    legacy_mdin = (legacy_dir / "mdin.spg.toml").read_text(encoding="utf-8")
+    bundled_mdin = (bundled_dir / "mdin.bundled.spg.toml").read_text(
+        encoding="utf-8"
+    )
+    legacy_keys = (
+        "restrain_atom_id",
+        "restrain_weight_in_file",
+        "restrain_coordinate_in_file",
+    )
+    for key in legacy_keys:
+        if not _has_key_line(legacy_mdin, key):
+            raise AssertionError(
+                f"focused positional restraint legacy branch lost {key}"
+            )
+        if _has_key_line(bundled_mdin, key):
+            raise AssertionError(
+                f"focused positional restraint bundled branch retained {key}"
+            )
+    if (bundled_dir / "legacy_sidecars").exists():
+        raise AssertionError(
+            "focused positional restraint bundled branch retained sidecars"
+        )
+
+    protocol_path = bundled_dir / "protocol.spgp.h5"
+    restart_path = bundled_dir / "restart.spgr.h5"
+    with h5py.File(protocol_path, "r") as protocol:
+        atom_indices = protocol["/restraint/default/atom_indices"][...].tolist()
+        weight = protocol["/restraint/default/weight"][...].tolist()
+        if atom_indices != [0, 1]:
+            raise AssertionError(
+                f"focused positional restraint atom IDs changed: {atom_indices}"
+            )
+        if weight != [[10.0, 0.0, 0.0], [0.0, 20.0, 0.0]]:
+            raise AssertionError(
+                f"focused positional restraint weights changed: {weight}"
+            )
+        if "/parameters/sponge/files/legacy_sidecars" in protocol:
+            raise AssertionError(
+                "focused positional restraint protocol retained sidecars"
+            )
+    reference_path = (
+        "/parameters/restart/references/restraint/default/coordinate"
+    )
+    with h5py.File(restart_path, "r") as restart:
+        reference = restart[reference_path][...].tolist()
+        if reference != [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]:
+            raise AssertionError(
+                "focused positional restraint reference coordinates changed: "
+                f"{reference}"
             )
 
 
@@ -5675,6 +5911,21 @@ def _prepare_focused_residue_com_res_pair(
             ],
             dtype=string_dtype,
         )
+        if "/restraint/default" not in protocol:
+            raise AssertionError(
+                "focused residue conversion lost typed restraint data"
+            )
+        del protocol["/restraint/default"]
+
+    reference_path = (
+        "/parameters/restart/references/restraint/default/coordinate"
+    )
+    with h5py.File(bundled_dir / "restart.spgr.h5", "r+") as restart:
+        if reference_path not in restart:
+            raise AssertionError(
+                "focused residue conversion lost typed restraint reference"
+            )
+        del restart[reference_path]
 
     sidecar_dir = bundled_dir / "legacy_sidecars"
     for child in sidecar_dir.iterdir():
@@ -8053,6 +8304,8 @@ def _mutate_failure_mdin(case: AbCase, mdin_path: Path, branch: str) -> None:
                 'velocity_in_file = "velocity.txt"',
             ]
         )
+    elif mutation == "h5_positional_restraint_dual_owner":
+        additions.append('restrain_atom_id = "duplicate_restrain_atom_id.txt"')
     elif mutation in {
         "unsupported_sidecar_key",
         "sidecar_length_mismatch",
@@ -8065,6 +8318,7 @@ def _mutate_failure_mdin(case: AbCase, mdin_path: Path, branch: str) -> None:
         "h5_nb14_extra_param_shape",
         "h5_eam_unknown_format",
         "h5_eam_embed_shape",
+        "h5_positional_restraint_weight_shape",
         "restart_dynamic_without_owner",
         "restart_protocol_without_owner",
         "restart_full_without_owner",
@@ -8097,8 +8351,10 @@ def _mutate_failure_h5(case: AbCase, case_dir: Path, branch: str) -> None:
         "h5_eam_unknown_format",
         "h5_eam_embed_shape",
     }
+    protocol_mutations = {"h5_positional_restraint_weight_shape"}
     if (
-        mutation not in sidecar_mutations | metadata_mutations
+        mutation
+        not in sidecar_mutations | metadata_mutations | protocol_mutations
         or branch not in case.failure_branches
     ):
         return
@@ -8106,6 +8362,16 @@ def _mutate_failure_h5(case: AbCase, case_dir: Path, branch: str) -> None:
         raise AssertionError(f"{mutation} requires the bundled H5 branch")
 
     topology_path = case_dir / "topology.spgt.h5"
+    if mutation in protocol_mutations:
+        protocol_path = case_dir / "protocol.spgp.h5"
+        with h5py.File(protocol_path, "r+") as protocol:
+            del protocol["/restraint/default/weight"]
+            protocol.create_dataset(
+                "/restraint/default/weight",
+                data=[[10.0, 0.0], [0.0, 20.0]],
+                dtype="f4",
+            )
+        return
     if mutation in metadata_mutations:
         with h5py.File(topology_path, "r+") as topology:
             if mutation == "h5_topology_atom_count_mismatch":
@@ -8833,6 +9099,13 @@ def _compare_input_semantics(
             }:
                 replica_result["oracle"] = _compare_focused_eam_behavior(
                     case, run
+                )
+            elif (
+                spec.contract_id == "input.protocol.positional_restraint"
+                and case.name == "normal_positional_restraint_typed_nonzero"
+            ):
+                replica_result["oracle"] = (
+                    _compare_focused_positional_restraint_behavior(case, run)
                 )
             elif spec.contract_id == "input.qc.type":
                 replica_result["oracle"] = _compare_typed_qc_type(case, run)
@@ -10136,6 +10409,149 @@ def _compare_focused_eam_behavior(
             str(path.relative_to(run.bundled_dir)) for path in materialized
         ],
     }
+    shutil.rmtree(control_dir)
+    return result
+
+
+def _compare_focused_positional_restraint_behavior(
+    case: AbCase, run: AbRun
+) -> dict[str, object]:
+    materialized_root = (
+        run.bundled_dir / ".sponge_h5_native_protocol" / "restraint"
+    )
+    materialized = (
+        materialized_root / "restrain_atom_id.txt",
+        materialized_root / "restrain_weight.txt",
+        materialized_root / "restrain_coordinate.txt",
+    )
+    missing = [
+        path
+        for path in materialized
+        if not path.exists() or path.stat().st_size == 0
+    ]
+    if missing:
+        raise AssertionError(
+            f"{case.name} did not materialize positional restraint payloads: "
+            f"{missing}"
+        )
+
+    legacy_force = _read_native_float32_file(
+        run.legacy_dir / "output" / "legacy.frc"
+    )
+    bundled_force = _read_native_float32_file(
+        run.bundled_dir / "output" / "legacy.frc"
+    )
+    force_result = _assert_nontrivial_equivalent_forces(
+        f"{case.name} positional restraint force", legacy_force, bundled_force
+    )
+    rows = _read_mdout(run.bundled_dir / "mdout.txt")["rows"]
+    if len(rows) != 1 or not math.isfinite(rows[0].get("restrain", math.nan)):
+        raise AssertionError(
+            f"{case.name} did not emit one finite restraint result"
+        )
+    _assert_numeric_sequences_close(
+        f"{case.name} positional restraint energy oracle",
+        (42.5,),
+        (rows[0]["restrain"],),
+        relative_tolerance=0.0,
+        absolute_tolerance=1.0e-6,
+    )
+    _assert_numeric_sequences_close(
+        f"{case.name} positional restraint force oracle",
+        (-20.0, 0.0, 0.0, 0.0, -30.0, 0.0),
+        bundled_force,
+        relative_tolerance=0.0,
+        absolute_tolerance=1.0e-6,
+    )
+
+    control_results = {}
+    for control_name in (
+        "swapped_atom_ids",
+        "zero_weight",
+        "matching_reference",
+    ):
+        control_results[control_name] = _run_positional_restraint_control(
+            case, run, control_name
+        )
+        _assert_numeric_sequences_close(
+            f"{case.name} {control_name} energy oracle",
+            (0.0,),
+            (control_results[control_name]["energy"],),
+            relative_tolerance=0.0,
+            absolute_tolerance=1.0e-6,
+        )
+        _assert_numeric_sequences_close(
+            f"{case.name} {control_name} force oracle",
+            (0.0,) * 6,
+            control_results[control_name]["force"],
+            relative_tolerance=0.0,
+            absolute_tolerance=1.0e-6,
+        )
+
+    return {
+        "energy": rows[0]["restrain"],
+        "force": force_result,
+        "controls": control_results,
+        "bundled_materialized_paths": [
+            str(path.relative_to(run.bundled_dir)) for path in materialized
+        ],
+    }
+
+
+def _run_positional_restraint_control(
+    case: AbCase, run: AbRun, control_name: str
+) -> dict[str, object]:
+    control_dir = run.bundled_dir.parent / f"bundled_restraint_{control_name}"
+    if control_dir.exists():
+        shutil.rmtree(control_dir)
+    shutil.copytree(run.bundled_dir, control_dir)
+    for path in (
+        control_dir / "output",
+        control_dir / ".sponge_h5_native_protocol",
+    ):
+        if path.exists():
+            shutil.rmtree(path)
+    (control_dir / "output").mkdir()
+    for file_name in ("mdout.txt", "mdinfo.txt", "run.stdout", "run.stderr"):
+        path = control_dir / file_name
+        if path.exists():
+            path.unlink()
+
+    protocol_path = control_dir / "protocol.spgp.h5"
+    restart_path = control_dir / "restart.spgr.h5"
+    if control_name == "swapped_atom_ids":
+        with h5py.File(protocol_path, "r+") as protocol:
+            protocol["/restraint/default/atom_indices"][...] = [1, 0]
+    elif control_name == "zero_weight":
+        with h5py.File(protocol_path, "r+") as protocol:
+            protocol["/restraint/default/weight"][...] = 0.0
+    elif control_name == "matching_reference":
+        reference_path = (
+            "/parameters/restart/references/restraint/default/coordinate"
+        )
+        with h5py.File(restart_path, "r+") as restart:
+            restart[reference_path][...] = [
+                [2.0, 0.0, 0.0],
+                [0.0, 1.5, 0.0],
+            ]
+    else:
+        raise AssertionError(
+            f"unsupported positional restraint control: {control_name}"
+        )
+
+    outcome = _run_sponge_process(control_dir, _mdin_name(control_dir))
+    if outcome.returncode != 0:
+        raise AssertionError(
+            f"{case.name} {control_name} control failed with code "
+            f"{outcome.returncode}\n{outcome.stdout}\n{outcome.stderr}"
+        )
+    rows = _read_mdout(control_dir / "mdout.txt")["rows"]
+    if len(rows) != 1:
+        raise AssertionError(
+            f"{case.name} {control_name} emitted {len(rows)} rows"
+        )
+    force = _read_native_float32_file(control_dir / "output" / "legacy.frc")
+    result = {"energy": rows[0]["restrain"], "force": force}
     shutil.rmtree(control_dir)
     return result
 
@@ -12471,6 +12887,18 @@ def _validate_full_contract_input(
         effective_required_paths = set(required_paths)
         if file_name == "topology.spgt.h5" and "/manybody/eam" not in paths:
             effective_required_paths.discard("/manybody/eam/atom_type")
+        if (
+            file_name == "protocol.spgp.h5"
+            and "/restraint/default" not in paths
+        ):
+            effective_required_paths.discard("/restraint/default/atom_indices")
+            effective_required_paths.discard("/restraint/default/weight")
+        if file_name == "restart.spgr.h5":
+            reference_path = (
+                "/parameters/restart/references/restraint/default/coordinate"
+            )
+            if reference_path not in paths:
+                effective_required_paths.discard(reference_path)
         missing = sorted(effective_required_paths - paths)
         if missing:
             raise AssertionError(
@@ -12513,6 +12941,42 @@ def _validate_full_contract_input(
             sidecar_root in topology
             and "EAM_in_file" in topology[f"{sidecar_root}/key"].asstr()[...]
         )
+    restraint_protocol_paths = (
+        "/restraint/default/atom_indices",
+        "/restraint/default/weight",
+    )
+    restraint_reference_path = (
+        "/parameters/restart/references/restraint/default/coordinate"
+    )
+    restraint_sidecar_keys = {
+        "restrain_atom_id",
+        "restrain_weight_in_file",
+        "restrain_coordinate_in_file",
+    }
+    with (
+        h5py.File(bundled_dir / "protocol.spgp.h5", "r") as protocol,
+        h5py.File(bundled_dir / "restart.spgr.h5", "r") as restart,
+    ):
+        typed_restraint_parts = [
+            path in protocol for path in restraint_protocol_paths
+        ]
+        typed_restraint_parts.append(restraint_reference_path in restart)
+        protocol_sidecar_keys: set[str] = set()
+        if sidecar_root in protocol:
+            protocol_sidecar_keys = set(
+                protocol[f"{sidecar_root}/key"].asstr()[...]
+            )
+        if sidecar_root in restart:
+            protocol_sidecar_keys.update(
+                restart[f"{sidecar_root}/key"].asstr()[...]
+            )
+        sidecar_restraint_parts = [
+            key in protocol_sidecar_keys for key in restraint_sidecar_keys
+        ]
+    typed_restraint_owner = all(typed_restraint_parts)
+    partial_typed_restraint_owner = any(typed_restraint_parts)
+    sidecar_restraint_owner = all(sidecar_restraint_parts)
+    partial_sidecar_restraint_owner = any(sidecar_restraint_parts)
     if partial_typed_owner and not typed_owner:
         raise AssertionError(
             f"{case.name} full-contract input has an incomplete typed residue "
@@ -12540,6 +13004,22 @@ def _validate_full_contract_input(
         raise AssertionError(
             f"{case.name} full-contract input requires exactly one EAM "
             f"owner, found {owner_count}"
+        )
+    if partial_typed_restraint_owner and not typed_restraint_owner:
+        raise AssertionError(
+            f"{case.name} full-contract input has an incomplete typed "
+            "positional-restraint owner"
+        )
+    if partial_sidecar_restraint_owner and not sidecar_restraint_owner:
+        raise AssertionError(
+            f"{case.name} full-contract input has an incomplete sidecar "
+            "positional-restraint owner"
+        )
+    if typed_restraint_owner == sidecar_restraint_owner:
+        owner_count = int(typed_restraint_owner) + int(sidecar_restraint_owner)
+        raise AssertionError(
+            f"{case.name} full-contract input requires exactly one positional "
+            f"restraint owner, found {owner_count}"
         )
 
     has_sidecars = any("legacy_sidecars" in path for path in all_paths)

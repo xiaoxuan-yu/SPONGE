@@ -1515,7 +1515,46 @@ Acceptance:
 - SPONGE rebuild, fixture-equivalence CTest, contract smoke, Ruff,
   clang-format, and diff checks pass, followed by one PR-scoped commit.
 
-## 48. Artifacts and Temporary-Space Policy
+## 48. PR 51: Typed Positional-Restraint Behavior Contract
+
+Treat positional restraint as one composite runtime contract rather than
+conflating it with CV-restraint configuration. Its typed owner spans protocol
+atom IDs and anisotropic weights plus restart reference coordinates.
+
+- Materialize `/restraint/default/atom_indices` and
+  `/restraint/default/weight` together with
+  `/parameters/restart/references/restraint/default/coordinate` into the
+  established positional-restraint parser inputs.
+- Validate atom-index bounds, exact vector/matrix shapes, atom-count agreement,
+  and finite values before the legacy parser consumes any materialized text.
+- Reject typed/legacy dual ownership. Make pure and sidecar full-contract
+  fixtures select exactly one complete owner across the protocol and restart
+  sidecar tables.
+- Add an isolated two-atom A/B case with exact energy and complete-force
+  oracles. Independently swap atom IDs, zero weights, and move references to
+  the current positions; each control must produce its predicted response.
+- Correct the registry surface from the inactive `restrain_in_file` to
+  `/restraint` shorthand to the three-part positional contract. Separate typed
+  and sidecar positional-restraint evidence, and track typed CV-restraint and
+  typed soft-wall config as deferred until each has a non-zero runtime behavior
+  gate.
+
+Acceptance:
+
+- The focused case matches at `restrain=42.5` with force
+  `(-20,0,0,0,-30,0)`. Swapped-ID, zero-weight, and matching-reference
+  controls each have zero restraint energy and force.
+- Pure full-contract VDS-off/on restores the legacy `restrain=22.50/11.25`
+  frames and advances to only the typed soft-wall gap. Sidecar VDS-off/on and
+  both residue COM/virial restraint regressions remain green.
+- Dual positional-restraint owners and a two-column weight matrix exit through
+  stable conflict/bad-file-format diagnostics; all 25 failure cases pass.
+- Registry coverage records 84 supported contracts, two explicitly deferred
+  typed protocol contracts, and one explicitly unsupported VDS contract.
+- SPONGE rebuild, fixture-equivalence CTest, contract smoke, Ruff, formatting,
+  clang-format, and diff checks pass, followed by one PR-scoped commit.
+
+## 49. Artifacts and Temporary-Space Policy
 
 - Use `SPONGE_BUNDLED_IO_AB_RUN_ROOT` for all heavy runs.
 - Put production artifacts on the workspace filesystem rather than `/tmp`.
@@ -1525,7 +1564,7 @@ Acceptance:
 - Record artifact byte counts and enforce a configurable per-case quota.
 - Cleanup must only remove directories created by the current gate run.
 
-## 49. PR Completion Log
+## 50. PR Completion Log
 
 Append one row immediately after completing and committing each PR.
 
@@ -1583,3 +1622,4 @@ Append one row immediately after completing and committing each PR.
 | PR 48: Inactive typed SITS configuration semantics | Complete | This commit | focused active and inactive typed SITS CPU A/B; full-contract pure-native progression check; SPONGE rebuild; 141-test smoke; Ruff; format; clang-format; `git diff --check` | Typed SITS config without `mode` now preserves the valid legacy inactive state: exact text is materialized, no SITS columns appear, and complete mdout is equal. The existing production-mode case remains non-trivial. Full-contract pure-native execution advances to independent NB14/EAM/restraint/soft-wall consumption gaps. |
 | PR 49: Canonical and extra NB14 behavior contracts | Complete | This commit | canonical/extra focused CPU A/B plus zero-LJ controls; pure full-contract VDS-off/on progression; sidecar full-contract VDS-off/on; dual-root and extra-shape process failures; 21-case failure sweep; native topology reader and fixture-equivalence CTests; SPONGE rebuild; 142-test smoke; Ruff; format; clang-format; `git diff --check` | The registry now distinguishes `nb14_in_file` scaling from raw `nb14_extra_in_file` A/B semantics. A small independently owned H5 helper preserves the untracked topology-reader boundary. Both pure typed routes match exact non-zero energies and complete force fingerprints, parameter-zero controls change force, and full-contract fixtures enforce exactly one NB14 owner. Pure full-contract NB14 columns are restored; EAM/restraint/soft-wall remain visible. |
 | PR 50: Typed EAM funcfl/setfl behavior contracts | Complete | This commit | focused funcfl/setfl CPU A/B plus zero-pair controls; pure full-contract VDS-off/on progression; sidecar full-contract VDS-off/on; unknown-format and table-shape process failures; complete failure sweep; fixture-equivalence CTest; SPONGE rebuild; contract smoke; Ruff; format; clang-format; `git diff --check` | Typed EAM input now materializes both legacy formats and optional atom types through the established EAM runtime parser. Exact energy and full-force oracles plus zero-pair controls prove table consumption, full-contract fixtures enforce exactly one EAM owner, and pure rerun now advances to only restraint/soft-wall gaps. |
+| PR 51: Typed positional-restraint behavior contract | Complete | This commit | focused typed positional-restraint CPU A/B plus three independent payload controls; pure full-contract VDS-off/on progression; sidecar VDS-off/on; two residue COM/virial regressions; dual-owner and weight-shape process failures; 25-case failure sweep; fixture-equivalence CTest; SPONGE rebuild; 142-test smoke; Ruff; format; clang-format; `git diff --check` | Protocol atom IDs/weights and restart reference coordinates now form one validated typed owner and materialize through the established positional-restraint parser. Exact energy/full-force oracles prove all three payload fields are consumed. The registry separates typed and sidecar evidence, retains CV restraint and typed soft wall as deferred, and pure rerun advances to only the soft-wall gap. |

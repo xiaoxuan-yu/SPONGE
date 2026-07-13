@@ -53,6 +53,7 @@ from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
     FOCUSED_LJ_SOFT_CORE_FIXTURE,
     FOCUSED_NB14_EXTRA_FIXTURE,
     FOCUSED_NB14_SCALED_FIXTURE,
+    FOCUSED_POSITIONAL_RESTRAINT_FIXTURE,
     FOCUSED_RESIDUE_COM_RES_FIXTURE,
     FOCUSED_RESIDUE_SIDECAR_FIXTURE,
     FOCUSED_RESIDUE_TYPED_COM_RES_FIXTURE,
@@ -301,6 +302,7 @@ def test_ab_production_harness_has_executable_contract_coverage():
         "normal_edip_nonzero",
         "normal_eam_funcfl_nonzero",
         "normal_eam_setfl_nonzero",
+        "normal_positional_restraint_typed_nonzero",
         "normal_sw_sidecar_pair_three_body",
         "normal_sw_typed_pair_three_body",
         "normal_tersoff_sidecar_angular",
@@ -366,6 +368,8 @@ def test_ab_production_harness_has_executable_contract_coverage():
         "failure_h5_nb14_extra_param_shape",
         "failure_h5_eam_unknown_format",
         "failure_h5_eam_embed_shape",
+        "failure_h5_positional_restraint_dual_owner",
+        "failure_h5_positional_restraint_weight_shape",
         "failure_restart_dynamic_without_owner",
         "failure_restart_protocol_without_owner",
         "failure_restart_full_without_owner",
@@ -697,6 +701,8 @@ def test_failure_matrix_requires_exit_category_and_stable_tokens():
         "h5_nb14_extra_param_shape",
         "h5_eam_unknown_format",
         "h5_eam_embed_shape",
+        "h5_positional_restraint_dual_owner",
+        "h5_positional_restraint_weight_shape",
         "restart_dynamic_without_owner",
         "restart_protocol_without_owner",
         "restart_full_without_owner",
@@ -742,6 +748,8 @@ def test_failure_matrix_requires_exit_category_and_stable_tokens():
         "h5_nb14_extra_param_shape": "spongeErrorBadFileFormat",
         "h5_eam_unknown_format": "spongeErrorBadFileFormat",
         "h5_eam_embed_shape": "spongeErrorBadFileFormat",
+        "h5_positional_restraint_dual_owner": "spongeErrorConflictingCommand",
+        "h5_positional_restraint_weight_shape": "spongeErrorBadFileFormat",
     }
     assert all(case.failure_branches == ("bundled",) for case in metadata_cases)
     contracts = load_contract_registry()

@@ -13,6 +13,7 @@
 #include "load/native.hpp"
 #include "load/native/eam_h5.hpp"
 #include "load/native/nb14_extra_h5.hpp"
+#include "load/native/restraint_h5.hpp"
 #include "utils/h5md/topology_h5_reader.hpp"
 
 namespace
@@ -168,6 +169,90 @@ void Materialize_H5_Native_EAM(CONTROLLER* controller)
     {
         controller->Set_Command("EAM_atom_type_in_file",
                                 atom_type_path.string().c_str(), 0);
+    }
+}
+
+void Materialize_H5_Native_Positional_Restraint(CONTROLLER* controller,
+                                                std::size_t atom_count)
+{
+    constexpr const char* protocol_key = "input_h5_protocol_path";
+    if (!controller->Command_Exist(protocol_key))
+    {
+        return;
+    }
+
+    SpongeH5MD::NativeRestraintH5Materializer materializer;
+    if (!materializer.Open_Protocol(controller->Command(protocol_key)))
+    {
+        controller->Throw_SPONGE_Error(
+            spongeErrorBadFileFormat,
+            "Materialize_H5_Native_Positional_Restraint",
+            materializer.Last_Error().c_str());
+    }
+    if (!materializer.Has_Positional_Restraint())
+    {
+        return;
+    }
+    if (controller->Command_Exist("restrain", "atom_id") ||
+        controller->Command_Exist("restrain", "weight_in_file") ||
+        controller->Command_Exist("restrain", "coordinate_in_file") ||
+        controller->Command_Exist("restrain", "amber_rst7"))
+    {
+        controller->Throw_SPONGE_Error(
+            spongeErrorConflictingCommand,
+            "Materialize_H5_Native_Positional_Restraint",
+            "Reason:\n\tinput.h5.protocol provides a native positional "
+            "restraint, but a legacy restraint atom, weight, or reference "
+            "input is also set. Native H5 and legacy text input cannot both "
+            "own positional restraint state\n");
+    }
+    if (controller->Command_Exist("input_h5_restart_path") &&
+        !materializer.Open_Restart(
+            controller->Command("input_h5_restart_path")))
+    {
+        controller->Throw_SPONGE_Error(
+            spongeErrorBadFileFormat,
+            "Materialize_H5_Native_Positional_Restraint",
+            materializer.Last_Error().c_str());
+    }
+
+    const std::filesystem::path output_dir =
+        std::filesystem::absolute(".sponge_h5_native_protocol/restraint")
+            .lexically_normal();
+    bool has_weight = false;
+    bool has_reference = false;
+    if (!materializer.Materialize(output_dir, atom_count, &has_weight,
+                                  &has_reference))
+    {
+        controller->Throw_SPONGE_Error(
+            spongeErrorBadFileFormat,
+            "Materialize_H5_Native_Positional_Restraint",
+            materializer.Last_Error().c_str());
+    }
+    if (!has_weight && !controller->Command_Exist("restrain", "single_weight"))
+    {
+        controller->Throw_SPONGE_Error(
+            spongeErrorBadFileFormat,
+            "Materialize_H5_Native_Positional_Restraint",
+            "Reason:\n\tnative positional restraint requires either "
+            "/restraint/default/weight or restrain_single_weight\n");
+    }
+
+    const std::filesystem::path atom_path = output_dir / "restrain_atom_id.txt";
+    controller->Set_Command("restrain_atom_id", atom_path.string().c_str(), 0);
+    if (has_weight)
+    {
+        const std::filesystem::path weight_path =
+            output_dir / "restrain_weight.txt";
+        controller->Set_Command("restrain_weight_in_file",
+                                weight_path.string().c_str(), 0);
+    }
+    if (has_reference)
+    {
+        const std::filesystem::path reference_path =
+            output_dir / "restrain_coordinate.txt";
+        controller->Set_Command("restrain_coordinate_in_file",
+                                reference_path.string().c_str(), 0);
     }
 }
 
@@ -409,6 +494,8 @@ void Xponge::System::Load_Inputs(CONTROLLER* controller)
     {
         Materialize_H5_Native_EAM(controller);
         Load_Native_Inputs(this, controller);
+        Materialize_H5_Native_Positional_Restraint(controller,
+                                                   this->atoms.mass.size());
         Materialize_H5_Native_NB14_Extra(controller, this);
         const auto residue_atom_numbers =
             Read_H5_Residue_Atom_Numbers(controller, this->atoms.mass.size());
