@@ -79,14 +79,16 @@ def test_every_implementation_key_has_exactly_one_contract_owner():
     assert len(owners) == expected_count
 
 
-def test_known_unmaterialized_topology_contracts_are_explicitly_deferred():
-    contracts = load_contract_registry()
+def test_improper_conversion_is_promoted_with_module_owned_runtime_evidence():
+    contract = load_contract_registry()["input.topology.improper"]
 
-    for contract_id in ("input.topology.improper",):
-        contract = contracts[contract_id]
-        assert contract.status == "deferred"
-        assert contract.minimum_evidence == "E3"
-        assert contract.reason
+    assert contract.status == "supported"
+    assert contract.minimum_evidence == "E3"
+    assert contract.case_ids == (
+        "normal_improper_converted_canonical_nonzero",
+        "normal_improper_converted_alias_nonzero",
+    )
+    assert contract.assertion_ids == ("input_semantic_equivalence",)
 
 
 def test_nb14_is_promoted_only_with_module_owned_runtime_evidence():

@@ -65,6 +65,12 @@ FOCUSED_RESIDUE_TYPED_COM_RES_FIXTURE = (
 )
 FOCUSED_GB_HYBRID_FIXTURE = "focused_gb_hybrid_two_atom"
 FOCUSED_GB_NATIVE_FIXTURE = "focused_gb_native_two_atom"
+FOCUSED_IMPROPER_CONVERTED_CANONICAL_FIXTURE = (
+    "focused_improper_converted_canonical_four_atom"
+)
+FOCUSED_IMPROPER_CONVERTED_ALIAS_FIXTURE = (
+    "focused_improper_converted_alias_four_atom"
+)
 FOCUSED_IMPROPER_NATIVE_FIXTURE = "focused_improper_native_four_atom"
 FOCUSED_LJ_SOFT_CORE_FIXTURE = "focused_lj_soft_core_two_atom"
 FOCUSED_SUBSYSTEM_DIVISION_FIXTURE = "focused_subsystem_division_two_atom"
@@ -331,6 +337,20 @@ INPUT_SEMANTIC_SPECS_BY_CASE = {
     "normal_improper_native_nonzero": (
         InputSemanticSpec(
             "input.topology.improper.native_runtime",
+            ("improper_dihedral",),
+            1.0e-6,
+        ),
+    ),
+    "normal_improper_converted_canonical_nonzero": (
+        InputSemanticSpec(
+            "input.topology.improper",
+            ("improper_dihedral",),
+            1.0e-6,
+        ),
+    ),
+    "normal_improper_converted_alias_nonzero": (
+        InputSemanticSpec(
+            "input.topology.improper",
             ("improper_dihedral",),
             1.0e-6,
         ),
@@ -911,6 +931,50 @@ def _cases_for_profile() -> list[AbCase]:
             contract_ids=(
                 "output.legacy.mdout",
                 "input.topology.gb",
+            ),
+            assertion_ids=(
+                "mdout_deterministic_equivalence",
+                "input_semantic_equivalence",
+            ),
+            normal_step_limit=1,
+            normal_interval=1,
+            normal_dt=0.0,
+            input_behavior_only=True,
+        ),
+        AbCase(
+            name="normal_improper_converted_canonical_nonzero",
+            fixture_case=FOCUSED_IMPROPER_CONVERTED_CANONICAL_FIXTURE,
+            legacy_subdir="generated_legacy",
+            bundled_subdir="generated_bundled",
+            mode="normal",
+            vds=False,
+            statistical_md=False,
+            restart_load_policy="structural",
+            contract_ids=(
+                "output.legacy.mdout",
+                "input.topology.improper",
+            ),
+            assertion_ids=(
+                "mdout_deterministic_equivalence",
+                "input_semantic_equivalence",
+            ),
+            normal_step_limit=1,
+            normal_interval=1,
+            normal_dt=0.0,
+            input_behavior_only=True,
+        ),
+        AbCase(
+            name="normal_improper_converted_alias_nonzero",
+            fixture_case=FOCUSED_IMPROPER_CONVERTED_ALIAS_FIXTURE,
+            legacy_subdir="generated_legacy",
+            bundled_subdir="generated_bundled",
+            mode="normal",
+            vds=False,
+            statistical_md=False,
+            restart_load_policy="structural",
+            contract_ids=(
+                "output.legacy.mdout",
+                "input.topology.improper",
             ),
             assertion_ids=(
                 "mdout_deterministic_equivalence",
@@ -3546,6 +3610,14 @@ def _prepare_case_pair(
             return _prepare_focused_gb_hybrid_pair(case_root)
         if case.fixture_case == FOCUSED_GB_NATIVE_FIXTURE:
             return _prepare_focused_gb_native_pair(case_root)
+        if case.fixture_case == FOCUSED_IMPROPER_CONVERTED_CANONICAL_FIXTURE:
+            return _prepare_focused_improper_converted_pair(
+                case_root, "improper_dihedral_in_file"
+            )
+        if case.fixture_case == FOCUSED_IMPROPER_CONVERTED_ALIAS_FIXTURE:
+            return _prepare_focused_improper_converted_pair(
+                case_root, "improper_in_file"
+            )
         if case.fixture_case == FOCUSED_IMPROPER_NATIVE_FIXTURE:
             return _prepare_focused_improper_native_pair(case_root)
         if case.fixture_case == FOCUSED_LJ_SOFT_CORE_FIXTURE:
@@ -5592,6 +5664,156 @@ def _validate_focused_gb_native_routes(
         for row in params
     ):
         raise AssertionError(f"focused native GB parameters changed: {params}")
+
+
+def _prepare_focused_improper_converted_pair(
+    case_root: Path, legacy_key: str
+) -> tuple[Path, Path]:
+    if legacy_key not in {
+        "improper_dihedral_in_file",
+        "improper_in_file",
+    }:
+        raise AssertionError(f"unsupported improper legacy key: {legacy_key}")
+    legacy_source = case_root / "focused_improper_converted_source"
+    legacy_dir = case_root / "legacy"
+    converted_dir = case_root / "converted_focused_improper_bundle"
+    bundled_dir = case_root / "bundled"
+    for path in (legacy_source, legacy_dir, converted_dir, bundled_dir):
+        if path.exists():
+            shutil.rmtree(path)
+    _write_focused_improper_native_input(legacy_source)
+    if legacy_key == "improper_in_file":
+        mdin_path = legacy_source / "mdin.spg.toml"
+        mdin_path.write_text(
+            mdin_path.read_text(encoding="utf-8").replace(
+                "improper_dihedral_in_file", "improper_in_file"
+            ),
+            encoding="utf-8",
+        )
+    shutil.copytree(legacy_source, legacy_dir)
+    _convert_legacy_case(legacy_source, converted_dir)
+    shutil.copytree(converted_dir / "bundle", bundled_dir)
+    _validate_focused_improper_converted_routes(
+        legacy_dir,
+        bundled_dir,
+        converted_dir / "manifest.json",
+        legacy_key,
+    )
+    return legacy_dir, bundled_dir
+
+
+def _validate_focused_improper_converted_routes(
+    legacy_dir: Path,
+    bundled_dir: Path,
+    manifest_path: Path,
+    legacy_key: str,
+) -> None:
+    legacy_mdin = (legacy_dir / "mdin.spg.toml").read_text(encoding="utf-8")
+    bundled_mdin = (bundled_dir / "mdin.bundled.spg.toml").read_text(
+        encoding="utf-8"
+    )
+    if not _has_key_line(legacy_mdin, legacy_key):
+        raise AssertionError(
+            f"focused converted improper legacy route lost {legacy_key}"
+        )
+    other_key = (
+        "improper_in_file"
+        if legacy_key == "improper_dihedral_in_file"
+        else "improper_dihedral_in_file"
+    )
+    if _has_key_line(legacy_mdin, other_key):
+        raise AssertionError(
+            f"focused converted improper legacy route retained {other_key}"
+        )
+    retained = sorted(
+        key
+        for key in ("improper_dihedral_in_file", "improper_in_file")
+        if _has_key_line(bundled_mdin, key)
+    )
+    if retained:
+        raise AssertionError(
+            f"focused converted improper bundle retained legacy keys: {retained}"
+        )
+
+    topology_path = bundled_dir / "topology.spgt.h5"
+    topology_paths = _h5_paths(topology_path)
+    required = {
+        "/forcefield/improper/atoms",
+        "/forcefield/improper/count",
+        "/forcefield/improper/pk",
+        "/forcefield/improper/phi0",
+    }
+    missing = sorted(required - topology_paths)
+    if missing:
+        raise AssertionError(
+            f"focused converted improper topology is missing datasets: {missing}"
+        )
+    if "/forcefield/improper/k" in topology_paths:
+        raise AssertionError(
+            "focused converted improper topology emitted legacy k"
+        )
+    sidecar_keys = _h5_string_values(
+        topology_path, "/parameters/sponge/files/legacy_sidecars/key"
+    )
+    sidecar_paths = _h5_string_values(
+        topology_path, "/parameters/sponge/files/legacy_sidecars/path"
+    )
+    if sidecar_keys != ["mass_in_file"] or sidecar_paths != [
+        "legacy_sidecars/mass_in_file/mass.txt"
+    ]:
+        raise AssertionError(
+            "focused converted improper emitted unexpected compatibility "
+            f"sidecars: keys={sidecar_keys}, paths={sidecar_paths}"
+        )
+    if not (bundled_dir / sidecar_paths[0]).is_file():
+        raise AssertionError(
+            "focused converted improper mass sidecar is absent"
+        )
+
+    with h5py.File(topology_path, "r") as topology:
+        count = int(topology["/forcefield/improper/count"][()])
+        atoms = topology["/forcefield/improper/atoms"][...].tolist()
+        pk = topology["/forcefield/improper/pk"][...].tolist()
+        phi0 = topology["/forcefield/improper/phi0"][...].tolist()
+    if count != 1 or atoms != [[0, 1, 2, 3]]:
+        raise AssertionError(
+            "focused converted improper atom payload changed: "
+            f"count={count}, atoms={atoms}"
+        )
+    if len(pk) != 1 or len(phi0) != 1:
+        raise AssertionError(
+            "focused converted improper parameters changed shape"
+        )
+    if not math.isclose(
+        pk[0], 10.0, rel_tol=0.0, abs_tol=1.0e-7
+    ) or not math.isclose(phi0[0], 0.2, rel_tol=0.0, abs_tol=1.0e-7):
+        raise AssertionError(
+            "focused converted improper parameters changed: "
+            f"pk={pk}, phi0={phi0}"
+        )
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    entries = [
+        entry
+        for entry in manifest["entries"]
+        if entry.get("source_key") == legacy_key
+    ]
+    expected_contract = (
+        "topology.improper_dihedral"
+        if legacy_key == "improper_dihedral_in_file"
+        else "topology.improper"
+    )
+    if len(entries) != 1 or entries[0].get("status") != "typed_converted":
+        raise AssertionError(
+            f"focused converted improper manifest entry changed: {entries}"
+        )
+    if (
+        entries[0].get("contract_id") != expected_contract
+        or entries[0].get("bundle_path") != "/forcefield/improper"
+    ):
+        raise AssertionError(
+            f"focused converted improper manifest route changed: {entries[0]}"
+        )
 
 
 def _prepare_focused_improper_native_pair(
@@ -7819,7 +8041,10 @@ def _compare_input_semantics(
                 "input.topology.gb.hybrid_activation",
             }:
                 replica_result["force"] = _compare_focused_gb_forces(case, run)
-            elif spec.contract_id == "input.topology.improper.native_runtime":
+            elif spec.contract_id in {
+                "input.topology.improper",
+                "input.topology.improper.native_runtime",
+            }:
                 replica_result["force"] = _compare_focused_improper_forces(
                     case, run
                 )
@@ -9685,19 +9910,152 @@ def _assert_gb_force_oracle(
 def _compare_focused_improper_forces(
     case: AbCase, run: AbRun
 ) -> dict[str, object]:
-    legacy = _read_native_float32_file(run.legacy_dir / "output" / "legacy.frc")
-    bundled = _read_native_float32_file(
-        run.bundled_dir / "output" / "legacy.frc"
+    branch_results = {}
+    forces = {}
+    for branch, directory in (
+        ("legacy", run.legacy_dir),
+        ("bundled", run.bundled_dir),
+    ):
+        rows = _read_mdout(directory / "mdout.txt")["rows"]
+        branch_forces = _read_native_float32_file(
+            directory / "output" / "legacy.frc"
+        )
+        branch_results[branch] = _assert_focused_improper_oracle(
+            f"{case.name} {branch}", rows, branch_forces
+        )
+        forces[branch] = branch_forces
+    cross_branch_force = _assert_nontrivial_equivalent_forces(
+        f"{case.name} improper force", forces["legacy"], forces["bundled"]
     )
-    result = _assert_nontrivial_equivalent_forces(
-        f"{case.name} improper force", legacy, bundled
+    return {
+        "route": (
+            "pure_native_typed_h5"
+            if case.fixture_case == FOCUSED_IMPROPER_NATIVE_FIXTURE
+            else "unmodified_legacy_to_bundle_output"
+        ),
+        "branches": branch_results,
+        "cross_branch_force": cross_branch_force,
+        "bundled_native_paths": [
+            "/forcefield/improper/atoms",
+            "/forcefield/improper/pk",
+            "/forcefield/improper/phi0",
+        ],
+        "typed_pk_half_control": _run_improper_pk_half_control(
+            case, run, forces["bundled"]
+        ),
+    }
+
+
+def _assert_focused_improper_oracle(
+    label: str,
+    rows: Sequence[dict[str, float]],
+    forces: Sequence[float],
+    *,
+    parameter_scale: float = 1.0,
+) -> dict[str, float]:
+    if len(rows) != 1:
+        raise AssertionError(
+            f"{label} expected one mdout row, found {len(rows)}"
+        )
+    energy = rows[0].get("improper_dihedral", math.nan)
+    expected_energy = 31.36 * parameter_scale
+    if not math.isfinite(energy) or not math.isclose(
+        energy, expected_energy, rel_tol=0.0, abs_tol=1.0e-6
+    ):
+        raise AssertionError(
+            f"{label} improper energy changed: {energy}, "
+            f"expected {expected_energy}"
+        )
+    if len(forces) != 12 or not all(math.isfinite(value) for value in forces):
+        raise AssertionError(f"{label} improper force payload is invalid")
+    maximum_abs_force = max(abs(value) for value in forces)
+    expected_maximum = 35.415924072265625 * parameter_scale
+    relative_tolerance, absolute_tolerance = _deterministic_tolerance("force")
+    if not math.isclose(
+        maximum_abs_force,
+        expected_maximum,
+        rel_tol=relative_tolerance,
+        abs_tol=absolute_tolerance,
+    ):
+        raise AssertionError(
+            f"{label} improper maximum force changed: {maximum_abs_force}, "
+            f"expected {expected_maximum}"
+        )
+    return {
+        "improper_dihedral": energy,
+        "maximum_abs_force": maximum_abs_force,
+        "parameter_scale": parameter_scale,
+    }
+
+
+def _run_improper_pk_half_control(
+    case: AbCase,
+    run: AbRun,
+    baseline_forces: Sequence[float],
+) -> dict[str, object]:
+    control_dir = run.bundled_dir.parent / "bundled_improper_pk_half"
+    if control_dir.exists():
+        shutil.rmtree(control_dir)
+    shutil.copytree(run.bundled_dir, control_dir)
+    output_dir = control_dir / "output"
+    if output_dir.exists():
+        shutil.rmtree(output_dir)
+    output_dir.mkdir()
+    for file_name in ("mdout.txt", "mdinfo.txt", "run.stdout", "run.stderr"):
+        path = control_dir / file_name
+        if path.exists():
+            path.unlink()
+
+    topology_path = control_dir / "topology.spgt.h5"
+    with h5py.File(topology_path, "r+") as topology:
+        pk = topology["/forcefield/improper/pk"]
+        if pk.shape != (1,) or not math.isclose(
+            float(pk[0]), 10.0, rel_tol=0.0, abs_tol=1.0e-7
+        ):
+            raise AssertionError(
+                f"{case.name} improper pk control lost canonical payload"
+            )
+        pk[...] = [5.0]
+
+    outcome = _run_sponge_process(control_dir, _mdin_name(control_dir))
+    if outcome.returncode != 0:
+        raise AssertionError(
+            f"{case.name} pk=5 control failed with code {outcome.returncode}\n"
+            f"{outcome.stdout}\n{outcome.stderr}"
+        )
+    rows = _read_mdout(control_dir / "mdout.txt")["rows"]
+    half_forces = _read_native_float32_file(
+        control_dir / "output" / "legacy.frc"
     )
-    result["bundled_native_paths"] = [
-        "/forcefield/improper/atoms",
-        "/forcefield/improper/pk",
-        "/forcefield/improper/phi0",
-    ]
-    result["converter_schema_normalization"] = "k_to_pk"
+    oracle = _assert_focused_improper_oracle(
+        f"{case.name} pk=5 control",
+        rows,
+        half_forces,
+        parameter_scale=0.5,
+    )
+    relative_tolerance, absolute_tolerance = _deterministic_tolerance("force")
+    _assert_numeric_sequences_close(
+        f"{case.name} pk=5 scaled force",
+        [0.5 * value for value in baseline_forces],
+        half_forces,
+        relative_tolerance=relative_tolerance,
+        absolute_tolerance=absolute_tolerance,
+    )
+    maximum_force_delta = max(
+        abs(full - half)
+        for full, half in zip(baseline_forces, half_forces, strict=True)
+    )
+    if maximum_force_delta <= 1.0:
+        raise AssertionError(
+            f"{case.name} typed pk did not change improper force"
+        )
+    result = {
+        **oracle,
+        "typed_pk": 5.0,
+        "maximum_force_delta": maximum_force_delta,
+        "exit_code": outcome.returncode,
+    }
+    shutil.rmtree(control_dir)
     return result
 
 

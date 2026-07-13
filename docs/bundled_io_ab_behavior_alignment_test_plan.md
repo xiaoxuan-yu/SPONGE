@@ -723,9 +723,10 @@ Acceptance:
 
 ## 25. PR 22: Native Improper Runtime Gate
 
-Separate SPONGE's executable native improper behavior from the still-broken
-legacy-to-bundle integration, and close only the former with a non-trivial
-four-atom case.
+At the PR 22 boundary, separate SPONGE's executable native improper behavior
+from the then-broken legacy-to-bundle integration, and close only the former
+with a non-trivial four-atom case. PR 43 below closes the retained conversion
+gap.
 
 - Generate four non-coplanar equal-mass atoms and one harmonic improper with
   `pk=10.0` and `phi0=0.2`. Require the legacy canonical
@@ -741,10 +742,10 @@ four-atom case.
 - Compare the module-owned energy row, complete mdout row, and complete binary
   force payload deterministically. Reject trivial energy, trivial force, any
   shape change, or any cross-branch value mismatch.
-- Track the passing behavior as `input.topology.improper.native_runtime`. Keep
-  `input.topology.improper` deferred for end-to-end conversion: the converter
-  currently writes `/k`, canonical sidecars are not allowlisted, and the
-  allowlisted alias is not consumed by `Native_Load_Impropers`.
+- Track the passing behavior as `input.topology.improper.native_runtime`. At
+  this boundary, keep `input.topology.improper` deferred for end-to-end
+  conversion because the converter writes `/k` while the runtime requires
+  `/pk`.
 
 Acceptance:
 
@@ -1264,7 +1265,44 @@ Acceptance:
   SPONGE rebuild, Ruff, clang-format, and diff checks pass, followed by exactly
   one PR-scoped commit.
 
-## 40. Artifacts and Temporary-Space Policy
+## 40. PR 43: End-to-End Improper Conversion Behavior Gate
+
+Close `input.topology.improper` with unmodified converter output for both
+canonical `improper_dihedral_in_file` and alias `improper_in_file` inputs.
+
+- Change XPONGE's typed improper schema from `/forcefield/improper/k` to the
+  SPONGE-native `/forcefield/improper/pk`; retain reverse export fallback for
+  older bundles that still contain `/k`.
+- Route legacy `improper_in_file` through the same native improper loader as
+  `improper_dihedral_in_file`, so the alias branch consumes the same force-field
+  payload instead of merely starting the process without an improper term.
+- Generate two independent four-atom cases with identical `pk=10.0` and
+  `phi0=0.2` semantics, differing only in the canonical versus alias legacy
+  key. Run each legacy input against the exact `legacy-to-bundle` output
+  without renaming datasets, deleting metadata, or rewriting the bundled mdin.
+- Require both conversion manifests to report `typed_converted` at
+  `/forcefield/improper`, require neither improper legacy key nor improper
+  sidecar ownership in the bundle, and validate exact atoms, count, `pk`, and
+  `phi0` values before execution.
+- Compare the complete deterministic mdout row and 12-value force payload.
+  Change only typed `pk` from `10` to `5` and require both energy and every
+  force component to scale by one half, proving the typed dataset reaches the
+  force kernel rather than merely initializing the module.
+
+Acceptance:
+
+- Canonical, alias, and bundled routes each produce
+  `improper_dihedral=31.36` and maximum force
+  `35.415924072265625`, with complete cross-branch equality.
+- The `pk=5` controls produce `improper_dihedral=15.68`, maximum force
+  `17.707962036132812`, and exact half-scale force within deterministic
+  float32 tolerances.
+- XPONGE parser/exporter focused tests, both converted real CPU A/B cases, the
+  existing pure-native regression, full smoke, related native input CTests,
+  Ruff, and diff checks pass. XPONGE and SPONGE are committed separately, once
+  per independent PR scope.
+
+## 41. Artifacts and Temporary-Space Policy
 
 - Use `SPONGE_BUNDLED_IO_AB_RUN_ROOT` for all heavy runs.
 - Put production artifacts on the workspace filesystem rather than `/tmp`.
@@ -1274,7 +1312,7 @@ Acceptance:
 - Record artifact byte counts and enforce a configurable per-case quota.
 - Cleanup must only remove directories created by the current gate run.
 
-## 41. PR Completion Log
+## 42. PR Completion Log
 
 Append one row immediately after completing and committing each PR.
 
@@ -1324,3 +1362,4 @@ Append one row immediately after completing and committing each PR.
 | PR 40: Typed QC type-sensitive behavior gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract` (135 tests); 95-test production manifest; real `rerun_qc_type_typed_unrestricted_vds_off` CPU A/B plus singlet control; two native input CTests; SPONGE rebuild; Ruff; changed-line clang-format; `git diff --check` | Typed `/qc/type` with no QC sidecar matches legacy across two complete mdout frames, non-trivial `QC`/`QC_S_sq`, and exact SCF text. Changing only multiplicity `3 -> 1` changes QC by up to `89.27` and spin square by `2.0065`, proving type-sensitive SCF consumption. Registry coverage advances to 79 supported, 3 deferred, and 1 unsupported contract. |
 | PR 41: Typed steering CV behavior gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract` (136 tests); 96-test production manifest; real `normal_steering_cv_typed_nonzero` and `normal_steering_cv_sidecar_nonzero` CPU A/B cases plus typed weight-zero control; two native input CTests; SPONGE rebuild; Ruff; clang-format; `git diff --check` | Pure typed `/cv/config` with no CV command or sidecars matches the legacy `cv_in_file` route at `steer_cv=3.0` and analytic force `(2,0,0,-2,0,0)`. Changing only weight `2.0 -> 0.0` zeros energy and force with maximum force delta `2.0`, proving typed config consumption. The registry now reflects the real `/cv/config` surface instead of the unconsumed `/steer` conversion. Coverage advances to 80 supported, 2 deferred, and 1 unsupported contract. |
 | PR 42: Typed SITS configuration/selection behavior gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract` (138 tests); 98-test production manifest; real `normal_sits_typed_configuration_nonzero` and `normal_sits_nk_typed_restart_nonzero` CPU A/B cases plus typed config/selection/precedence controls; two native input CTests; SPONGE rebuild; Ruff; clang-format; `git diff --check` | Pure typed `/sits/config`, `/sits/atom_indices`, and Nk restart state with no inline SITS owner match legacy at `SITS_AA_kAB=-1.22`, `SITS_bias=-0.5317`, `SITS_fb=0.7049`, and maximum force `0.2489061951637268`. Typed `pe_a=0.5` and atom set `[0]` produce distinct deterministic bias, factor, energy, and force fingerprints; complete inline config wins over typed config without suppressing typed atoms. Duplicate atom and duplicate config-key payloads exit as bad-file-format. Registry coverage advances to 81 supported, 1 deferred, and 1 unsupported contract. |
+| PR 43: End-to-end improper conversion behavior gate | Complete | XPONGE `45e52be`, `b890fbf`; SPONGE this commit | XPONGE 93-test bundle regression; `pixi run -e dev-cpu smoke-bundled-io-contract` (138 tests); 103-test registry/manifest suite; real canonical, alias, and pure-native improper CPU A/B cases plus typed `pk=5` controls; two native input CTests; SPONGE rebuild; Ruff; clang-format; `git diff --check` | XPONGE emits native `/forcefield/improper/pk`, retains `/k` reverse-export fallback, and omits improper sidecars for typed conversion. SPONGE consumes the declared `improper_in_file` alias when canonical input is absent. Unmodified canonical and alias conversions match legacy at `improper_dihedral=31.36` and maximum force `35.415924072265625`; independent `pk=5` controls halve energy and every force component. Coverage reaches 82 supported, 0 deferred, and 1 explicitly unsupported contract. |

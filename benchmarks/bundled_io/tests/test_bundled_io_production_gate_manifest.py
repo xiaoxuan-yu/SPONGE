@@ -44,6 +44,8 @@ from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
     FOCUSED_EXCLUSIONS_FIXTURE,
     FOCUSED_GB_HYBRID_FIXTURE,
     FOCUSED_GB_NATIVE_FIXTURE,
+    FOCUSED_IMPROPER_CONVERTED_ALIAS_FIXTURE,
+    FOCUSED_IMPROPER_CONVERTED_CANONICAL_FIXTURE,
     FOCUSED_IMPROPER_NATIVE_FIXTURE,
     FOCUSED_LJ_SOFT_CORE_FIXTURE,
     FOCUSED_RESIDUE_COM_RES_FIXTURE,
@@ -71,6 +73,7 @@ from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
     _assert_constraint_projection_oracle,
     _assert_core_topology_payload_response,
     _assert_exclusion_coulomb_oracle,
+    _assert_focused_improper_oracle,
     _assert_gb_force_oracle,
     _assert_nontrivial_equivalent_forces,
     _assert_residue_com_res_virial_oracle,
@@ -297,6 +300,8 @@ def test_ab_production_harness_has_executable_contract_coverage():
         "normal_residue_typed_com_res_virial",
         "normal_gb_hybrid_nonzero",
         "normal_gb_native_nonzero",
+        "normal_improper_converted_canonical_nonzero",
+        "normal_improper_converted_alias_nonzero",
         "normal_improper_native_nonzero",
         "normal_lj_soft_core_nonzero",
         "normal_subsystem_division_partition",
@@ -1402,25 +1407,22 @@ def test_focused_gb_gate_rejects_activation_only_or_coulomb_only_behavior():
         )
 
 
-def test_focused_improper_case_requires_pure_native_nonzero_energy_and_force():
+def test_focused_improper_cases_cover_native_and_unmodified_conversion_routes():
     contracts = load_contract_registry()
-    case = next(
-        case
-        for case in _cases_for_profile()
-        if case.name == "normal_improper_native_nonzero"
-    )
-    spec = INPUT_SEMANTIC_SPECS_BY_CASE[case.name]
+    cases = {case.name: case for case in _cases_for_profile()}
+    native_case = cases["normal_improper_native_nonzero"]
+    native_spec = INPUT_SEMANTIC_SPECS_BY_CASE[native_case.name]
 
-    assert case.fixture_case == FOCUSED_IMPROPER_NATIVE_FIXTURE
-    assert case.statistical_md is False
-    assert case.normal_step_limit == 1
-    assert case.normal_dt == 0.0
-    assert case.input_behavior_only is True
-    assert case.contract_ids == (
+    assert native_case.fixture_case == FOCUSED_IMPROPER_NATIVE_FIXTURE
+    assert native_case.statistical_md is False
+    assert native_case.normal_step_limit == 1
+    assert native_case.normal_dt == 0.0
+    assert native_case.input_behavior_only is True
+    assert native_case.contract_ids == (
         "output.legacy.mdout",
         "input.topology.improper.native_runtime",
     )
-    assert spec == (
+    assert native_spec == (
         InputSemanticSpec(
             "input.topology.improper.native_runtime",
             ("improper_dihedral",),
@@ -1429,12 +1431,43 @@ def test_focused_improper_case_requires_pure_native_nonzero_energy_and_force():
     )
     native = contracts["input.topology.improper.native_runtime"]
     assert native.status == "supported"
-    assert native.case_ids == (case.name,)
+    assert native.case_ids == (native_case.name,)
     assert native.assertion_ids == ("input_semantic_equivalence",)
+
+    converted_names = (
+        "normal_improper_converted_canonical_nonzero",
+        "normal_improper_converted_alias_nonzero",
+    )
+    converted_fixtures = (
+        FOCUSED_IMPROPER_CONVERTED_CANONICAL_FIXTURE,
+        FOCUSED_IMPROPER_CONVERTED_ALIAS_FIXTURE,
+    )
+    for case_name, fixture in zip(
+        converted_names, converted_fixtures, strict=True
+    ):
+        case = cases[case_name]
+        assert case.fixture_case == fixture
+        assert case.statistical_md is False
+        assert case.normal_step_limit == 1
+        assert case.normal_dt == 0.0
+        assert case.input_behavior_only is True
+        assert case.contract_ids == (
+            "output.legacy.mdout",
+            "input.topology.improper",
+        )
+        assert INPUT_SEMANTIC_SPECS_BY_CASE[case.name] == (
+            InputSemanticSpec(
+                "input.topology.improper",
+                ("improper_dihedral",),
+                1.0e-6,
+            ),
+        )
+
     conversion = contracts["input.topology.improper"]
-    assert conversion.status == "deferred"
-    assert "requires /pk" in conversion.reason
-    assert "not consumed" in conversion.reason
+    assert conversion.status == "supported"
+    assert conversion.case_ids == converted_names
+    assert conversion.assertion_ids == ("input_semantic_equivalence",)
+    assert conversion.reason == ""
 
 
 def test_focused_improper_gate_rejects_activation_only_evidence():
@@ -1450,6 +1483,18 @@ def test_focused_improper_gate_rejects_activation_only_evidence():
             [{"improper_dihedral": 0.0}],
             spec,
             deterministic=True,
+        )
+    with pytest.raises(AssertionError, match="improper energy changed"):
+        _assert_focused_improper_oracle(
+            "improper mutation",
+            [{"improper_dihedral": 0.0}],
+            [1.0] * 12,
+        )
+    with pytest.raises(AssertionError, match="maximum force changed"):
+        _assert_focused_improper_oracle(
+            "improper mutation",
+            [{"improper_dihedral": 31.36}],
+            [1.0] * 12,
         )
     with pytest.raises(AssertionError, match="bundled force is all trivial"):
         _assert_nontrivial_equivalent_forces(
