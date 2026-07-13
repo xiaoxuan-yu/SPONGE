@@ -718,13 +718,13 @@
       "contract_id": "input.manybody.tersoff",
       "direction": "input",
       "component": "manybody",
-      "status": "deferred",
+      "status": "supported",
       "minimum_evidence": "E3",
       "legacy_surface": "TERSOFF_in_file",
       "bundled_surface": "/manybody/tersoff",
-      "case_ids": [],
-      "assertion_ids": [],
-      "reason": "The converter emits typed /manybody/tersoff data, but the bundled runtime does not materialize that native payload into the TERSOFF_in_file consumer. Angular sidecar behavior is tracked separately."
+      "case_ids": ["normal_tersoff_typed_angular"],
+      "assertion_ids": ["input_semantic_equivalence"],
+      "reason": ""
     },
     {
       "contract_id": "input.manybody.tersoff.sidecar",

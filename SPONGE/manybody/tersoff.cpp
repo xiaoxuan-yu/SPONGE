@@ -1,5 +1,337 @@
 ﻿#include "tersoff.h"
 
+#include <cmath>
+#include <filesystem>
+#include <fstream>
+#include <highfive/highfive.hpp>
+#include <iomanip>
+#include <set>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+namespace
+{
+template <typename T>
+hid_t Tersoff_Native_H5_Type();
+
+template <>
+hid_t Tersoff_Native_H5_Type<int>()
+{
+    return H5T_NATIVE_INT;
+}
+
+template <>
+hid_t Tersoff_Native_H5_Type<float>()
+{
+    return H5T_NATIVE_FLOAT;
+}
+
+template <typename T>
+std::vector<T> Read_Tersoff_H5_Array(HighFive::File* file,
+                                     const std::string& dataset_path,
+                                     std::size_t expected_rank,
+                                     std::size_t expected_columns)
+{
+    HighFive::DataSet dataset = file->getDataSet(dataset_path);
+    const auto dimensions = dataset.getSpace().getDimensions();
+    if (dimensions.size() != expected_rank ||
+        (expected_rank == 2 && dimensions[1] != expected_columns))
+    {
+        std::ostringstream message;
+        message << dataset_path << " must have rank " << expected_rank;
+        if (expected_rank == 2)
+        {
+            message << " and " << expected_columns << " columns";
+        }
+        throw std::runtime_error(message.str());
+    }
+    std::size_t value_count = 1;
+    for (const std::size_t dimension : dimensions)
+    {
+        value_count *= dimension;
+    }
+    std::vector<T> values(value_count);
+    if (value_count != 0 &&
+        H5Dread(dataset.getId(), Tersoff_Native_H5_Type<T>(), H5S_ALL, H5S_ALL,
+                H5P_DEFAULT, values.data()) < 0)
+    {
+        throw std::runtime_error("failed to read " + dataset_path);
+    }
+    return values;
+}
+
+std::vector<std::string> Read_Tersoff_Type_Names(HighFive::File* file,
+                                                 int atom_type_count)
+{
+    constexpr const char* path = "/manybody/tersoff/type_name";
+    HighFive::DataSet dataset = file->getDataSet(path);
+    const auto dimensions = dataset.getSpace().getDimensions();
+    if (dimensions.size() != 1 ||
+        dimensions[0] != static_cast<std::size_t>(atom_type_count))
+    {
+        throw std::runtime_error(
+            "/manybody/tersoff/type_name must have shape [atom_type_count]");
+    }
+    std::vector<std::string> names;
+    dataset.read(names);
+    std::set<std::string> unique_names;
+    for (const std::string& name : names)
+    {
+        if (name.empty() || name.find_first_of(" \t\r\n") != std::string::npos)
+        {
+            throw std::runtime_error(
+                "/manybody/tersoff/type_name contains an empty or whitespace "
+                "name");
+        }
+        if (!unique_names.insert(name).second)
+        {
+            throw std::runtime_error(
+                "/manybody/tersoff/type_name contains a duplicate name");
+        }
+    }
+    return names;
+}
+
+std::string Tersoff_Number_String(float value)
+{
+    std::ostringstream out;
+    out << std::setprecision(9) << value;
+    return out.str();
+}
+
+bool Tersoff_Parameters_Agree(float actual, float expected)
+{
+    const float scale = std::max(1.0f, std::fabs(expected));
+    return std::isfinite(actual) && std::isfinite(expected) &&
+           std::fabs(actual - expected) <= 2.0e-5f * scale;
+}
+
+void Materialize_H5_Tersoff_Input(CONTROLLER* controller,
+                                  const char* module_name, int atom_numbers)
+{
+    constexpr const char* input_key = "input_h5_topology_path";
+    constexpr const char* root = "/manybody/tersoff";
+    if (strcmp(module_name, "TERSOFF") != 0 ||
+        controller->Command_Exist(module_name, "in_file") ||
+        !controller->Command_Exist(input_key))
+    {
+        return;
+    }
+
+    try
+    {
+        HighFive::File file(controller->Command(input_key),
+                            HighFive::File::ReadOnly);
+        if (!file.exist(root))
+        {
+            return;
+        }
+
+        int atom_type_count = 0;
+        file.getDataSet(std::string(root) + "/atom_type_count")
+            .read(atom_type_count);
+        if (atom_type_count <= 0)
+        {
+            throw std::runtime_error(
+                "/manybody/tersoff/atom_type_count must be positive");
+        }
+        const auto atom_type = Read_Tersoff_H5_Array<int>(
+            &file, std::string(root) + "/atom_type", 1, 0);
+        if (atom_type.size() != static_cast<std::size_t>(atom_numbers))
+        {
+            throw std::runtime_error(
+                "/manybody/tersoff/atom_type must match runtime atom count");
+        }
+        for (const int type : atom_type)
+        {
+            if (type < 0 || type >= atom_type_count)
+            {
+                throw std::runtime_error(
+                    "/manybody/tersoff/atom_type contains an out-of-range "
+                    "type");
+            }
+        }
+
+        const auto type_names = Read_Tersoff_Type_Names(&file, atom_type_count);
+        const auto type_map =
+            Read_Tersoff_H5_Array<int>(&file, std::string(root) + "/map", 1, 0);
+        const std::size_t map_size = static_cast<std::size_t>(atom_type_count) *
+                                     atom_type_count * atom_type_count;
+        if (type_map.size() != map_size)
+        {
+            throw std::runtime_error(
+                "/manybody/tersoff/map must have length atom_type_count^3");
+        }
+
+        long long declared_entry_count = 0;
+        file.getDataSet(std::string(root) + "/entry/count")
+            .read(declared_entry_count);
+        if (declared_entry_count <= 0)
+        {
+            throw std::runtime_error(
+                "/manybody/tersoff/entry/count must be positive");
+        }
+        const auto entry_type = Read_Tersoff_H5_Array<int>(
+            &file, std::string(root) + "/entry/type", 2, 3);
+        const auto parameters_raw = Read_Tersoff_H5_Array<float>(
+            &file, std::string(root) + "/entry/parameters_raw", 2, 14);
+        const auto parameters = Read_Tersoff_H5_Array<float>(
+            &file, std::string(root) + "/entry/parameters", 2, 18);
+        const std::size_t entry_count = entry_type.size() / 3;
+        if (entry_count != static_cast<std::size_t>(declared_entry_count) ||
+            parameters_raw.size() / 14 != entry_count ||
+            parameters.size() / 18 != entry_count || entry_count > map_size)
+        {
+            throw std::runtime_error(
+                "/manybody/tersoff entry count/type/parameter row mismatch");
+        }
+        HighFive::DataSet entry_name_dataset =
+            file.getDataSet(std::string(root) + "/entry/type_name");
+        const auto entry_name_dimensions =
+            entry_name_dataset.getSpace().getDimensions();
+        if (entry_name_dimensions.size() != 2 ||
+            entry_name_dimensions[0] != entry_count ||
+            entry_name_dimensions[1] != 3)
+        {
+            throw std::runtime_error(
+                "/manybody/tersoff/entry/type_name must have shape [entry,3]");
+        }
+        std::vector<std::vector<std::string>> entry_type_names;
+        entry_name_dataset.read(entry_type_names);
+
+        std::vector<int> expected_map(map_size, -1);
+        for (std::size_t row = 0; row < entry_count; ++row)
+        {
+            const int a = entry_type[3 * row];
+            const int b = entry_type[3 * row + 1];
+            const int c = entry_type[3 * row + 2];
+            if (a < 0 || a >= atom_type_count || b < 0 ||
+                b >= atom_type_count || c < 0 || c >= atom_type_count)
+            {
+                throw std::runtime_error(
+                    "/manybody/tersoff/entry/type contains an out-of-range "
+                    "type");
+            }
+            const std::size_t index =
+                static_cast<std::size_t>(a) * atom_type_count *
+                    atom_type_count +
+                static_cast<std::size_t>(b) * atom_type_count + c;
+            if (expected_map[index] != -1)
+            {
+                throw std::runtime_error(
+                    "/manybody/tersoff/entry/type contains a duplicate row");
+            }
+            expected_map[index] = static_cast<int>(row);
+            if (entry_type_names[row].size() != 3 ||
+                entry_type_names[row][0] != type_names[a] ||
+                entry_type_names[row][1] != type_names[b] ||
+                entry_type_names[row][2] != type_names[c])
+            {
+                throw std::runtime_error(
+                    "/manybody/tersoff/entry/type_name is inconsistent with "
+                    "entry/type");
+            }
+            float expected_parameters[18] = {};
+            for (std::size_t parameter = 0; parameter < 14; ++parameter)
+            {
+                const float value = parameters_raw[14 * row + parameter];
+                if (!std::isfinite(value))
+                {
+                    throw std::runtime_error(
+                        "/manybody/tersoff/entry/parameters_raw contains a "
+                        "non-finite value");
+                }
+                expected_parameters[parameter] = value;
+            }
+            expected_parameters[9] *= CONSTANT_EV_TO_KCAL_MOL;
+            expected_parameters[13] *= CONSTANT_EV_TO_KCAL_MOL;
+            const float n = expected_parameters[6];
+            if (n > 0.0f)
+            {
+                expected_parameters[14] = powf(2.0f * n * 1.0e-16f, -1.0f / n);
+                expected_parameters[15] = powf(2.0f * n * 1.0e-8f, -1.0f / n);
+                expected_parameters[16] = 1.0f / expected_parameters[15];
+                expected_parameters[17] = 1.0f / expected_parameters[14];
+            }
+            for (std::size_t parameter = 0; parameter < 18; ++parameter)
+            {
+                if (!Tersoff_Parameters_Agree(parameters[18 * row + parameter],
+                                              expected_parameters[parameter]))
+                {
+                    throw std::runtime_error(
+                        "/manybody/tersoff/entry/parameters is inconsistent "
+                        "with parameters_raw");
+                }
+            }
+        }
+        if (type_map != expected_map)
+        {
+            throw std::runtime_error(
+                "/manybody/tersoff/map is inconsistent with entry/type");
+        }
+
+        const auto output_path =
+            std::filesystem::absolute(".sponge_h5_native_manybody/tersoff.txt")
+                .lexically_normal();
+        std::filesystem::create_directories(output_path.parent_path());
+        std::ofstream out(output_path);
+        if (!out)
+        {
+            throw std::runtime_error(
+                "failed to create materialized Tersoff input " +
+                output_path.string());
+        }
+        out << atom_numbers << ' ' << atom_type_count << '\n';
+        for (int type = 0; type < atom_type_count; ++type)
+        {
+            out << type_names[type]
+                << (type + 1 == atom_type_count ? '\n' : ' ');
+        }
+        for (std::size_t row = 0; row < entry_count; ++row)
+        {
+            out << type_names[entry_type[3 * row]] << ' '
+                << type_names[entry_type[3 * row + 1]] << ' '
+                << type_names[entry_type[3 * row + 2]];
+            for (std::size_t parameter = 0; parameter < 14; ++parameter)
+            {
+                out << ' '
+                    << Tersoff_Number_String(
+                           parameters_raw[14 * row + parameter]);
+            }
+            out << '\n';
+        }
+        out << "# Atom types\n";
+        for (std::size_t atom = 0; atom < atom_type.size(); ++atom)
+        {
+            out << atom_type[atom]
+                << (atom + 1 == atom_type.size() ? '\n' : ' ');
+        }
+        out.close();
+        if (!out)
+        {
+            throw std::runtime_error(
+                "failed to write materialized Tersoff input " +
+                output_path.string());
+        }
+        const std::string command_name = std::string(module_name) + "_in_file";
+        controller->Set_Command(command_name.c_str(),
+                                output_path.string().c_str(), 0);
+    }
+    catch (const std::exception& error)
+    {
+        const std::string message =
+            std::string(
+                "Reason:\n\tfailed to materialize typed Tersoff input from ") +
+            root + ": " + error.what() + "\n";
+        controller->Throw_SPONGE_Error(spongeErrorBadFileFormat,
+                                       "Materialize_H5_Tersoff_Input",
+                                       message.c_str());
+    }
+}
+}  // namespace
+
 enum TersoffParam
 {
     p_m = 0,
@@ -277,6 +609,7 @@ void TERSOFF_INFORMATION::Initial(CONTROLLER* controller, int atom_numbers,
     else
         strcpy(this->module_name, module_name);
     this->atom_numbers = atom_numbers;
+    Materialize_H5_Tersoff_Input(controller, this->module_name, atom_numbers);
     if (!controller->Command_Exist(this->module_name, "in_file")) return;
     controller->printf("START INITIALIZING TERSOFF FORCE\n");
     FILE* fp;

@@ -54,6 +54,7 @@ FOCUSED_EDIP_FIXTURE = "focused_edip_two_atom"
 FOCUSED_SW_SIDECAR_FIXTURE = "focused_sw_sidecar_three_atom"
 FOCUSED_SW_TYPED_FIXTURE = "focused_sw_typed_three_atom"
 FOCUSED_TERSOFF_SIDECAR_FIXTURE = "focused_tersoff_sidecar_three_atom"
+FOCUSED_TERSOFF_TYPED_FIXTURE = "focused_tersoff_typed_three_atom"
 FOCUSED_CUSTOM_PAIR_FIXTURE = "focused_custom_pair_two_atom"
 FOCUSED_EXCLUSIONS_FIXTURE = "focused_exclusions_three_atom"
 FOCUSED_RESIDUE_SIDECAR_FIXTURE = "focused_residue_sidecar_pbc_four_atom"
@@ -267,6 +268,9 @@ INPUT_SEMANTIC_SPECS_BY_CASE = {
         InputSemanticSpec(
             "input.manybody.tersoff.sidecar", ("potential",), 1.0e-6
         ),
+    ),
+    "normal_tersoff_typed_angular": (
+        InputSemanticSpec("input.manybody.tersoff", ("potential",), 1.0e-6),
     ),
     "normal_custom_pair_nonzero": (
         InputSemanticSpec("input.custom.pairwise", ("custom_pair",), 1.0e-6),
@@ -668,6 +672,28 @@ def _cases_for_profile() -> list[AbCase]:
             contract_ids=(
                 "output.legacy.mdout",
                 "input.manybody.tersoff.sidecar",
+            ),
+            assertion_ids=(
+                "mdout_deterministic_equivalence",
+                "input_semantic_equivalence",
+            ),
+            normal_step_limit=1,
+            normal_interval=1,
+            normal_dt=0.0,
+            input_behavior_only=True,
+        ),
+        AbCase(
+            name="normal_tersoff_typed_angular",
+            fixture_case=FOCUSED_TERSOFF_TYPED_FIXTURE,
+            legacy_subdir="generated_legacy",
+            bundled_subdir="generated_bundled",
+            mode="normal",
+            vds=False,
+            statistical_md=False,
+            restart_load_policy="structural",
+            contract_ids=(
+                "output.legacy.mdout",
+                "input.manybody.tersoff",
             ),
             assertion_ids=(
                 "mdout_deterministic_equivalence",
@@ -3414,6 +3440,8 @@ def _prepare_case_pair(
             return _prepare_focused_sw_typed_pair(case_root)
         if case.fixture_case == FOCUSED_TERSOFF_SIDECAR_FIXTURE:
             return _prepare_focused_tersoff_sidecar_pair(case_root)
+        if case.fixture_case == FOCUSED_TERSOFF_TYPED_FIXTURE:
+            return _prepare_focused_tersoff_typed_pair(case_root)
         if case.fixture_case == FOCUSED_CUSTOM_PAIR_FIXTURE:
             return _prepare_focused_custom_pair_pair(case_root)
         if case.fixture_case == FOCUSED_EXCLUSIONS_FIXTURE:
@@ -4195,6 +4223,88 @@ def _prepare_focused_tersoff_sidecar_pair(
     return legacy_dir, bundled_dir
 
 
+def _prepare_focused_tersoff_typed_pair(
+    case_root: Path,
+) -> tuple[Path, Path]:
+    legacy_dir, bundled_dir = _prepare_focused_tersoff_sidecar_pair(case_root)
+    topology_path = bundled_dir / "topology.spgt.h5"
+    sidecar_root = "/parameters/sponge/files/legacy_sidecars"
+    string_dtype = h5py.string_dtype(encoding="utf-8")
+    with h5py.File(topology_path, "r+") as topology:
+        if sidecar_root not in topology:
+            raise AssertionError(
+                "focused Tersoff conversion did not emit source sidecars"
+            )
+        del topology[sidecar_root]
+        tersoff = topology.require_group("/manybody/tersoff")
+        tersoff.create_dataset("atom_type_count", data=1, dtype="i4")
+        tersoff.create_dataset("atom_type", data=[0, 0, 0], dtype="i4")
+        tersoff.create_dataset("map", data=[0], dtype="i4")
+        tersoff.create_dataset("type_name", data=["Si"], dtype=string_dtype)
+        entry = tersoff.require_group("entry")
+        entry.create_dataset("count", data=1, dtype="i8")
+        entry.create_dataset("type", data=[[0, 0, 0]], dtype="i4")
+        entry.create_dataset(
+            "type_name",
+            data=[["Si", "Si", "Si"]],
+            dtype=string_dtype,
+        )
+        entry.create_dataset(
+            "parameters_raw",
+            data=[
+                [
+                    3.0,
+                    1.0,
+                    0.0,
+                    25000.0,
+                    4.3484,
+                    -0.89,
+                    0.72751,
+                    0.000000125724,
+                    2.199,
+                    340.0,
+                    1.95,
+                    0.05,
+                    3.568,
+                    1380.0,
+                ]
+            ],
+            dtype="f4",
+        )
+        entry.create_dataset(
+            "parameters",
+            data=[
+                [
+                    3.0,
+                    1.0,
+                    0.0,
+                    25000.0,
+                    4.3484,
+                    -0.89,
+                    0.72751,
+                    0.000000125724,
+                    2.199,
+                    7840.58642578125,
+                    1.95,
+                    0.05,
+                    3.568,
+                    31823.556640625,
+                    5.874280307059868e21,
+                    59229962240.0,
+                    1.6883347150886685e-11,
+                    1.702336211264742e-22,
+                ]
+            ],
+            dtype="f4",
+        )
+
+    sidecars = bundled_dir / "legacy_sidecars"
+    if sidecars.exists():
+        shutil.rmtree(sidecars)
+    _validate_focused_tersoff_typed_routes(legacy_dir, bundled_dir)
+    return legacy_dir, bundled_dir
+
+
 def _write_focused_tersoff_sidecar_input(case_dir: Path) -> None:
     case_dir.mkdir(parents=True, exist_ok=True)
     (case_dir / "mass.txt").write_text(
@@ -4281,6 +4391,84 @@ def _validate_focused_tersoff_sidecar_routes(
     if (bundled_dir / "legacy_sidecars" / "mass_in_file").exists():
         raise AssertionError(
             "focused Tersoff bundled branch retained mass sidecar"
+        )
+
+
+def _validate_focused_tersoff_typed_routes(
+    legacy_dir: Path, bundled_dir: Path
+) -> None:
+    legacy_mdin = (legacy_dir / "mdin.spg.toml").read_text(encoding="utf-8")
+    bundled_mdin = (bundled_dir / "mdin.bundled.spg.toml").read_text(
+        encoding="utf-8"
+    )
+    if not _has_key_line(legacy_mdin, "TERSOFF_in_file"):
+        raise AssertionError("focused typed Tersoff legacy route is missing")
+    if _has_key_line(bundled_mdin, "TERSOFF_in_file"):
+        raise AssertionError("focused typed Tersoff retained TERSOFF_in_file")
+    if (bundled_dir / "legacy_sidecars").exists():
+        raise AssertionError("focused typed Tersoff retained sidecars")
+
+    topology_path = bundled_dir / "topology.spgt.h5"
+    sidecar_root = "/parameters/sponge/files/legacy_sidecars"
+    with h5py.File(topology_path, "r") as topology:
+        if sidecar_root in topology:
+            raise AssertionError(
+                "focused typed Tersoff topology retained a sidecar table"
+            )
+        atom_type_count = int(topology["/manybody/tersoff/atom_type_count"][()])
+        atom_type = topology["/manybody/tersoff/atom_type"][...].tolist()
+        type_map = topology["/manybody/tersoff/map"][...].tolist()
+        type_name = (
+            topology["/manybody/tersoff/type_name"].asstr()[...].tolist()
+        )
+        entry_count = int(topology["/manybody/tersoff/entry/count"][()])
+        entry_type = topology["/manybody/tersoff/entry/type"][...].tolist()
+        entry_type_name = (
+            topology["/manybody/tersoff/entry/type_name"].asstr()[...].tolist()
+        )
+        parameters = topology["/manybody/tersoff/entry/parameters_raw"][
+            ...
+        ].tolist()
+        native_parameters = topology["/manybody/tersoff/entry/parameters"][
+            ...
+        ].tolist()
+    if atom_type_count != 1 or atom_type != [0, 0, 0]:
+        raise AssertionError("focused typed Tersoff atom-type payload changed")
+    if type_map != [0] or type_name != ["Si"]:
+        raise AssertionError("focused typed Tersoff type mapping changed")
+    if (
+        entry_count != 1
+        or entry_type != [[0, 0, 0]]
+        or entry_type_name != [["Si", "Si", "Si"]]
+        or len(parameters) != 1
+        or len(native_parameters) != 1
+    ):
+        raise AssertionError("focused typed Tersoff entry payload changed")
+    _assert_numeric_sequences_close(
+        "focused typed Tersoff parameters",
+        (
+            3.0,
+            1.0,
+            0.0,
+            25000.0,
+            4.3484,
+            -0.89,
+            0.72751,
+            0.000000125724,
+            2.199,
+            340.0,
+            1.95,
+            0.05,
+            3.568,
+            1380.0,
+        ),
+        parameters[0],
+        relative_tolerance=1.0e-7,
+        absolute_tolerance=1.0e-7,
+    )
+    if len(native_parameters[0]) != 18:
+        raise AssertionError(
+            "focused typed Tersoff native parameter payload changed"
         )
 
 
@@ -7206,7 +7394,10 @@ def _compare_input_semantics(
                         case, run, spec.contract_id
                     )
                 )
-            elif spec.contract_id == "input.manybody.tersoff.sidecar":
+            elif spec.contract_id in {
+                "input.manybody.tersoff",
+                "input.manybody.tersoff.sidecar",
+            }:
                 replica_result["oracle"] = _compare_focused_tersoff_angular(
                     case, run
                 )
@@ -7497,12 +7688,212 @@ def _compare_focused_tersoff_angular(
     cross_branch_force = _assert_nontrivial_equivalent_forces(
         f"{case.name} Tersoff force", forces["legacy"], forces["bundled"]
     )
-    return {
-        "route": "isolated_h5_TERSOFF_in_file_sidecar",
+    result = {
+        "route": (
+            "typed_h5_manybody_tersoff"
+            if case.fixture_case == FOCUSED_TERSOFF_TYPED_FIXTURE
+            else "isolated_h5_TERSOFF_in_file_sidecar"
+        ),
         "module_owned_energy": "isolated_total_potential",
         "branches": branch_results,
         "cross_branch_force": cross_branch_force,
     }
+    if case.fixture_case == FOCUSED_TERSOFF_TYPED_FIXTURE:
+        materialized = (
+            run.bundled_dir / ".sponge_h5_native_manybody" / "tersoff.txt"
+        )
+        if not materialized.exists() or materialized.stat().st_size == 0:
+            raise AssertionError(
+                f"{case.name} did not materialize bundled Tersoff payload"
+            )
+        result["bundled_materialized_path"] = str(
+            materialized.relative_to(run.bundled_dir)
+        )
+        result["gamma_zero_control"] = _run_typed_tersoff_gamma_zero_control(
+            case, run, forces["bundled"]
+        )
+        result["typed_validation_controls"] = (
+            _run_typed_tersoff_validation_controls(case, run)
+        )
+    return result
+
+
+def _run_typed_tersoff_gamma_zero_control(
+    case: AbCase, run: AbRun, correct_forces: Sequence[float]
+) -> dict[str, object]:
+    control_dir = run.bundled_dir.parent / "bundled_tersoff_gamma_zero"
+    if control_dir.exists():
+        shutil.rmtree(control_dir)
+    shutil.copytree(run.bundled_dir, control_dir)
+    for path in (
+        control_dir / "output",
+        control_dir / ".sponge_h5_native_manybody",
+    ):
+        if path.exists():
+            shutil.rmtree(path)
+    (control_dir / "output").mkdir()
+    for file_name in ("mdout.txt", "mdinfo.txt", "run.stdout", "run.stderr"):
+        path = control_dir / file_name
+        if path.exists():
+            path.unlink()
+
+    topology_path = control_dir / "topology.spgt.h5"
+    with h5py.File(topology_path, "r+") as topology:
+        raw_parameters = topology["/manybody/tersoff/entry/parameters_raw"]
+        native_parameters = topology["/manybody/tersoff/entry/parameters"]
+        if raw_parameters.shape != (1, 14) or native_parameters.shape != (
+            1,
+            18,
+        ):
+            raise AssertionError(
+                f"{case.name} gamma control lost Tersoff parameter shape"
+            )
+        if not math.isclose(
+            float(raw_parameters[0, 1]), 1.0, rel_tol=0.0, abs_tol=1.0e-7
+        ) or not math.isclose(
+            float(native_parameters[0, 1]),
+            1.0,
+            rel_tol=0.0,
+            abs_tol=1.0e-7,
+        ):
+            raise AssertionError(
+                f"{case.name} gamma control lost canonical gamma"
+            )
+        raw_parameters[0, 1] = 0.0
+        native_parameters[0, 1] = 0.0
+
+    outcome = _run_sponge_process(control_dir, _mdin_name(control_dir))
+    if outcome.returncode != 0:
+        raise AssertionError(
+            f"{case.name} gamma=0 control failed with code "
+            f"{outcome.returncode}\n{outcome.stdout}\n{outcome.stderr}"
+        )
+    rows = _read_mdout(control_dir / "mdout.txt")["rows"]
+    if len(rows) != 1:
+        raise AssertionError(
+            f"{case.name} gamma=0 control expected one mdout row"
+        )
+    gamma_zero_potential = rows[0].get("potential", math.nan)
+    gamma_zero_effective_potential = rows[0].get("eff_pot", math.nan)
+    _assert_numeric_sequences_close(
+        f"{case.name} gamma=0 potential",
+        (-196.06, -196.05984),
+        (gamma_zero_potential, gamma_zero_effective_potential),
+        relative_tolerance=1.0e-6,
+        absolute_tolerance=1.0e-6,
+    )
+    gamma_zero_forces = _read_native_float32_file(
+        control_dir / "output" / "legacy.frc"
+    )
+    expected_gamma_zero_force = (
+        144.78313,
+        144.78313,
+        0.0,
+        -144.78313,
+        0.0,
+        0.0,
+        0.0,
+        -144.78313,
+        0.0,
+    )
+    relative_tolerance, absolute_tolerance = _deterministic_tolerance("force")
+    _assert_numeric_sequences_close(
+        f"{case.name} gamma=0 force",
+        expected_gamma_zero_force,
+        gamma_zero_forces,
+        relative_tolerance=relative_tolerance,
+        absolute_tolerance=absolute_tolerance,
+    )
+    maximum_force_delta = max(
+        abs(full - control)
+        for full, control in zip(correct_forces, gamma_zero_forces, strict=True)
+    )
+    if maximum_force_delta <= 1.0:
+        raise AssertionError(
+            f"{case.name} typed gamma did not change Tersoff force"
+        )
+    result = {
+        "typed_gamma": 0.0,
+        "potential": gamma_zero_potential,
+        "effective_potential": gamma_zero_effective_potential,
+        "maximum_abs_force": max(abs(value) for value in gamma_zero_forces),
+        "maximum_force_delta": maximum_force_delta,
+        "exit_code": outcome.returncode,
+    }
+    shutil.rmtree(control_dir)
+    return result
+
+
+def _run_typed_tersoff_validation_controls(
+    case: AbCase, run: AbRun
+) -> dict[str, object]:
+    controls = (
+        (
+            "map_mismatch",
+            "/manybody/tersoff/map",
+            "inconsistent with entry/type",
+        ),
+        (
+            "parameter_mismatch",
+            "/manybody/tersoff/entry/parameters",
+            "inconsistent with parameters_raw",
+        ),
+    )
+    results = {}
+    for name, dataset_token, reason_token in controls:
+        control_dir = run.bundled_dir.parent / f"bundled_tersoff_{name}"
+        if control_dir.exists():
+            shutil.rmtree(control_dir)
+        shutil.copytree(run.bundled_dir, control_dir)
+        for path in (
+            control_dir / "output",
+            control_dir / ".sponge_h5_native_manybody",
+        ):
+            if path.exists():
+                shutil.rmtree(path)
+        (control_dir / "output").mkdir()
+        for file_name in (
+            "mdout.txt",
+            "mdinfo.txt",
+            "run.stdout",
+            "run.stderr",
+        ):
+            path = control_dir / file_name
+            if path.exists():
+                path.unlink()
+
+        with h5py.File(control_dir / "topology.spgt.h5", "r+") as topology:
+            if name == "map_mismatch":
+                topology["/manybody/tersoff/map"][0] = -1
+            else:
+                topology["/manybody/tersoff/entry/parameters"][0, 1] = 0.5
+
+        outcome = _run_sponge_process(control_dir, _mdin_name(control_dir))
+        combined = outcome.stdout + outcome.stderr
+        category = _failure_category(combined)
+        expected_tokens = (
+            "Materialize_H5_Tersoff_Input",
+            dataset_token,
+            reason_token,
+        )
+        missing = [token for token in expected_tokens if token not in combined]
+        if (
+            outcome.returncode == 0
+            or category != "spongeErrorBadFileFormat"
+            or missing
+        ):
+            raise AssertionError(
+                f"{case.name} {name} was not rejected: "
+                f"code={outcome.returncode}, category={category}, "
+                f"missing={missing}\n{combined}"
+            )
+        results[name] = {
+            "exit_code": outcome.returncode,
+            "failure_category": category,
+            "diagnostic_tokens": list(expected_tokens),
+        }
+        shutil.rmtree(control_dir)
+    return results
 
 
 def _assert_tersoff_angular_oracle(
