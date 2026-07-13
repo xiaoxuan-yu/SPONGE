@@ -61,6 +61,7 @@ FOCUSED_VIRTUAL_ATOMS_ALL_TYPES_FIXTURE = "focused_virtual_atoms_all_types"
 FOCUSED_VIRTUAL_ATOMS_ALIAS_FIXTURE = "focused_virtual_atoms_plural_alias"
 FOCUSED_VIRTUAL_ATOMS_PBC_FIXTURE = "focused_virtual_atoms_pbc_boundary"
 FOCUSED_CONSTRAINT_SIDECAR_FIXTURE = "focused_constraint_sidecar_two_atom"
+FOCUSED_STEERING_CV_SIDECAR_FIXTURE = "focused_steering_cv_sidecar_two_atom"
 SITS_FF19SB_CMAP_SOURCE = (
     REPO_ROOT / "benchmarks" / "performance" / "sits" / "statics" / "ala2_sits"
 )
@@ -253,6 +254,11 @@ INPUT_SEMANTIC_SPECS_BY_CASE = {
             "input.topology.improper.native_runtime",
             ("improper_dihedral",),
             1.0e-6,
+        ),
+    ),
+    "normal_steering_cv_sidecar_nonzero": (
+        InputSemanticSpec(
+            "input.protocol.steering.cv_sidecar", ("steer_cv",), 1.0e-6
         ),
     ),
     "normal_lj_soft_core_nonzero": (
@@ -731,6 +737,28 @@ def _cases_for_profile() -> list[AbCase]:
             normal_step_limit=4,
             normal_interval=1,
             normal_dt=0.001,
+            input_behavior_only=True,
+        ),
+        AbCase(
+            name="normal_steering_cv_sidecar_nonzero",
+            fixture_case=FOCUSED_STEERING_CV_SIDECAR_FIXTURE,
+            legacy_subdir="generated_legacy",
+            bundled_subdir="generated_bundled",
+            mode="normal",
+            vds=False,
+            statistical_md=False,
+            restart_load_policy="structural",
+            contract_ids=(
+                "output.legacy.mdout",
+                "input.protocol.steering.cv_sidecar",
+            ),
+            assertion_ids=(
+                "mdout_deterministic_equivalence",
+                "input_semantic_equivalence",
+            ),
+            normal_step_limit=1,
+            normal_interval=1,
+            normal_dt=0.0,
             input_behavior_only=True,
         ),
         AbCase(
@@ -2932,6 +2960,8 @@ def _prepare_case_pair(
             return _prepare_focused_virtual_atoms_pair(case.fixture_case, case_root)
         if case.fixture_case == FOCUSED_CONSTRAINT_SIDECAR_FIXTURE:
             return _prepare_focused_constraint_sidecar_pair(case_root)
+        if case.fixture_case == FOCUSED_STEERING_CV_SIDECAR_FIXTURE:
+            return _prepare_focused_steering_cv_sidecar_pair(case_root)
         return _prepare_normal_tip3p_pair(case_root, replica_seed)
 
     legacy_dir = _copy_case(case, "legacy", case.legacy_subdir, case_root)
@@ -4544,6 +4574,133 @@ def _validate_focused_constraint_sidecar_routes(
         )
 
 
+def _prepare_focused_steering_cv_sidecar_pair(
+    case_root: Path,
+) -> tuple[Path, Path]:
+    legacy_source = case_root / "focused_steering_cv_sidecar_source"
+    legacy_dir = case_root / "legacy"
+    converted_dir = case_root / "converted_focused_steering_cv_bundle"
+    bundled_dir = case_root / "bundled"
+    for path in (legacy_source, legacy_dir, converted_dir, bundled_dir):
+        if path.exists():
+            shutil.rmtree(path)
+    _write_focused_steering_cv_sidecar_input(legacy_source)
+    shutil.copytree(legacy_source, legacy_dir)
+    _convert_legacy_case(legacy_source, converted_dir)
+    shutil.copytree(converted_dir / "bundle", bundled_dir)
+
+    topology_path = bundled_dir / "topology.spgt.h5"
+    with h5py.File(topology_path, "r+") as topology:
+        sidecar_table = "/parameters/sponge/files/legacy_sidecars"
+        if sidecar_table in topology:
+            del topology[sidecar_table]
+    protocol_path = bundled_dir / "protocol.spgp.h5"
+    with h5py.File(protocol_path, "r+") as protocol:
+        if "/cv" in protocol:
+            del protocol["/cv"]
+    mass_sidecar = bundled_dir / "legacy_sidecars" / "mass_in_file"
+    if mass_sidecar.exists():
+        shutil.rmtree(mass_sidecar)
+    _validate_focused_steering_cv_sidecar_routes(legacy_dir, bundled_dir)
+    return legacy_dir, bundled_dir
+
+
+def _write_focused_steering_cv_sidecar_input(case_dir: Path) -> None:
+    case_dir.mkdir(parents=True, exist_ok=True)
+    (case_dir / "mass.txt").write_text("2\n12.0\n12.0\n", encoding="utf-8")
+    (case_dir / "coordinate.txt").write_text(
+        "2 0.0\n"
+        "0.0 0.0 0.0\n"
+        "1.5 0.0 0.0\n"
+        "10.0 10.0 10.0\n"
+        "90.0 90.0 90.0\n",
+        encoding="utf-8",
+    )
+    (case_dir / "velocity.txt").write_text(
+        "2\n0.0 0.0 0.0\n0.0 0.0 0.0\n", encoding="utf-8"
+    )
+    (case_dir / "cv.txt").write_text(
+        "steer\n"
+        "{\n"
+        "    CV = distance\n"
+        "    weight = 2.0\n"
+        "}\n"
+        "distance\n"
+        "{\n"
+        "    CV_type = distance\n"
+        "    atom = 0 1\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    (case_dir / "mdin.spg.toml").write_text(
+        'md_name = "bundled io ab focused steering CV sidecar"\n'
+        'mode = "nve"\n'
+        "step_limit = 1\n"
+        "dt = 0.0\n"
+        "cutoff = 4.0\n"
+        "skin = 0.4\n"
+        'mass_in_file = "mass.txt"\n'
+        'coordinate_in_file = "coordinate.txt"\n'
+        'velocity_in_file = "velocity.txt"\n'
+        'cv_in_file = "cv.txt"\n'
+        "print_zeroth_frame = 0\n"
+        "write_mdout_interval = 1\n"
+        "write_information_interval = 1\n",
+        encoding="utf-8",
+    )
+
+
+def _validate_focused_steering_cv_sidecar_routes(
+    legacy_dir: Path, bundled_dir: Path
+) -> None:
+    legacy_mdin = (legacy_dir / "mdin.spg.toml").read_text(encoding="utf-8")
+    bundled_mdin = (bundled_dir / "mdin.bundled.spg.toml").read_text(
+        encoding="utf-8"
+    )
+    if not _has_key_line(legacy_mdin, "cv_in_file"):
+        raise AssertionError("focused steering legacy route lost cv_in_file")
+    if _has_key_line(legacy_mdin, "steer_cv_in_file"):
+        raise AssertionError(
+            "focused steering legacy route used unconsumed steer_cv_in_file"
+        )
+    if _has_key_line(bundled_mdin, "cv_in_file"):
+        raise AssertionError(
+            "focused steering bundled mdin retained cv_in_file"
+        )
+
+    topology_path = bundled_dir / "topology.spgt.h5"
+    topology_sidecars = "/parameters/sponge/files/legacy_sidecars"
+    if topology_sidecars in _h5_paths(topology_path):
+        raise AssertionError(
+            "focused steering bundled topology retained sidecars"
+        )
+    protocol_path = bundled_dir / "protocol.spgp.h5"
+    protocol_paths = _h5_paths(protocol_path)
+    if any(path.startswith("/cv") for path in protocol_paths):
+        raise AssertionError(
+            "focused steering bundled protocol retained typed CV data"
+        )
+    sidecar_root = "/parameters/sponge/files/legacy_sidecars"
+    keys = _h5_string_values(protocol_path, f"{sidecar_root}/key")
+    paths = _h5_string_values(protocol_path, f"{sidecar_root}/path")
+    expected_path = "legacy_sidecars/cv_in_file/cv.txt"
+    if keys != ["cv_in_file"] or paths != [expected_path]:
+        raise AssertionError(
+            "focused steering protocol sidecar binding changed: "
+            f"keys={keys}, paths={paths}"
+        )
+    legacy_payload = (legacy_dir / "cv.txt").read_bytes()
+    bundled_payload = (bundled_dir / expected_path).read_bytes()
+    if legacy_payload != bundled_payload:
+        raise AssertionError(
+            "focused steering CV sidecar payload differs from legacy input"
+        )
+    if (bundled_dir / "legacy_sidecars" / "mass_in_file").exists():
+        raise AssertionError(
+            "focused steering bundled branch retained mass sidecar"
+        )
+
+
 def _write_sits_ff19sb_cmap_mdin(case_dir: Path, replica_seed: int):
     _assert_sits_ff19sb_cmap_fixture(case_dir / "ALA_cmap.txt")
     masses = read_mass_values(case_dir / "ALA_mass.txt")
@@ -5407,6 +5564,10 @@ def _compare_input_semantics(
                 replica_result["force"] = _compare_focused_improper_forces(
                     case, run
                 )
+            elif spec.contract_id == "input.protocol.steering.cv_sidecar":
+                replica_result["oracle"] = _compare_focused_steering_cv(
+                    case, run
+                )
             elif spec.contract_id == "input.topology.lj_soft_core":
                 replica_result["force"] = _compare_focused_lj_soft_core_forces(
                     case, run
@@ -5432,6 +5593,89 @@ def _compare_input_semantics(
             }
         )
     return results
+
+
+def _compare_focused_steering_cv(
+    case: AbCase, run: AbRun
+) -> dict[str, object]:
+    branch_results = {}
+    forces = {}
+    for branch, directory in (
+        ("legacy", run.legacy_dir),
+        ("bundled", run.bundled_dir),
+    ):
+        rows = _read_mdout(directory / "mdout.txt")["rows"]
+        branch_forces = _read_native_float32_file(
+            directory / "output" / "legacy.frc"
+        )
+        branch_results[branch] = _assert_steering_cv_oracle(
+            f"{case.name} {branch}", rows, branch_forces
+        )
+        forces[branch] = branch_forces
+    cross_branch_force = _assert_nontrivial_equivalent_forces(
+        f"{case.name} steering force", forces["legacy"], forces["bundled"]
+    )
+    return {
+        "route": "isolated_h5_cv_in_file_protocol_sidecar",
+        "branches": branch_results,
+        "cross_branch_force": cross_branch_force,
+    }
+
+
+def _assert_steering_cv_oracle(
+    label: str,
+    rows: Sequence[dict[str, float]],
+    forces: Sequence[float],
+) -> dict[str, object]:
+    expected_energy = 3.0
+    expected_force = (2.0, 0.0, 0.0, -2.0, 0.0, 0.0)
+    steering_energy = [
+        row["steer_cv"] for row in rows if "steer_cv" in row
+    ]
+    total_potential = [
+        row["potential"] for row in rows if "potential" in row
+    ]
+    effective_potential = [
+        row["eff_pot"] for row in rows if "eff_pot" in row
+    ]
+    for observable, values in (
+        ("steer_cv", steering_energy),
+        ("potential", total_potential),
+        ("eff_pot", effective_potential),
+    ):
+        _assert_numeric_sequences_close(
+            f"{label} steering {observable} oracle",
+            (expected_energy,),
+            values,
+            relative_tolerance=1.0e-6,
+            absolute_tolerance=1.0e-6,
+        )
+    relative_tolerance, absolute_tolerance = _deterministic_tolerance("force")
+    _assert_numeric_sequences_close(
+        f"{label} steering force oracle",
+        expected_force,
+        forces,
+        relative_tolerance=relative_tolerance,
+        absolute_tolerance=absolute_tolerance,
+    )
+    non_steering_maximum = max(
+        abs(row.get(observable, 0.0))
+        for row in rows
+        for observable in ("PM", "temperature")
+    )
+    if non_steering_maximum > 1.0e-8:
+        raise AssertionError(
+            f"{label} isolated steering fixture has another non-zero result"
+        )
+    return {
+        "distance": 1.5,
+        "weight": 2.0,
+        "steering_energy": steering_energy[0],
+        "maximum_abs_force": max(abs(value) for value in forces),
+        "weight_zero_energy": 0.0,
+        "weight_zero_maximum_abs_force": 0.0,
+        "isolated_module_owned_result": True,
+    }
 
 
 def _compare_focused_tersoff_angular(

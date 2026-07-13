@@ -42,6 +42,7 @@ from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
     FOCUSED_GB_HYBRID_FIXTURE,
     FOCUSED_IMPROPER_NATIVE_FIXTURE,
     FOCUSED_LJ_SOFT_CORE_FIXTURE,
+    FOCUSED_STEERING_CV_SIDECAR_FIXTURE,
     FOCUSED_SW_SIDECAR_FIXTURE,
     FOCUSED_TERSOFF_SIDECAR_FIXTURE,
     FOCUSED_VIRTUAL_ATOMS_ALIAS_FIXTURE,
@@ -55,6 +56,7 @@ from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
     _assert_exclusion_coulomb_oracle,
     _assert_gb_force_oracle,
     _assert_nontrivial_equivalent_forces,
+    _assert_steering_cv_oracle,
     _assert_sw_pair_three_body_oracle,
     _assert_tersoff_angular_oracle,
     _assert_virtual_atom_oracle,
@@ -270,6 +272,7 @@ def test_ab_production_harness_has_executable_contract_coverage():
         "normal_virtual_atoms_pbc_boundary",
         "normal_virtual_atoms_plural_alias",
         "normal_constraint_sidecar_projection",
+        "normal_steering_cv_sidecar_nonzero",
         "normal_vds_chunk_minus_one",
         "normal_vds_chunk_exact",
         "normal_vds_chunk_plus_one",
@@ -1243,6 +1246,69 @@ def test_focused_constraint_gate_rejects_ignored_or_wrong_constraint(
         _assert_constraint_projection_oracle(
             "constraint mutation", positions, velocities
         )
+
+
+def test_focused_steering_case_requires_cv_sidecar_energy_and_force():
+    contracts = load_contract_registry()
+    case = next(
+        case
+        for case in _cases_for_profile()
+        if case.name == "normal_steering_cv_sidecar_nonzero"
+    )
+    spec = INPUT_SEMANTIC_SPECS_BY_CASE[case.name]
+
+    assert case.fixture_case == FOCUSED_STEERING_CV_SIDECAR_FIXTURE
+    assert case.statistical_md is False
+    assert case.normal_step_limit == 1
+    assert case.normal_dt == 0.0
+    assert case.input_behavior_only is True
+    assert case.contract_ids == (
+        "output.legacy.mdout",
+        "input.protocol.steering.cv_sidecar",
+    )
+    assert spec == (
+        InputSemanticSpec(
+            "input.protocol.steering.cv_sidecar", ("steer_cv",), 1.0e-6
+        ),
+    )
+    sidecar = contracts["input.protocol.steering.cv_sidecar"]
+    assert sidecar.status == "supported"
+    assert sidecar.case_ids == (case.name,)
+    assert sidecar.assertion_ids == ("input_semantic_equivalence",)
+    typed = contracts["input.protocol.steering"]
+    assert typed.status == "deferred"
+    assert "steer_cv_in_file has no runtime consumer" in typed.reason
+    assert "tracked separately" in typed.reason
+
+
+def test_focused_steering_gate_rejects_zero_weight_energy_and_force():
+    rows = [
+        {
+            "steer_cv": 3.0,
+            "potential": 3.0,
+            "eff_pot": 3.0,
+            "PM": 0.0,
+            "temperature": 0.0,
+        }
+    ]
+    force = (2.0, 0.0, 0.0, -2.0, 0.0, 0.0)
+    result = _assert_steering_cv_oracle("steering", rows, force)
+    assert result["steering_energy"] == 3.0
+    assert result["maximum_abs_force"] == 2.0
+
+    zero_rows = [
+        {
+            "steer_cv": 0.0,
+            "potential": 0.0,
+            "eff_pot": 0.0,
+            "PM": 0.0,
+            "temperature": 0.0,
+        }
+    ]
+    with pytest.raises(AssertionError, match="steering steer_cv oracle"):
+        _assert_steering_cv_oracle("weight=0", zero_rows, (0.0,) * 6)
+    with pytest.raises(AssertionError, match="steering force oracle"):
+        _assert_steering_cv_oracle("zero force", rows, (0.0,) * 6)
 
 
 @pytest.mark.parametrize(

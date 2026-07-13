@@ -755,7 +755,19 @@
       "bundled_surface": "/steering",
       "case_ids": [],
       "assertion_ids": [],
-      "reason": "A non-zero steering work/force A/B fixture is pending."
+      "reason": "The steering runtime queries the CV controller, which only consumes cv_in_file; steer_cv_in_file has no runtime consumer and typed /steering is not materialized. The working cv_in_file protocol-sidecar route is tracked separately."
+    },
+    {
+      "contract_id": "input.protocol.steering.cv_sidecar",
+      "direction": "input",
+      "component": "protocol_sidecar",
+      "status": "supported",
+      "minimum_evidence": "E3",
+      "legacy_surface": "steer block in cv_in_file",
+      "bundled_surface": "protocol /parameters/sponge/files/legacy_sidecars binding for cv_in_file",
+      "case_ids": ["normal_steering_cv_sidecar_nonzero"],
+      "assertion_ids": ["input_semantic_equivalence"],
+      "reason": ""
     },
     {
       "contract_id": "input.bias.metadynamics",
