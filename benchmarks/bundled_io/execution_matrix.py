@@ -391,6 +391,8 @@ def _parse_production_run(raw: object, index: int) -> ProductionRun:
     if not isinstance(passed, bool) or not isinstance(mutations, bool):
         raise AssertionError(f"{label} boolean fields are invalid")
     _required_commit(raw, "source_commit", label)
+    if raw.get("source_tree_state") != "clean":
+        raise AssertionError(f"{label} source_tree_state must be clean")
     for key in (
         "contract_evidence_sha256",
         "matrix_evidence_sha256",

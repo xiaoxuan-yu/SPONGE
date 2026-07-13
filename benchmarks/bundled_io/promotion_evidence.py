@@ -6,6 +6,7 @@ import json
 import math
 import os
 import re
+import subprocess
 from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Mapping, Sequence
@@ -119,6 +120,7 @@ def derive_production_run(
     *,
     run_id: str,
     source_commit: str,
+    source_tree_state: str,
     retry_count: int,
     evidence_path: Path,
     matrix_evidence_paths: Sequence[Path],
@@ -132,6 +134,8 @@ def derive_production_run(
         raise AssertionError(
             "source_commit must be a 7-64 character lowercase hex ID"
         )
+    if source_tree_state != "clean":
+        raise AssertionError("production run source_tree_state must be clean")
     if retry_count < 0:
         raise AssertionError("retry_count must be non-negative")
 
@@ -157,6 +161,7 @@ def derive_production_run(
     )
     provenance = {
         "source_commit": source_commit,
+        "source_tree_state": source_tree_state,
         "contract_evidence_sha256": _file_sha256(evidence_path),
         "matrix_evidence_sha256": _payload_sha256(matrix_evidence),
         "comparator_evidence_sha256": _file_sha256(comparator_evidence_path),
@@ -169,6 +174,7 @@ def append_production_run_history(
 ) -> dict[str, object]:
     required_provenance = {
         "source_commit",
+        "source_tree_state",
         "contract_evidence_sha256",
         "matrix_evidence_sha256",
         "comparator_evidence_sha256",
@@ -196,6 +202,33 @@ def append_production_run_history(
     runs.append({**asdict(run), **dict(provenance)})
     _write_json_atomically(path, history)
     return history
+
+
+def inspect_clean_source_tree(repo_root: Path, expected_commit: str) -> str:
+    actual_commit = _run_git(repo_root, "rev-parse", "HEAD")
+    if actual_commit != expected_commit:
+        raise AssertionError(
+            "source commit mismatch: "
+            f"expected={expected_commit!r}, actual={actual_commit!r}"
+        )
+    status = _run_git(
+        repo_root,
+        "status",
+        "--porcelain=v1",
+        "--untracked-files=all",
+    )
+    if status:
+        paths = [
+            line[3:] if len(line) > 3 else line for line in status.splitlines()
+        ]
+        preview = paths[:10]
+        suffix = (
+            f" (+{len(paths) - len(preview)} more)" if len(paths) > 10 else ""
+        )
+        raise AssertionError(
+            f"production source tree is dirty: {preview}{suffix}"
+        )
+    return "clean"
 
 
 def _validate_comparator_evidence(
@@ -361,6 +394,20 @@ def _load_json_object(path: Path, label: str) -> dict[str, object]:
     return payload
 
 
+def _run_git(repo_root: Path, *arguments: str) -> str:
+    result = subprocess.run(
+        ["git", "-C", str(repo_root), *arguments],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise AssertionError(
+            f"git {' '.join(arguments)} failed: {result.stderr.strip()}"
+        )
+    return result.stdout.rstrip("\n")
+
+
 def _file_sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -388,6 +435,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--source-commit", required=True)
+    parser.add_argument("--repo-root", type=Path, default=Path.cwd())
     parser.add_argument("--retry-count", type=int, required=True)
     parser.add_argument("--evidence", type=Path, required=True)
     parser.add_argument(
@@ -397,9 +445,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--history", type=Path, required=True)
     args = parser.parse_args(argv)
 
+    source_tree_state = inspect_clean_source_tree(
+        args.repo_root, args.source_commit
+    )
     run, provenance = derive_production_run(
         run_id=args.run_id,
         source_commit=args.source_commit,
+        source_tree_state=source_tree_state,
         retry_count=args.retry_count,
         evidence_path=args.evidence,
         matrix_evidence_paths=args.matrix_evidence,

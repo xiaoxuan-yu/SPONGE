@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import subprocess
 from dataclasses import replace
 from pathlib import Path
 
@@ -38,6 +39,7 @@ from benchmarks.bundled_io.promotion_evidence import (
     REQUIRED_COMPARATOR_MUTATION_TESTS,
     append_production_run_history,
     derive_production_run,
+    inspect_clean_source_tree,
     merge_matrix_evidence,
     write_comparator_mutation_report,
 )
@@ -3101,11 +3103,12 @@ def _promotion_artifacts(tmp_path: Path):
     return matrix, contracts, evidence_path, matrix_paths, comparator_path
 
 
-def _derive_promotion_run(artifacts):
+def _derive_promotion_run(artifacts, source_tree_state="clean"):
     matrix, contracts, evidence, matrix_evidence, comparator = artifacts
     return derive_production_run(
         run_id=PROMOTION_RUN_ID,
         source_commit=PROMOTION_SOURCE_COMMIT,
+        source_tree_state=source_tree_state,
         retry_count=0,
         evidence_path=evidence,
         matrix_evidence_paths=matrix_evidence,
@@ -3125,6 +3128,7 @@ def test_production_run_is_derived_from_complete_hashed_evidence(tmp_path):
     assert run.finalize_fraction == pytest.approx(0.111)
     assert run.output_bytes_ratio == pytest.approx(1.011)
     assert provenance["source_commit"] == PROMOTION_SOURCE_COMMIT
+    assert provenance["source_tree_state"] == "clean"
     assert all(
         len(value) == 64
         for key, value in provenance.items()
@@ -3163,6 +3167,13 @@ def test_production_run_rejects_failed_comparator_pytest_session(tmp_path):
 
     with pytest.raises(AssertionError, match="pytest_exit_status must be 0"):
         _derive_promotion_run(artifacts)
+
+
+def test_production_run_rejects_dirty_source_attestation(tmp_path):
+    artifacts = _promotion_artifacts(tmp_path)
+
+    with pytest.raises(AssertionError, match="source_tree_state must be clean"):
+        _derive_promotion_run(artifacts, source_tree_state="dirty")
 
 
 def test_production_run_rejects_unproven_matrix_environment(tmp_path):
@@ -3242,6 +3253,7 @@ def test_history_loader_rejects_unattested_handwritten_run(tmp_path):
             "runs": [
                 {
                     "run_id": PROMOTION_RUN_ID,
+                    "source_commit": PROMOTION_SOURCE_COMMIT,
                     "passed": True,
                     "retry_count": 0,
                     "runtime_ratio": 1.0,
@@ -3253,5 +3265,59 @@ def test_history_loader_rejects_unattested_handwritten_run(tmp_path):
         },
     )
 
-    with pytest.raises(AssertionError, match="source_commit"):
+    with pytest.raises(AssertionError, match="source_tree_state"):
         load_production_run_history(history)
+
+
+def test_source_tree_attestation_rejects_commit_and_worktree_drift(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(
+        ["git", "init", "-q", str(repo)],
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    tracked = repo / "tracked.txt"
+    tracked.write_text("baseline\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "-C", str(repo), "add", "tracked.txt"],
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "-c",
+            "user.name=Bundled IO Gate",
+            "-c",
+            "user.email=bundled-io@example.invalid",
+            "commit",
+            "-qm",
+            "fixture",
+        ],
+        text=True,
+        capture_output=True,
+        check=True,
+    )
+    source_commit = subprocess.run(
+        ["git", "-C", str(repo), "rev-parse", "HEAD"],
+        text=True,
+        capture_output=True,
+        check=True,
+    ).stdout.strip()
+
+    assert inspect_clean_source_tree(repo, source_commit) == "clean"
+    with pytest.raises(AssertionError, match="source commit mismatch"):
+        inspect_clean_source_tree(repo, "0" * 40)
+
+    tracked.write_text("modified\n", encoding="utf-8")
+    with pytest.raises(AssertionError, match="source tree is dirty"):
+        inspect_clean_source_tree(repo, source_commit)
+    tracked.write_text("baseline\n", encoding="utf-8")
+    (repo / "untracked.txt").write_text("untracked\n", encoding="utf-8")
+    with pytest.raises(AssertionError, match="source tree is dirty"):
+        inspect_clean_source_tree(repo, source_commit)

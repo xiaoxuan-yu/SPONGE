@@ -1681,7 +1681,34 @@ Acceptance:
 - Contract smoke, the real mutation hook, Ruff, formatting, and diff checks
   pass, followed by one PR-scoped commit.
 
-## 52. Artifacts and Temporary-Space Policy
+## 52. PR 55: Clean Source Provenance Gate
+
+Prevent production evidence from being attributed to a commit when the tested
+source tree contains tracked modifications or untracked implementation files.
+This is required before the three-run PR 7c streak can be meaningful: a GPU
+result from a dirty worktree is useful debugging evidence but not release
+evidence for the named commit.
+
+- Before reading any behavior artifact, resolve the repository `HEAD` and
+  require it to equal the requested source commit.
+- Run `git status --porcelain=v1 --untracked-files=all` and reject any tracked
+  modification, staged change, deletion, rename, or untracked path.
+- Persist `source_tree_state=clean` with the source commit and artifact hashes.
+  The production-history loader rejects rows without this attestation.
+- Keep generated production outputs under ignored `outputs/` paths so evidence
+  collection itself does not dirty an otherwise clean checkout.
+
+Acceptance:
+
+- A temporary clean Git repository passes exact-HEAD attestation.
+- Commit mismatch, modified tracked content, and untracked content each fail
+  before contract, matrix, or comparator artifacts are read.
+- The real current worktree is rejected as dirty, proving that the existing
+  local GPU-capable binaries cannot yet establish a release evidence streak.
+- Contract smoke, focused manifest tests, Ruff, formatting, and diff checks
+  pass, followed by one PR-scoped commit.
+
+## 53. Artifacts and Temporary-Space Policy
 
 - Use `SPONGE_BUNDLED_IO_AB_RUN_ROOT` for all heavy runs.
 - Put production artifacts on the workspace filesystem rather than `/tmp`.
@@ -1691,7 +1718,7 @@ Acceptance:
 - Record artifact byte counts and enforce a configurable per-case quota.
 - Cleanup must only remove directories created by the current gate run.
 
-## 53. PR Completion Log
+## 54. PR Completion Log
 
 Append one row immediately after completing and committing each PR.
 
@@ -1753,3 +1780,4 @@ Append one row immediately after completing and committing each PR.
 | PR 52: Typed soft-wall behavior contract | Complete | This commit | focused typed soft-wall CPU A/B plus zero-potential control; pure and sidecar full-contract VDS-off/on; dual-owner and three shape process failures; 29-case failure sweep; fixture-equivalence CTest; SPONGE rebuild; 142-test smoke; Ruff; format; clang-format; `git diff --check` | Typed `/wall/soft/{count,name,potential}` now validates and materializes through the established soft-wall parser. The focused gate matches `z_wall=10.0` and force `(0,0,-2,0,0,-6)` while the typed zero-potential control zeros both. Full-contract fixtures enforce exactly one owner, and pure VDS-off/on now pass the complete rerun behavior gate. Registry coverage reaches 85 supported, one deferred, and one unsupported contract. |
 | PR 53: Typed and sidecar CV-restraint behavior contracts | Complete | This commit | focused typed/sidecar CV-restraint CPU A/B plus weight-zero and reordered-definition controls; pure and sidecar full-contract VDS-off/on E3 gates; dual-owner, partial-owner, offset, and definition-conflict process failures; 33-case failure sweep; fixture-equivalence CTest; SPONGE rebuild; 142-test smoke; Ruff; format; clang-format; `git diff --check` | The CV controller now merges all three legacy configuration surfaces, while typed protocol roots pass one structured, conflict-aware materializer. Focused routes match `restrain_cv=1.0` and force `(4,0,0,-4,0,0)`; full-contract routes exercise `restrain_cv=12.06`. Registry coverage reaches 87 supported, zero deferred, and one unsupported contract. |
 | PR 54: Attested production promotion evidence | Complete | This commit | eight derived-evidence positive/negative guards; real 24-test comparator mutation hook; 150-test contract smoke; workflow YAML parse; execution-matrix CLI; Ruff; format; `git diff --check` | Production history is now derived from same-run contract, split CPU/GPU/MPI matrix, and comparator artifacts. Scheduled CPU jobs share one run ID and upload the comparator report. History records conservative scenario performance, source commit, and three SHA-256 provenance values; stale/conflicting IDs, incomplete evidence, failed mutation sessions, non-finite metrics, duplicates, and unattested handwritten rows fail. Promotion remains shadow pending three complete retry-free runs and cross-process VDS closure. |
+| PR 55: Clean source provenance gate | Complete | This commit | clean/mismatched/modified/untracked temporary-Git guards; real dirty-tree CLI rejection; 152-test contract smoke; Ruff; format; `git diff --check` | Production derivation now requires exact `HEAD`, an empty porcelain status including untracked files, and persisted `source_tree_state=clean`. The current worktree is correctly rejected before artifact loading, so its available RTX 4090 cannot be used to claim a commit-qualified PR 7c streak until the bundled I/O source baseline is tracked. |
