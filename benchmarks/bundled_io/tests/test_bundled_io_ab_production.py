@@ -54,6 +54,7 @@ FOCUSED_CUSTOM_PAIR_FIXTURE = "focused_custom_pair_two_atom"
 FOCUSED_EXCLUSIONS_FIXTURE = "focused_exclusions_three_atom"
 FOCUSED_LJ_SOFT_CORE_FIXTURE = "focused_lj_soft_core_two_atom"
 FOCUSED_VIRTUAL_ATOMS_ALL_TYPES_FIXTURE = "focused_virtual_atoms_all_types"
+FOCUSED_VIRTUAL_ATOMS_ALIAS_FIXTURE = "focused_virtual_atoms_plural_alias"
 FOCUSED_VIRTUAL_ATOMS_PBC_FIXTURE = "focused_virtual_atoms_pbc_boundary"
 SITS_FF19SB_CMAP_SOURCE = (
     REPO_ROOT / "benchmarks" / "performance" / "sits" / "statics" / "ala2_sits"
@@ -230,6 +231,11 @@ INPUT_SEMANTIC_SPECS_BY_CASE = {
     ),
     "normal_virtual_atoms_pbc_boundary": (
         InputSemanticSpec("input.topology.virtual_atoms_pbc", ("PM",), 1.0e-6),
+    ),
+    "normal_virtual_atoms_plural_alias": (
+        InputSemanticSpec(
+            "input.topology.virtual_atoms_alias", ("PM",), 1.0e-6
+        ),
     ),
 }
 
@@ -520,6 +526,28 @@ def _cases_for_profile() -> list[AbCase]:
             contract_ids=(
                 "output.legacy.mdout",
                 "input.topology.virtual_atoms_pbc",
+            ),
+            assertion_ids=(
+                "mdout_deterministic_equivalence",
+                "input_semantic_equivalence",
+            ),
+            normal_step_limit=1,
+            normal_interval=1,
+            normal_dt=0.0,
+            input_behavior_only=True,
+        ),
+        AbCase(
+            name="normal_virtual_atoms_plural_alias",
+            fixture_case=FOCUSED_VIRTUAL_ATOMS_ALIAS_FIXTURE,
+            legacy_subdir="generated_legacy",
+            bundled_subdir="generated_bundled",
+            mode="normal",
+            vds=False,
+            statistical_md=False,
+            restart_load_policy="structural",
+            contract_ids=(
+                "output.legacy.mdout",
+                "input.topology.virtual_atoms_alias",
             ),
             assertion_ids=(
                 "mdout_deterministic_equivalence",
@@ -1505,6 +1533,7 @@ def _prepare_case_pair(
             return _prepare_focused_lj_soft_core_pair(case_root)
         if case.fixture_case in {
             FOCUSED_VIRTUAL_ATOMS_ALL_TYPES_FIXTURE,
+            FOCUSED_VIRTUAL_ATOMS_ALIAS_FIXTURE,
             FOCUSED_VIRTUAL_ATOMS_PBC_FIXTURE,
         }:
             return _prepare_focused_virtual_atoms_pair(case.fixture_case, case_root)
@@ -2129,6 +2158,7 @@ def _prepare_focused_virtual_atoms_pair(
 ) -> tuple[Path, Path]:
     if fixture_case not in {
         FOCUSED_VIRTUAL_ATOMS_ALL_TYPES_FIXTURE,
+        FOCUSED_VIRTUAL_ATOMS_ALIAS_FIXTURE,
         FOCUSED_VIRTUAL_ATOMS_PBC_FIXTURE,
     }:
         raise AssertionError(f"unknown focused virtual-atom fixture: {fixture_case}")
@@ -2192,7 +2222,10 @@ def _write_focused_virtual_atoms_input(case_dir: Path, fixture_case: str) -> Non
         )
         pbc = True
         cutoff = 8.0
-    elif fixture_case == FOCUSED_VIRTUAL_ATOMS_PBC_FIXTURE:
+    elif fixture_case in {
+        FOCUSED_VIRTUAL_ATOMS_ALIAS_FIXTURE,
+        FOCUSED_VIRTUAL_ATOMS_PBC_FIXTURE,
+    }:
         atom_count = 4
         masses = [1.0] * atom_count
         charges = [0.0, 0.0, 1.0, -1.0]
@@ -2208,6 +2241,11 @@ def _write_focused_virtual_atoms_input(case_dir: Path, fixture_case: str) -> Non
         cutoff = 4.0
     else:
         raise AssertionError(f"unknown focused virtual-atom fixture: {fixture_case}")
+    virtual_atom_key = (
+        "virtual_atoms_in_file"
+        if fixture_case == FOCUSED_VIRTUAL_ATOMS_ALIAS_FIXTURE
+        else "virtual_atom_in_file"
+    )
 
     (case_dir / "mass.txt").write_text(
         f"{atom_count}\n" + "".join(f"{value}\n" for value in masses),
@@ -2244,7 +2282,7 @@ def _write_focused_virtual_atoms_input(case_dir: Path, fixture_case: str) -> Non
         'charge_in_file = "charge.txt"\n'
         'coordinate_in_file = "coordinate.txt"\n'
         'velocity_in_file = "velocity.txt"\n'
-        'virtual_atom_in_file = "virtual_atom.txt"\n'
+        f'{virtual_atom_key} = "virtual_atom.txt"\n'
         "print_zeroth_frame = 0\n"
         "write_mdout_interval = 1\n"
         "write_information_interval = 1\n",
@@ -2262,7 +2300,10 @@ def _focused_virtual_atom_payload(fixture_case: str) -> dict[str, list[float]]:
             "parameter_offset": [0, 2, 4, 5, 6],
             "parameter": [0.25, 0.5, 1.0, 0.5, 2.0, 0.25],
         }
-    if fixture_case == FOCUSED_VIRTUAL_ATOMS_PBC_FIXTURE:
+    if fixture_case in {
+        FOCUSED_VIRTUAL_ATOMS_ALIAS_FIXTURE,
+        FOCUSED_VIRTUAL_ATOMS_PBC_FIXTURE,
+    }:
         return {
             "type": [1],
             "atom": [2],
@@ -2281,8 +2322,25 @@ def _validate_focused_virtual_atoms_routes(
     bundled_mdin = (bundled_dir / "mdin.bundled.spg.toml").read_text(
         encoding="utf-8"
     )
-    if not _has_key_line(legacy_mdin, "virtual_atom_in_file"):
-        raise AssertionError("focused virtual-atom legacy route is missing")
+    legacy_key = (
+        "virtual_atoms_in_file"
+        if fixture_case == FOCUSED_VIRTUAL_ATOMS_ALIAS_FIXTURE
+        else "virtual_atom_in_file"
+    )
+    if not _has_key_line(legacy_mdin, legacy_key):
+        raise AssertionError(
+            f"focused virtual-atom legacy route is missing: {legacy_key}"
+        )
+    alternate_legacy_key = (
+        "virtual_atom_in_file"
+        if legacy_key == "virtual_atoms_in_file"
+        else "virtual_atoms_in_file"
+    )
+    if _has_key_line(legacy_mdin, alternate_legacy_key):
+        raise AssertionError(
+            "focused virtual-atom legacy route retained alternate key: "
+            f"{alternate_legacy_key}"
+        )
     retained = sorted(
         key
         for key in ("virtual_atom_in_file", "virtual_atoms_in_file")
@@ -3283,7 +3341,10 @@ def _focused_virtual_atom_coordinate_oracle(
             ),
             (1, 2, 6, 7),
         )
-    if fixture_case == FOCUSED_VIRTUAL_ATOMS_PBC_FIXTURE:
+    if fixture_case in {
+        FOCUSED_VIRTUAL_ATOMS_ALIAS_FIXTURE,
+        FOCUSED_VIRTUAL_ATOMS_PBC_FIXTURE,
+    }:
         return (
             (
                 9.5,
@@ -3352,7 +3413,11 @@ def _compare_focused_virtual_atoms_oracle(
             else [1]
         ),
         "periodic_boundary_crossing": (
-            case.fixture_case == FOCUSED_VIRTUAL_ATOMS_PBC_FIXTURE
+            case.fixture_case
+            in {
+                FOCUSED_VIRTUAL_ATOMS_ALIAS_FIXTURE,
+                FOCUSED_VIRTUAL_ATOMS_PBC_FIXTURE,
+            }
         ),
         "branches": branch_results,
         "cross_branch_force": force,

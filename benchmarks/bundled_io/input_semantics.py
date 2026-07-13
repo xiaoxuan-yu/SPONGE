@@ -24,6 +24,7 @@ REQUIRED_INPUT_SEMANTIC_CONTRACTS = frozenset(
         "input.topology.lj_soft_core",
         "input.topology.subsystem_division",
         "input.topology.virtual_atoms",
+        "input.topology.virtual_atoms_alias",
         "input.topology.virtual_atoms_pbc",
         "input.manybody.eam",
         "input.manybody.sw",

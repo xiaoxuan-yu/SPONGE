@@ -513,7 +513,30 @@ Acceptance:
 - Registry, manifest, real focused CPU A/B, related H5 CTest, Ruff, and diff
   checks pass.
 
-## 19. Artifacts and Temporary-Space Policy
+## 19. PR 16: Virtual-Atom Plural Alias Behavior Gate
+
+Close the `virtual_atoms_in_file` compatibility contract independently from the
+canonical singular key.
+
+- Reuse the boundary-crossing type 1 fixture, but expose the source only through
+  `virtual_atoms_in_file` in the legacy branch.
+- Let the legacy native loader resolve the plural alias when the canonical key
+  is absent, without changing custom virtual-atom module key resolution.
+- Require conversion to the exact `/forcefield/virtual_atom` ragged payload and
+  remove both spellings, the sidecar table, and the sidecar directory from the
+  bundled branch.
+- Apply the same `9.75` PBC coordinate, non-zero PM, real-atom force, complete
+  force, and mdout equivalence assertions as the canonical PBC contract.
+
+Acceptance:
+
+- The legacy branch contains only `virtual_atoms_in_file`; the bundled branch
+  contains neither spelling and has no fallback sidecar route.
+- Both branches satisfy the same runtime coordinate/energy/force semantics.
+- Registry, required-semantic inventory, manifest, real focused CPU A/B,
+  related H5 CTest, Ruff, clang-format, and diff checks pass.
+
+## 20. Artifacts and Temporary-Space Policy
 
 - Use `SPONGE_BUNDLED_IO_AB_RUN_ROOT` for all heavy runs.
 - Put production artifacts on the workspace filesystem rather than `/tmp`.
@@ -523,7 +546,7 @@ Acceptance:
 - Record artifact byte counts and enforce a configurable per-case quota.
 - Cleanup must only remove directories created by the current gate run.
 
-## 20. PR Completion Log
+## 21. PR Completion Log
 
 Append one row immediately after completing and committing each PR.
 
@@ -546,3 +569,4 @@ Append one row immediately after completing and committing each PR.
 | PR 13: Focused native exclusion semantics gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; real `normal_exclusions_coulomb_oracle` CPU A/B; Ruff; `git diff --check` | 83 contract/manifest/comparator tests and the focused real A/B pass. The pure bundled branch uses offsets/list `[0,1,1,1]`/`[1]`, and both branches match the `-1/12` energy and analytic nine-value force oracle with maximum force `0.1111111119389534`. |
 | PR 14: Focused native LJ soft-core behavior gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; `ctest --test-dir build-dev-cpu-h5-2 --output-on-failure -R 'test_topology_native_h5_reader|test_h5_input_fixture_equivalence'`; real `normal_lj_soft_core_nonzero` CPU A/B; Ruff; `git diff --check` | 85 contract/manifest/comparator tests, both H5 input contract tests, and the focused real A/B pass. The gate first exposed legacy `potential=-0.06` versus bundled `-0.01`; pure native runtime normalization now matches legacy at `LJ_soft=-0.06`, `eff_pot=-0.056708537`, maximum force `0.1920633763074875`, and zero full-mdout error. Subsystem division remains deferred because its mask is not consumed by the force kernel. |
 | PR 15: Focused native virtual-atom behavior gates | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; `ctest --test-dir build-dev-cpu-h5-2 --output-on-failure -R 'test_topology_native_h5_reader|test_h5_input_fixture_equivalence'`; real `normal_virtual_atoms_all_types` and `normal_virtual_atoms_pbc_boundary` CPU A/B; Ruff; clang-format; `git diff --check` | 88 contract/manifest/comparator tests, both H5 input contract tests, and both focused real A/B cases pass. The all-types gate covers exact type 0/1/2/3 ragged payloads, layered type 2-to-3 reconstruction, 24-value coordinate oracles, non-zero PM, and complete force parity; the PBC gate distinguishes `9.75` from the incorrect non-periodic `7.25`. It exposed and fixed the type 3 host/device copy source and the missing global first-frame coordinate refresh. Registry coverage advances to 52 supported, 22 deferred, and 1 unsupported contract. |
+| PR 16: Virtual-atom plural alias behavior gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; `ctest --test-dir build-dev-cpu-h5-2 --output-on-failure -R 'test_topology_native_h5_reader|test_h5_input_fixture_equivalence'`; real `normal_virtual_atoms_plural_alias` CPU A/B; Ruff; clang-format; `git diff --check` | 89 contract/manifest/comparator tests, both H5 input contract tests, and the focused real A/B pass. The legacy branch resolves only `virtual_atoms_in_file`; the bundled branch contains the exact native payload with neither key nor sidecars. Both paths match the boundary-crossing coordinate `9.75`, non-zero PM, complete force, and mdout behavior. Registry coverage advances to 53 supported, 21 deferred, and 1 unsupported contract. |

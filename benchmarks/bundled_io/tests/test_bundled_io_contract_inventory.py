@@ -82,10 +82,7 @@ def test_every_implementation_key_has_exactly_one_contract_owner():
 def test_known_unmaterialized_topology_contracts_are_explicitly_deferred():
     contracts = load_contract_registry()
 
-    for contract_id in (
-        "input.topology.improper",
-        "input.topology.virtual_atoms_alias",
-    ):
+    for contract_id in ("input.topology.improper",):
         contract = contracts[contract_id]
         assert contract.status == "deferred"
         assert contract.minimum_evidence == "E3"

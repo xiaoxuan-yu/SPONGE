@@ -832,14 +832,13 @@
       "contract_id": "input.topology.virtual_atoms_alias",
       "direction": "input",
       "component": "virtual_atom",
-      "status": "deferred",
+      "status": "supported",
       "minimum_evidence": "E3",
       "legacy_surface": "virtual_atoms_in_file",
       "bundled_surface": "/forcefield/virtual_atom",
-      "case_ids": [],
-      "assertion_ids": [],
-      "inventory_refs": ["topology_sidecar_keys:virtual_atoms_in_file"],
-      "reason": "The singular key is covered; the plural legacy alias needs a dedicated conversion and runtime case."
+      "case_ids": ["normal_virtual_atoms_plural_alias"],
+      "assertion_ids": ["input_semantic_equivalence"],
+      "inventory_refs": ["topology_sidecar_keys:virtual_atoms_in_file"]
     },
     {
       "contract_id": "output.trajectory.chunk_size",
