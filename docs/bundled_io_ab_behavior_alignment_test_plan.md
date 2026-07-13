@@ -1351,7 +1351,29 @@ Acceptance:
   and `libnccl` and has no unresolved runtime libraries.
 - CMake formatting and diff checks pass, followed by one PR-scoped commit.
 
-## 43. Artifacts and Temporary-Space Policy
+## 43. PR 46: Portable GPU MPI Device Mapping
+
+Make the GPU rank-2 matrix executable on both one-GPU and multi-GPU runners
+without changing the simulated system or branch semantics.
+
+- For GPU cases with more than one MPI rank, default both ranks to device `0`,
+  which permits local single-GPU validation.
+- Allow `SPONGE_BUNDLED_IO_AB_GPU_DEVICES` to provide an explicit per-rank map
+  such as `0 1` on a multi-GPU runner.
+- Inject the same device map into legacy and bundled mdin files and remove any
+  stale fixture device key before insertion.
+- Keep GPU rank-1 behavior unchanged.
+
+Acceptance:
+
+- Static tests prove the shared-device default, explicit two-device override,
+  and absence of an injected rank-1 device command.
+- A real two-rank CUDA+MPI nonorthogonal NPT+SETTLE case runs four replicas and
+  passes statistical mdout, trajectory, observable, and restart comparisons.
+- Evidence reports two MPI ranks and rank-0-only output ownership.
+- Smoke, Ruff, and diff checks pass, followed by one PR-scoped commit.
+
+## 44. Artifacts and Temporary-Space Policy
 
 - Use `SPONGE_BUNDLED_IO_AB_RUN_ROOT` for all heavy runs.
 - Put production artifacts on the workspace filesystem rather than `/tmp`.
@@ -1361,7 +1383,7 @@ Acceptance:
 - Record artifact byte counts and enforce a configurable per-case quota.
 - Cleanup must only remove directories created by the current gate run.
 
-## 44. PR Completion Log
+## 45. PR Completion Log
 
 Append one row immediately after completing and committing each PR.
 
@@ -1414,3 +1436,4 @@ Append one row immediately after completing and committing each PR.
 | PR 43: End-to-end improper conversion behavior gate | Complete | XPONGE `45e52be`, `b890fbf`; SPONGE this commit | XPONGE 93-test bundle regression; `pixi run -e dev-cpu smoke-bundled-io-contract` (138 tests); 103-test registry/manifest suite; real canonical, alias, and pure-native improper CPU A/B cases plus typed `pk=5` controls; two native input CTests; SPONGE rebuild; Ruff; clang-format; `git diff --check` | XPONGE emits native `/forcefield/improper/pk`, retains `/k` reverse-export fallback, and omits improper sidecars for typed conversion. SPONGE consumes the declared `improper_in_file` alias when canonical input is absent. Unmodified canonical and alias conversions match legacy at `improper_dihedral=31.36` and maximum force `35.415924072265625`; independent `pk=5` controls halve energy and every force component. Coverage reaches 82 supported, 0 deferred, and 1 explicitly unsupported contract. |
 | PR 44: Execution-matrix residue ownership fixture repair | Complete | XPONGE `2c0dc3e`; SPONGE this commit | XPONGE 101-test bundle regression; pinned-fixture hash/ownership gate; CPU and GPU deterministic matrix A/B; four-replica GPU Middle+SETTLE statistical A/B; Ruff; `git diff --check` | XPONGE now emits typed residue state without an active residue sidecar and reverse-exports mutated typed offsets. The regenerated TIP3P fixture has exactly one residue owner. Complete CPU/GPU deterministic and GPU statistical behavior comparisons pass; the former conflicting-owner startup failure is closed. |
 | PR 45: CUDA+MPI NCCL discovery prerequisite | Complete | This commit | CUDA 13 + OpenMPI + NCCL configure; 107-step CUDA `SPONGE` target build; `ldd`; cmake-format; `git diff --check` | The project CMake module path can now resolve an available NCCL installation through `NCCL_ROOT`. The real CUDA+MPI executable links HDF5, CUDA 13, OpenMPI, and NCCL without unresolved runtime libraries, enabling the GPU rank-2 behavior gate. |
+| PR 46: Portable GPU MPI device mapping | Complete | This commit | shared/explicit/rank-1 device-map mutation test; real four-replica CUDA+MPI rank-2 NPT+SETTLE statistical A/B; 139-test smoke; Ruff; `git diff --check` | GPU rank-2 defaults to a portable single-GPU shared map and accepts an explicit per-rank multi-GPU map. The real case passes complete mdout and all three H5 families with `mpi_rank_count=2` and rank-0-only output ownership. |

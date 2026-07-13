@@ -528,6 +528,15 @@ def _runtime_keys(
                 'velocity_in_file = "initial_velocity.txt"',
             ]
         )
+    if case.backend == "gpu" and case.mpi_ranks > 1:
+        device_map = os.environ.get(
+            "SPONGE_BUNDLED_IO_AB_GPU_DEVICES", "0"
+        ).strip()
+        if not device_map:
+            raise AssertionError(
+                "SPONGE_BUNDLED_IO_AB_GPU_DEVICES must not be empty"
+            )
+        keys.append(f'device = "{device_map}"')
     if case.thermostat != "none":
         keys.extend(
             [
@@ -561,6 +570,7 @@ def _runtime_key_names() -> set[str]:
         "step_limit",
         "dt",
         "cutoff",
+        "device",
         "default_in_file_prefix",
         "velocity_in_file",
         "print_zeroth_frame",

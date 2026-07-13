@@ -34,6 +34,7 @@ from benchmarks.bundled_io.input_semantics import (
 )
 from benchmarks.bundled_io.tests.test_bundled_io_ab_execution_matrix import (
     MATRIX_RUNTIME_CASES,
+    _runtime_keys,
 )
 from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
     FOCUSED_CONSTRAINT_SIDECAR_FIXTURE,
@@ -2620,6 +2621,37 @@ def test_execution_matrix_fixture_hashes_are_reviewed_and_pinned():
             ][()]
         }
         assert "residue_in_file" not in sidecar_keys
+
+
+def test_gpu_rank2_device_mapping_is_explicit_and_configurable(monkeypatch):
+    rank2 = next(
+        case
+        for case in MATRIX_RUNTIME_CASES
+        if case.backend == "gpu" and case.mpi_ranks == 2
+    )
+    rank1 = next(
+        case
+        for case in MATRIX_RUNTIME_CASES
+        if case.backend == "gpu" and case.mpi_ranks == 1
+    )
+
+    monkeypatch.delenv("SPONGE_BUNDLED_IO_AB_GPU_DEVICES", raising=False)
+    default_keys = _runtime_keys(
+        rank2, 20260709, step_limit=64, interval=1
+    )
+    assert 'device = "0"' in default_keys
+    assert not any(
+        key.startswith("device =")
+        for key in _runtime_keys(
+            rank1, 20260709, step_limit=64, interval=1
+        )
+    )
+
+    monkeypatch.setenv("SPONGE_BUNDLED_IO_AB_GPU_DEVICES", "0 1")
+    explicit_keys = _runtime_keys(
+        rank2, 20260709, step_limit=64, interval=1
+    )
+    assert 'device = "0 1"' in explicit_keys
 
 
 def test_execution_matrix_rejects_removed_axis_and_unmapped_combination():
