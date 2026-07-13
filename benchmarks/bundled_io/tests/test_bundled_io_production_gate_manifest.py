@@ -235,6 +235,10 @@ def test_ab_production_harness_has_executable_contract_coverage():
     assert {case.name for case in cases} == {
         "normal_core_h5_output",
         "normal_sits_ff19sb_cmap_peptide",
+        "normal_vds_chunk_minus_one",
+        "normal_vds_chunk_exact",
+        "normal_vds_chunk_plus_one",
+        "normal_vds_chunk_two_plus_one",
         "rerun_full_contract_pure_vds_off",
         "rerun_full_contract_pure_vds_on",
         "rerun_full_contract_sidecar_vds_off",
@@ -259,6 +263,40 @@ def test_ab_production_harness_has_executable_contract_coverage():
         "unsupported"
     )
     assert contracts["output.vds.complete_prefix_repair"].status == "deferred"
+
+
+def test_vds_chunk_boundary_cases_cover_required_frame_transitions():
+    contract = load_contract_registry()["output.trajectory.chunk_size"]
+    cases = {
+        case.name: case
+        for case in _cases_for_profile()
+        if case.mode == "chunk_boundary"
+    }
+
+    assert {
+        name: (
+            case.output_chunk_size,
+            case.expected_trajectory_frames,
+            case.normal_interval,
+            case.normal_dt,
+        )
+        for name, case in cases.items()
+    } == {
+        "normal_vds_chunk_minus_one": (4, 3, 1, 0.0001),
+        "normal_vds_chunk_exact": (4, 4, 1, 0.0001),
+        "normal_vds_chunk_plus_one": (4, 5, 1, 0.0001),
+        "normal_vds_chunk_two_plus_one": (4, 9, 1, 0.0001),
+    }
+    assert all(case.vds for case in cases.values())
+    assert all(not case.statistical_md for case in cases.values())
+    assert all(
+        "h5_chunk_boundary_equivalence" in case.assertion_ids
+        for case in cases.values()
+    )
+    assert contract.status == "supported"
+    assert contract.minimum_evidence == "E3"
+    assert set(contract.case_ids) == set(cases)
+    assert contract.assertion_ids == ("h5_chunk_boundary_equivalence",)
 
 
 def test_rerun_boundary_matrix_covers_semantic_axes_and_eof_boundaries():

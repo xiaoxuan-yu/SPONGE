@@ -264,6 +264,11 @@ class AbCase:
     failure_branches: tuple[str, ...] = ("legacy", "bundled")
     expected_error_category: str = ""
     expected_diagnostic_tokens: tuple[str, ...] = ()
+    output_chunk_size: int = 1
+    normal_step_limit: int | None = None
+    normal_interval: int | None = None
+    normal_dt: float | None = None
+    expected_trajectory_frames: int | None = None
 
 
 @dataclass
@@ -528,9 +533,57 @@ def _cases_for_profile() -> list[AbCase]:
             ),
         ),
     ]
+    cases.extend(_chunk_boundary_cases())
     cases.extend(_rerun_boundary_cases())
     cases.extend(_failure_cases())
     return cases
+
+
+def _chunk_boundary_cases() -> list[AbCase]:
+    shared = {
+        "fixture_case": "tip3p_validation_generated",
+        "legacy_subdir": "generated_legacy",
+        "bundled_subdir": "generated_bundled",
+        "mode": "chunk_boundary",
+        "vds": True,
+        "statistical_md": False,
+        "restart_load_policy": "structural",
+        "contract_ids": (
+            "output.trajectory",
+            "output.trajectory.vds_on",
+            "output.trajectory.chunk_size",
+        ),
+        "assertion_ids": ("h5_chunk_boundary_equivalence",),
+        "output_chunk_size": 4,
+        "normal_interval": 1,
+        "normal_dt": 0.0001,
+    }
+    return [
+        AbCase(
+            name="normal_vds_chunk_minus_one",
+            normal_step_limit=3,
+            expected_trajectory_frames=3,
+            **shared,
+        ),
+        AbCase(
+            name="normal_vds_chunk_exact",
+            normal_step_limit=4,
+            expected_trajectory_frames=4,
+            **shared,
+        ),
+        AbCase(
+            name="normal_vds_chunk_plus_one",
+            normal_step_limit=5,
+            expected_trajectory_frames=5,
+            **shared,
+        ),
+        AbCase(
+            name="normal_vds_chunk_two_plus_one",
+            normal_step_limit=9,
+            expected_trajectory_frames=9,
+            **shared,
+        ),
+    ]
 
 
 def _rerun_boundary_cases() -> list[AbCase]:
@@ -776,6 +829,9 @@ def test_legacy_and_bundled_ab_behavior(case: AbCase):
     if case.failure_mutation is not None:
         _run_failure_case(case, contracts)
         return
+    if case.mode == "chunk_boundary":
+        _run_chunk_boundary_case(case, contracts)
+        return
     root = _output_root()
     case_root = root / case.name
     runs = []
@@ -976,6 +1032,116 @@ def _run_failure_case(case: AbCase, contracts) -> None:
     print(f"\nBundled I/O A/B failure metrics: {metrics_path}")
 
 
+def _run_chunk_boundary_case(case: AbCase, contracts) -> None:
+    case_root = _output_root() / case.name
+    legacy_dir, bundled_dir = _prepare_case_pair(case, case_root, 20260709)
+    for branch, case_dir, mdin_name in (
+        ("legacy", legacy_dir, "mdin.spg.toml"),
+        ("bundled", bundled_dir, "mdin.bundled.spg.toml"),
+    ):
+        _prepare_mdin(
+            case_dir,
+            mdin_name,
+            case,
+            branch=branch,
+            replica_seed=20260709,
+        )
+        _run_sponge(case_dir, mdin_name)
+
+    run = AbRun(
+        replica_index=0,
+        replica_seed=20260709,
+        legacy_dir=legacy_dir,
+        bundled_dir=bundled_dir,
+        legacy_metrics={},
+        bundled_metrics={},
+        legacy_output_contract={},
+        bundled_output_contract={},
+    )
+    mdout = _compare_mdout_deterministically(case, run)
+    h5 = _compare_h5_outputs_deterministically(case, run)
+    layouts = {
+        "legacy": _assert_chunk_boundary_layout(case, legacy_dir),
+        "bundled": _assert_chunk_boundary_layout(case, bundled_dir),
+    }
+    details = {
+        "method": "same_semantic_deterministic_h5_and_vds_layout",
+        "chunk_size": case.output_chunk_size,
+        "expected_frames": case.expected_trajectory_frames,
+        "mdout_rows": mdout["rows"],
+        "h5_families": sorted(h5),
+        "layouts": layouts,
+    }
+    assertion = AssertionEvidence(
+        assertion_id="h5_chunk_boundary_equivalence",
+        evidence_level="E3",
+        details=details,
+    )
+    evidence = build_case_evidence(contracts, case, (assertion,))
+    metrics = {
+        "profile": PROFILE,
+        "case": case.name,
+        "contract_ids": list(case.contract_ids),
+        "assertion_ids": list(case.assertion_ids),
+        "evidence": [record.as_dict() for record in evidence],
+        "comparison": details,
+    }
+    metrics_path = case_root / "ab_metrics.json"
+    metrics_path.write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+    update_evidence_report(
+        _output_root() / "ab_evidence.json",
+        contracts,
+        case,
+        evidence,
+        {
+            "profile": PROFILE,
+            "chunk_size": case.output_chunk_size,
+            "expected_trajectory_frames": case.expected_trajectory_frames,
+            "sponge_executable": str(_sponge_executable()),
+            "metrics_path": str(metrics_path),
+        },
+        EVIDENCE_RUN_ID,
+    )
+    print(f"\nBundled I/O A/B chunk metrics: {metrics_path}")
+
+
+def _assert_chunk_boundary_layout(
+    case: AbCase, case_dir: Path
+) -> dict[str, int]:
+    if case.expected_trajectory_frames is None:
+        raise AssertionError(f"{case.name} has no expected frame count")
+    trajectory = case_dir / TRAJECTORY_REL
+    frame_count = int(
+        _h5_numeric_values(
+            trajectory, "/parameters/sponge/output/frame_count"
+        )[-1]
+    )
+    if frame_count != case.expected_trajectory_frames:
+        raise AssertionError(
+            f"{case.name} frame count mismatch: "
+            f"expected={case.expected_trajectory_frames}, actual={frame_count}"
+        )
+    shape = _h5_dataset_shape(
+        trajectory, "/particles/all/position/value"
+    )
+    if not shape or shape[0] != frame_count:
+        raise AssertionError(
+            f"{case.name} position frame dimension differs: {shape}"
+        )
+    shard_count = _vds_shard_count(trajectory)
+    expected_shards = math.ceil(frame_count / case.output_chunk_size)
+    if shard_count != expected_shards:
+        raise AssertionError(
+            f"{case.name} shard count mismatch: "
+            f"expected={expected_shards}, actual={shard_count}"
+        )
+    return {
+        "frame_count": frame_count,
+        "shard_count": shard_count,
+        "expected_shard_count": expected_shards,
+    }
+
+
 def test_sidecar_rerun_cmap_potential_is_branch_and_vds_invariant():
     cases = {
         case.vds: case
@@ -1086,7 +1252,7 @@ def _replica_seed(replica_index: int) -> int:
 def _prepare_case_pair(
     case: AbCase, case_root: Path, replica_seed: int
 ) -> tuple[Path, Path]:
-    if case.mode == "normal":
+    if case.mode in {"normal", "chunk_boundary"}:
         if case.fixture_case == SITS_FF19SB_CMAP_FIXTURE:
             return _prepare_sits_ff19sb_cmap_pair(case_root, replica_seed)
         return _prepare_normal_tip3p_pair(case_root, replica_seed)
@@ -1395,7 +1561,7 @@ def _prepare_mdin(
         "frc",
         "rst",
     }
-    if case.statistical_md:
+    if case.mode in {"normal", "chunk_boundary"}:
         remove_keys.update(
             {
                 "mode",
@@ -1405,30 +1571,44 @@ def _prepare_mdin(
                 "target_temperature",
             }
         )
+        if case.normal_dt is not None:
+            remove_keys.add("dt")
     text = _remove_key_lines(
         text,
         remove_keys,
     )
     limits = PROFILE_LIMITS[PROFILE]
-    if case.mode == "normal":
-        step_limit = limits["normal_step_limit"]
-        interval = limits["normal_interval"]
-        additions = [
-            'mode = "nvt"',
-            'thermostat = "middle_langevin"',
-            f"thermostat_seed = {replica_seed}",
-            "thermostat_tau = 0.1",
-            "target_temperature = 300.0",
-            f"step_limit = {step_limit}",
-            f"write_mdout_interval = {interval}",
-            f"write_trajectory_interval = {interval}",
-            f"write_restart_file_interval = {step_limit}",
-            'crd = "output/legacy.crd"',
-            'box = "output/legacy.box"',
-            'vel = "output/legacy.vel"',
-            'frc = "output/legacy.frc"',
-            'rst = "output/legacy_restart"',
-        ]
+    if case.mode in {"normal", "chunk_boundary"}:
+        step_limit = case.normal_step_limit or limits["normal_step_limit"]
+        interval = case.normal_interval or limits["normal_interval"]
+        additions = []
+        if case.statistical_md:
+            additions.extend(
+                [
+                    'mode = "nvt"',
+                    'thermostat = "middle_langevin"',
+                    f"thermostat_seed = {replica_seed}",
+                    "thermostat_tau = 0.1",
+                    "target_temperature = 300.0",
+                ]
+            )
+        else:
+            additions.append('mode = "nve"')
+        if case.normal_dt is not None:
+            additions.append(f"dt = {case.normal_dt}")
+        additions.extend(
+            [
+                f"step_limit = {step_limit}",
+                f"write_mdout_interval = {interval}",
+                f"write_trajectory_interval = {interval}",
+                f"write_restart_file_interval = {step_limit}",
+                'crd = "output/legacy.crd"',
+                'box = "output/legacy.box"',
+                'vel = "output/legacy.vel"',
+                'frc = "output/legacy.frc"',
+                'rst = "output/legacy_restart"',
+            ]
+        )
     else:
         additions = [
             f"rerun_start = {case.rerun_start}",
@@ -1467,7 +1647,7 @@ def _prepare_mdin(
             'mdinfo = "mdinfo.txt"',
             f'output_h5_trajectory_path = "{TRAJECTORY_REL.as_posix()}"',
             f"output_h5_trajectory_vds = {'true' if case.vds else 'false'}",
-            "output_h5_trajectory_chunk_size = 1",
+            f"output_h5_trajectory_chunk_size = {case.output_chunk_size}",
             f'output_h5_observable_path = "{OBSERVABLE_REL.as_posix()}"',
         ]
     )

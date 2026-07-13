@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 
+import h5py
 import pytest
 
 from benchmarks.bundled_io.ab_statistics import (
@@ -11,9 +12,12 @@ from benchmarks.bundled_io.ab_statistics import (
     holm_correct_equivalence_family,
 )
 from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
+    TRAJECTORY_REL,
+    _assert_chunk_boundary_layout,
     _assert_nonfinite_patterns_match,
     _assert_numeric_sequences_close,
     _assert_periodic_positions_close,
+    _chunk_boundary_cases,
     _deterministic_tolerance,
     _statistical_policy,
 )
@@ -326,3 +330,36 @@ def test_nonfinite_pattern_check_does_not_force_finite_frames_to_match():
         [1.0, float("nan"), 2.0],
         [1.5, float("nan"), 2.5],
     )
+
+
+def test_chunk_boundary_layout_rejects_frame_and_shard_mutations(tmp_path):
+    case = _chunk_boundary_cases()[0]
+    trajectory = tmp_path / TRAJECTORY_REL
+    trajectory.parent.mkdir(parents=True)
+    with h5py.File(trajectory, "w") as handle:
+        handle.create_dataset(
+            "/parameters/sponge/output/frame_count", data=[3]
+        )
+        handle.create_dataset(
+            "/particles/all/position/value", shape=(3, 2, 3), dtype="f4"
+        )
+    shard_root = trajectory.parent / "ab.spg.shards"
+    shard_root.mkdir()
+    (shard_root / "segment_000000.spg.h5md").touch()
+
+    assert _assert_chunk_boundary_layout(case, tmp_path) == {
+        "frame_count": 3,
+        "shard_count": 1,
+        "expected_shard_count": 1,
+    }
+
+    with h5py.File(trajectory, "r+") as handle:
+        handle["/parameters/sponge/output/frame_count"][0] = 4
+    with pytest.raises(AssertionError, match="frame count mismatch"):
+        _assert_chunk_boundary_layout(case, tmp_path)
+
+    with h5py.File(trajectory, "r+") as handle:
+        handle["/parameters/sponge/output/frame_count"][0] = 3
+    (shard_root / "segment_000001.spg.h5md").touch()
+    with pytest.raises(AssertionError, match="shard count mismatch"):
+        _assert_chunk_boundary_layout(case, tmp_path)

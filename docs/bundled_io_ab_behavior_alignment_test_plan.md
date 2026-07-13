@@ -323,7 +323,28 @@ Production promotion requires:
   metadata proves the declared backend, thread count, MPI rank count, and
   rank-0 output ownership; a declaration-only scenario cannot be promoted.
 
-## 11. Artifacts and Temporary-Space Policy
+## 11. PR 8: VDS Chunk-Boundary Behavior Closure
+
+This follow-up scope closes the deferred runtime behavior contract for
+`output_h5_trajectory_chunk_size` without weakening the unsupported
+cross-process append boundary.
+
+- Run same-semantic legacy-input and bundled-input deterministic NVE branches
+  with a fixed chunk size.
+- Cover frame counts at chunk-1, chunk, chunk+1, and 2*chunk+1.
+- Compare mdout plus every trajectory/observable H5 dataset across branches.
+- Assert the VDS wrapper frame count and physical shard count at each boundary.
+- Emit E3 evidence for the chunk-size contract from the executed cases.
+
+Acceptance:
+
+- The four boundary cases produce exactly 3, 4, 5, and 9 frames for chunk size
+  4 and exactly 1, 1, 2, and 3 shards respectively.
+- A wrong frame count, shard count, or cross-branch numeric payload fails the
+  gate.
+- Registry, manifest, comparator, and full contract tests pass.
+
+## 12. Artifacts and Temporary-Space Policy
 
 - Use `SPONGE_BUNDLED_IO_AB_RUN_ROOT` for all heavy runs.
 - Put production artifacts on the workspace filesystem rather than `/tmp`.
@@ -333,7 +354,7 @@ Production promotion requires:
 - Record artifact byte counts and enforce a configurable per-case quota.
 - Cleanup must only remove directories created by the current gate run.
 
-## 12. PR Completion Log
+## 13. PR Completion Log
 
 Append one row immediately after completing and committing each PR.
 
@@ -348,3 +369,4 @@ Append one row immediately after completing and committing each PR.
 | PR 7a: Executable shadow promotion guard | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; execution-matrix CLI; workflow YAML parse; `git diff --check` | 70 contract/manifest tests pass. The typed matrix and mutation-tested promotion evaluator reject missing axes/combinations/evidence, unproven environment metadata, retries, comparator-mutation gaps, and runtime/finalize/output-size budget overruns. Medium and production jobs are explicit `continue-on-error` shadow jobs and are absent from the release workflow; runtime evidence remained intentionally deferred at this boundary. |
 | PR 7b: Portable runtime matrix and CPU/MPI evidence | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; six CPU rank-1 fast A/B cases; two CPU rank-2 fast A/B cases; Ruff; workflow YAML parse; `git diff --check` | 74 contract/manifest tests and all eight CPU/MPI runtime cases pass. The matrix pins same-semantic fixtures, records backend/OMP/MPI/rank-0 ownership evidence, and compares complete H5 trajectory/observable/restart behavior with periodic-aware deterministic and statistical position checks. Four GPU cases are executable but lack real-device evidence, so promotion remains shadow-only for PR 7c. |
 | PR 7c: GPU evidence and final promotion | Pending | | | |
+| PR 8: VDS chunk-boundary behavior closure | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; four real CPU VDS chunk-boundary A/B cases; Ruff; `git diff --check` | 76 contract/manifest/comparator tests pass. With chunk size 4, same-semantic deterministic NVE branches produce and compare 3/4/5/9 frames with 1/1/2/3 shards. Frame-count and shard-count mutations are rejected. The cases use `dt=0.0001` to isolate chunk/finalize behavior without relaxing deterministic numeric tolerances. |
