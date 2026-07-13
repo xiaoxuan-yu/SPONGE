@@ -990,7 +990,50 @@ Acceptance:
   SPONGE rebuild, Ruff, clang-format, and diff checks pass, followed by exactly
   one PR-scoped commit.
 
-## 33. Artifacts and Temporary-Space Policy
+## 33. PR 36: Typed Residue Runtime-Behavior Gate
+
+Close the native typed residue contract by materializing
+`/atoms/residue_index` into `Xponge::system.residues` before MD-core residue
+consumers initialize.
+
+- Apply the typed route only to native H5 input. Reject simultaneous
+  `residue_in_file` ownership instead of silently selecting either source.
+- Require a one-dimensional atom-sized residue-index payload whose labels start
+  at zero and remain contiguous and nondecreasing. Convert those labels to the
+  per-residue atom counts consumed by the native runtime. When
+  `/residues/atom_offset` is also present, require it to start at zero, end at
+  atom count, remain nondecreasing, and describe exactly the same mapping.
+- Run two deterministic same-semantic A/B pairs. The legacy branches consume
+  `residue_in_file`; the bundled branches contain typed
+  `/atoms/residue_index=[0,0,1,1]` and
+  `/residues/atom_offset=[0,2,4]`, with no topology sidecar table or residue
+  sidecar payload.
+- Retain only non-target protocol sidecars required to drive the behavior
+  oracles. The PBC case proves whole-molecule coordinate mapping; the COM case
+  proves residue-membership-sensitive restraint virial and pressure.
+- Reuse the `[1,3]` wrong-partition control by mutating the typed payload to
+  `[0,1,1,1]`. Require unchanged bond/restraint energy and complete force, but
+  a large pressure/Pxx change, proving that the typed membership reaches its
+  runtime consumer.
+
+Acceptance:
+
+- Typed and legacy PBC routes both load two residues, produce non-zero
+  `bond=2.0`, retain the complete 12-value force, and emit the mapped position
+  fingerprint `(19,21,25,28)`.
+- Typed and legacy COM routes both produce `bond=2.0`, `restrain=2.0`,
+  `pressure=0.04`, and `Pxx=0.11`. The `[1,3]` control preserves energy and
+  force while changing pressure/Pxx to `-11.53/-34.60`.
+- Both existing residue-sidecar behavior gates continue to pass, demonstrating
+  that typed materialization does not override the sidecar route.
+- A residue-index/offset disagreement exits with `spongeErrorBadFileFormat`;
+  simultaneous typed and `residue_in_file` ownership exits with
+  `spongeErrorConflictingCommand`, retaining route-specific diagnostics.
+- Registry, manifest, real CPU A/B, full smoke, related native-reader CTests,
+  SPONGE rebuild, Ruff, clang-format, and diff checks pass, followed by exactly
+  one PR-scoped commit.
+
+## 34. Artifacts and Temporary-Space Policy
 
 - Use `SPONGE_BUNDLED_IO_AB_RUN_ROOT` for all heavy runs.
 - Put production artifacts on the workspace filesystem rather than `/tmp`.
@@ -1000,7 +1043,7 @@ Acceptance:
 - Record artifact byte counts and enforce a configurable per-case quota.
 - Cleanup must only remove directories created by the current gate run.
 
-## 34. PR Completion Log
+## 35. PR Completion Log
 
 Append one row immediately after completing and committing each PR.
 
@@ -1043,3 +1086,4 @@ Append one row immediately after completing and committing each PR.
 | PR 33: Core topology payload-sensitivity gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract` (128 tests); 88-test production manifest; real `normal_core_topology_payload_sensitivity` CPU A/B plus three typed-payload controls; two native topology reader CTests; SPONGE rebuild; Ruff; clang-format; `git diff --check` | Pure typed mass, charge, and LJ routes contain no topology sidecars and match legacy across the complete one-frame mdout and force payload. Independent controls produce temperature `26.21 -> 52.42` with unchanged force, Coulomb `-0.50 -> 0` with maximum force delta `0.25`, and LJ `-0.02 -> 0` with maximum force delta `0.04541015625`, proving each payload reaches its consumer. The broader `normal_core_h5_output` case remains active and still reports its pre-existing legacy/H5 force schedule mismatch (`51` versus `50` frames), which is not weakened by this input gate. Registry coverage remains 73 supported, 10 deferred, and 1 unsupported contract. |
 | PR 34: Complete H5 metadata failure semantics | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract` (130 tests); 90-test production manifest; four real `failure_h5_topology_*` CPU process gates; three supported-schema real controls; three metadata/input CTests; SPONGE rebuild; Ruff; clang-format; `git diff --check` | Atom-count, mass-shape, mass-dtype, and unknown-schema mutations now share one complete F1 contract. Schema versions `0`, `1`, and `xponge.legacy_to_bundle.v1` each start successfully, while `unsupported.topology.v999` exits 238 with `spongeErrorValueErrorCommand` and route-specific diagnostics. The partial metadata registry record is removed; coverage remains 73 supported, advances to 9 deferred, and retains 1 unsupported contract. |
 | PR 35: Subsystem-division energy-partition behavior gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract` (130 tests); 90-test production manifest; real `normal_lj_soft_core_nonzero` and `normal_subsystem_division_partition` CPU A/B plus all-intra legacy/bundled controls; two native topology reader CTests; SPONGE rebuild; Ruff; clang-format; `git diff --check` | The legacy `[0,1]` sidecar and pure typed bundled dataset both produce `LJ_soft_inter=-0.06`, `LJ_soft_intra=0.00`, and the same complete force. Same-semantic `[0,0]` controls move the full `-0.06` to the intra observable while preserving total soft-core energy and force, proving mask consumption without changing dynamics. Registry coverage advances to 74 supported, 8 deferred, and 1 unsupported contract. |
+| PR 36: Typed residue runtime-behavior gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract` (131 tests); 91-test production manifest; real typed PBC and COM-virial CPU A/B plus both sidecar residue regressions; two native topology reader CTests; SPONGE rebuild; Ruff; clang-format; `git diff --check` | Pure typed `/atoms/residue_index=[0,0,1,1]` and `/residues/atom_offset=[0,2,4]` materialize into the native `[2,2]` runtime partition without a topology sidecar. They match legacy at `bond=2.0`, the whole-molecule PBC fingerprint `(19,21,25,28)`, `restrain=2.0`, `pressure=0.04`, and `Pxx=0.11`. A typed `[1,3]` control preserves the complete force and energy while changing pressure/Pxx to `-11.53/-34.60`; inconsistent typed datasets and legacy/typed ownership conflicts are rejected. Registry coverage advances to 75 supported, 7 deferred, and 1 unsupported contract. |

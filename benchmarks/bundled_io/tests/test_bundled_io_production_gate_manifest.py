@@ -47,6 +47,8 @@ from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
     FOCUSED_LJ_SOFT_CORE_FIXTURE,
     FOCUSED_RESIDUE_COM_RES_FIXTURE,
     FOCUSED_RESIDUE_SIDECAR_FIXTURE,
+    FOCUSED_RESIDUE_TYPED_COM_RES_FIXTURE,
+    FOCUSED_RESIDUE_TYPED_PBC_FIXTURE,
     FOCUSED_SITS_NK_TYPED_RESTART_FIXTURE,
     FOCUSED_STEERING_CV_SIDECAR_FIXTURE,
     FOCUSED_SUBSYSTEM_DIVISION_FIXTURE,
@@ -283,6 +285,8 @@ def test_ab_production_harness_has_executable_contract_coverage():
         "normal_exclusions_coulomb_oracle",
         "normal_residue_sidecar_pbc_mapping",
         "normal_residue_sidecar_com_res_virial",
+        "normal_residue_typed_pbc_mapping",
+        "normal_residue_typed_com_res_virial",
         "normal_gb_hybrid_nonzero",
         "normal_gb_native_nonzero",
         "normal_improper_native_nonzero",
@@ -1140,9 +1144,53 @@ def test_focused_residue_case_requires_com_res_membership_behavior():
         "normal_residue_sidecar_com_res_virial",
     )
     assert sidecar.assertion_ids == ("input_semantic_equivalence",)
+
+
+def test_focused_typed_residue_cases_require_both_runtime_consumers():
+    contracts = load_contract_registry()
+    pbc_case = next(
+        case
+        for case in _cases_for_profile()
+        if case.name == "normal_residue_typed_pbc_mapping"
+    )
+    com_res_case = next(
+        case
+        for case in _cases_for_profile()
+        if case.name == "normal_residue_typed_com_res_virial"
+    )
+    pbc_spec = INPUT_SEMANTIC_SPECS_BY_CASE[pbc_case.name]
+    com_res_spec = INPUT_SEMANTIC_SPECS_BY_CASE[com_res_case.name]
+
+    assert pbc_case.fixture_case == FOCUSED_RESIDUE_TYPED_PBC_FIXTURE
+    assert com_res_case.fixture_case == FOCUSED_RESIDUE_TYPED_COM_RES_FIXTURE
+    assert pbc_case.statistical_md is False
+    assert com_res_case.statistical_md is False
+    assert pbc_case.normal_step_limit == 1
+    assert com_res_case.normal_step_limit == 1
+    assert pbc_case.normal_dt == 0.0
+    assert com_res_case.normal_dt == 0.001
+    assert pbc_case.input_behavior_only is True
+    assert com_res_case.input_behavior_only is True
+    expected_contracts = (
+        "output.legacy.mdout",
+        "input.topology.residue",
+    )
+    assert pbc_case.contract_ids == expected_contracts
+    assert com_res_case.contract_ids == expected_contracts
+    assert pbc_spec == (
+        InputSemanticSpec("input.topology.residue", ("bond",), 1.0e-6),
+    )
+    assert com_res_spec == (
+        InputSemanticSpec(
+            "input.topology.residue",
+            ("bond", "restrain", "pressure", "Pxx"),
+            1.0e-6,
+        ),
+    )
     typed = contracts["input.topology.residue"]
-    assert typed.status == "deferred"
-    assert "not materialized" in typed.reason
+    assert typed.status == "supported"
+    assert typed.case_ids == (pbc_case.name, com_res_case.name)
+    assert typed.assertion_ids == ("input_semantic_equivalence",)
 
 
 def test_focused_core_topology_case_requires_payload_sensitive_consumers():

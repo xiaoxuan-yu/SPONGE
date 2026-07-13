@@ -572,13 +572,16 @@
       "contract_id": "input.topology.residue",
       "direction": "input",
       "component": "core_topology",
-      "status": "deferred",
+      "status": "supported",
       "minimum_evidence": "E3",
       "legacy_surface": "residue_in_file",
-      "bundled_surface": "/atoms/residue_index",
-      "case_ids": [],
-      "assertion_ids": [],
-      "reason": "The typed /atoms/residue_index dataset is not materialized into Xponge::system.residues at runtime. The H5 sidecar route is tracked separately."
+      "bundled_surface": "/atoms/residue_index and /residues/atom_offset",
+      "case_ids": [
+        "normal_residue_typed_pbc_mapping",
+        "normal_residue_typed_com_res_virial"
+      ],
+      "assertion_ids": ["input_semantic_equivalence"],
+      "reason": ""
     },
     {
       "contract_id": "input.topology.residue.sidecar",

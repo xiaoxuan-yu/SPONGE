@@ -57,6 +57,10 @@ FOCUSED_CUSTOM_PAIR_FIXTURE = "focused_custom_pair_two_atom"
 FOCUSED_EXCLUSIONS_FIXTURE = "focused_exclusions_three_atom"
 FOCUSED_RESIDUE_SIDECAR_FIXTURE = "focused_residue_sidecar_pbc_four_atom"
 FOCUSED_RESIDUE_COM_RES_FIXTURE = "focused_residue_sidecar_com_res_four_atom"
+FOCUSED_RESIDUE_TYPED_PBC_FIXTURE = "focused_residue_typed_pbc_four_atom"
+FOCUSED_RESIDUE_TYPED_COM_RES_FIXTURE = (
+    "focused_residue_typed_com_res_four_atom"
+)
 FOCUSED_GB_HYBRID_FIXTURE = "focused_gb_hybrid_two_atom"
 FOCUSED_GB_NATIVE_FIXTURE = "focused_gb_native_two_atom"
 FOCUSED_IMPROPER_NATIVE_FIXTURE = "focused_improper_native_four_atom"
@@ -275,6 +279,20 @@ INPUT_SEMANTIC_SPECS_BY_CASE = {
     "normal_residue_sidecar_com_res_virial": (
         InputSemanticSpec(
             "input.topology.residue.sidecar",
+            ("bond", "restrain", "pressure", "Pxx"),
+            1.0e-6,
+        ),
+    ),
+    "normal_residue_typed_pbc_mapping": (
+        InputSemanticSpec(
+            "input.topology.residue",
+            ("bond",),
+            1.0e-6,
+        ),
+    ),
+    "normal_residue_typed_com_res_virial": (
+        InputSemanticSpec(
+            "input.topology.residue",
             ("bond", "restrain", "pressure", "Pxx"),
             1.0e-6,
         ),
@@ -711,6 +729,50 @@ def _cases_for_profile() -> list[AbCase]:
             contract_ids=(
                 "output.legacy.mdout",
                 "input.topology.residue.sidecar",
+            ),
+            assertion_ids=(
+                "mdout_deterministic_equivalence",
+                "input_semantic_equivalence",
+            ),
+            normal_step_limit=1,
+            normal_interval=1,
+            normal_dt=0.001,
+            input_behavior_only=True,
+        ),
+        AbCase(
+            name="normal_residue_typed_pbc_mapping",
+            fixture_case=FOCUSED_RESIDUE_TYPED_PBC_FIXTURE,
+            legacy_subdir="generated_legacy",
+            bundled_subdir="generated_bundled",
+            mode="normal",
+            vds=False,
+            statistical_md=False,
+            restart_load_policy="structural",
+            contract_ids=(
+                "output.legacy.mdout",
+                "input.topology.residue",
+            ),
+            assertion_ids=(
+                "mdout_deterministic_equivalence",
+                "input_semantic_equivalence",
+            ),
+            normal_step_limit=1,
+            normal_interval=1,
+            normal_dt=0.0,
+            input_behavior_only=True,
+        ),
+        AbCase(
+            name="normal_residue_typed_com_res_virial",
+            fixture_case=FOCUSED_RESIDUE_TYPED_COM_RES_FIXTURE,
+            legacy_subdir="generated_legacy",
+            bundled_subdir="generated_bundled",
+            mode="normal",
+            vds=False,
+            statistical_md=False,
+            restart_load_policy="structural",
+            contract_ids=(
+                "output.legacy.mdout",
+                "input.topology.residue",
             ),
             assertion_ids=(
                 "mdout_deterministic_equivalence",
@@ -3309,6 +3371,10 @@ def _prepare_case_pair(
             return _prepare_focused_residue_sidecar_pair(case_root)
         if case.fixture_case == FOCUSED_RESIDUE_COM_RES_FIXTURE:
             return _prepare_focused_residue_com_res_pair(case_root)
+        if case.fixture_case == FOCUSED_RESIDUE_TYPED_PBC_FIXTURE:
+            return _prepare_focused_residue_typed_pair(case_root)
+        if case.fixture_case == FOCUSED_RESIDUE_TYPED_COM_RES_FIXTURE:
+            return _prepare_focused_residue_typed_com_res_pair(case_root)
         if case.fixture_case == FOCUSED_GB_HYBRID_FIXTURE:
             return _prepare_focused_gb_hybrid_pair(case_root)
         if case.fixture_case == FOCUSED_GB_NATIVE_FIXTURE:
@@ -4553,6 +4619,46 @@ def _prepare_focused_residue_com_res_pair(
     return legacy_dir, bundled_dir
 
 
+def _promote_focused_residue_bundle_to_typed(bundled_dir: Path) -> None:
+    topology_path = bundled_dir / "topology.spgt.h5"
+    sidecar_root = "/parameters/sponge/files/legacy_sidecars"
+    with h5py.File(topology_path, "r+") as topology:
+        if sidecar_root not in topology:
+            raise AssertionError(
+                "focused residue conversion did not emit topology sidecars"
+            )
+        del topology[sidecar_root]
+        atoms = topology.require_group("/atoms")
+        residues = topology.require_group("/residues")
+        atoms.create_dataset("residue_index", data=[0, 0, 1, 1], dtype="i4")
+        residues.create_dataset("atom_offset", data=[0, 2, 4], dtype="i8")
+
+    residue_sidecar = bundled_dir / "legacy_sidecars" / "residue_in_file"
+    if not residue_sidecar.exists():
+        raise AssertionError(
+            "focused residue bundle lost residue sidecar input"
+        )
+    shutil.rmtree(residue_sidecar)
+
+
+def _prepare_focused_residue_typed_pair(
+    case_root: Path,
+) -> tuple[Path, Path]:
+    legacy_dir, bundled_dir = _prepare_focused_residue_sidecar_pair(case_root)
+    _promote_focused_residue_bundle_to_typed(bundled_dir)
+    _validate_focused_residue_typed_pbc_routes(legacy_dir, bundled_dir)
+    return legacy_dir, bundled_dir
+
+
+def _prepare_focused_residue_typed_com_res_pair(
+    case_root: Path,
+) -> tuple[Path, Path]:
+    legacy_dir, bundled_dir = _prepare_focused_residue_com_res_pair(case_root)
+    _promote_focused_residue_bundle_to_typed(bundled_dir)
+    _validate_focused_residue_typed_com_res_routes(legacy_dir, bundled_dir)
+    return legacy_dir, bundled_dir
+
+
 def _write_focused_residue_com_res_input(case_dir: Path) -> None:
     case_dir.mkdir(parents=True, exist_ok=True)
     (case_dir / "mass.txt").write_text(
@@ -4709,6 +4815,83 @@ def _validate_focused_residue_com_res_routes(
             raise AssertionError(
                 f"focused residue {key} payload differs from legacy"
             )
+
+
+def _validate_focused_residue_typed_payload(
+    legacy_dir: Path, bundled_dir: Path
+) -> None:
+    legacy_mdin = (legacy_dir / "mdin.spg.toml").read_text(encoding="utf-8")
+    bundled_mdin = (bundled_dir / "mdin.bundled.spg.toml").read_text(
+        encoding="utf-8"
+    )
+    if not _has_key_line(legacy_mdin, "residue_in_file"):
+        raise AssertionError("focused typed residue legacy route is missing")
+    if _has_key_line(bundled_mdin, "residue_in_file"):
+        raise AssertionError(
+            "focused typed residue bundled mdin retained residue_in_file"
+        )
+
+    topology_path = bundled_dir / "topology.spgt.h5"
+    sidecar_root = "/parameters/sponge/files/legacy_sidecars"
+    with h5py.File(topology_path, "r") as topology:
+        if sidecar_root in topology:
+            raise AssertionError(
+                "focused typed residue retained topology sidecar table"
+            )
+        residue_index = topology["/atoms/residue_index"][...].tolist()
+        atom_offset = topology["/residues/atom_offset"][...].tolist()
+    if residue_index != [0, 0, 1, 1]:
+        raise AssertionError(
+            f"focused typed residue membership changed: {residue_index}"
+        )
+    if atom_offset != [0, 2, 4]:
+        raise AssertionError(
+            f"focused typed residue offsets changed: {atom_offset}"
+        )
+
+
+def _validate_focused_residue_typed_pbc_routes(
+    legacy_dir: Path, bundled_dir: Path
+) -> None:
+    _validate_focused_residue_typed_payload(legacy_dir, bundled_dir)
+    sidecar_root = "/parameters/sponge/files/legacy_sidecars"
+    expected_sidecars = ["constrain_in_file"]
+    sidecar_dir = bundled_dir / "legacy_sidecars"
+    if sorted(path.name for path in sidecar_dir.iterdir()) != expected_sidecars:
+        raise AssertionError(
+            "focused typed residue PBC bundle retained unrelated sidecars"
+        )
+    protocol_keys = _h5_string_values(
+        bundled_dir / "protocol.spgp.h5", f"{sidecar_root}/key"
+    )
+    if protocol_keys != expected_sidecars:
+        raise AssertionError(
+            f"focused typed residue PBC support routes changed: {protocol_keys}"
+        )
+
+
+def _validate_focused_residue_typed_com_res_routes(
+    legacy_dir: Path, bundled_dir: Path
+) -> None:
+    _validate_focused_residue_typed_payload(legacy_dir, bundled_dir)
+    sidecar_root = "/parameters/sponge/files/legacy_sidecars"
+
+    expected_sidecars = [
+        "constrain_in_file",
+        "restrain_atom_id",
+        "restrain_coordinate_in_file",
+    ]
+    sidecar_dir = bundled_dir / "legacy_sidecars"
+    if sorted(path.name for path in sidecar_dir.iterdir()) != expected_sidecars:
+        raise AssertionError(
+            "focused typed residue bundle retained unrelated sidecars"
+        )
+    protocol_path = bundled_dir / "protocol.spgp.h5"
+    protocol_keys = _h5_string_values(protocol_path, f"{sidecar_root}/key")
+    if protocol_keys != expected_sidecars:
+        raise AssertionError(
+            f"focused typed residue support routes changed: {protocol_keys}"
+        )
 
 
 def _prepare_focused_gb_hybrid_pair(case_root: Path) -> tuple[Path, Path]:
@@ -6826,8 +7009,14 @@ def _compare_input_semantics(
                 replica_result["oracle"] = _compare_focused_exclusions_oracle(
                     case, run
                 )
-            elif spec.contract_id == "input.topology.residue.sidecar":
-                if case.name == "normal_residue_sidecar_pbc_mapping":
+            elif spec.contract_id in {
+                "input.topology.residue",
+                "input.topology.residue.sidecar",
+            }:
+                if case.name in {
+                    "normal_residue_sidecar_pbc_mapping",
+                    "normal_residue_typed_pbc_mapping",
+                }:
                     replica_result["oracle"] = (
                         _compare_focused_residue_pbc_mapping(case, run)
                     )
@@ -7542,13 +7731,99 @@ def _compare_focused_residue_pbc_mapping(
         forces["legacy"],
         forces["bundled"],
     )
-    return {
-        "route": "isolated_h5_residue_in_file_topology_sidecar",
+    result = {
+        "route": (
+            "typed_h5_atoms_residue_index"
+            if case.fixture_case == FOCUSED_RESIDUE_TYPED_PBC_FIXTURE
+            else "isolated_h5_residue_in_file_topology_sidecar"
+        ),
         "residue_atom_counts": [2, 2],
         "runtime_consumer": "force_whole_output molecule coordinate mapping",
         "branches": branches,
         "cross_branch_force": cross_branch_force,
     }
+    if case.fixture_case == FOCUSED_RESIDUE_TYPED_PBC_FIXTURE:
+        result["typed_validation_controls"] = (
+            _run_typed_residue_validation_controls(case, run)
+        )
+    return result
+
+
+def _run_typed_residue_validation_controls(
+    case: AbCase, run: AbRun
+) -> dict[str, object]:
+    controls = (
+        (
+            "inconsistent_offset",
+            "spongeErrorBadFileFormat",
+            (
+                "/atoms/residue_index",
+                "/residues/atom_offset",
+                "different residue mappings",
+            ),
+        ),
+        (
+            "legacy_conflict",
+            "spongeErrorConflictingCommand",
+            ("native residue mapping", "residue_in_file"),
+        ),
+    )
+    results = {}
+    for name, expected_category, expected_tokens in controls:
+        control_dir = run.bundled_dir.parent / f"bundled_residue_{name}"
+        if control_dir.exists():
+            shutil.rmtree(control_dir)
+        shutil.copytree(run.bundled_dir, control_dir)
+        output_dir = control_dir / "output"
+        if output_dir.exists():
+            shutil.rmtree(output_dir)
+        output_dir.mkdir(parents=True)
+        for file_name in (
+            "mdout.txt",
+            "mdinfo.txt",
+            "run.stdout",
+            "run.stderr",
+        ):
+            path = control_dir / file_name
+            if path.exists():
+                path.unlink()
+
+        if name == "inconsistent_offset":
+            with h5py.File(control_dir / "topology.spgt.h5", "r+") as topology:
+                topology["/residues/atom_offset"][...] = [0, 1, 4]
+        else:
+            shutil.copy2(
+                run.legacy_dir / "residue.txt", control_dir / "residue.txt"
+            )
+            mdin_path = control_dir / _mdin_name(control_dir)
+            text = mdin_path.read_text(encoding="utf-8")
+            mdin_path.write_text(
+                _insert_root_toml_keys(
+                    text, ['residue_in_file = "residue.txt"']
+                ),
+                encoding="utf-8",
+            )
+
+        outcome = _run_sponge_process(control_dir, _mdin_name(control_dir))
+        combined = outcome.stdout + outcome.stderr
+        category = _failure_category(combined)
+        if outcome.returncode == 0 or category != expected_category:
+            raise AssertionError(
+                f"{case.name} {name} control was not rejected as "
+                f"{expected_category}: code={outcome.returncode}, "
+                f"category={category}\n{combined}"
+            )
+        missing = [token for token in expected_tokens if token not in combined]
+        if missing:
+            raise AssertionError(
+                f"{case.name} {name} control lost diagnostics: {missing}"
+            )
+        results[name] = {
+            "exit_code": outcome.returncode,
+            "failure_category": category,
+            "diagnostic_tokens": list(expected_tokens),
+        }
+    return results
 
 
 def _assert_residue_pbc_mapping_oracle(
@@ -7647,7 +7922,11 @@ def _compare_focused_residue_com_res_virial(
         forces["bundled"],
     )
     return {
-        "route": "isolated_h5_residue_in_file_topology_sidecar",
+        "route": (
+            "typed_h5_atoms_residue_index"
+            if case.fixture_case == FOCUSED_RESIDUE_TYPED_COM_RES_FIXTURE
+            else "isolated_h5_residue_in_file_topology_sidecar"
+        ),
         "residue_atom_counts": [2, 2],
         "runtime_consumer": "restrain com_res virial and pressure",
         "wrong_partition_control": _run_residue_wrong_partition_control(
@@ -7729,13 +8008,28 @@ def _run_residue_wrong_partition_control(
 
     topology_path = control_dir / "topology.spgt.h5"
     sidecar_root = "/parameters/sponge/files/legacy_sidecars"
-    keys = _h5_string_values(topology_path, f"{sidecar_root}/key")
-    paths = _h5_string_values(topology_path, f"{sidecar_root}/path")
-    if keys != ["residue_in_file"] or len(paths) != 1:
-        raise AssertionError(
-            f"{case.name} wrong-partition control lost isolated residue route"
-        )
-    (control_dir / paths[0]).write_text("4 2\n1\n3\n", encoding="utf-8")
+    if case.fixture_case == FOCUSED_RESIDUE_TYPED_COM_RES_FIXTURE:
+        with h5py.File(topology_path, "r+") as topology:
+            if sidecar_root in topology:
+                raise AssertionError(
+                    f"{case.name} typed control retained topology sidecars"
+                )
+            residue_index = topology["/atoms/residue_index"]
+            atom_offset = topology["/residues/atom_offset"]
+            if residue_index[...].tolist() != [0, 0, 1, 1]:
+                raise AssertionError(
+                    f"{case.name} typed control lost canonical membership"
+                )
+            residue_index[...] = [0, 1, 1, 1]
+            atom_offset[...] = [0, 1, 4]
+    else:
+        keys = _h5_string_values(topology_path, f"{sidecar_root}/key")
+        paths = _h5_string_values(topology_path, f"{sidecar_root}/path")
+        if keys != ["residue_in_file"] or len(paths) != 1:
+            raise AssertionError(
+                f"{case.name} wrong-partition control lost isolated residue route"
+            )
+        (control_dir / paths[0]).write_text("4 2\n1\n3\n", encoding="utf-8")
 
     outcome = _run_sponge_process(control_dir, _mdin_name(control_dir))
     if outcome.returncode != 0:
