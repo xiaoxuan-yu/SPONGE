@@ -1331,7 +1331,27 @@ Acceptance:
 - The former GPU startup failure naming
   `Xponge::Read_H5_Residue_Atom_Numbers` is absent.
 
-## 42. Artifacts and Temporary-Space Policy
+## 42. PR 45: CUDA+MPI NCCL Discovery Prerequisite
+
+Make the existing CUDA+MPI build path capable of resolving NCCL through the
+project's CMake module search path.
+
+- Add a standard `FindNCCL.cmake` that accepts `NCCL_ROOT`, searches both
+  `lib` and `lib64`, and exports the plural include/library variables already
+  consumed by `cmake/utils/mpi.cmake`.
+- Keep package installation and runner provisioning outside the finder; the
+  finder only resolves an available NCCL installation.
+- Configure and build the real `SPONGE` target with CUDA, MPI, OpenMPI, and
+  NCCL enabled before accepting the prerequisite.
+
+Acceptance:
+
+- CMake reports both MPI and NCCL found under `PARALLEL=cuda` and `MPI=ON`.
+- The complete CUDA+MPI `SPONGE` executable links successfully with `libmpi`
+  and `libnccl` and has no unresolved runtime libraries.
+- CMake formatting and diff checks pass, followed by one PR-scoped commit.
+
+## 43. Artifacts and Temporary-Space Policy
 
 - Use `SPONGE_BUNDLED_IO_AB_RUN_ROOT` for all heavy runs.
 - Put production artifacts on the workspace filesystem rather than `/tmp`.
@@ -1341,7 +1361,7 @@ Acceptance:
 - Record artifact byte counts and enforce a configurable per-case quota.
 - Cleanup must only remove directories created by the current gate run.
 
-## 43. PR Completion Log
+## 44. PR Completion Log
 
 Append one row immediately after completing and committing each PR.
 
@@ -1393,3 +1413,4 @@ Append one row immediately after completing and committing each PR.
 | PR 42: Typed SITS configuration/selection behavior gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract` (138 tests); 98-test production manifest; real `normal_sits_typed_configuration_nonzero` and `normal_sits_nk_typed_restart_nonzero` CPU A/B cases plus typed config/selection/precedence controls; two native input CTests; SPONGE rebuild; Ruff; clang-format; `git diff --check` | Pure typed `/sits/config`, `/sits/atom_indices`, and Nk restart state with no inline SITS owner match legacy at `SITS_AA_kAB=-1.22`, `SITS_bias=-0.5317`, `SITS_fb=0.7049`, and maximum force `0.2489061951637268`. Typed `pe_a=0.5` and atom set `[0]` produce distinct deterministic bias, factor, energy, and force fingerprints; complete inline config wins over typed config without suppressing typed atoms. Duplicate atom and duplicate config-key payloads exit as bad-file-format. Registry coverage advances to 81 supported, 1 deferred, and 1 unsupported contract. |
 | PR 43: End-to-end improper conversion behavior gate | Complete | XPONGE `45e52be`, `b890fbf`; SPONGE this commit | XPONGE 93-test bundle regression; `pixi run -e dev-cpu smoke-bundled-io-contract` (138 tests); 103-test registry/manifest suite; real canonical, alias, and pure-native improper CPU A/B cases plus typed `pk=5` controls; two native input CTests; SPONGE rebuild; Ruff; clang-format; `git diff --check` | XPONGE emits native `/forcefield/improper/pk`, retains `/k` reverse-export fallback, and omits improper sidecars for typed conversion. SPONGE consumes the declared `improper_in_file` alias when canonical input is absent. Unmodified canonical and alias conversions match legacy at `improper_dihedral=31.36` and maximum force `35.415924072265625`; independent `pk=5` controls halve energy and every force component. Coverage reaches 82 supported, 0 deferred, and 1 explicitly unsupported contract. |
 | PR 44: Execution-matrix residue ownership fixture repair | Complete | XPONGE `2c0dc3e`; SPONGE this commit | XPONGE 101-test bundle regression; pinned-fixture hash/ownership gate; CPU and GPU deterministic matrix A/B; four-replica GPU Middle+SETTLE statistical A/B; Ruff; `git diff --check` | XPONGE now emits typed residue state without an active residue sidecar and reverse-exports mutated typed offsets. The regenerated TIP3P fixture has exactly one residue owner. Complete CPU/GPU deterministic and GPU statistical behavior comparisons pass; the former conflicting-owner startup failure is closed. |
+| PR 45: CUDA+MPI NCCL discovery prerequisite | Complete | This commit | CUDA 13 + OpenMPI + NCCL configure; 107-step CUDA `SPONGE` target build; `ldd`; cmake-format; `git diff --check` | The project CMake module path can now resolve an available NCCL installation through `NCCL_ROOT`. The real CUDA+MPI executable links HDF5, CUDA 13, OpenMPI, and NCCL without unresolved runtime libraries, enabling the GPU rank-2 behavior gate. |
