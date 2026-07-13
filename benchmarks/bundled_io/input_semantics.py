@@ -22,6 +22,7 @@ REQUIRED_INPUT_SEMANTIC_CONTRACTS = frozenset(
         "input.topology.urey_bradley",
         "input.topology.cmap",
         "input.topology.gb",
+        "input.topology.gb.hybrid_activation",
         "input.topology.lj_soft_core",
         "input.topology.subsystem_division",
         "input.topology.virtual_atoms",

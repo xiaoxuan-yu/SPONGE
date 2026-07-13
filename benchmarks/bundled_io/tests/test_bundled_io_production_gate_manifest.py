@@ -39,6 +39,7 @@ from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
     FOCUSED_CUSTOM_PAIR_FIXTURE,
     FOCUSED_EDIP_FIXTURE,
     FOCUSED_EXCLUSIONS_FIXTURE,
+    FOCUSED_GB_HYBRID_FIXTURE,
     FOCUSED_IMPROPER_NATIVE_FIXTURE,
     FOCUSED_LJ_SOFT_CORE_FIXTURE,
     FOCUSED_VIRTUAL_ATOMS_ALIAS_FIXTURE,
@@ -50,6 +51,7 @@ from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
     RERUN_INPUT_SEMANTIC_SPECS,
     _assert_constraint_projection_oracle,
     _assert_exclusion_coulomb_oracle,
+    _assert_gb_force_oracle,
     _assert_nontrivial_equivalent_forces,
     _assert_virtual_atom_oracle,
     _cases_for_profile,
@@ -255,6 +257,7 @@ def test_ab_production_harness_has_executable_contract_coverage():
         "normal_edip_nonzero",
         "normal_custom_pair_nonzero",
         "normal_exclusions_coulomb_oracle",
+        "normal_gb_hybrid_nonzero",
         "normal_improper_native_nonzero",
         "normal_lj_soft_core_nonzero",
         "normal_virtual_atoms_all_types",
@@ -736,6 +739,57 @@ def test_focused_exclusions_case_requires_native_payload_and_coulomb_oracle():
     assert contracts["input.topology.exclusions"].assertion_ids == (
         "input_semantic_equivalence",
     )
+
+
+def test_focused_gb_case_requires_native_state_and_sidecar_activation_behavior():
+    contracts = load_contract_registry()
+    case = next(
+        case
+        for case in _cases_for_profile()
+        if case.name == "normal_gb_hybrid_nonzero"
+    )
+    spec = INPUT_SEMANTIC_SPECS_BY_CASE[case.name]
+
+    assert case.fixture_case == FOCUSED_GB_HYBRID_FIXTURE
+    assert case.statistical_md is False
+    assert case.normal_step_limit == 1
+    assert case.normal_dt == 0.0
+    assert case.input_behavior_only is True
+    assert case.contract_ids == (
+        "output.legacy.mdout",
+        "input.topology.gb.hybrid_activation",
+    )
+    assert spec == (
+        InputSemanticSpec(
+            "input.topology.gb.hybrid_activation", ("gb",), 1.0e-6
+        ),
+    )
+    hybrid = contracts["input.topology.gb.hybrid_activation"]
+    assert hybrid.status == "supported"
+    assert hybrid.case_ids == (case.name,)
+    assert hybrid.assertion_ids == ("input_semantic_equivalence",)
+    native = contracts["input.topology.gb"]
+    assert native.status == "deferred"
+    assert "only calls GB initialization when gb_in_file exists" in native.reason
+    assert "tracked separately" in native.reason
+
+
+def test_focused_gb_gate_rejects_activation_only_or_coulomb_only_behavior():
+    spec = InputSemanticSpec(
+        "input.topology.gb.hybrid_activation", ("gb",), 1.0e-6
+    )
+    with pytest.raises(AssertionError, match="all trivial"):
+        assert_module_semantics(
+            "GB",
+            [{"gb": 0.0}],
+            [{"gb": 0.0}],
+            spec,
+            deterministic=True,
+        )
+    with pytest.raises(AssertionError, match=r"GB\+Coulomb force oracle"):
+        _assert_gb_force_oracle(
+            "GB mutation", (0.25, 0.0, 0.0, -0.25, 0.0, 0.0)
+        )
 
 
 def test_focused_improper_case_requires_pure_native_nonzero_energy_and_force():

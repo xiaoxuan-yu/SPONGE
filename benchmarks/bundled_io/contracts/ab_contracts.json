@@ -572,10 +572,22 @@
       "status": "deferred",
       "minimum_evidence": "E3",
       "legacy_surface": "gb_in_file",
-      "bundled_surface": "/forcefield/gb",
+      "bundled_surface": "pure native /forcefield/gb without sidecars",
       "case_ids": [],
       "assertion_ids": [],
-      "reason": "GB fields are reader-equivalent, but no paired non-trivial GB energy result is registered."
+      "reason": "The native reader populates GB state, but main only calls GB initialization when gb_in_file exists. The executable native-state plus sidecar-activation route is tracked separately."
+    },
+    {
+      "contract_id": "input.topology.gb.hybrid_activation",
+      "direction": "input",
+      "component": "implicit_solvent_hybrid_activation",
+      "status": "supported",
+      "minimum_evidence": "E3",
+      "legacy_surface": "gb_in_file",
+      "bundled_surface": "/forcefield/gb native state plus H5 gb_in_file activation binding",
+      "case_ids": ["normal_gb_hybrid_nonzero"],
+      "assertion_ids": ["input_semantic_equivalence"],
+      "reason": ""
     },
     {
       "contract_id": "input.topology.lj_soft_core",

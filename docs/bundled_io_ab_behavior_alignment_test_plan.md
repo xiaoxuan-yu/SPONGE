@@ -757,7 +757,42 @@ Acceptance:
 - Registry, manifest, real CPU A/B, Ruff, and diff checks pass, followed by
   exactly one PR-scoped commit.
 
-## 26. Artifacts and Temporary-Space Policy
+## 26. PR 23: GB Native-State/Sidecar-Activation Gate
+
+Close the executable GB hybrid route without using its evidence to claim that
+pure native `/forcefield/gb` initialization is supported.
+
+- Generate two non-periodic atoms with charges `+1/-1`, separation `2.0`, and
+  identical GB radius/scale parameters `1.5/0.8`. Require finite, non-zero
+  module-owned `gb` energy.
+- Convert the same input and retain typed `/forcefield/gb/params`. Reduce the
+  H5 sidecar table to the single `gb_in_file` binding so mass and charge are
+  necessarily consumed from typed native state.
+- Treat the remaining GB sidecar as an activation binding, not GB payload
+  evidence: native topology state is loaded before sidecar injection, and the
+  later binding causes `main` to call `gb.Initial` against that native state.
+- Require the bundled mdin to contain no direct `gb_in_file`, while the bound
+  sidecar remains byte-identical to the legacy input and the typed parameter
+  matrix is validated independently.
+- Compare complete mdout and force payloads. In addition to non-zero GB energy,
+  require the total force oracle `+/-0.10313021`; reject the Coulomb-only
+  `+/-0.25` result so process startup or an ignored GB force cannot pass.
+- Track this route as `input.topology.gb.hybrid_activation`. Keep pure native
+  `input.topology.gb` deferred until initialization no longer depends on the
+  legacy-key sidecar.
+
+Acceptance:
+
+- Legacy text and the typed-state/sidecar-activation bundle produce equivalent
+  non-zero GB energy and GB-influenced force.
+- Missing or trivial GB energy, Coulomb-only force, sidecar-table contamination,
+  typed parameter drift, or any cross-branch mdout/force mismatch fails.
+- The registry explicitly distinguishes the executable hybrid route from the
+  deferred pure native contract.
+- Registry, manifest, real CPU A/B, Ruff, and diff checks pass, followed by
+  exactly one PR-scoped commit.
+
+## 27. Artifacts and Temporary-Space Policy
 
 - Use `SPONGE_BUNDLED_IO_AB_RUN_ROOT` for all heavy runs.
 - Put production artifacts on the workspace filesystem rather than `/tmp`.
@@ -767,7 +802,7 @@ Acceptance:
 - Record artifact byte counts and enforce a configurable per-case quota.
 - Cleanup must only remove directories created by the current gate run.
 
-## 27. PR Completion Log
+## 28. PR Completion Log
 
 Append one row immediately after completing and committing each PR.
 
@@ -797,3 +832,4 @@ Append one row immediately after completing and committing each PR.
 | PR 20: Unrestricted QC observable and SCF text gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; real `rerun_qc_unrestricted_sidecar_vds_off/on` CPU A/B; Ruff; `git diff --check` | Triplet unrestricted QC produces two finite non-zero spin-square frames in both branches and archives a non-empty exact SCF trace in trajectory and observable output under both VDS modes. Empty-output evidence was removed from the old full-contract cases. `input.qc.type` remains deferred because pure `/qc/type` is not consumed. Registry coverage advances to 62 supported, 12 deferred, and 1 unsupported contract. |
 | PR 21: Constraint sidecar projection gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; real `normal_constraint_sidecar_projection` CPU A/B; Ruff; `git diff --check` | 97 contract/manifest/comparator tests and the real four-frame A/B pass. Both branches preserve distance `1.5` with zero measured residual and reduce relative radial speed from `2.0` to `3.411315e-6`; complete position and velocity trajectories are identical. The supported sidecar contract is separated from deferred native typed `/constraint` consumption. Registry coverage advances to 63 supported, 12 deferred, and 1 unsupported contract. |
 | PR 22: Native improper runtime gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; `ctest --test-dir build-dev-cpu-h5-2 --output-on-failure -R 'test_topology_native_h5_reader\|test_h5_input_fixture_equivalence'`; real `normal_improper_native_nonzero` CPU A/B; Ruff; `git diff --check` | 99 contract/manifest/comparator tests, both related H5 input CTests, and the focused real A/B pass. Pure typed `/forcefield/improper/{atoms,pk,phi0}` with no sidecars matches canonical legacy input at `improper_dihedral=31.36`, maximum force `35.415924072265625`, and zero full-mdout error. End-to-end conversion remains deferred for the documented `/k` versus `/pk` and sidecar-key gaps. Registry coverage advances to 64 supported, 12 deferred, and 1 unsupported contract. |
+| PR 23: GB native-state/sidecar-activation gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; real `normal_gb_hybrid_nonzero` CPU A/B; Ruff; `git diff --check` | 101 contract/manifest/comparator tests and the focused real A/B pass. Typed GB state plus the isolated H5 activation binding matches legacy at `gb=-0.25`, total potential `-0.75`, and maximum force `0.10313020646572113`; the gate rejects the Coulomb-only `0.25` force. Pure native GB without the activation sidecar remains deferred. Registry coverage advances to 65 supported, 12 deferred, and 1 unsupported contract. |
