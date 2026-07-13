@@ -1,5 +1,7 @@
 ﻿#include "SITS.h"
 
+#include "sits_h5_input.hpp"
+
 template <bool need_force, bool need_energy, bool need_virial,
           bool need_coulomb>
 static __global__ void Selective_Lennard_Jones_And_Direct_Coulomb_Device(
@@ -1242,6 +1244,8 @@ void SITS_INFORMATION::Initial(CONTROLLER* controller, int atom_numbers_,
         strcpy(print_bias_name, given_module_name);
         strcpy(print_fb_name, given_module_name);
     }
+    SpongeH5MD::Materialize_H5_SITS_Input(controller, module_name,
+                                          atom_numbers_);
     strcat(print_aa_kab_name, "_AA_kAB");
     strcat(print_bias_name, "_bias");
     strcat(print_fb_name, "_fb");

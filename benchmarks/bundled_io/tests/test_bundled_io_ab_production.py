@@ -76,6 +76,7 @@ FOCUSED_CONSTRAINT_TYPED_FIXTURE = "focused_constraint_typed_two_atom"
 FOCUSED_STEERING_CV_SIDECAR_FIXTURE = "focused_steering_cv_sidecar_two_atom"
 FOCUSED_STEERING_CV_TYPED_FIXTURE = "focused_steering_cv_typed_two_atom"
 FOCUSED_SITS_NK_TYPED_RESTART_FIXTURE = "focused_sits_nk_typed_restart_two_atom"
+FOCUSED_SITS_TYPED_CONFIG_FIXTURE = "focused_sits_typed_config_two_atom"
 SUPPORTED_TOPOLOGY_SCHEMA_VERSIONS = (
     "0",
     "1",
@@ -250,6 +251,18 @@ INPUT_SEMANTIC_SPECS_BY_CASE = {
         InputSemanticSpec("input.topology.cmap", ("cmap",), 1.0e-6),
     ),
     "normal_sits_nk_typed_restart_nonzero": (
+        InputSemanticSpec(
+            "input.protocol.sits.nk_typed_restart",
+            ("SITS_AA_kAB", "SITS_bias", "SITS_fb"),
+            1.0e-4,
+        ),
+    ),
+    "normal_sits_typed_configuration_nonzero": (
+        InputSemanticSpec(
+            "input.protocol.sits",
+            ("SITS_AA_kAB", "SITS_bias", "SITS_fb"),
+            1.0e-4,
+        ),
         InputSemanticSpec(
             "input.protocol.sits.nk_typed_restart",
             ("SITS_AA_kAB", "SITS_bias", "SITS_fb"),
@@ -588,6 +601,29 @@ def _cases_for_profile() -> list[AbCase]:
             restart_load_policy="protocol",
             contract_ids=(
                 "output.legacy.mdout",
+                "input.protocol.sits.nk_typed_restart",
+            ),
+            assertion_ids=(
+                "mdout_deterministic_equivalence",
+                "input_semantic_equivalence",
+            ),
+            normal_step_limit=1,
+            normal_interval=1,
+            normal_dt=0.0,
+            input_behavior_only=True,
+        ),
+        AbCase(
+            name="normal_sits_typed_configuration_nonzero",
+            fixture_case=FOCUSED_SITS_TYPED_CONFIG_FIXTURE,
+            legacy_subdir="generated_legacy",
+            bundled_subdir="generated_bundled",
+            mode="normal",
+            vds=False,
+            statistical_md=False,
+            restart_load_policy="protocol",
+            contract_ids=(
+                "output.legacy.mdout",
+                "input.protocol.sits",
                 "input.protocol.sits.nk_typed_restart",
             ),
             assertion_ids=(
@@ -3482,6 +3518,8 @@ def _prepare_case_pair(
             return _prepare_sits_ff19sb_cmap_pair(case_root, replica_seed)
         if case.fixture_case == FOCUSED_SITS_NK_TYPED_RESTART_FIXTURE:
             return _prepare_focused_sits_nk_typed_restart_pair(case_root)
+        if case.fixture_case == FOCUSED_SITS_TYPED_CONFIG_FIXTURE:
+            return _prepare_focused_sits_typed_config_pair(case_root)
         if case.fixture_case == FOCUSED_EDIP_FIXTURE:
             return _prepare_focused_edip_pair(case_root)
         if case.fixture_case == FOCUSED_SW_SIDECAR_FIXTURE:
@@ -6581,6 +6619,60 @@ def _prepare_focused_sits_nk_typed_restart_pair(
     return legacy_dir, bundled_dir
 
 
+def _prepare_focused_sits_typed_config_pair(
+    case_root: Path,
+) -> tuple[Path, Path]:
+    legacy_dir, bundled_dir = _prepare_focused_sits_nk_typed_restart_pair(
+        case_root
+    )
+    bundled_mdin_path = bundled_dir / "mdin.bundled.spg.toml"
+    typed_keys = (
+        "mode",
+        "k_numbers",
+        "T",
+        "nk_rest",
+        "nk_fix",
+        "pe_a",
+        "pe_b",
+        "fb_bias",
+        "fb_interval",
+    )
+    bundled_mdin = _remove_key_lines(
+        bundled_mdin_path.read_text(encoding="utf-8"),
+        {f"SITS_{key}" for key in typed_keys} | {"SITS_atom_numbers"},
+    )
+    bundled_mdin_path.write_text(bundled_mdin, encoding="utf-8")
+
+    protocol_path = bundled_dir / "protocol.spgp.h5"
+    string_dtype = h5py.string_dtype(encoding="utf-8")
+    typed_values = (
+        "production",
+        "2",
+        "300/600",
+        "false",
+        "true",
+        "1.0",
+        "0.0",
+        "0.0",
+        "1",
+    )
+    with h5py.File(protocol_path, "r+") as protocol:
+        sits = protocol.create_group("/sits")
+        sits.create_dataset("atom_indices", data=[0, 1], dtype="i4")
+        config = sits.create_group("config")
+        config.create_dataset("key", data=typed_keys, dtype=string_dtype)
+        config.create_dataset("value", data=typed_values, dtype=string_dtype)
+        section = config.create_group("section")
+        section.create_dataset("count", data=1, dtype="i8")
+        section.create_dataset(
+            "key_offset", data=[0, len(typed_keys)], dtype="i8"
+        )
+        section.create_dataset("name", data=["SITS"], dtype=string_dtype)
+
+    _validate_focused_sits_typed_config_routes(legacy_dir, bundled_dir)
+    return legacy_dir, bundled_dir
+
+
 def _write_focused_sits_nk_typed_restart_input(case_dir: Path) -> None:
     case_dir.mkdir(parents=True, exist_ok=True)
     (case_dir / "mass.txt").write_text("2\n12.0\n12.0\n", encoding="utf-8")
@@ -6722,6 +6814,61 @@ def _validate_focused_sits_nk_typed_restart_routes(
             raise AssertionError(
                 f"focused SITS bundled branch lost {key} support sidecar"
             )
+
+
+def _validate_focused_sits_typed_config_routes(
+    legacy_dir: Path, bundled_dir: Path
+) -> None:
+    legacy_mdin = (legacy_dir / "mdin.spg.toml").read_text(encoding="utf-8")
+    bundled_mdin = (bundled_dir / "mdin.bundled.spg.toml").read_text(
+        encoding="utf-8"
+    )
+    for key in ("SITS_mode", "SITS_atom_numbers", "SITS_k_numbers", "SITS_T"):
+        if not _has_key_line(legacy_mdin, key):
+            raise AssertionError(f"focused typed SITS legacy route lost {key}")
+    if re.search(r"(?m)^\s*SITS_[A-Za-z0-9_]+\s*=", bundled_mdin):
+        raise AssertionError(
+            "focused typed SITS bundled route retained inline SITS ownership"
+        )
+
+    protocol_path = bundled_dir / "protocol.spgp.h5"
+    expected_keys = (
+        "mode",
+        "k_numbers",
+        "T",
+        "nk_rest",
+        "nk_fix",
+        "pe_a",
+        "pe_b",
+        "fb_bias",
+        "fb_interval",
+    )
+    expected_values = (
+        "production",
+        "2",
+        "300/600",
+        "false",
+        "true",
+        "1.0",
+        "0.0",
+        "0.0",
+        "1",
+    )
+    if (
+        tuple(_h5_string_values(protocol_path, "/sits/config/key"))
+        != expected_keys
+    ):
+        raise AssertionError("focused typed SITS config keys changed")
+    if (
+        tuple(_h5_string_values(protocol_path, "/sits/config/value"))
+        != expected_values
+    ):
+        raise AssertionError("focused typed SITS config values changed")
+    if _h5_numeric_values(protocol_path, "/sits/atom_indices") != [0, 1]:
+        raise AssertionError("focused typed SITS atom indices changed")
+    sidecar_root = "/parameters/sponge/files/legacy_sidecars"
+    if sidecar_root in _h5_paths(protocol_path):
+        raise AssertionError("focused typed SITS protocol retained sidecars")
 
 
 def _write_sits_ff19sb_cmap_mdin(case_dir: Path, replica_seed: int):
@@ -7687,6 +7834,10 @@ def _compare_input_semantics(
                 replica_result["oracle"] = (
                     _compare_focused_sits_nk_typed_restart(case, run)
                 )
+            elif spec.contract_id == "input.protocol.sits":
+                replica_result["oracle"] = _compare_focused_sits_typed_config(
+                    case, run
+                )
             elif spec.contract_id == "input.topology.lj_soft_core":
                 replica_result["force"] = _compare_focused_lj_soft_core_forces(
                     case, run
@@ -7742,6 +7893,261 @@ def _compare_focused_sits_nk_typed_restart(
         "route": "isolated_h5_typed_SITS_nk_restart_state",
         "branches": branch_results,
         "cross_branch_force": cross_branch_force,
+    }
+
+
+def _compare_focused_sits_typed_config(
+    case: AbCase, run: AbRun
+) -> dict[str, object]:
+    baseline = _compare_focused_sits_nk_typed_restart(case, run)
+    materialized_root = run.bundled_dir / ".sponge_h5_native_protocol"
+    expected_config = (
+        "SITS\n"
+        "{\n"
+        "    mode = production\n"
+        "    k_numbers = 2\n"
+        "    T = 300/600\n"
+        "    nk_rest = false\n"
+        "    nk_fix = true\n"
+        "    pe_a = 1.0\n"
+        "    pe_b = 0.0\n"
+        "    fb_bias = 0.0\n"
+        "    fb_interval = 1\n"
+        "}\n"
+    )
+    config_path = materialized_root / "sits.txt"
+    atom_path = materialized_root / "sits_atom.txt"
+    if config_path.read_text(encoding="utf-8") != expected_config:
+        raise AssertionError(f"{case.name} materialized SITS config changed")
+    if atom_path.read_text(encoding="utf-8") != "0\n1\n":
+        raise AssertionError(f"{case.name} materialized SITS atom list changed")
+
+    baseline_rows = _read_mdout(run.bundled_dir / "mdout.txt")["rows"]
+    baseline_force = _read_native_float32_file(
+        run.bundled_dir / "output" / "legacy.frc"
+    )
+    control_results: dict[str, object] = {}
+    for mutation in (
+        "pe_a_half",
+        "single_selected_atom",
+        "explicit_config_precedence",
+    ):
+        control_dir = (
+            run.bundled_dir.parent / f"bundled_sits_{mutation}_control"
+        )
+        if control_dir.exists():
+            shutil.rmtree(control_dir)
+        shutil.copytree(run.bundled_dir, control_dir)
+        for path in (
+            control_dir / "output",
+            control_dir / ".sponge_h5_native_protocol",
+        ):
+            if path.exists():
+                shutil.rmtree(path)
+        (control_dir / "output").mkdir(parents=True)
+        for file_name in (
+            "mdout.txt",
+            "mdinfo.txt",
+            "run.stdout",
+            "run.stderr",
+        ):
+            path = control_dir / file_name
+            if path.exists():
+                path.unlink()
+
+        protocol_path = control_dir / "protocol.spgp.h5"
+        if mutation == "explicit_config_precedence":
+            mdin_path = control_dir / _mdin_name(control_dir)
+            mdin = _insert_root_toml_keys(
+                mdin_path.read_text(encoding="utf-8"),
+                [
+                    'SITS_mode = "production"',
+                    "SITS_k_numbers = 2",
+                    'SITS_T = "300/600"',
+                    "SITS_nk_rest = false",
+                    "SITS_nk_fix = true",
+                    "SITS_pe_a = 0.5",
+                    "SITS_pe_b = 0.0",
+                    "SITS_fb_bias = 0.0",
+                    "SITS_fb_interval = 1",
+                ],
+            )
+            mdin_path.write_text(mdin, encoding="utf-8")
+        else:
+            with h5py.File(protocol_path, "r+") as protocol:
+                if mutation == "pe_a_half":
+                    keys = protocol["/sits/config/key"].asstr()[...].tolist()
+                    pe_a_index = keys.index("pe_a")
+                    protocol["/sits/config/value"][pe_a_index] = "0.5"
+                else:
+                    del protocol["/sits/atom_indices"]
+                    protocol["/sits"].create_dataset(
+                        "atom_indices", data=[0], dtype="i4"
+                    )
+
+        outcome = _run_sponge_process(control_dir, _mdin_name(control_dir))
+        if outcome.returncode != 0:
+            raise AssertionError(
+                f"{case.name} {mutation} control failed with "
+                f"code {outcome.returncode}\n{outcome.stdout}\n{outcome.stderr}"
+            )
+        control_rows = _read_mdout(control_dir / "mdout.txt")["rows"]
+        control_force = _read_native_float32_file(
+            control_dir / "output" / "legacy.frc"
+        )
+        if len(control_rows) != len(baseline_rows) or len(control_rows) != 1:
+            raise AssertionError(
+                f"{case.name} {mutation} control changed mdout shape"
+            )
+        observables = ("SITS_AA_kAB", "SITS_bias", "SITS_fb", "eff_pot")
+        observable_deltas = {
+            observable: abs(
+                float(control_rows[0].get(observable, math.nan))
+                - float(baseline_rows[0].get(observable, math.nan))
+            )
+            for observable in observables
+        }
+        if not all(
+            math.isfinite(value) for value in observable_deltas.values()
+        ):
+            raise AssertionError(
+                f"{case.name} {mutation} control produced non-finite evidence"
+            )
+        if len(control_force) != len(baseline_force) or not all(
+            math.isfinite(value) for value in control_force
+        ):
+            raise AssertionError(
+                f"{case.name} {mutation} control produced invalid force"
+            )
+        maximum_force_delta = max(
+            abs(control - reference)
+            for control, reference in zip(
+                control_force, baseline_force, strict=True
+            )
+        )
+        _assert_sits_typed_control_response(
+            case.name, mutation, control_rows[0], maximum_force_delta
+        )
+        if mutation == "explicit_config_precedence":
+            if (
+                control_dir / ".sponge_h5_native_protocol" / "sits.txt"
+            ).exists():
+                raise AssertionError(
+                    f"{case.name} typed config overrode explicit SITS config"
+                )
+            if not (
+                control_dir / ".sponge_h5_native_protocol" / "sits_atom.txt"
+            ).exists():
+                raise AssertionError(
+                    f"{case.name} explicit config suppressed typed atom indices"
+                )
+        control_results[mutation] = {
+            "observables": {
+                key: float(control_rows[0][key]) for key in observables
+            },
+            "observable_deltas": observable_deltas,
+            "maximum_force_delta": maximum_force_delta,
+        }
+        shutil.rmtree(control_dir)
+
+    failure_results = {}
+    for mutation, diagnostic in (
+        ("duplicate_atom", "/sits/atom_indices row 1 duplicates atom 0"),
+        ("duplicate_config_key", "/sits/config/key contains a duplicate key"),
+    ):
+        failure_dir = (
+            run.bundled_dir.parent / f"bundled_sits_{mutation}_failure"
+        )
+        if failure_dir.exists():
+            shutil.rmtree(failure_dir)
+        shutil.copytree(run.bundled_dir, failure_dir)
+        for path in (
+            failure_dir / "output",
+            failure_dir / ".sponge_h5_native_protocol",
+        ):
+            if path.exists():
+                shutil.rmtree(path)
+        (failure_dir / "output").mkdir(parents=True)
+        with h5py.File(failure_dir / "protocol.spgp.h5", "r+") as protocol:
+            if mutation == "duplicate_atom":
+                protocol["/sits/atom_indices"][...] = (0, 0)
+            else:
+                protocol["/sits/config/key"][1] = "mode"
+        failure = _run_sponge_process(failure_dir, _mdin_name(failure_dir))
+        failure_text = failure.stdout + failure.stderr
+        if failure.returncode == 0 or not all(
+            token in failure_text
+            for token in (
+                "spongeErrorBadFileFormat",
+                "Materialize_H5_SITS_Input",
+                diagnostic,
+            )
+        ):
+            raise AssertionError(
+                f"{case.name} {mutation} control was not rejected\n"
+                f"{failure.stdout}\n{failure.stderr}"
+            )
+        failure_results[mutation] = {
+            "exit_code": failure.returncode,
+            "failure_category": "spongeErrorBadFileFormat",
+            "diagnostic": diagnostic,
+        }
+        shutil.rmtree(failure_dir)
+
+    return {
+        "route": "pure_typed_SITS_config_atoms_and_nk_restart",
+        "baseline": baseline,
+        "materialized_config": str(config_path.relative_to(run.bundled_dir)),
+        "materialized_atom_list": str(atom_path.relative_to(run.bundled_dir)),
+        "controls": control_results,
+        "invalid_payloads_rejected": failure_results,
+    }
+
+
+def _assert_sits_typed_control_response(
+    label: str,
+    mutation: str,
+    row: dict[str, float],
+    maximum_force_delta: float,
+) -> dict[str, float]:
+    expected_by_mutation = {
+        "pe_a_half": {"SITS_bias": -1.4591, "SITS_fb": 0.6471},
+        "explicit_config_precedence": {
+            "SITS_bias": -1.4591,
+            "SITS_fb": 0.6471,
+        },
+        "single_selected_atom": {
+            "SITS_AA_kAB": -0.61,
+            "SITS_bias": -0.7295,
+            "SITS_fb": 0.6471,
+        },
+    }
+    if mutation not in expected_by_mutation:
+        raise AssertionError(
+            f"{label} has unknown typed SITS mutation {mutation}"
+        )
+    for observable, expected in expected_by_mutation[mutation].items():
+        _assert_numeric_sequences_close(
+            f"{label} {mutation} {observable} oracle",
+            (expected,),
+            (float(row.get(observable, math.nan)),),
+            relative_tolerance=0.0,
+            absolute_tolerance=1.5e-4,
+        )
+    minimum_force_delta = (
+        0.01
+        if mutation in {"pe_a_half", "explicit_config_precedence"}
+        else 0.02
+    )
+    if not math.isfinite(maximum_force_delta) or (
+        maximum_force_delta <= minimum_force_delta
+    ):
+        raise AssertionError(
+            f"{label} {mutation} force response is too small: "
+            f"{maximum_force_delta}"
+        )
+    return {key: float(row[key]) for key in expected_by_mutation[mutation]} | {
+        "maximum_force_delta": maximum_force_delta
     }
 
 

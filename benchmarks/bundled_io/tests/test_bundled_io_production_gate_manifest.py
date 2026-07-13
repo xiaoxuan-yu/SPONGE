@@ -51,6 +51,7 @@ from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
     FOCUSED_RESIDUE_TYPED_COM_RES_FIXTURE,
     FOCUSED_RESIDUE_TYPED_PBC_FIXTURE,
     FOCUSED_SITS_NK_TYPED_RESTART_FIXTURE,
+    FOCUSED_SITS_TYPED_CONFIG_FIXTURE,
     FOCUSED_STEERING_CV_SIDECAR_FIXTURE,
     FOCUSED_STEERING_CV_TYPED_FIXTURE,
     FOCUSED_SUBSYSTEM_DIVISION_FIXTURE,
@@ -75,6 +76,7 @@ from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
     _assert_residue_com_res_virial_oracle,
     _assert_residue_pbc_mapping_oracle,
     _assert_sits_nk_typed_restart_oracle,
+    _assert_sits_typed_control_response,
     _assert_steering_cv_oracle,
     _assert_subsystem_partition_response,
     _assert_sw_pair_three_body_oracle,
@@ -304,6 +306,7 @@ def test_ab_production_harness_has_executable_contract_coverage():
         "normal_constraint_sidecar_projection",
         "normal_constraint_typed_projection",
         "normal_sits_nk_typed_restart_nonzero",
+        "normal_sits_typed_configuration_nonzero",
         "normal_steering_cv_sidecar_nonzero",
         "normal_steering_cv_typed_nonzero",
         "normal_vds_chunk_minus_one",
@@ -1775,12 +1778,113 @@ def test_focused_sits_case_requires_typed_nk_bias_and_scaled_force():
     typed_restart = contracts["input.protocol.sits.nk_typed_restart"]
     assert typed_restart.status == "supported"
     assert typed_restart.component == "restart_protocol_state"
-    assert typed_restart.case_ids == (case.name,)
+    assert typed_restart.case_ids == (
+        case.name,
+        "normal_sits_typed_configuration_nonzero",
+    )
     assert typed_restart.assertion_ids == ("input_semantic_equivalence",)
     typed_config = contracts["input.protocol.sits"]
-    assert typed_config.status == "deferred"
-    assert "typed /sits configuration" in typed_config.reason
-    assert "tracked separately" in typed_config.reason
+    assert typed_config.status == "supported"
+    assert typed_config.case_ids == ("normal_sits_typed_configuration_nonzero",)
+
+
+def test_focused_typed_sits_case_requires_config_atoms_and_restart_state():
+    contracts = load_contract_registry()
+    case = next(
+        case
+        for case in _cases_for_profile()
+        if case.name == "normal_sits_typed_configuration_nonzero"
+    )
+    spec = INPUT_SEMANTIC_SPECS_BY_CASE[case.name]
+
+    assert case.fixture_case == FOCUSED_SITS_TYPED_CONFIG_FIXTURE
+    assert case.statistical_md is False
+    assert case.normal_step_limit == 1
+    assert case.normal_dt == 0.0
+    assert case.restart_load_policy == "protocol"
+    assert case.input_behavior_only is True
+    assert case.contract_ids == (
+        "output.legacy.mdout",
+        "input.protocol.sits",
+        "input.protocol.sits.nk_typed_restart",
+    )
+    assert spec == (
+        InputSemanticSpec(
+            "input.protocol.sits",
+            ("SITS_AA_kAB", "SITS_bias", "SITS_fb"),
+            1.0e-4,
+        ),
+        InputSemanticSpec(
+            "input.protocol.sits.nk_typed_restart",
+            ("SITS_AA_kAB", "SITS_bias", "SITS_fb"),
+            1.0e-4,
+        ),
+    )
+    typed_config = contracts["input.protocol.sits"]
+    assert typed_config.status == "supported"
+    assert typed_config.minimum_evidence == "E3"
+    assert typed_config.case_ids == (case.name,)
+    assert typed_config.assertion_ids == ("input_semantic_equivalence",)
+    assert "/sits/config" in typed_config.bundled_surface
+    assert "/sits/atom_indices" in typed_config.bundled_surface
+
+
+def test_focused_typed_sits_controls_reject_ignored_payloads():
+    pe_a_result = _assert_sits_typed_control_response(
+        "typed SITS",
+        "pe_a_half",
+        {"SITS_bias": -1.4591, "SITS_fb": 0.6471},
+        0.012950390577316284,
+    )
+    assert pe_a_result["maximum_force_delta"] > 0.01
+    atom_result = _assert_sits_typed_control_response(
+        "typed SITS",
+        "single_selected_atom",
+        {
+            "SITS_AA_kAB": -0.61,
+            "SITS_bias": -0.7295,
+            "SITS_fb": 0.6471,
+        },
+        0.02654215693473816,
+    )
+    assert atom_result["maximum_force_delta"] > 0.02
+    precedence_result = _assert_sits_typed_control_response(
+        "typed SITS",
+        "explicit_config_precedence",
+        {"SITS_bias": -1.4591, "SITS_fb": 0.6471},
+        0.012950390577316284,
+    )
+    assert precedence_result["maximum_force_delta"] > 0.01
+
+    with pytest.raises(AssertionError, match="SITS_bias oracle"):
+        _assert_sits_typed_control_response(
+            "ignored pe_a",
+            "pe_a_half",
+            {"SITS_bias": -0.5317, "SITS_fb": 0.7049},
+            0.012950390577316284,
+        )
+    with pytest.raises(AssertionError, match="SITS_AA_kAB oracle"):
+        _assert_sits_typed_control_response(
+            "ignored atom indices",
+            "single_selected_atom",
+            {
+                "SITS_AA_kAB": -1.22,
+                "SITS_bias": -0.5317,
+                "SITS_fb": 0.7049,
+            },
+            0.02654215693473816,
+        )
+    with pytest.raises(AssertionError, match="force response is too small"):
+        _assert_sits_typed_control_response(
+            "ignored force response",
+            "single_selected_atom",
+            {
+                "SITS_AA_kAB": -0.61,
+                "SITS_bias": -0.7295,
+                "SITS_fb": 0.6471,
+            },
+            0.0,
+        )
 
 
 def test_focused_sits_gate_rejects_initialization_only_and_unscaled_force():

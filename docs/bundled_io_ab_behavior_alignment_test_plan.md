@@ -1215,7 +1215,56 @@ Acceptance:
   SPONGE rebuild, Ruff, clang-format, and diff checks pass, followed by exactly
   one PR-scoped commit.
 
-## 39. Artifacts and Temporary-Space Policy
+## 39. PR 42: Typed SITS Configuration/Selection Behavior Gate
+
+Close `input.protocol.sits` with pure typed configuration, atom-selection, and
+restart-state behavior rather than treating SITS initialization as evidence.
+
+- Use the deterministic two-atom selective LJ/Coulomb fixture. The legacy
+  branch consumes inline `SITS_*` configuration, `SITS_atom_numbers=2`, and
+  `SITS_nk_in_file`; the bundled branch removes every inline `SITS_*` owner and
+  consumes `/sits/config`, `/sits/atom_indices=[0,1]`, and typed Nk protocol
+  restart state.
+- Materialize `/sits/config` through the established controller command
+  interface and `/sits/atom_indices` through the established atom-list parser.
+  Require exactly the active SITS section, consistent section offsets and
+  key/value lengths, unique config keys, config-safe tokens, a mode entry, and
+  unique in-range atom indices. Preserve explicit inline configuration and atom
+  routes for migration compatibility.
+- Compare the complete deterministic mdout row and six-value force payload.
+  Require non-trivial `SITS_AA_kAB`, `SITS_bias`, and `SITS_fb` behavior and the
+  existing asymmetric `Nk=(1,4)` oracle.
+- Change only typed `pe_a` from `1.0` to `0.5`; require bias `-1.4591`, force
+  factor `0.6471`, and maximum force delta above `0.01`. Separately change the
+  typed atom set from `[0,1]` to `[0]`; require `SITS_AA_kAB=-0.61`, bias
+  `-0.7295`, force factor `0.6471`, and maximum force delta above `0.02`.
+- Supply a complete inline SITS configuration with `pe_a=0.5` while leaving
+  typed config at `1.0`. Require the inline fingerprint, no materialized typed
+  config, and a materialized typed atom list, proving config and atom ownership
+  precedence independently.
+- Run process-level duplicate-index `[0,0]` and duplicate-config-key controls.
+  Require `spongeErrorBadFileFormat`, `Materialize_H5_SITS_Input`, and
+  payload-specific diagnostics for both.
+
+Acceptance:
+
+- Legacy and pure typed routes both produce `SITS_AA_kAB=-1.22`,
+  `SITS_bias=-0.5317`, `SITS_fb=0.7049`, `eff_pot=-1.2829471`, and the same
+  non-zero six-value force with maximum magnitude `0.2489061951637268`.
+- The typed branch materializes `.sponge_h5_native_protocol/sits.txt` and
+  `sits_atom.txt`; it contains no inline SITS configuration or protocol
+  sidecar owner.
+- Both typed counterfactuals match their deterministic behavior fingerprints,
+  so ignored config or ignored atom selection cannot pass. The inline control
+  proves explicit config precedence without suppressing typed atom selection;
+  duplicate atom and config-key inputs are rejected before SITS initialization.
+- The existing typed Nk restart case remains green, proving the new
+  configuration path does not weaken restart-state behavior.
+- Registry, manifest, real CPU A/B, full smoke, related native input CTests,
+  SPONGE rebuild, Ruff, clang-format, and diff checks pass, followed by exactly
+  one PR-scoped commit.
+
+## 40. Artifacts and Temporary-Space Policy
 
 - Use `SPONGE_BUNDLED_IO_AB_RUN_ROOT` for all heavy runs.
 - Put production artifacts on the workspace filesystem rather than `/tmp`.
@@ -1225,7 +1274,7 @@ Acceptance:
 - Record artifact byte counts and enforce a configurable per-case quota.
 - Cleanup must only remove directories created by the current gate run.
 
-## 40. PR Completion Log
+## 41. PR Completion Log
 
 Append one row immediately after completing and committing each PR.
 
@@ -1274,3 +1323,4 @@ Append one row immediately after completing and committing each PR.
 | PR 39: Typed Tersoff angular behavior gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract` (134 tests); 94-test production manifest; real `normal_tersoff_typed_angular` and `normal_tersoff_sidecar_angular` CPU A/B cases plus two typed failure controls; two native input CTests; SPONGE rebuild; Ruff; clang-format; `git diff --check` | Pure typed `/manybody/tersoff` with no Tersoff command or sidecars matches legacy at `potential=-173.23`, `eff_pot=-173.23468`, and maximum force `135.94906616210938`. A typed gamma-zero control produces `potential=-196.06`, `eff_pot=-196.05984`, and maximum force `144.7831268310547`, proving angular parameter consumption. Conflicting map/entry and raw/runtime parameter payloads are rejected as bad-file-format. Registry coverage advances to 78 supported, 4 deferred, and 1 unsupported contract. |
 | PR 40: Typed QC type-sensitive behavior gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract` (135 tests); 95-test production manifest; real `rerun_qc_type_typed_unrestricted_vds_off` CPU A/B plus singlet control; two native input CTests; SPONGE rebuild; Ruff; changed-line clang-format; `git diff --check` | Typed `/qc/type` with no QC sidecar matches legacy across two complete mdout frames, non-trivial `QC`/`QC_S_sq`, and exact SCF text. Changing only multiplicity `3 -> 1` changes QC by up to `89.27` and spin square by `2.0065`, proving type-sensitive SCF consumption. Registry coverage advances to 79 supported, 3 deferred, and 1 unsupported contract. |
 | PR 41: Typed steering CV behavior gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract` (136 tests); 96-test production manifest; real `normal_steering_cv_typed_nonzero` and `normal_steering_cv_sidecar_nonzero` CPU A/B cases plus typed weight-zero control; two native input CTests; SPONGE rebuild; Ruff; clang-format; `git diff --check` | Pure typed `/cv/config` with no CV command or sidecars matches the legacy `cv_in_file` route at `steer_cv=3.0` and analytic force `(2,0,0,-2,0,0)`. Changing only weight `2.0 -> 0.0` zeros energy and force with maximum force delta `2.0`, proving typed config consumption. The registry now reflects the real `/cv/config` surface instead of the unconsumed `/steer` conversion. Coverage advances to 80 supported, 2 deferred, and 1 unsupported contract. |
+| PR 42: Typed SITS configuration/selection behavior gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract` (138 tests); 98-test production manifest; real `normal_sits_typed_configuration_nonzero` and `normal_sits_nk_typed_restart_nonzero` CPU A/B cases plus typed config/selection/precedence controls; two native input CTests; SPONGE rebuild; Ruff; clang-format; `git diff --check` | Pure typed `/sits/config`, `/sits/atom_indices`, and Nk restart state with no inline SITS owner match legacy at `SITS_AA_kAB=-1.22`, `SITS_bias=-0.5317`, `SITS_fb=0.7049`, and maximum force `0.2489061951637268`. Typed `pe_a=0.5` and atom set `[0]` produce distinct deterministic bias, factor, energy, and force fingerprints; complete inline config wins over typed config without suppressing typed atoms. Duplicate atom and duplicate config-key payloads exit as bad-file-format. Registry coverage advances to 81 supported, 1 deferred, and 1 unsupported contract. |

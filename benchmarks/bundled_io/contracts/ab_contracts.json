@@ -543,18 +543,18 @@
       "contract_id": "input.protocol.sits",
       "direction": "input",
       "component": "sits",
-      "status": "deferred",
+      "status": "supported",
       "minimum_evidence": "E3",
-      "legacy_surface": "SITS legacy inputs",
-      "bundled_surface": "/sits and restart SITS state",
-      "case_ids": [],
-      "assertion_ids": [],
+      "legacy_surface": "inline SITS configuration, SITS_atom_numbers, and SITS_nk_in_file",
+      "bundled_surface": "/sits/config, /sits/atom_indices, and typed SITS Nk restart state",
+      "case_ids": ["normal_sits_typed_configuration_nonzero"],
+      "assertion_ids": ["input_semantic_equivalence"],
       "inventory_refs": [
         "protocol_sidecar_keys:SITS_in_file",
         "protocol_sidecar_keys:SITS_atom_in_file",
         "protocol_sidecar_keys:SITS_nk_in_file"
       ],
-      "reason": "The runtime consumes inline SITS configuration, while typed /sits configuration is not materialized. Typed SITS Nk restart behavior is tracked separately."
+      "reason": ""
     },
     {
       "contract_id": "input.protocol.sits.nk_typed_restart",
@@ -564,7 +564,7 @@
       "minimum_evidence": "E3",
       "legacy_surface": "inline SITS production configuration and SITS_nk_in_file",
       "bundled_surface": "inline SITS production configuration and /parameters/restart/bias/sits/SITS/nk with input_h5_restart_load=protocol",
-      "case_ids": ["normal_sits_nk_typed_restart_nonzero"],
+      "case_ids": ["normal_sits_nk_typed_restart_nonzero", "normal_sits_typed_configuration_nonzero"],
       "assertion_ids": ["input_semantic_equivalence"],
       "reason": ""
     },
@@ -887,7 +887,7 @@
       "minimum_evidence": "E3",
       "legacy_surface": "mdout",
       "bundled_surface": "explicit mdout retained beside H5 output",
-      "case_ids": ["normal_core_h5_output", "normal_sits_ff19sb_cmap_peptide", "rerun_full_contract_pure_vds_off", "rerun_full_contract_pure_vds_on", "rerun_full_contract_sidecar_vds_off", "rerun_full_contract_sidecar_vds_on", "rerun_qc_unrestricted_sidecar_vds_off", "rerun_qc_unrestricted_sidecar_vds_on", "rerun_qc_type_typed_unrestricted_vds_off", "rerun_boundary_start0_strip0_limit1_vds_off", "rerun_boundary_start1_strip0_unlimited_no_velocity_vds_on", "rerun_boundary_start0_strip1_beyond_selected_vds_on", "rerun_boundary_start0_strip0_exact_eof_box_vds_off", "rerun_boundary_start1_strip1_limit1_selected_no_velocity_vds_off"],
+      "case_ids": ["normal_core_h5_output", "normal_sits_ff19sb_cmap_peptide", "normal_sits_typed_configuration_nonzero", "rerun_full_contract_pure_vds_off", "rerun_full_contract_pure_vds_on", "rerun_full_contract_sidecar_vds_off", "rerun_full_contract_sidecar_vds_on", "rerun_qc_unrestricted_sidecar_vds_off", "rerun_qc_unrestricted_sidecar_vds_on", "rerun_qc_type_typed_unrestricted_vds_off", "rerun_boundary_start0_strip0_limit1_vds_off", "rerun_boundary_start1_strip0_unlimited_no_velocity_vds_on", "rerun_boundary_start0_strip1_beyond_selected_vds_on", "rerun_boundary_start0_strip0_exact_eof_box_vds_off", "rerun_boundary_start1_strip1_limit1_selected_no_velocity_vds_off"],
       "assertion_ids": ["mdout_statistical_equivalence", "mdout_deterministic_equivalence"],
       "inventory_refs": ["legacy_output_keys:mdout"]
     },
