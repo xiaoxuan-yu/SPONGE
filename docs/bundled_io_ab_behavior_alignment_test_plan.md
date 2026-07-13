@@ -927,7 +927,34 @@ Acceptance:
   CTests, Ruff, clang-format, and diff checks pass, followed by exactly one
   PR-scoped commit.
 
-## 31. Artifacts and Temporary-Space Policy
+## 31. PR 34: Complete H5 Metadata Failure Semantics
+
+Close the complete topology metadata F1 contract by adding the missing schema
+version rejection to the existing atom-count, shape, and dtype process gates.
+
+- Preserve the three schema versions emitted by current supported producers:
+  legacy unit fixtures (`0`), native H5 fixtures (`1`), and XPONGE conversion
+  (`xponge.legacy_to_bundle.v1`).
+- Add a bundled-only mutation that replaces `/schema/version` with
+  `unsupported.topology.v999` and require a non-zero process exit,
+  `spongeErrorValueErrorCommand`, and route-specific stable diagnostics.
+- Run validation from the common `Xponge::System::Load_Inputs` entry before any
+  native text input loader. Legacy-only inputs remain unaffected.
+- Merge the partial three-mutation `failure.h5_metadata.runtime_rejections`
+  registry record into the complete `failure.h5_metadata` contract so one owner
+  enumerates all four failure semantics.
+
+Acceptance:
+
+- All four real bundled failure cases reject their mutation with the exact
+  expected error category and stable diagnostic tokens.
+- Known supported schema versions continue to pass existing real A/B and H5
+  input-validation tests.
+- Registry, full manifest and smoke suites, SPONGE rebuild, related CTests,
+  Ruff, clang-format, and diff checks pass, followed by exactly one PR-scoped
+  commit.
+
+## 32. Artifacts and Temporary-Space Policy
 
 - Use `SPONGE_BUNDLED_IO_AB_RUN_ROOT` for all heavy runs.
 - Put production artifacts on the workspace filesystem rather than `/tmp`.
@@ -937,7 +964,7 @@ Acceptance:
 - Record artifact byte counts and enforce a configurable per-case quota.
 - Cleanup must only remove directories created by the current gate run.
 
-## 32. PR Completion Log
+## 33. PR Completion Log
 
 Append one row immediately after completing and committing each PR.
 
@@ -978,3 +1005,4 @@ Append one row immediately after completing and committing each PR.
 | PR 31: Residue membership/COM-virial follow-up gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract` (119 tests); 79-test production manifest; real `normal_residue_sidecar_pbc_mapping` and `normal_residue_sidecar_com_res_virial` CPU A/B; SPONGE rebuild; Ruff; clang-format; `git diff --check` | PR 30's residue-count, runtime-partition, force, and whole-molecule PBC mapping gate remains active. The second isolated `[2,2]` residue-sidecar case drives `com_res` restraint virial behavior with equivalent `bond=2.0`, `restrain=2.0`, `pressure=0.04`, `Pxx=0.11`, and 12-value force output. A same-count `[1,3]` control preserves energy and force but changes pressure/Pxx to `-11.53/-34.60`, proving membership-sensitive consumption. CPU atom-to-group maps now own their storage instead of aliasing freed host buffers. Typed residue input remains deferred. Registry coverage stays at 72 supported, 11 deferred, and 1 unsupported contract. |
 | PR 32: Pure native GB behavior gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract` (120 tests); 80-test production manifest; real `normal_gb_native_nonzero` and `normal_gb_hybrid_nonzero` CPU A/B; two native topology reader CTests; SPONGE rebuild; Ruff; changed-line clang-format; `git diff --check` | The pure bundled branch consumes `/forcefield/gb/params` with no `gb_in_file`, sidecar table, or sidecar files. Both routes match `Coulomb=-0.50`, `gb=-0.25`, `potential=-0.75`, the complete six-value force oracle, and all mdout columns. Non-periodic GB initialization now recognizes preloaded native state while preserving the hybrid activation route. Registry coverage advances to 73 supported, 10 deferred, and 1 unsupported contract. |
 | PR 33: Core topology payload-sensitivity gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract` (128 tests); 88-test production manifest; real `normal_core_topology_payload_sensitivity` CPU A/B plus three typed-payload controls; two native topology reader CTests; SPONGE rebuild; Ruff; clang-format; `git diff --check` | Pure typed mass, charge, and LJ routes contain no topology sidecars and match legacy across the complete one-frame mdout and force payload. Independent controls produce temperature `26.21 -> 52.42` with unchanged force, Coulomb `-0.50 -> 0` with maximum force delta `0.25`, and LJ `-0.02 -> 0` with maximum force delta `0.04541015625`, proving each payload reaches its consumer. The broader `normal_core_h5_output` case remains active and still reports its pre-existing legacy/H5 force schedule mismatch (`51` versus `50` frames), which is not weakened by this input gate. Registry coverage remains 73 supported, 10 deferred, and 1 unsupported contract. |
+| PR 34: Complete H5 metadata failure semantics | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract` (130 tests); 90-test production manifest; four real `failure_h5_topology_*` CPU process gates; three supported-schema real controls; three metadata/input CTests; SPONGE rebuild; Ruff; clang-format; `git diff --check` | Atom-count, mass-shape, mass-dtype, and unknown-schema mutations now share one complete F1 contract. Schema versions `0`, `1`, and `xponge.legacy_to_bundle.v1` each start successfully, while `unsupported.topology.v999` exits 238 with `spongeErrorValueErrorCommand` and route-specific diagnostics. The partial metadata registry record is removed; coverage remains 73 supported, advances to 9 deferred, and retains 1 unsupported contract. |

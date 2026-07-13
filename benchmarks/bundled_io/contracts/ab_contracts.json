@@ -332,26 +332,15 @@
       "contract_id": "failure.h5_metadata",
       "direction": "runtime",
       "component": "input_validation",
-      "status": "deferred",
+      "status": "supported",
       "minimum_evidence": "F1",
       "legacy_surface": "malformed legacy atom counts and payload dimensions",
       "bundled_surface": "H5 atom count, shape, dtype, and schema-version errors",
-      "case_ids": [],
-      "assertion_ids": [],
-      "reason": "Production process gates cover topology atom-count, mass shape, and mass dtype rejection separately. An incompatible /schema/version value is currently accepted, so the complete four-mutation contract remains deferred."
-    },
-    {
-      "contract_id": "failure.h5_metadata.runtime_rejections",
-      "direction": "runtime",
-      "component": "input_validation",
-      "status": "supported",
-      "minimum_evidence": "F1",
-      "legacy_surface": "malformed topology count and mass payload",
-      "bundled_surface": "H5 topology atom-count, mass shape, and mass dtype rejection",
       "case_ids": [
         "failure_h5_topology_atom_count_mismatch",
         "failure_h5_topology_mass_shape",
-        "failure_h5_topology_mass_dtype"
+        "failure_h5_topology_mass_dtype",
+        "failure_h5_topology_schema_version"
       ],
       "assertion_ids": ["stable_failure_semantics"],
       "reason": ""

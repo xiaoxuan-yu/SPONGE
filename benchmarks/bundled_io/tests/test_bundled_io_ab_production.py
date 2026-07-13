@@ -67,6 +67,11 @@ FOCUSED_VIRTUAL_ATOMS_PBC_FIXTURE = "focused_virtual_atoms_pbc_boundary"
 FOCUSED_CONSTRAINT_SIDECAR_FIXTURE = "focused_constraint_sidecar_two_atom"
 FOCUSED_STEERING_CV_SIDECAR_FIXTURE = "focused_steering_cv_sidecar_two_atom"
 FOCUSED_SITS_NK_TYPED_RESTART_FIXTURE = "focused_sits_nk_typed_restart_two_atom"
+SUPPORTED_TOPOLOGY_SCHEMA_VERSIONS = (
+    "0",
+    "1",
+    "xponge.legacy_to_bundle.v1",
+)
 SITS_FF19SB_CMAP_SOURCE = (
     REPO_ROOT / "benchmarks" / "performance" / "sits" / "statics" / "ala2_sits"
 )
@@ -1344,7 +1349,7 @@ def _failure_cases() -> list[AbCase]:
     }
     metadata_shared = {
         **shared,
-        "contract_ids": ("failure.h5_metadata.runtime_rejections",),
+        "contract_ids": ("failure.h5_metadata",),
     }
     restart_owner_shared = {
         key: value
@@ -1490,6 +1495,19 @@ def _failure_cases() -> list[AbCase]:
                 "Materialize_H5_Native_Topology_Core",
                 "failed to read native topology H5 core state",
                 "Unable to read the dataset",
+            ),
+            **metadata_shared,
+        ),
+        AbCase(
+            name="failure_h5_topology_schema_version",
+            failure_mutation="h5_topology_schema_version",
+            failure_branches=("bundled",),
+            expected_error_category="spongeErrorValueErrorCommand",
+            expected_diagnostic_tokens=(
+                "Xponge::Validate_H5_Topology_Schema_Version",
+                "input_h5_topology_path",
+                "unsupported /schema/version",
+                "unsupported.topology.v999",
             ),
             **metadata_shared,
         ),
@@ -1686,6 +1704,7 @@ def test_legacy_and_bundled_ab_behavior(case: AbCase):
 def _run_failure_case(case: AbCase, contracts) -> None:
     case_root = _output_root() / case.name
     legacy_dir, bundled_dir = _prepare_case_pair(case, case_root, 20260709)
+    supported_schema_controls = {}
     for branch, case_dir, mdin_name in (
         ("legacy", legacy_dir, "mdin.spg.toml"),
         ("bundled", bundled_dir, "mdin.bundled.spg.toml"),
@@ -1698,6 +1717,13 @@ def _run_failure_case(case: AbCase, contracts) -> None:
             replica_seed=20260709,
         )
         _mutate_failure_mdin(case, case_dir / mdin_name, branch)
+        if (
+            case.failure_mutation == "h5_topology_schema_version"
+            and branch == "bundled"
+        ):
+            supported_schema_controls = _run_supported_topology_schema_controls(
+                case, case_dir
+            )
         _mutate_failure_h5(case, case_dir, branch)
 
     outcomes = {}
@@ -1757,6 +1783,7 @@ def _run_failure_case(case: AbCase, contracts) -> None:
             "mutation": case.failure_mutation,
             "branches": list(case.failure_branches),
             "outcomes": outcomes,
+            "supported_schema_controls": supported_schema_controls,
         },
     )
     evidence = build_case_evidence(contracts, case, (assertion,))
@@ -6131,6 +6158,7 @@ def _mutate_failure_mdin(case: AbCase, mdin_path: Path, branch: str) -> None:
         "h5_topology_atom_count_mismatch",
         "h5_topology_mass_shape",
         "h5_topology_mass_dtype",
+        "h5_topology_schema_version",
         "restart_dynamic_without_owner",
         "restart_protocol_without_owner",
         "restart_full_without_owner",
@@ -6157,6 +6185,7 @@ def _mutate_failure_h5(case: AbCase, case_dir: Path, branch: str) -> None:
         "h5_topology_atom_count_mismatch",
         "h5_topology_mass_shape",
         "h5_topology_mass_dtype",
+        "h5_topology_schema_version",
     }
     if (
         mutation not in sidecar_mutations | metadata_mutations
@@ -6171,6 +6200,13 @@ def _mutate_failure_h5(case: AbCase, case_dir: Path, branch: str) -> None:
         with h5py.File(topology_path, "r+") as topology:
             if mutation == "h5_topology_atom_count_mismatch":
                 topology["/topology/atom_count"][...] = 3
+                return
+            if mutation == "h5_topology_schema_version":
+                _replace_h5_string_dataset(
+                    topology,
+                    "/schema/version",
+                    "unsupported.topology.v999",
+                )
                 return
             del topology["/atoms/mass"]
             if mutation == "h5_topology_mass_shape":
@@ -6217,6 +6253,43 @@ def _mutate_failure_h5(case: AbCase, case_dir: Path, branch: str) -> None:
         string_dtype = h5py.string_dtype(encoding="utf-8")
         group.create_dataset("key", data=keys, dtype=string_dtype)
         group.create_dataset("path", data=paths, dtype=string_dtype)
+
+
+def _run_supported_topology_schema_controls(
+    case: AbCase, bundled_dir: Path
+) -> dict[str, object]:
+    results = {}
+    for version in SUPPORTED_TOPOLOGY_SCHEMA_VERSIONS:
+        suffix = re.sub(r"[^A-Za-z0-9]+", "_", version).strip("_")
+        control_dir = bundled_dir.parent / f"bundled_schema_{suffix}"
+        if control_dir.exists():
+            shutil.rmtree(control_dir)
+        shutil.copytree(bundled_dir, control_dir)
+        with h5py.File(control_dir / "topology.spgt.h5", "r+") as topology:
+            _replace_h5_string_dataset(topology, "/schema/version", version)
+        outcome = _run_sponge_process(control_dir, _mdin_name(control_dir))
+        if outcome.returncode != 0:
+            raise AssertionError(
+                f"{case.name} rejected supported topology schema {version!r} "
+                f"with code {outcome.returncode}\n"
+                f"{outcome.stdout}\n{outcome.stderr}"
+            )
+        results[version] = {
+            "exit_code": outcome.returncode,
+            "elapsed_s": outcome.elapsed_s,
+        }
+        shutil.rmtree(control_dir)
+    return results
+
+
+def _replace_h5_string_dataset(h5: h5py.File, path: str, value: str) -> None:
+    if path in h5:
+        del h5[path]
+    h5.create_dataset(
+        path,
+        data=value,
+        dtype=h5py.string_dtype(encoding="utf-8"),
+    )
 
 
 def _remove_key_lines(text: str, keys: set[str]) -> str:
