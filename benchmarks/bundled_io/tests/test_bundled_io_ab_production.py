@@ -3645,11 +3645,7 @@ def _prepare_case_pair(
     legacy_dir = _copy_case(case, "legacy", case.legacy_subdir, case_root)
     bundled_dir = _copy_case(case, "bundled", case.bundled_subdir, case_root)
     if "input.qc.spin_square" in case.contract_ids:
-        _prepare_unrestricted_qc_inputs(
-            legacy_dir,
-            bundled_dir,
-            keep_typed_residue="input.qc.type" in case.contract_ids,
-        )
+        _prepare_unrestricted_qc_inputs(legacy_dir, bundled_dir)
     if "input.qc.type" in case.contract_ids:
         _prepare_pure_typed_qc_input(bundled_dir)
     _validate_full_contract_input(case, bundled_dir)
@@ -3663,8 +3659,6 @@ def _prepare_case_pair(
 def _prepare_unrestricted_qc_inputs(
     legacy_dir: Path,
     bundled_dir: Path,
-    *,
-    keep_typed_residue: bool = False,
 ) -> None:
     qc_type_paths = [legacy_dir / "qc_type.txt"]
     bundled_qc_sidecar = (
@@ -3722,10 +3716,11 @@ def _prepare_unrestricted_qc_inputs(
                 raise AssertionError(
                     "unrestricted QC bundle does not bind the expected sidecar"
                 )
-            if "residue_in_file" in keys and not keep_typed_residue:
-                for path in ("/atoms/residue_index", "/residues/atom_offset"):
-                    if path in topology:
-                        del topology[path]
+            if "residue_in_file" in keys:
+                raise AssertionError(
+                    "unrestricted QC fixture retains a duplicate residue "
+                    "sidecar owner"
+                )
 
 
 def _prepare_pure_typed_qc_input(bundled_dir: Path) -> None:
@@ -3735,15 +3730,18 @@ def _prepare_pure_typed_qc_input(bundled_dir: Path) -> None:
         sidecars = topology[sidecar_root]
         keys = sidecars["key"].asstr()[...].tolist()
         paths = sidecars["path"].asstr()[...].tolist()
+        if "residue_in_file" in keys:
+            raise AssertionError(
+                "typed QC fixture retains a duplicate residue sidecar owner"
+            )
         retained = [
             (key, path)
             for key, path in zip(keys, paths, strict=True)
-            if key not in {"qc_type_in_file", "residue_in_file"}
+            if key != "qc_type_in_file"
         ]
-        if len(retained) != len(keys) - 2:
+        if len(retained) != len(keys) - 1:
             raise AssertionError(
-                "typed QC fixture did not remove the QC and duplicate residue "
-                "bindings"
+                "typed QC fixture did not remove exactly the QC binding"
             )
         del sidecars["key"]
         del sidecars["path"]
@@ -3754,13 +3752,14 @@ def _prepare_pure_typed_qc_input(bundled_dir: Path) -> None:
         sidecars.create_dataset(
             "path", data=[item[1] for item in retained], dtype=string_dtype
         )
-    for key in ("qc_type_in_file", "residue_in_file"):
-        sidecar = bundled_dir / "legacy_sidecars" / key
-        if not sidecar.exists():
-            raise AssertionError(
-                f"typed QC fixture lost its source {key} sidecar"
-            )
-        shutil.rmtree(sidecar)
+    qc_sidecar = bundled_dir / "legacy_sidecars" / "qc_type_in_file"
+    if not qc_sidecar.exists():
+        raise AssertionError("typed QC fixture lost its source QC sidecar")
+    shutil.rmtree(qc_sidecar)
+    if (bundled_dir / "legacy_sidecars" / "residue_in_file").exists():
+        raise AssertionError(
+            "typed QC fixture retains duplicate residue sidecar data"
+        )
     _validate_pure_typed_qc_route(bundled_dir)
 
 
@@ -4951,34 +4950,7 @@ def _prepare_focused_residue_sidecar_pair(
     shutil.copytree(legacy_source, legacy_dir)
     _convert_legacy_case(legacy_source, converted_dir)
     shutil.copytree(converted_dir / "bundle", bundled_dir)
-
-    topology_path = bundled_dir / "topology.spgt.h5"
-    sidecar_root = "/parameters/sponge/files/legacy_sidecars"
-    with h5py.File(topology_path, "r+") as topology:
-        if sidecar_root not in topology:
-            raise AssertionError(
-                "focused residue conversion did not emit topology sidecars"
-            )
-        sidecars = topology[sidecar_root]
-        keys = sidecars["key"].asstr()[...].tolist()
-        paths = sidecars["path"].asstr()[...].tolist()
-        try:
-            residue_index = keys.index("residue_in_file")
-        except ValueError as error:
-            raise AssertionError(
-                "focused residue conversion did not bind residue_in_file"
-            ) from error
-        residue_path = paths[residue_index]
-        del sidecars["key"]
-        del sidecars["path"]
-        string_dtype = h5py.string_dtype(encoding="utf-8")
-        sidecars.create_dataset(
-            "key", data=["residue_in_file"], dtype=string_dtype
-        )
-        sidecars.create_dataset("path", data=[residue_path], dtype=string_dtype)
-        for typed_path in ("/atoms/residue_index", "/residues/atom_offset"):
-            if typed_path in topology:
-                del topology[typed_path]
+    _replace_typed_residue_with_focused_sidecar(legacy_dir, bundled_dir)
 
     sidecar_dir = bundled_dir / "legacy_sidecars"
     for child in sidecar_dir.iterdir():
@@ -4989,6 +4961,40 @@ def _prepare_focused_residue_sidecar_pair(
                 child.unlink()
     _validate_focused_residue_sidecar_routes(legacy_dir, bundled_dir)
     return legacy_dir, bundled_dir
+
+
+def _replace_typed_residue_with_focused_sidecar(
+    legacy_dir: Path, bundled_dir: Path
+) -> None:
+    relative_sidecar = Path("legacy_sidecars/residue_in_file/residue.txt")
+    sidecar_path = bundled_dir / relative_sidecar
+    sidecar_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(legacy_dir / "residue.txt", sidecar_path)
+
+    topology_path = bundled_dir / "topology.spgt.h5"
+    sidecar_root = "/parameters/sponge/files/legacy_sidecars"
+    typed_paths = ("/atoms/residue_index", "/residues/atom_offset")
+    with h5py.File(topology_path, "r+") as topology:
+        missing = [path for path in typed_paths if path not in topology]
+        if missing:
+            raise AssertionError(
+                "focused residue conversion did not emit typed residue "
+                f"datasets: {missing}"
+            )
+        for typed_path in typed_paths:
+            del topology[typed_path]
+
+        sidecars = topology.require_group(sidecar_root)
+        for dataset_name in ("key", "path"):
+            if dataset_name in sidecars:
+                del sidecars[dataset_name]
+        string_dtype = h5py.string_dtype(encoding="utf-8")
+        sidecars.create_dataset(
+            "key", data=["residue_in_file"], dtype=string_dtype
+        )
+        sidecars.create_dataset(
+            "path", data=[relative_sidecar.as_posix()], dtype=string_dtype
+        )
 
 
 def _write_focused_residue_sidecar_input(case_dir: Path) -> None:
@@ -5113,35 +5119,9 @@ def _prepare_focused_residue_com_res_pair(
     shutil.copytree(legacy_source, legacy_dir)
     _convert_legacy_case(legacy_source, converted_dir)
     shutil.copytree(converted_dir / "bundle", bundled_dir)
+    _replace_typed_residue_with_focused_sidecar(legacy_dir, bundled_dir)
 
-    topology_path = bundled_dir / "topology.spgt.h5"
     sidecar_root = "/parameters/sponge/files/legacy_sidecars"
-    with h5py.File(topology_path, "r+") as topology:
-        if sidecar_root not in topology:
-            raise AssertionError(
-                "focused residue conversion did not emit topology sidecars"
-            )
-        sidecars = topology[sidecar_root]
-        keys = sidecars["key"].asstr()[...].tolist()
-        paths = sidecars["path"].asstr()[...].tolist()
-        try:
-            residue_index = keys.index("residue_in_file")
-        except ValueError as error:
-            raise AssertionError(
-                "focused residue conversion did not bind residue_in_file"
-            ) from error
-        residue_path = paths[residue_index]
-        del sidecars["key"]
-        del sidecars["path"]
-        string_dtype = h5py.string_dtype(encoding="utf-8")
-        sidecars.create_dataset(
-            "key", data=["residue_in_file"], dtype=string_dtype
-        )
-        sidecars.create_dataset("path", data=[residue_path], dtype=string_dtype)
-        for typed_path in ("/atoms/residue_index", "/residues/atom_offset"):
-            if typed_path in topology:
-                del topology[typed_path]
-
     coordinate_sidecar = (
         bundled_dir
         / "legacy_sidecars"
@@ -11499,19 +11479,36 @@ def _validate_full_contract_input(
     for file_name, required_paths in FULL_CONTRACT_INPUT_REQUIRED_PATHS.items():
         file_path = bundled_dir / file_name
         paths = _h5_paths(file_path)
-        allowed_missing = set()
-        if (
-            "input.qc.spin_square" in case.contract_ids
-            and file_name == "topology.spgt.h5"
-        ):
-            allowed_missing.add("/atoms/residue_index")
-        missing = sorted(required_paths - paths - allowed_missing)
+        missing = sorted(required_paths - paths)
         if missing:
             raise AssertionError(
                 f"{case.name} full-contract input {file_name} is missing "
                 f"required paths: {missing}"
             )
         all_paths.update(paths)
+
+    topology_path = bundled_dir / "topology.spgt.h5"
+    sidecar_root = "/parameters/sponge/files/legacy_sidecars"
+    with h5py.File(topology_path, "r") as topology:
+        typed_paths = ("/atoms/residue_index", "/residues/atom_offset")
+        typed_owner = all(path in topology for path in typed_paths)
+        partial_typed_owner = any(path in topology for path in typed_paths)
+        sidecar_owner = False
+        if sidecar_root in topology:
+            sidecar_keys = topology[f"{sidecar_root}/key"].asstr()[...]
+            sidecar_owner = "residue_in_file" in sidecar_keys
+    if partial_typed_owner and not typed_owner:
+        raise AssertionError(
+            f"{case.name} full-contract input has an incomplete typed residue "
+            "owner"
+        )
+    if typed_owner == sidecar_owner:
+        owner_count = int(typed_owner) + int(sidecar_owner)
+        raise AssertionError(
+            f"{case.name} full-contract input requires exactly one residue "
+            f"owner, found {owner_count}"
+        )
+
     has_sidecars = any("legacy_sidecars" in path for path in all_paths)
     if "input.full_contract.pure_native" in case.contract_ids and has_sidecars:
         raise AssertionError(

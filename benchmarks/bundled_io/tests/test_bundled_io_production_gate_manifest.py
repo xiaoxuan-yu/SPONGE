@@ -117,6 +117,9 @@ HIGHFIVE_TEST = REPO_ROOT / "tests/h5_bundle/test_highfive_backend_io.cpp"
 AB_SHADOW_WORKFLOW = REPO_ROOT / ".github/workflows/bundled-io-ab-shadow.yml"
 RELEASE_WORKFLOW = REPO_ROOT / ".github/workflows/release.yml"
 MATRIX_FIXTURE_ROOT = REPO_ROOT / "benchmarks/bundled_io/fixtures/tip3p_matrix"
+FULL_CONTRACT_FIXTURE_ROOT = (
+    REPO_ROOT / "tests/h5_bundle/fixtures/input_matrix/full_contract_rerun"
+)
 
 
 def _dev_tasks() -> dict[str, object]:
@@ -2623,6 +2626,38 @@ def test_execution_matrix_fixture_hashes_are_reviewed_and_pinned():
         assert "residue_in_file" not in sidecar_keys
 
 
+def test_full_contract_fixtures_have_one_typed_residue_owner():
+    for family in ("bundled_input", "bundled_input_with_legacy_sidecar"):
+        bundle = FULL_CONTRACT_FIXTURE_ROOT / family / "bundle"
+        topology_path = bundle / "topology.spgt.h5"
+        with h5py.File(topology_path, "r") as topology:
+            assert "/atoms/residue_index" in topology, family
+            assert "/residues/atom_offset" in topology, family
+            sidecar_root = "/parameters/sponge/files/legacy_sidecars"
+            sidecar_keys = set()
+            if sidecar_root in topology:
+                sidecar_keys = {
+                    value.decode() if isinstance(value, bytes) else str(value)
+                    for value in topology[f"{sidecar_root}/key"][()]
+                }
+            assert "residue_in_file" not in sidecar_keys, family
+        assert not (bundle / "legacy_sidecars/residue_in_file").exists(), family
+
+    manifest_path = (
+        FULL_CONTRACT_FIXTURE_ROOT
+        / "bundled_input_with_legacy_sidecar/manifest.json"
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    residue_entry = next(
+        entry
+        for entry in manifest["entries"]
+        if entry["contract_id"] == "topology.residue"
+    )
+    assert residue_entry["status"] == "typed_converted"
+    assert "sidecar_key" not in residue_entry
+    assert "sidecar_path" not in residue_entry
+
+
 def test_gpu_rank2_device_mapping_is_explicit_and_configurable(monkeypatch):
     rank2 = next(
         case
@@ -2636,21 +2671,15 @@ def test_gpu_rank2_device_mapping_is_explicit_and_configurable(monkeypatch):
     )
 
     monkeypatch.delenv("SPONGE_BUNDLED_IO_AB_GPU_DEVICES", raising=False)
-    default_keys = _runtime_keys(
-        rank2, 20260709, step_limit=64, interval=1
-    )
+    default_keys = _runtime_keys(rank2, 20260709, step_limit=64, interval=1)
     assert 'device = "0"' in default_keys
     assert not any(
         key.startswith("device =")
-        for key in _runtime_keys(
-            rank1, 20260709, step_limit=64, interval=1
-        )
+        for key in _runtime_keys(rank1, 20260709, step_limit=64, interval=1)
     )
 
     monkeypatch.setenv("SPONGE_BUNDLED_IO_AB_GPU_DEVICES", "0 1")
-    explicit_keys = _runtime_keys(
-        rank2, 20260709, step_limit=64, interval=1
-    )
+    explicit_keys = _runtime_keys(rank2, 20260709, step_limit=64, interval=1)
     assert 'device = "0 1"' in explicit_keys
 
 

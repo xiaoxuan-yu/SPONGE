@@ -399,9 +399,7 @@
       "payload_kind": "file",
       "source_key": "residue_in_file",
       "source_path": "/home/youmans/sidereus/SPONGE/tests/h5_bundle/fixtures/input_matrix/full_contract_rerun/legacy_input/residue.txt",
-      "status": "typed_converted",
-      "sidecar_key": "residue_in_file",
-      "sidecar_path": "legacy_sidecars/residue_in_file/residue.txt"
+      "status": "typed_converted"
     },
     {
       "bundle_file": "topology.spgt.h5",

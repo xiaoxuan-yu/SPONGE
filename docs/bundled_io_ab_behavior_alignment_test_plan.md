@@ -1373,7 +1373,43 @@ Acceptance:
 - Evidence reports two MPI ranks and rank-0-only output ownership.
 - Smoke, Ruff, and diff checks pass, followed by one PR-scoped commit.
 
-## 44. Artifacts and Temporary-Space Policy
+## 44. PR 47: Production-Fixture Residue Ownership Repair
+
+Bring the production full-contract and focused residue fixtures in line with
+the converter's typed-only residue contract without weakening the dedicated
+legacy-sidecar behavior coverage.
+
+- Keep `/atoms/residue_index` and `/residues/atom_offset` as the sole residue
+  owner in both full-contract bundles. Remove the stale `residue_in_file`
+  binding, materialized payload, and manifest sidecar metadata from the
+  compatibility bundle while retaining all unrelated compatibility sidecars.
+- Construct the focused residue-sidecar cases explicitly from current typed
+  converter output: copy the legacy residue payload into a bundle-local
+  sidecar, replace the topology binding table with that single owner, and
+  remove both typed residue datasets. The typed focused cases then promote the
+  same semantic partition back to one typed owner.
+- Reject partial typed residue state, no owner, and dual ownership during
+  full-contract preparation. Add a static fixture gate that parses both H5
+  topologies, verifies typed ownership, checks the manifest, and rejects an
+  external residue sidecar directory.
+- Remove the typed-QC fixture's obsolete assumption that converter output
+  contains a residue sidecar. QC mutation must not change residue ownership.
+
+Acceptance:
+
+- Sidecar and typed residue PBC mapping plus COM/virial behavior cases pass
+  against legacy with the complete semantic oracles.
+- Full-contract compatibility bundles pass both VDS modes, all QC cases, all
+  failure-semantics cases, and the CMAP potential VDS invariant without the
+  `Read_H5_Residue_Atom_Numbers` ownership conflict.
+- The production sweep may expose later independent behavior gaps only after
+  residue initialization succeeds; typed SITS configuration, no-velocity
+  rerun temperature, strip/frame numbering, and exact-EOF legacy cleanup are
+  retained as failures for follow-up PRs rather than hidden by the fixture.
+- Contract smoke, fixture manifest/equivalence CTests, Ruff, formatting, and
+  diff checks pass, followed by one PR-scoped commit.
+
+## 45. Artifacts and Temporary-Space Policy
 
 - Use `SPONGE_BUNDLED_IO_AB_RUN_ROOT` for all heavy runs.
 - Put production artifacts on the workspace filesystem rather than `/tmp`.
@@ -1383,7 +1419,7 @@ Acceptance:
 - Record artifact byte counts and enforce a configurable per-case quota.
 - Cleanup must only remove directories created by the current gate run.
 
-## 45. PR Completion Log
+## 46. PR Completion Log
 
 Append one row immediately after completing and committing each PR.
 
@@ -1437,3 +1473,4 @@ Append one row immediately after completing and committing each PR.
 | PR 44: Execution-matrix residue ownership fixture repair | Complete | XPONGE `2c0dc3e`; SPONGE this commit | XPONGE 101-test bundle regression; pinned-fixture hash/ownership gate; CPU and GPU deterministic matrix A/B; four-replica GPU Middle+SETTLE statistical A/B; Ruff; `git diff --check` | XPONGE now emits typed residue state without an active residue sidecar and reverse-exports mutated typed offsets. The regenerated TIP3P fixture has exactly one residue owner. Complete CPU/GPU deterministic and GPU statistical behavior comparisons pass; the former conflicting-owner startup failure is closed. |
 | PR 45: CUDA+MPI NCCL discovery prerequisite | Complete | This commit | CUDA 13 + OpenMPI + NCCL configure; 107-step CUDA `SPONGE` target build; `ldd`; cmake-format; `git diff --check` | The project CMake module path can now resolve an available NCCL installation through `NCCL_ROOT`. The real CUDA+MPI executable links HDF5, CUDA 13, OpenMPI, and NCCL without unresolved runtime libraries, enabling the GPU rank-2 behavior gate. |
 | PR 46: Portable GPU MPI device mapping | Complete | This commit | shared/explicit/rank-1 device-map mutation test; real four-replica CUDA+MPI rank-2 NPT+SETTLE statistical A/B; 139-test smoke; Ruff; `git diff --check` | GPU rank-2 defaults to a portable single-GPU shared map and accepts an explicit per-rank multi-GPU map. The real case passes complete mdout and all three H5 families with `mpi_rank_count=2` and rank-0-only output ownership. |
+| PR 47: Production-fixture residue ownership repair | Complete | This commit | four focused residue CPU A/B cases; full-contract sidecar VDS-off/on; 24-case sidecar QC/rerun/failure sweep; CMAP VDS invariant; 140-test smoke; H5 manifest and fixture-equivalence CTests; Ruff; format; `git diff --check` | Full-contract bundles now have exactly one typed residue owner, while focused sidecar cases explicitly replace typed state with one bundle-local sidecar owner. The stale startup conflict is closed across compatibility paths. Independent typed-SITS and rerun boundary behavior failures remain visible for subsequent alignment PRs. |
