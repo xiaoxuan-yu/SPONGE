@@ -556,7 +556,19 @@
         "protocol_sidecar_keys:SITS_atom_in_file",
         "protocol_sidecar_keys:SITS_nk_in_file"
       ],
-      "reason": "SITS initializes in the paired fixture, but a non-trivial module-owned SITS state/output comparison is pending."
+      "reason": "The runtime consumes inline SITS configuration, while typed /sits configuration is not materialized. Typed SITS Nk restart behavior is tracked separately."
+    },
+    {
+      "contract_id": "input.protocol.sits.nk_typed_restart",
+      "direction": "input",
+      "component": "restart_protocol_state",
+      "status": "supported",
+      "minimum_evidence": "E3",
+      "legacy_surface": "inline SITS production configuration and SITS_nk_in_file",
+      "bundled_surface": "inline SITS production configuration and /parameters/restart/bias/sits/SITS/nk with input_h5_restart_load=protocol",
+      "case_ids": ["normal_sits_nk_typed_restart_nonzero"],
+      "assertion_ids": ["input_semantic_equivalence"],
+      "reason": ""
     },
     {
       "contract_id": "input.topology.residue",

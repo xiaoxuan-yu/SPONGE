@@ -62,6 +62,9 @@ FOCUSED_VIRTUAL_ATOMS_ALIAS_FIXTURE = "focused_virtual_atoms_plural_alias"
 FOCUSED_VIRTUAL_ATOMS_PBC_FIXTURE = "focused_virtual_atoms_pbc_boundary"
 FOCUSED_CONSTRAINT_SIDECAR_FIXTURE = "focused_constraint_sidecar_two_atom"
 FOCUSED_STEERING_CV_SIDECAR_FIXTURE = "focused_steering_cv_sidecar_two_atom"
+FOCUSED_SITS_NK_TYPED_RESTART_FIXTURE = (
+    "focused_sits_nk_typed_restart_two_atom"
+)
 SITS_FF19SB_CMAP_SOURCE = (
     REPO_ROOT / "benchmarks" / "performance" / "sits" / "statics" / "ala2_sits"
 )
@@ -224,6 +227,13 @@ INPUT_SEMANTIC_SPECS_BY_CASE = {
     ),
     "normal_sits_ff19sb_cmap_peptide": (
         InputSemanticSpec("input.topology.cmap", ("cmap",), 1.0e-6),
+    ),
+    "normal_sits_nk_typed_restart_nonzero": (
+        InputSemanticSpec(
+            "input.protocol.sits.nk_typed_restart",
+            ("SITS_AA_kAB", "SITS_bias", "SITS_fb"),
+            1.0e-4,
+        ),
     ),
     "normal_edip_nonzero": (
         InputSemanticSpec("input.manybody.edip", ("EDIP",), 1.0e-6),
@@ -474,6 +484,28 @@ def _cases_for_profile() -> list[AbCase]:
                 "restart_continuation_equivalence",
                 "input_semantic_equivalence",
             ),
+        ),
+        AbCase(
+            name="normal_sits_nk_typed_restart_nonzero",
+            fixture_case=FOCUSED_SITS_NK_TYPED_RESTART_FIXTURE,
+            legacy_subdir="generated_legacy",
+            bundled_subdir="generated_bundled",
+            mode="normal",
+            vds=False,
+            statistical_md=False,
+            restart_load_policy="protocol",
+            contract_ids=(
+                "output.legacy.mdout",
+                "input.protocol.sits.nk_typed_restart",
+            ),
+            assertion_ids=(
+                "mdout_deterministic_equivalence",
+                "input_semantic_equivalence",
+            ),
+            normal_step_limit=1,
+            normal_interval=1,
+            normal_dt=0.0,
+            input_behavior_only=True,
         ),
         AbCase(
             name="normal_edip_nonzero",
@@ -2936,6 +2968,8 @@ def _prepare_case_pair(
     if case.mode in {"normal", "chunk_boundary"}:
         if case.fixture_case == SITS_FF19SB_CMAP_FIXTURE:
             return _prepare_sits_ff19sb_cmap_pair(case_root, replica_seed)
+        if case.fixture_case == FOCUSED_SITS_NK_TYPED_RESTART_FIXTURE:
+            return _prepare_focused_sits_nk_typed_restart_pair(case_root)
         if case.fixture_case == FOCUSED_EDIP_FIXTURE:
             return _prepare_focused_edip_pair(case_root)
         if case.fixture_case == FOCUSED_SW_SIDECAR_FIXTURE:
@@ -4701,6 +4735,193 @@ def _validate_focused_steering_cv_sidecar_routes(
         )
 
 
+def _prepare_focused_sits_nk_typed_restart_pair(
+    case_root: Path,
+) -> tuple[Path, Path]:
+    legacy_source = case_root / "focused_sits_nk_typed_restart_source"
+    legacy_dir = case_root / "legacy"
+    converted_dir = case_root / "converted_focused_sits_nk_restart_bundle"
+    bundled_dir = case_root / "bundled"
+    for path in (legacy_source, legacy_dir, converted_dir, bundled_dir):
+        if path.exists():
+            shutil.rmtree(path)
+    _write_focused_sits_nk_typed_restart_input(legacy_source)
+    shutil.copytree(legacy_source, legacy_dir)
+    _convert_legacy_case(legacy_source, converted_dir)
+    shutil.copytree(converted_dir / "bundle", bundled_dir)
+
+    bundled_mdin_path = bundled_dir / "mdin.bundled.spg.toml"
+    bundled_mdin = _remove_key_lines(
+        bundled_mdin_path.read_text(encoding="utf-8"), {"SITS_nk_rest"}
+    )
+    bundled_mdin = _insert_root_toml_keys(
+        bundled_mdin, ["SITS_nk_rest = false"]
+    )
+    bundled_mdin_path.write_text(bundled_mdin, encoding="utf-8")
+
+    protocol_path = bundled_dir / "protocol.spgp.h5"
+    with h5py.File(protocol_path, "r+") as protocol:
+        if "/sits" in protocol:
+            del protocol["/sits"]
+    restart_path = bundled_dir / "restart.spgr.h5"
+    with h5py.File(restart_path, "r+") as restart:
+        embedded_nk = "/parameters/restart/protocol_sidecars/SITS_nk_in_file"
+        if embedded_nk in restart:
+            del restart[embedded_nk]
+        sidecar_table = "/parameters/sponge/files/legacy_sidecars"
+        if sidecar_table in restart:
+            del restart[sidecar_table]
+    nk_sidecar = bundled_dir / "legacy_sidecars" / "SITS_nk_in_file"
+    if nk_sidecar.exists():
+        shutil.rmtree(nk_sidecar)
+    _validate_focused_sits_nk_typed_restart_routes(legacy_dir, bundled_dir)
+    return legacy_dir, bundled_dir
+
+
+def _write_focused_sits_nk_typed_restart_input(case_dir: Path) -> None:
+    case_dir.mkdir(parents=True, exist_ok=True)
+    (case_dir / "mass.txt").write_text("2\n12.0\n12.0\n", encoding="utf-8")
+    (case_dir / "charge.txt").write_text("2\n1.0\n-1.0\n", encoding="utf-8")
+    (case_dir / "lj.txt").write_text(
+        "2 1\n4096.0\n128.0\n0\n0\n", encoding="utf-8"
+    )
+    (case_dir / "coordinate.txt").write_text(
+        "2 0.0\n"
+        "0.0 0.0 0.0\n"
+        "2.0 0.0 0.0\n"
+        "20.0 20.0 20.0\n"
+        "90.0 90.0 90.0\n",
+        encoding="utf-8",
+    )
+    (case_dir / "velocity.txt").write_text(
+        "2\n0.0 0.0 0.0\n0.0 0.0 0.0\n", encoding="utf-8"
+    )
+    (case_dir / "sits_nk.txt").write_text("1.0 4.0\n", encoding="utf-8")
+    (case_dir / "mdin.spg.toml").write_text(
+        'md_name = "bundled io ab focused SITS nk typed restart"\n'
+        'mode = "nvt"\n'
+        "pbc = true\n"
+        "step_limit = 1\n"
+        "dt = 0.0\n"
+        "cutoff = 10.0\n"
+        "target_temperature = 300.0\n"
+        'thermostat = "middle_langevin"\n'
+        "thermostat_tau = 0.01\n"
+        "thermostat_seed = 20260713\n"
+        'mass_in_file = "mass.txt"\n'
+        'charge_in_file = "charge.txt"\n'
+        'LJ_in_file = "lj.txt"\n'
+        'coordinate_in_file = "coordinate.txt"\n'
+        'velocity_in_file = "velocity.txt"\n'
+        'SITS_nk_in_file = "sits_nk.txt"\n'
+        "print_zeroth_frame = 0\n"
+        "write_mdout_interval = 1\n"
+        "write_information_interval = 1\n"
+        'SITS_mode = "production"\n'
+        "SITS_atom_numbers = 2\n"
+        "SITS_k_numbers = 2\n"
+        'SITS_T = "300/600"\n'
+        "SITS_nk_rest = true\n"
+        "SITS_nk_fix = true\n"
+        "SITS_pe_a = 1.0\n"
+        "SITS_pe_b = 0.0\n"
+        "SITS_fb_bias = 0.0\n"
+        "SITS_fb_interval = 1\n",
+        encoding="utf-8",
+    )
+
+
+def _validate_focused_sits_nk_typed_restart_routes(
+    legacy_dir: Path, bundled_dir: Path
+) -> None:
+    legacy_mdin = (legacy_dir / "mdin.spg.toml").read_text(encoding="utf-8")
+    bundled_mdin = (bundled_dir / "mdin.bundled.spg.toml").read_text(
+        encoding="utf-8"
+    )
+    if not _has_key_line(legacy_mdin, "SITS_nk_in_file"):
+        raise AssertionError("focused SITS legacy route lost SITS_nk_in_file")
+    if _has_key_line(bundled_mdin, "SITS_nk_in_file"):
+        raise AssertionError(
+            "focused SITS bundled mdin retained SITS_nk_in_file"
+        )
+    if re.search(
+        r"(?m)^SITS_nk_rest\s*=\s*(?:false|0)\s*$", bundled_mdin
+    ) is None:
+        raise AssertionError("focused SITS bundled route did not disable text Nk")
+    for text, label in ((legacy_mdin, "legacy"), (bundled_mdin, "bundled")):
+        for key in ("SITS_mode", "SITS_atom_numbers", "SITS_k_numbers"):
+            if not _has_key_line(text, key):
+                raise AssertionError(
+                    f"focused SITS {label} route lost inline key {key}"
+                )
+
+    topology_path = bundled_dir / "topology.spgt.h5"
+    sidecar_root = "/parameters/sponge/files/legacy_sidecars"
+    topology_paths = _h5_paths(topology_path)
+    for typed_path in (
+        "/atoms/mass",
+        "/atoms/charge",
+        "/forcefield/lj/type",
+        "/forcefield/lj/pair_A_12",
+        "/forcefield/lj/pair_B_6",
+    ):
+        if typed_path not in topology_paths:
+            raise AssertionError(
+                f"focused SITS topology lost typed support {typed_path}"
+            )
+    topology_keys = _h5_string_values(
+        topology_path, f"{sidecar_root}/key"
+    )
+    topology_sidecar_paths = _h5_string_values(
+        topology_path, f"{sidecar_root}/path"
+    )
+    expected_topology_sidecars = {
+        "mass_in_file": "legacy_sidecars/mass_in_file/mass.txt",
+        "charge_in_file": "legacy_sidecars/charge_in_file/charge.txt",
+        "LJ_in_file": "legacy_sidecars/LJ_in_file/lj.txt",
+    }
+    if dict(zip(topology_keys, topology_sidecar_paths, strict=True)) != (
+        expected_topology_sidecars
+    ):
+        raise AssertionError(
+            "focused SITS topology support routes changed: "
+            f"keys={topology_keys}, paths={topology_sidecar_paths}"
+        )
+    protocol_path = bundled_dir / "protocol.spgp.h5"
+    protocol_paths = _h5_paths(protocol_path)
+    if any(path.startswith("/sits") for path in protocol_paths):
+        raise AssertionError("focused SITS bundled protocol retained typed data")
+    if sidecar_root in protocol_paths:
+        raise AssertionError(
+            "focused SITS protocol file unexpectedly retained sidecars"
+        )
+    restart_path = bundled_dir / "restart.spgr.h5"
+    restart_paths = _h5_paths(restart_path)
+    typed_nk_path = "/parameters/restart/bias/sits/SITS/nk"
+    if typed_nk_path not in restart_paths:
+        raise AssertionError("focused SITS bundled restart lost typed Nk state")
+    typed_nk = _h5_numeric_values(restart_path, typed_nk_path)
+    _assert_numeric_sequences_close(
+        "focused SITS typed Nk payload",
+        (1.0, 4.0),
+        typed_nk,
+        relative_tolerance=0.0,
+        absolute_tolerance=0.0,
+    )
+    if sidecar_root in restart_paths:
+        raise AssertionError("focused SITS restart retained sidecar path table")
+    embedded_path = "/parameters/restart/protocol_sidecars/SITS_nk_in_file"
+    if embedded_path in restart_paths:
+        raise AssertionError("focused SITS restart retained embedded Nk text")
+    if (bundled_dir / "legacy_sidecars" / "SITS_nk_in_file").exists():
+        raise AssertionError("focused SITS retained external Nk sidecar file")
+    for key in ("mass_in_file", "charge_in_file", "LJ_in_file"):
+        if not (bundled_dir / "legacy_sidecars" / key).exists():
+            raise AssertionError(
+                f"focused SITS bundled branch lost {key} support sidecar"
+            )
+
+
 def _write_sits_ff19sb_cmap_mdin(case_dir: Path, replica_seed: int):
     _assert_sits_ff19sb_cmap_fixture(case_dir / "ALA_cmap.txt")
     masses = read_mass_values(case_dir / "ALA_mass.txt")
@@ -4924,6 +5145,14 @@ def _prepare_mdin(
                 'rst = "output/legacy_restart"',
             ]
         )
+        if (
+            branch == "bundled"
+            and case.restart_load_policy != "structural"
+            and _has_key_line(text, "input_h5_restart_path")
+        ):
+            additions.append(
+                f'input_h5_restart_load = "{case.restart_load_policy}"'
+            )
     else:
         additions = [
             f"rerun_start = {case.rerun_start}",
@@ -5568,6 +5797,10 @@ def _compare_input_semantics(
                 replica_result["oracle"] = _compare_focused_steering_cv(
                     case, run
                 )
+            elif spec.contract_id == "input.protocol.sits.nk_typed_restart":
+                replica_result["oracle"] = (
+                    _compare_focused_sits_nk_typed_restart(case, run)
+                )
             elif spec.contract_id == "input.topology.lj_soft_core":
                 replica_result["force"] = _compare_focused_lj_soft_core_forces(
                     case, run
@@ -5593,6 +5826,118 @@ def _compare_input_semantics(
             }
         )
     return results
+
+
+def _compare_focused_sits_nk_typed_restart(
+    case: AbCase, run: AbRun
+) -> dict[str, object]:
+    branch_results = {}
+    forces = {}
+    for branch, directory in (
+        ("legacy", run.legacy_dir),
+        ("bundled", run.bundled_dir),
+    ):
+        rows = _read_mdout(directory / "mdout.txt")["rows"]
+        branch_forces = _read_native_float32_file(
+            directory / "output" / "legacy.frc"
+        )
+        branch_results[branch] = _assert_sits_nk_typed_restart_oracle(
+            f"{case.name} {branch}", rows, branch_forces
+        )
+        forces[branch] = branch_forces
+    cross_branch_force = _assert_nontrivial_equivalent_forces(
+        f"{case.name} SITS force", forces["legacy"], forces["bundled"]
+    )
+    return {
+        "route": "isolated_h5_typed_SITS_nk_restart_state",
+        "branches": branch_results,
+        "cross_branch_force": cross_branch_force,
+    }
+
+
+def _assert_sits_nk_typed_restart_oracle(
+    label: str,
+    rows: Sequence[dict[str, float]],
+    forces: Sequence[float],
+) -> dict[str, object]:
+    enhancing_energy = -1.22
+    expected_bias = -0.5317
+    expected_factor = 0.7049
+    expected_potential = -1.28
+    expected_effective_potential = -1.2829471
+    expected_force = (
+        0.1828715056180954,
+        1.096548518653151e-09,
+        -1.2317579178855453e-09,
+        -0.2489061951637268,
+        -7.1972111603813e-10,
+        1.3064306303434137e-09,
+    )
+    control_bias = -0.1833
+    control_factor = 0.8677
+    control_force_x = 0.21928882598876953
+
+    module_energy = [
+        row["SITS_AA_kAB"] for row in rows if "SITS_AA_kAB" in row
+    ]
+    bias = [row["SITS_bias"] for row in rows if "SITS_bias" in row]
+    factor = [row["SITS_fb"] for row in rows if "SITS_fb" in row]
+    lj_short = [row["LJ_short"] for row in rows if "LJ_short" in row]
+    lj = [row["LJ"] for row in rows if "LJ" in row]
+    particle_mesh = [row["PM"] for row in rows if "PM" in row]
+    potential = [row["potential"] for row in rows if "potential" in row]
+    effective_potential = [
+        row["eff_pot"] for row in rows if "eff_pot" in row
+    ]
+    for observable, expected, values, tolerance in (
+        ("SITS_AA_kAB", enhancing_energy, module_energy, 1.0e-6),
+        ("SITS_bias", expected_bias, bias, 1.5e-4),
+        ("SITS_fb", expected_factor, factor, 1.5e-4),
+        ("LJ_short", -1.0, lj_short, 1.0e-6),
+        ("LJ", -1.0, lj, 1.0e-6),
+        ("PM", -0.5, particle_mesh, 1.0e-6),
+        ("potential", expected_potential, potential, 1.1e-2),
+        (
+            "eff_pot",
+            expected_effective_potential,
+            effective_potential,
+            1.0e-5,
+        ),
+    ):
+        _assert_numeric_sequences_close(
+            f"{label} {observable} oracle",
+            (expected,),
+            values,
+            relative_tolerance=0.0,
+            absolute_tolerance=tolerance,
+        )
+    relative_tolerance, absolute_tolerance = _deterministic_tolerance("force")
+    _assert_numeric_sequences_close(
+        f"{label} SITS force oracle",
+        expected_force,
+        forces,
+        relative_tolerance=relative_tolerance,
+        absolute_tolerance=absolute_tolerance,
+    )
+    if abs(bias[0] - control_bias) <= 0.3:
+        raise AssertionError(f"{label} SITS bias does not distinguish typed Nk")
+    if abs(factor[0] - control_factor) <= 0.1:
+        raise AssertionError(
+            f"{label} SITS force factor does not distinguish typed Nk"
+        )
+    if abs(forces[0] - control_force_x) <= 0.03:
+        raise AssertionError(f"{label} SITS force does not distinguish typed Nk")
+    return {
+        "enhancing_energy_at_update": enhancing_energy,
+        "nk": [1.0, 4.0],
+        "temperatures": [300.0, 600.0],
+        "bias": bias[0],
+        "force_factor": factor[0],
+        "potential": potential[0],
+        "effective_potential": effective_potential[0],
+        "maximum_abs_force": max(abs(value) for value in forces),
+        "initialization_only_rejected": True,
+    }
 
 
 def _compare_focused_steering_cv(
