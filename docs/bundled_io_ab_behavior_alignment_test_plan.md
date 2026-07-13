@@ -391,7 +391,31 @@ Acceptance:
 - Registry, manifest, all three real CPU failure cases, Ruff, and diff checks
   pass.
 
-## 14. Artifacts and Temporary-Space Policy
+## 14. PR 11: Restart Owner-State Failure Semantics
+
+Close the deferred F1 owner-state contract by exercising each non-structural
+restart load policy through the production process.
+
+- Request `dynamic` state containing Nose-Hoover-chain payload while the
+  current run has no Nose-Hoover-chain thermostat owner.
+- Request `protocol` state containing metadynamics payload while the current
+  run has no initialized metadynamics owner.
+- Request `full` state with the same missing dynamic owner and require it to
+  reject before partially applying later protocol state.
+- Require non-zero exit, `spongeErrorConflictingCommand`, and owner-specific
+  stable diagnostic tokens for all three cases.
+
+Acceptance:
+
+- The three cases use the same bundled restart payload and differ only in the
+  declared `input_h5_restart_load` policy.
+- Dynamic/full diagnostics name the Nose-Hoover-chain state and missing
+  thermostat; protocol diagnostics name metadynamics state and its missing
+  module.
+- Registry, manifest, all three real CPU failure cases, Ruff, and diff checks
+  pass.
+
+## 15. Artifacts and Temporary-Space Policy
 
 - Use `SPONGE_BUNDLED_IO_AB_RUN_ROOT` for all heavy runs.
 - Put production artifacts on the workspace filesystem rather than `/tmp`.
@@ -401,7 +425,7 @@ Acceptance:
 - Record artifact byte counts and enforce a configurable per-case quota.
 - Cleanup must only remove directories created by the current gate run.
 
-## 15. PR Completion Log
+## 16. PR Completion Log
 
 Append one row immediately after completing and committing each PR.
 
@@ -419,3 +443,4 @@ Append one row immediately after completing and committing each PR.
 | PR 8: VDS chunk-boundary behavior closure | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; four real CPU VDS chunk-boundary A/B cases; Ruff; `git diff --check` | 76 contract/manifest/comparator tests pass. With chunk size 4, same-semantic deterministic NVE branches produce and compare 3/4/5/9 frames with 1/1/2/3 shards. Frame-count and shard-count mutations are rejected. The cases use `dt=0.0001` to isolate chunk/finalize behavior without relaxing deterministic numeric tolerances. |
 | PR 9: Focused non-zero EDIP input behavior gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; real `normal_edip_nonzero` CPU A/B; Ruff; `git diff --check` | 79 contract/manifest/comparator tests and the focused real A/B pass. The pure bundled branch removes the sidecar table and directory, materializes `/manybody/edip`, and matches legacy at non-zero `EDIP=52.98159` and maximum force `400.30548`. The independently exposed H5 zeroth-frame/force-payload schedule gap remains outside this input-only contract. |
 | PR 10: H5 sidecar-table failure semantics | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; three real bundled CPU failure cases; Ruff; `git diff --check` | 79 contract/manifest/comparator tests and all three F1 process cases pass. Unsupported key, key/path length mismatch, and same-key different-path conflict each exit with code 238 and `spongeErrorValueErrorCommand`, while retaining route-specific stable diagnostic tokens. |
+| PR 11: Restart owner-state failure semantics | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; three real bundled CPU failure cases; Ruff; `git diff --check` | 79 contract/manifest/comparator tests and all three F1 process cases pass. Dynamic, protocol, and full policies each exit with code 235 and `spongeErrorConflictingCommand`; diagnostics distinguish missing Nose-Hoover-chain and metadynamics owners. |

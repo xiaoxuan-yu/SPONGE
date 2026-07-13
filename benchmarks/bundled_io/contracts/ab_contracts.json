@@ -359,13 +359,16 @@
       "contract_id": "failure.restart_owner_state",
       "direction": "runtime",
       "component": "input_validation",
-      "status": "deferred",
+      "status": "supported",
       "minimum_evidence": "F1",
       "legacy_surface": "dynamic/protocol/full state requested without owner module",
       "bundled_surface": "the same owner-state requests through input_h5_restart_load",
-      "case_ids": [],
-      "assertion_ids": [],
-      "reason": "Validation helpers cover missing payloads; process-level owner-module diagnostics are pending."
+      "case_ids": [
+        "failure_restart_dynamic_without_owner",
+        "failure_restart_protocol_without_owner",
+        "failure_restart_full_without_owner"
+      ],
+      "assertion_ids": ["stable_failure_semantics"]
     },
     {
       "contract_id": "input.topology.cmap",

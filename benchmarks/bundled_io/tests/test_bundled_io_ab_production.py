@@ -741,6 +741,12 @@ def _failure_cases() -> list[AbCase]:
         **shared,
         "contract_ids": ("failure.sidecar_table",),
     }
+    restart_owner_shared = {
+        key: value
+        for key, value in shared.items()
+        if key != "restart_load_policy"
+    }
+    restart_owner_shared["contract_ids"] = ("failure.restart_owner_state",)
     return [
         AbCase(
             name="failure_missing_trajectory_binding",
@@ -847,6 +853,42 @@ def _failure_cases() -> list[AbCase]:
                 "h5=",
             ),
             **sidecar_shared,
+        ),
+        AbCase(
+            name="failure_restart_dynamic_without_owner",
+            restart_load_policy="dynamic",
+            failure_mutation="restart_dynamic_without_owner",
+            failure_branches=("bundled",),
+            expected_error_category="spongeErrorConflictingCommand",
+            expected_diagnostic_tokens=(
+                "Restart contains Nose-Hoover chain state",
+                "nose_hoover_chain thermostat is not initialized",
+            ),
+            **restart_owner_shared,
+        ),
+        AbCase(
+            name="failure_restart_protocol_without_owner",
+            restart_load_policy="protocol",
+            failure_mutation="restart_protocol_without_owner",
+            failure_branches=("bundled",),
+            expected_error_category="spongeErrorConflictingCommand",
+            expected_diagnostic_tokens=(
+                "Restart contains metadynamics state",
+                "meta module is not initialized",
+            ),
+            **restart_owner_shared,
+        ),
+        AbCase(
+            name="failure_restart_full_without_owner",
+            restart_load_policy="full",
+            failure_mutation="restart_full_without_owner",
+            failure_branches=("bundled",),
+            expected_error_category="spongeErrorConflictingCommand",
+            expected_diagnostic_tokens=(
+                "Restart contains Nose-Hoover chain state",
+                "nose_hoover_chain thermostat is not initialized",
+            ),
+            **restart_owner_shared,
         ),
     ]
 
@@ -1884,6 +1926,9 @@ def _mutate_failure_mdin(case: AbCase, mdin_path: Path, branch: str) -> None:
         "unsupported_sidecar_key",
         "sidecar_length_mismatch",
         "sidecar_path_conflict",
+        "restart_dynamic_without_owner",
+        "restart_protocol_without_owner",
+        "restart_full_without_owner",
     }:
         return
     else:
