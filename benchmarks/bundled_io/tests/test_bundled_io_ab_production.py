@@ -1140,6 +1140,10 @@ def _failure_cases() -> list[AbCase]:
         **shared,
         "contract_ids": ("failure.sidecar_table",),
     }
+    metadata_shared = {
+        **shared,
+        "contract_ids": ("failure.h5_metadata.runtime_rejections",),
+    }
     restart_owner_shared = {
         key: value
         for key, value in shared.items()
@@ -1252,6 +1256,40 @@ def _failure_cases() -> list[AbCase]:
                 "h5=",
             ),
             **sidecar_shared,
+        ),
+        AbCase(
+            name="failure_h5_topology_atom_count_mismatch",
+            failure_mutation="h5_topology_atom_count_mismatch",
+            failure_branches=("bundled",),
+            expected_error_category="spongeErrorValueErrorCommand",
+            expected_diagnostic_tokens=(
+                "input_h5_restart_path",
+                "restart atom_count does not match topology",
+            ),
+            **metadata_shared,
+        ),
+        AbCase(
+            name="failure_h5_topology_mass_shape",
+            failure_mutation="h5_topology_mass_shape",
+            failure_branches=("bundled",),
+            expected_error_category="spongeErrorBadFileFormat",
+            expected_diagnostic_tokens=(
+                "Materialize_H5_Native_Topology_Core",
+                "atom mass dataset /atoms/mass must be one-dimensional",
+            ),
+            **metadata_shared,
+        ),
+        AbCase(
+            name="failure_h5_topology_mass_dtype",
+            failure_mutation="h5_topology_mass_dtype",
+            failure_branches=("bundled",),
+            expected_error_category="spongeErrorBadFileFormat",
+            expected_diagnostic_tokens=(
+                "Materialize_H5_Native_Topology_Core",
+                "failed to read native topology H5 core state",
+                "Unable to read the dataset",
+            ),
+            **metadata_shared,
         ),
         AbCase(
             name="failure_restart_dynamic_without_owner",
@@ -4839,6 +4877,9 @@ def _mutate_failure_mdin(case: AbCase, mdin_path: Path, branch: str) -> None:
         "unsupported_sidecar_key",
         "sidecar_length_mismatch",
         "sidecar_path_conflict",
+        "h5_topology_atom_count_mismatch",
+        "h5_topology_mass_shape",
+        "h5_topology_mass_dtype",
         "restart_dynamic_without_owner",
         "restart_protocol_without_owner",
         "restart_full_without_owner",
@@ -4861,12 +4902,40 @@ def _mutate_failure_h5(case: AbCase, case_dir: Path, branch: str) -> None:
         "sidecar_length_mismatch",
         "sidecar_path_conflict",
     }
-    if mutation not in sidecar_mutations or branch not in case.failure_branches:
+    metadata_mutations = {
+        "h5_topology_atom_count_mismatch",
+        "h5_topology_mass_shape",
+        "h5_topology_mass_dtype",
+    }
+    if (
+        mutation not in sidecar_mutations | metadata_mutations
+        or branch not in case.failure_branches
+    ):
         return
     if branch != "bundled":
         raise AssertionError(f"{mutation} requires the bundled H5 branch")
 
     topology_path = case_dir / "topology.spgt.h5"
+    if mutation in metadata_mutations:
+        with h5py.File(topology_path, "r+") as topology:
+            if mutation == "h5_topology_atom_count_mismatch":
+                topology["/topology/atom_count"][...] = 3
+                return
+            del topology["/atoms/mass"]
+            if mutation == "h5_topology_mass_shape":
+                topology.create_dataset(
+                    "/atoms/mass",
+                    data=[[12.011], [15.999]],
+                    dtype="f4",
+                )
+            else:
+                topology.create_dataset(
+                    "/atoms/mass",
+                    data=["12.011", "15.999"],
+                    dtype=h5py.string_dtype(encoding="utf-8"),
+                )
+        return
+
     group_path = "/parameters/sponge/files/legacy_sidecars"
     with h5py.File(topology_path, "r+") as h5:
         if group_path not in h5:

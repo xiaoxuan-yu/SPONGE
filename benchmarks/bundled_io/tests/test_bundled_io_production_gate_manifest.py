@@ -298,6 +298,9 @@ def test_ab_production_harness_has_executable_contract_coverage():
         "failure_sidecar_unsupported_key",
         "failure_sidecar_key_path_length_mismatch",
         "failure_sidecar_path_conflict",
+        "failure_h5_topology_atom_count_mismatch",
+        "failure_h5_topology_mass_shape",
+        "failure_h5_topology_mass_dtype",
         "failure_restart_dynamic_without_owner",
         "failure_restart_protocol_without_owner",
         "failure_restart_full_without_owner",
@@ -507,6 +510,9 @@ def test_failure_matrix_requires_exit_category_and_stable_tokens():
         "unsupported_sidecar_key",
         "sidecar_length_mismatch",
         "sidecar_path_conflict",
+        "h5_topology_atom_count_mismatch",
+        "h5_topology_mass_shape",
+        "h5_topology_mass_dtype",
         "restart_dynamic_without_owner",
         "restart_protocol_without_owner",
         "restart_full_without_owner",
@@ -537,6 +543,33 @@ def test_failure_matrix_requires_exit_category_and_stable_tokens():
         "sidecar_path_conflict",
     }
     assert all(case.failure_branches == ("bundled",) for case in sidecar_cases)
+    metadata_cases = [
+        case
+        for case in cases
+        if case.contract_ids == ("failure.h5_metadata.runtime_rejections",)
+    ]
+    assert {
+        case.failure_mutation: case.expected_error_category
+        for case in metadata_cases
+    } == {
+        "h5_topology_atom_count_mismatch": "spongeErrorValueErrorCommand",
+        "h5_topology_mass_shape": "spongeErrorBadFileFormat",
+        "h5_topology_mass_dtype": "spongeErrorBadFileFormat",
+    }
+    assert all(
+        case.failure_branches == ("bundled",) for case in metadata_cases
+    )
+    contracts = load_contract_registry()
+    metadata_contract = contracts["failure.h5_metadata.runtime_rejections"]
+    assert metadata_contract.status == "supported"
+    assert set(metadata_contract.case_ids) == {
+        case.name for case in metadata_cases
+    }
+    assert metadata_contract.assertion_ids == ("stable_failure_semantics",)
+    complete_contract = contracts["failure.h5_metadata"]
+    assert complete_contract.status == "deferred"
+    assert "schema/version" in complete_contract.reason
+    assert "currently accepted" in complete_contract.reason
     restart_owner_cases = [
         case
         for case in cases
