@@ -636,13 +636,13 @@
       "contract_id": "input.manybody.edip",
       "direction": "input",
       "component": "manybody",
-      "status": "deferred",
+      "status": "supported",
       "minimum_evidence": "E3",
       "legacy_surface": "EDIP_in_file",
       "bundled_surface": "/manybody/edip",
-      "case_ids": [],
-      "assertion_ids": [],
-      "reason": "Runtime parity exists but must reject the current all-zero EDIP sentinel before promotion."
+      "case_ids": ["normal_edip_nonzero"],
+      "assertion_ids": ["input_semantic_equivalence"],
+      "reason": ""
     },
     {
       "contract_id": "input.manybody.tersoff",

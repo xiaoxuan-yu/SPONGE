@@ -34,10 +34,12 @@ from benchmarks.bundled_io.tests.test_bundled_io_ab_execution_matrix import (
     MATRIX_RUNTIME_CASES,
 )
 from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
+    FOCUSED_EDIP_FIXTURE,
     INPUT_SEMANTIC_SPECS_BY_CASE,
     MDINFO_CONTRACT_KEYS,
     PROFILE_LIMITS,
     RERUN_INPUT_SEMANTIC_SPECS,
+    _assert_nontrivial_equivalent_forces,
     _cases_for_profile,
     _expected_rerun_frame_indices,
     _insert_root_toml_keys,
@@ -235,6 +237,7 @@ def test_ab_production_harness_has_executable_contract_coverage():
     assert {case.name for case in cases} == {
         "normal_core_h5_output",
         "normal_sits_ff19sb_cmap_peptide",
+        "normal_edip_nonzero",
         "normal_vds_chunk_minus_one",
         "normal_vds_chunk_exact",
         "normal_vds_chunk_plus_one",
@@ -492,6 +495,46 @@ def test_input_semantic_gate_requires_nontrivial_owned_result():
 
     assert result["legacy_nontrivial"] is True
     assert result["bundled_nontrivial"] is True
+
+
+def test_focused_edip_case_requires_pure_h5_nonzero_energy_and_force():
+    contracts = load_contract_registry()
+    case = next(
+        case for case in _cases_for_profile() if case.name == "normal_edip_nonzero"
+    )
+    spec = INPUT_SEMANTIC_SPECS_BY_CASE[case.name]
+
+    assert case.fixture_case == FOCUSED_EDIP_FIXTURE
+    assert case.statistical_md is False
+    assert case.normal_step_limit == 1
+    assert case.normal_dt == 0.0
+    assert case.input_behavior_only is True
+    assert case.contract_ids == (
+        "output.legacy.mdout",
+        "input.manybody.edip",
+    )
+    assert spec == (
+        InputSemanticSpec("input.manybody.edip", ("EDIP",), 1.0e-6),
+    )
+    assert contracts["input.manybody.edip"].status == "supported"
+    assert contracts["input.manybody.edip"].case_ids == (case.name,)
+    assert contracts["input.manybody.edip"].assertion_ids == (
+        "input_semantic_equivalence",
+    )
+
+
+@pytest.mark.parametrize(
+    ("legacy", "bundled", "message"),
+    [
+        ([0.0, 0.0], [0.0, 0.0], "legacy force is all trivial"),
+        ([1.0, -1.0], [1.0, 0.0], "mismatch at index"),
+    ],
+)
+def test_focused_edip_force_gate_rejects_trivial_or_mismatched_force(
+    legacy, bundled, message
+):
+    with pytest.raises(AssertionError, match=message):
+        _assert_nontrivial_equivalent_forces("EDIP force", legacy, bundled)
 
 
 def test_input_semantic_registry_uses_owned_observables_not_initialization_logs():

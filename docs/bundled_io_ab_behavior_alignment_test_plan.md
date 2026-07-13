@@ -344,7 +344,31 @@ Acceptance:
   gate.
 - Registry, manifest, comparator, and full contract tests pass.
 
-## 12. Artifacts and Temporary-Space Policy
+## 12. PR 9: Focused Non-Zero EDIP Input Behavior Gate
+
+This follow-up replaces the broad fixture's all-zero EDIP sentinel with a
+minimal deterministic case whose owning module has distinguishable behavior.
+
+- Generate a two-atom legacy input with `EDIP_in_file`, finite separation, and
+  no competing force-field module.
+- Convert the same input to native `/manybody/edip` H5 datasets and remove the
+  converter's unused legacy-sidecar directory before execution.
+- Require non-zero, cross-branch equivalent EDIP energy and force values.
+- Compare complete deterministic mdout rows and the non-zero legacy force route
+  across the legacy-input and bundled-input branches.
+- Keep H5 force/output schedule behavior outside this input-only evidence scope;
+  that independent contract must be repaired and gated separately.
+
+Acceptance:
+
+- The bundled mdin has no `EDIP_in_file` and the runtime directory has no
+  `legacy_sidecars`; all required EDIP pair/triple/type datasets are present.
+- Both branches emit finite `EDIP` values above the declared sentinel floor and
+  non-zero force payloads.
+- Zero energy, zero force, force mismatch, or mdout mismatch fails the gate.
+- Registry, manifest, comparator, real focused A/B, Ruff, and diff checks pass.
+
+## 13. Artifacts and Temporary-Space Policy
 
 - Use `SPONGE_BUNDLED_IO_AB_RUN_ROOT` for all heavy runs.
 - Put production artifacts on the workspace filesystem rather than `/tmp`.
@@ -354,7 +378,7 @@ Acceptance:
 - Record artifact byte counts and enforce a configurable per-case quota.
 - Cleanup must only remove directories created by the current gate run.
 
-## 13. PR Completion Log
+## 14. PR Completion Log
 
 Append one row immediately after completing and committing each PR.
 
@@ -370,3 +394,4 @@ Append one row immediately after completing and committing each PR.
 | PR 7b: Portable runtime matrix and CPU/MPI evidence | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; six CPU rank-1 fast A/B cases; two CPU rank-2 fast A/B cases; Ruff; workflow YAML parse; `git diff --check` | 74 contract/manifest tests and all eight CPU/MPI runtime cases pass. The matrix pins same-semantic fixtures, records backend/OMP/MPI/rank-0 ownership evidence, and compares complete H5 trajectory/observable/restart behavior with periodic-aware deterministic and statistical position checks. Four GPU cases are executable but lack real-device evidence, so promotion remains shadow-only for PR 7c. |
 | PR 7c: GPU evidence and final promotion | Pending | | | |
 | PR 8: VDS chunk-boundary behavior closure | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; four real CPU VDS chunk-boundary A/B cases; Ruff; `git diff --check` | 76 contract/manifest/comparator tests pass. With chunk size 4, same-semantic deterministic NVE branches produce and compare 3/4/5/9 frames with 1/1/2/3 shards. Frame-count and shard-count mutations are rejected. The cases use `dt=0.0001` to isolate chunk/finalize behavior without relaxing deterministic numeric tolerances. |
+| PR 9: Focused non-zero EDIP input behavior gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; real `normal_edip_nonzero` CPU A/B; Ruff; `git diff --check` | 79 contract/manifest/comparator tests and the focused real A/B pass. The pure bundled branch removes the sidecar table and directory, materializes `/manybody/edip`, and matches legacy at non-zero `EDIP=52.98159` and maximum force `400.30548`. The independently exposed H5 zeroth-frame/force-payload schedule gap remains outside this input-only contract. |
