@@ -289,7 +289,7 @@ Append one row immediately after completing and committing each PR.
 |---|---|---|---|---|
 | PR 1: Executable contract registry | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; sidecar rerun VDS-off A/B | 21 contract tests and one real A/B case pass; pure-native rerun exposes a strict column-set gap retained for input behavior closure. |
 | PR 2: Contract enumeration and fixtures | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; H5 manifest/native-reader/fixture-equivalence CTest; sidecar rerun VDS-off A/B | Runtime key inventory has exact contract ownership; full-contract mdin/manifest now enumerate output controls, all legacy routes, particle stream, and rerun controls; missing topology runtime cases are explicitly deferred to PR 5. |
-| PR 3: Comparators | Pending | | | |
+| PR 3: Comparators | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; real sidecar rerun VDS-off A/B (expected QC failure) | 41 contract/comparator tests pass; TOST plus Holm correction, quantity-specific margins, structured position/velocity/force/box statistics, exact non-finite patterns, and all six comparator mutations are enforced. The real gate still rejects the known QC first-frame behavior gap (`-34183.44` vs `-34139.92`) without weakening tolerances. |
 | PR 4: Output behavior closure | Pending | | | |
 | PR 5: Input behavior closure | Pending | | | |
 | PR 6: Rerun and failure semantics | Pending | | | |

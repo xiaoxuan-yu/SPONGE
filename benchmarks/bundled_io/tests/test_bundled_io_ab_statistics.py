@@ -1,11 +1,23 @@
 from __future__ import annotations
 
+import math
+
 import pytest
 
 from benchmarks.bundled_io.ab_statistics import (
     StatisticalEquivalencePolicy,
     block_means,
     compare_replicas,
+    holm_correct_equivalence_family,
+)
+from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
+    _assert_nonfinite_patterns_match,
+    _assert_numeric_sequences_close,
+    _deterministic_tolerance,
+    _statistical_policy,
+)
+from benchmarks.bundled_io.trajectory_statistics import (
+    trajectory_observable_series,
 )
 
 POLICY = StatisticalEquivalencePolicy(
@@ -15,6 +27,16 @@ POLICY = StatisticalEquivalencePolicy(
     confidence_z=3.0,
     relative_margin=0.05,
     absolute_margin=0.01,
+    maximum_std_ratio=1.5,
+)
+
+MUTATION_POLICY = StatisticalEquivalencePolicy(
+    burn_in_frames=0,
+    block_size=2,
+    minimum_blocks_per_replica=3,
+    confidence_z=2.0,
+    relative_margin=0.01,
+    absolute_margin=0.05,
     maximum_std_ratio=1.5,
 )
 
@@ -48,7 +70,9 @@ def test_statistical_equivalence_rejects_mean_shift_outside_margin():
     legacy = [[0.0, 0.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0]]
     bundled = [[0.0, 0.0, 11.0, 11.0, 11.0, 11.0, 11.0, 11.0]]
 
-    with pytest.raises(AssertionError, match="mean is not statistically equivalent"):
+    with pytest.raises(
+        AssertionError, match="mean is not statistically equivalent"
+    ):
         compare_replicas("temperature", legacy, bundled, POLICY)
 
 
@@ -58,3 +82,195 @@ def test_statistical_equivalence_rejects_changed_fluctuations():
 
     with pytest.raises(AssertionError, match="fluctuation mismatch"):
         compare_replicas("temperature", legacy, bundled, POLICY)
+
+
+def test_statistical_equivalence_reports_tost_p_value():
+    replicas = [[0.0, 0.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0]]
+
+    result = compare_replicas("temperature", replicas, replicas, POLICY)
+
+    assert result["equivalence_p_value"] == 0.0
+
+
+def test_holm_correction_rejects_observable_that_only_passes_uncorrected_alpha():
+    results = {
+        "potential": {"equivalence_p_value": 0.03},
+        "temperature": {"equivalence_p_value": 0.04},
+    }
+
+    with pytest.raises(AssertionError, match="after Holm correction"):
+        holm_correct_equivalence_family("mdout", results, alpha=0.05)
+
+
+def test_holm_correction_records_auditable_rank_and_threshold():
+    results = {
+        "potential": {"equivalence_p_value": 0.001},
+        "temperature": {"equivalence_p_value": 0.01},
+    }
+
+    corrected = holm_correct_equivalence_family("mdout", results, alpha=0.05)
+
+    assert corrected["potential"]["holm_rank"] == 1
+    assert corrected["potential"]["holm_threshold"] == pytest.approx(0.025)
+    assert corrected["temperature"]["holm_rank"] == 2
+
+
+def _compare_trajectory_family(
+    dataset: str,
+    legacy_replicas: list[list[float]],
+    bundled_replicas: list[list[float]],
+    shape: tuple[int, ...],
+) -> None:
+    legacy = [
+        trajectory_observable_series(dataset, values, shape)
+        for values in legacy_replicas
+    ]
+    bundled = [
+        trajectory_observable_series(dataset, values, shape)
+        for values in bundled_replicas
+    ]
+    results = {}
+    for feature in legacy[0]:
+        results[feature] = compare_replicas(
+            feature,
+            [replica[feature] for replica in legacy],
+            [replica[feature] for replica in bundled],
+            MUTATION_POLICY,
+        )
+    holm_correct_equivalence_family("trajectory", results, alpha=0.05)
+
+
+def _position_frames(frame_count: int) -> list[float]:
+    values = []
+    for frame in range(frame_count):
+        values.extend((float(frame), 0.0, 0.0, 10.0, 0.0, 0.0))
+    return values
+
+
+def test_energy_offset_mutation_is_rejected():
+    legacy = [[10.0, 10.1, 9.9, 10.0, 10.1, 9.9]]
+    bundled = [[value + 1.0 for value in legacy[0]]]
+
+    with pytest.raises(
+        AssertionError, match="mean is not statistically equivalent"
+    ):
+        compare_replicas("potential", legacy, bundled, MUTATION_POLICY)
+
+
+def test_variance_increase_mutation_is_rejected():
+    legacy = [[9.9, 9.9, 10.1, 10.1, 10.0, 10.0]]
+    bundled = [[9.5, 9.5, 10.5, 10.5, 10.0, 10.0]]
+
+    with pytest.raises(AssertionError):
+        compare_replicas("temperature", legacy, bundled, MUTATION_POLICY)
+
+
+def test_atom_permutation_mutation_is_rejected():
+    legacy = _position_frames(6)
+    bundled = []
+    for offset in range(0, len(legacy), 6):
+        bundled.extend(legacy[offset + 3 : offset + 6])
+        bundled.extend(legacy[offset : offset + 3])
+
+    with pytest.raises(AssertionError):
+        _compare_trajectory_family(
+            "/particles/all/position/value", [legacy], [bundled], (6, 2, 3)
+        )
+
+
+def test_local_force_offset_mutation_is_rejected():
+    legacy = []
+    bundled = []
+    for frame in range(6):
+        legacy.extend((float(frame), 0.0, 0.0, -float(frame), 0.0, 0.0))
+        bundled.extend((float(frame), 0.0, 0.0, -float(frame) + 1.0, 0.0, 0.0))
+
+    with pytest.raises(AssertionError):
+        _compare_trajectory_family(
+            "/particles/all/force/value", [legacy], [bundled], (6, 2, 3)
+        )
+
+
+def test_missing_nonfinite_mutation_is_rejected():
+    with pytest.raises(AssertionError, match="non-finite mismatch"):
+        _assert_numeric_sequences_close(
+            "potential",
+            [1.0, float("nan"), float("inf"), -float("inf")],
+            [1.0, 0.0, float("inf"), -float("inf")],
+            relative_tolerance=0.0,
+            absolute_tolerance=0.0,
+        )
+
+
+@pytest.mark.parametrize(
+    ("legacy", "bundled"),
+    [
+        ([float("inf")], [-float("inf")]),
+        ([-float("inf")], [float("inf")]),
+        ([float("nan")], [float("inf")]),
+    ],
+)
+def test_nonfinite_kind_and_sign_mutations_are_rejected(legacy, bundled):
+    with pytest.raises(AssertionError, match="non-finite mismatch"):
+        _assert_nonfinite_patterns_match("potential", legacy, bundled)
+
+
+def test_frame_schedule_mutation_is_rejected():
+    with pytest.raises(AssertionError, match="mismatch at index 2"):
+        _assert_numeric_sequences_close(
+            "step schedule",
+            [0.0, 10.0, 20.0],
+            [0.0, 10.0, 30.0],
+            relative_tolerance=0.0,
+            absolute_tolerance=1.0e-12,
+        )
+
+
+def test_position_and_velocity_observables_use_atom_masses():
+    position = trajectory_observable_series(
+        "/particles/all/position/value",
+        [0.0, 0.0, 0.0, 4.0, 0.0, 0.0],
+        (1, 2, 3),
+        atom_weights=[1.0, 3.0],
+    )
+    velocity = trajectory_observable_series(
+        "/particles/all/velocity/value",
+        [1.0, 0.0, 0.0, 3.0, 0.0, 0.0],
+        (1, 2, 3),
+        atom_weights=[1.0, 3.0],
+    )
+
+    assert position["center_of_mass_component_0"] == [3.0]
+    assert velocity["mass_weighted_mean_squared_speed"] == [7.0]
+
+
+def test_box_observables_include_matrix_volume_lengths_and_angles():
+    observables = trajectory_observable_series(
+        "/particles/all/box/edges/value",
+        [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0],
+        (1, 3, 3),
+    )
+
+    assert observables["matrix_0_0"] == [1.0]
+    assert observables["volume"] == [1.0]
+    assert observables["length_2"] == [1.0]
+    assert observables["angle_0_1"] == [pytest.approx(math.pi / 2.0)]
+
+
+def test_comparator_policies_are_quantity_specific():
+    assert (
+        _statistical_policy("pressure").absolute_margin
+        != _statistical_policy("potential").absolute_margin
+    )
+    assert _deterministic_tolerance("position") != _deterministic_tolerance(
+        "force"
+    )
+    assert _deterministic_tolerance("step") == (0.0, 1.0e-12)
+
+
+def test_nonfinite_pattern_check_does_not_force_finite_frames_to_match():
+    _assert_nonfinite_patterns_match(
+        "stochastic potential",
+        [1.0, float("nan"), 2.0],
+        [1.5, float("nan"), 2.5],
+    )

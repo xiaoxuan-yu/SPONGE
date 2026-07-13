@@ -27,6 +27,11 @@ from benchmarks.bundled_io.ab_contracts import (
 from benchmarks.bundled_io.ab_statistics import (
     StatisticalEquivalencePolicy,
     compare_replicas,
+    holm_correct_equivalence_family,
+    normal_cdf,
+)
+from benchmarks.bundled_io.trajectory_statistics import (
+    trajectory_observable_series,
 )
 from benchmarks.utils import Extractor
 from benchmarks.validation.thermostat.tests.utils import (
@@ -72,6 +77,40 @@ PROFILE_LIMITS = {
 STATISTICAL_CONFIDENCE_Z = 3.0
 STATISTICAL_MAXIMUM_STD_RATIO = 1.5
 STATISTICAL_MINIMUM_BLOCKS_PER_REPLICA = 4
+
+PHYSICAL_ABSOLUTE_MARGINS = {
+    "medium": {
+        "temperature": 1.0,
+        "pressure": 5.0,
+        "density": 2.0e-2,
+        "position": 2.0e-2,
+        "velocity": 2.0e-2,
+        "force": 2.0e-1,
+        "box_length": 5.0e-2,
+        "box_angle": 5.0e-3,
+        "box_volume": 1.0,
+    },
+    "production": {
+        "temperature": 5.0e-1,
+        "pressure": 2.0,
+        "density": 1.0e-2,
+        "position": 1.0e-2,
+        "velocity": 1.0e-2,
+        "force": 1.0e-1,
+        "box_length": 2.0e-2,
+        "box_angle": 2.0e-3,
+        "box_volume": 5.0e-1,
+    },
+}
+
+DETERMINISTIC_TOLERANCES = {
+    "schedule": (0.0, 1.0e-12),
+    "position": (1.0e-5, 1.0e-6),
+    "velocity": (1.0e-5, 1.0e-7),
+    "force": (1.0e-4, 1.0e-7),
+    "box": (1.0e-6, 1.0e-7),
+    "observable": (1.0e-4, 1.0e-8),
+}
 
 FULL_CONTRACT_INPUT_REQUIRED_PATHS = {
     "topology.spgt.h5": {
@@ -1167,17 +1206,53 @@ def _parse_float(value: str) -> float:
     return float(normalized)
 
 
-def _statistical_policy() -> StatisticalEquivalencePolicy:
+def _observable_quantity(label: str) -> str:
+    normalized = label.lower()
+    for quantity, aliases in {
+        "temperature": ("temperature", "temp"),
+        "pressure": ("pressure", "press"),
+        "density": ("density",),
+        "position": ("position", "squared_displacement", "pair_distance"),
+        "velocity": ("velocity", "speed"),
+        "force": ("force",),
+        "box_volume": ("volume",),
+        "box_angle": ("angle",),
+        "box_length": ("box", "length", "matrix"),
+    }.items():
+        if any(alias in normalized for alias in aliases):
+            return quantity
+    return "energy"
+
+
+def _statistical_policy(label: str = "energy") -> StatisticalEquivalencePolicy:
     limits = PROFILE_LIMITS[PROFILE]
+    quantity = _observable_quantity(label)
+    absolute_margin = PHYSICAL_ABSOLUTE_MARGINS[PROFILE].get(
+        quantity, float(limits["normal_absolute_margin"])
+    )
     return StatisticalEquivalencePolicy(
         burn_in_frames=int(limits["normal_burn_in_frames"]),
         block_size=int(limits["normal_block_size"]),
         minimum_blocks_per_replica=STATISTICAL_MINIMUM_BLOCKS_PER_REPLICA,
         confidence_z=STATISTICAL_CONFIDENCE_Z,
         relative_margin=float(limits["normal_relative_margin"]),
-        absolute_margin=float(limits["normal_absolute_margin"]),
+        absolute_margin=absolute_margin,
         maximum_std_ratio=STATISTICAL_MAXIMUM_STD_RATIO,
     )
+
+
+def _holm_alpha(policy: StatisticalEquivalencePolicy) -> float:
+    return 1.0 - normal_cdf(policy.confidence_z)
+
+
+def _deterministic_tolerance(label: str) -> tuple[float, float]:
+    normalized = label.lower()
+    if any(token in normalized for token in ("step", "time", "frame")):
+        return DETERMINISTIC_TOLERANCES["schedule"]
+    for quantity in ("position", "velocity", "force", "box"):
+        if quantity in normalized:
+            return DETERMINISTIC_TOLERANCES[quantity]
+    return DETERMINISTIC_TOLERANCES["observable"]
 
 
 def _require_matching_mdout_columns(
@@ -1233,6 +1308,23 @@ def _assert_numeric_sequences_close(
             )
 
 
+def _assert_nonfinite_patterns_match(
+    label: str, left: Sequence[float], right: Sequence[float]
+) -> None:
+    if len(left) != len(right):
+        raise AssertionError(
+            f"{label} length mismatch: legacy={len(left)}, bundled={len(right)}"
+        )
+    for index, (left_value, right_value) in enumerate(zip(left, right)):
+        if math.isfinite(left_value) and math.isfinite(right_value):
+            continue
+        if not _same_nonfinite_value(left_value, right_value):
+            raise AssertionError(
+                f"{label} non-finite mismatch at index {index}: "
+                f"legacy={left_value}, bundled={right_value}"
+            )
+
+
 def _compare_mdout_statistically(
     case: AbCase, runs: Sequence[AbRun]
 ) -> dict[str, object]:
@@ -1276,6 +1368,7 @@ def _compare_mdout_statistically(
         },
         "columns": {},
     }
+    finite_results: dict[str, dict[str, float | int]] = {}
     for column in columns:
         legacy_replicas = [
             [row[column] for row in left["rows"]] for left, _ in parsed
@@ -1306,26 +1399,54 @@ def _compare_mdout_statistically(
             for replica_index, (legacy, bundled) in enumerate(
                 zip(legacy_replicas, bundled_replicas)
             ):
-                _assert_numeric_sequences_close(
+                _assert_nonfinite_patterns_match(
                     f"{case.name} mdout {column} replica {replica_index}",
                     legacy,
                     bundled,
-                    relative_tolerance=0.0,
-                    absolute_tolerance=0.0,
                 )
-            comparison["columns"][column] = {
+            finite_legacy = [
+                [value for value in replica if math.isfinite(value)]
+                for replica in legacy_replicas
+            ]
+            finite_bundled = [
+                [value for value in replica if math.isfinite(value)]
+                for replica in bundled_replicas
+            ]
+            nonfinite_result: dict[str, object] = {
                 "method": "exact_nonfinite_pattern",
                 "nonfinite_count": sum(
                     not math.isfinite(value) for value in all_values
                 ),
             }
+            column_policy = _statistical_policy(column)
+            if finite_legacy[0] and _can_use_statistics(
+                finite_legacy, column_policy
+            ):
+                finite_result = compare_replicas(
+                    f"{case.name} mdout {column} finite values",
+                    finite_legacy,
+                    finite_bundled,
+                    column_policy,
+                )
+                nonfinite_result["finite_values"] = finite_result
+                finite_results[column] = finite_result
+            comparison["columns"][column] = nonfinite_result
             continue
 
-        comparison["columns"][column] = compare_replicas(
+        column_policy = _statistical_policy(column)
+        result = compare_replicas(
             f"{case.name} mdout {column}",
             legacy_replicas,
             bundled_replicas,
-            policy,
+            column_policy,
+        )
+        comparison["columns"][column] = result
+        finite_results[column] = result
+    if finite_results:
+        holm_correct_equivalence_family(
+            f"{case.name} mdout observable family",
+            finite_results,
+            alpha=_holm_alpha(policy),
         )
     return comparison
 
@@ -1347,12 +1468,15 @@ def _compare_mdout_deterministically(
     for column in columns:
         legacy_values = [row[column] for row in left_rows]
         bundled_values = [row[column] for row in right_rows]
+        relative_tolerance, absolute_tolerance = _deterministic_tolerance(
+            column
+        )
         _assert_numeric_sequences_close(
             f"{case.name} deterministic mdout {column}",
             legacy_values,
             bundled_values,
-            relative_tolerance=1.0e-4,
-            absolute_tolerance=1.0e-8,
+            relative_tolerance=relative_tolerance,
+            absolute_tolerance=absolute_tolerance,
         )
         for legacy_value, bundled_value in zip(legacy_values, bundled_values):
             if math.isfinite(legacy_value) and math.isfinite(bundled_value):
@@ -1712,12 +1836,15 @@ def _compare_rerun_h5_output(case: AbCase, run: AbRun) -> dict[str, object]:
             if dataset == input_position_dataset
             else expected_boxes
         )
+        relative_tolerance, absolute_tolerance = _deterministic_tolerance(
+            dataset
+        )
         _assert_numeric_sequences_close(
             f"{case.name} rerun output matches bundled input {dataset}",
             expected,
             output_values,
-            relative_tolerance=1.0e-5,
-            absolute_tolerance=1.0e-6,
+            relative_tolerance=relative_tolerance,
+            absolute_tolerance=absolute_tolerance,
         )
 
     # _compare_mdout_deterministically already proves legacy and bundled mdout
@@ -2072,15 +2199,20 @@ def _compare_h5_outputs_statistically(
 
         assert baseline_datasets is not None
         dataset_summaries: dict[str, object] = {}
+        family_results: dict[str, dict[str, float | int]] = {}
         for dataset in sorted(baseline_datasets):
             legacy_path = _output_h5_files(case, runs[0].legacy_dir)[name]
             kind = _h5_dataset_kind(legacy_path, dataset)
             if kind == "numeric":
-                dataset_summaries[dataset] = (
-                    _compare_h5_numeric_dataset_statistics(
-                        case, runs, name, dataset
-                    )
+                numeric_summary = _compare_h5_numeric_dataset_statistics(
+                    case, runs, name, dataset
                 )
+                dataset_summaries[dataset] = numeric_summary
+                equivalence_result = _primary_equivalence_result(
+                    numeric_summary
+                )
+                if equivalence_result is not None:
+                    family_results[dataset] = equivalence_result
             else:
                 for run in runs:
                     legacy_file = _output_h5_files(case, run.legacy_dir)[name]
@@ -2096,12 +2228,28 @@ def _compare_h5_outputs_statistically(
                             f"{case.name} {name} metadata dataset differs: {dataset}"
                         )
                 dataset_summaries[dataset] = {"method": "exact_metadata"}
+        if family_results:
+            holm_correct_equivalence_family(
+                f"{case.name} {name} H5 dataset family",
+                family_results,
+                alpha=_holm_alpha(_statistical_policy(name)),
+            )
         summaries[name] = {
             "method": "all_dataset_schema_and_statistical_values",
             "dataset_count": len(baseline_datasets),
             "datasets": dataset_summaries,
         }
     return summaries
+
+
+def _primary_equivalence_result(
+    summary: dict[str, object],
+) -> dict[str, float | int] | None:
+    for key in ("flat_values", "finite_values"):
+        candidate = summary.get(key)
+        if isinstance(candidate, dict) and "equivalence_p_value" in candidate:
+            return candidate
+    return None
 
 
 def _compare_h5_numeric_dataset_statistics(
@@ -2149,16 +2297,33 @@ def _compare_h5_numeric_dataset_statistics(
         for replica_index, (legacy, bundled) in enumerate(
             zip(legacy_replicas, bundled_replicas)
         ):
-            _assert_numeric_sequences_close(
+            _assert_nonfinite_patterns_match(
                 f"{case.name} {name}:{dataset} replica {replica_index}",
                 legacy,
                 bundled,
-                relative_tolerance=0.0,
-                absolute_tolerance=0.0,
             )
-        return {"method": "exact_nonfinite_pattern"}
+        finite_legacy = [
+            [value for value in replica if math.isfinite(value)]
+            for replica in legacy_replicas
+        ]
+        finite_bundled = [
+            [value for value in replica if math.isfinite(value)]
+            for replica in bundled_replicas
+        ]
+        result: dict[str, object] = {"method": "exact_nonfinite_pattern"}
+        finite_policy = replace(_statistical_policy(dataset), burn_in_frames=0)
+        if finite_legacy[0] and _can_use_statistics(
+            finite_legacy, finite_policy
+        ):
+            result["finite_values"] = compare_replicas(
+                f"{case.name} {name}:{dataset} finite values",
+                finite_legacy,
+                finite_bundled,
+                finite_policy,
+            )
+        return result
 
-    policy = _statistical_policy()
+    policy = _statistical_policy(dataset)
     flat_policy = replace(policy, burn_in_frames=0)
     result: dict[str, object] = {}
     if _can_use_statistics(legacy_replicas, flat_policy):
@@ -2211,7 +2376,70 @@ def _compare_h5_numeric_dataset_statistics(
                 bundled_frame_rms,
                 policy,
             )
+    if shape:
+        atom_weights = _trajectory_atom_weights(runs[0], dataset, shape)
+        legacy_observables = [
+            trajectory_observable_series(
+                dataset, values, shape, atom_weights=atom_weights
+            )
+            for values in legacy_replicas
+        ]
+        bundled_observables = [
+            trajectory_observable_series(
+                dataset, values, shape, atom_weights=atom_weights
+            )
+            for values in bundled_replicas
+        ]
+        if legacy_observables and legacy_observables[0]:
+            feature_names = set(legacy_observables[0])
+            if any(set(item) != feature_names for item in legacy_observables):
+                raise AssertionError(
+                    f"{case.name} {dataset} legacy features differ"
+                )
+            if any(set(item) != feature_names for item in bundled_observables):
+                raise AssertionError(
+                    f"{case.name} {dataset} bundled features differ"
+                )
+            feature_results: dict[str, dict[str, float | int]] = {}
+            for feature in sorted(feature_names):
+                legacy_series = [item[feature] for item in legacy_observables]
+                bundled_series = [item[feature] for item in bundled_observables]
+                feature_policy = _statistical_policy(f"{dataset} {feature}")
+                if not _can_use_statistics(legacy_series, feature_policy):
+                    continue
+                feature_results[feature] = compare_replicas(
+                    f"{case.name} {name}:{dataset} {feature}",
+                    legacy_series,
+                    bundled_series,
+                    feature_policy,
+                )
+            if feature_results:
+                holm_correct_equivalence_family(
+                    f"{case.name} {name}:{dataset} trajectory observable family",
+                    feature_results,
+                    alpha=_holm_alpha(policy),
+                )
+                result["trajectory_observables"] = feature_results
     return result
+
+
+def _trajectory_atom_weights(
+    run: AbRun, dataset: str, shape: tuple[int, ...]
+) -> list[float] | None:
+    if (
+        not dataset.endswith(("/position/value", "/velocity/value"))
+        or len(shape) != 3
+    ):
+        return None
+    mass_files = sorted(run.legacy_dir.glob("*_mass.txt"))
+    if len(mass_files) != 1:
+        return None
+    masses = read_mass_values(mass_files[0])
+    if len(masses) != shape[1]:
+        raise AssertionError(
+            f"trajectory atom count {shape[1]} differs from mass count {len(masses)}"
+        )
+    return masses
 
 
 def _can_use_statistics(

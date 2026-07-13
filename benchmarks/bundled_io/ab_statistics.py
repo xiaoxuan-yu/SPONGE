@@ -35,6 +35,48 @@ class BlockSummary:
     sem: float
 
 
+def normal_cdf(value: float) -> float:
+    """Return the standard normal cumulative distribution function."""
+
+    return 0.5 * (1.0 + math.erf(value / math.sqrt(2.0)))
+
+
+def holm_correct_equivalence_family(
+    label: str,
+    results: dict[str, dict[str, float | int]],
+    *,
+    alpha: float,
+) -> dict[str, dict[str, float | int]]:
+    """Apply Holm's step-down correction to an equivalence-test family.
+
+    Equivalence reverses the usual null: every observable must reject its
+    non-equivalence null.  Consequently, one failed Holm comparison rejects
+    the complete A/B observable family.
+    """
+
+    if not 0.0 < alpha < 1.0:
+        raise ValueError("alpha must be between zero and one")
+    if not results:
+        raise AssertionError(f"{label} has no observables")
+
+    ranked = sorted(
+        results.items(), key=lambda item: float(item[1]["equivalence_p_value"])
+    )
+    family_size = len(ranked)
+    for rank, (observable, result) in enumerate(ranked, start=1):
+        threshold = alpha / (family_size - rank + 1)
+        p_value = float(result["equivalence_p_value"])
+        result["holm_rank"] = rank
+        result["holm_threshold"] = threshold
+        if p_value > threshold:
+            raise AssertionError(
+                f"{label} is not equivalent after Holm correction: "
+                f"observable={observable}, p={p_value:.12g}, "
+                f"threshold={threshold:.12g}, rank={rank}/{family_size}"
+            )
+    return results
+
+
 def block_means(
     samples: Sequence[float], policy: StatisticalEquivalencePolicy
 ) -> list[float]:
@@ -118,10 +160,17 @@ def compare_replicas(
         raise ValueError("maximum_std_ratio must be at least one")
 
     paired_blocks = [
-        (block_means(legacy_replica, policy), block_means(bundled_replica, policy))
-        for legacy_replica, bundled_replica in zip(legacy_replicas, bundled_replicas)
+        (
+            block_means(legacy_replica, policy),
+            block_means(bundled_replica, policy),
+        )
+        for legacy_replica, bundled_replica in zip(
+            legacy_replicas, bundled_replicas
+        )
     ]
-    for replica_index, (legacy_blocks, bundled_blocks) in enumerate(paired_blocks):
+    for replica_index, (legacy_blocks, bundled_blocks) in enumerate(
+        paired_blocks
+    ):
         if len(legacy_blocks) != len(bundled_blocks):
             raise AssertionError(
                 f"{label} block count mismatch in replica {replica_index}: "
@@ -138,7 +187,9 @@ def compare_replicas(
     ]
     delta = statistics.fmean(paired_deltas)
     delta_sem = statistics.stdev(paired_deltas) / math.sqrt(len(paired_deltas))
-    scale = max(1.0, abs(legacy.mean), abs(bundled.mean), legacy.std, bundled.std)
+    scale = max(
+        1.0, abs(legacy.mean), abs(bundled.mean), legacy.std, bundled.std
+    )
     margin = max(policy.absolute_margin, policy.relative_margin * scale)
     confidence_bound = abs(delta) + policy.confidence_z * delta_sem
     if confidence_bound > margin:
@@ -148,6 +199,13 @@ def compare_replicas(
             f"delta={delta:.12g}, sem={delta_sem:.12g}, "
             f"confidence_bound={confidence_bound:.12g}, margin={margin:.12g}"
         )
+
+    if delta_sem == 0.0:
+        equivalence_p_value = 0.0 if abs(delta) < margin else 1.0
+    else:
+        lower_p = 1.0 - normal_cdf((delta + margin) / delta_sem)
+        upper_p = 1.0 - normal_cdf((margin - delta) / delta_sem)
+        equivalence_p_value = max(0.0, min(1.0, max(lower_p, upper_p)))
 
     zero_scale = max(policy.absolute_margin, 1.0e-15)
     if legacy.std <= zero_scale and bundled.std <= zero_scale:
@@ -178,5 +236,6 @@ def compare_replicas(
         "mean_delta_sem": delta_sem,
         "confidence_bound": confidence_bound,
         "practical_margin": margin,
+        "equivalence_p_value": equivalence_p_value,
         "std_ratio": std_ratio,
     }
