@@ -5,6 +5,7 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
+import h5py
 import pytest
 
 try:
@@ -50,6 +51,7 @@ from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
     _assert_virtual_atom_oracle,
     _cases_for_profile,
     _expected_rerun_frame_indices,
+    _h5_string_values,
     _insert_root_toml_keys,
     _parse_mdinfo_key_values,
 )
@@ -262,6 +264,8 @@ def test_ab_production_harness_has_executable_contract_coverage():
         "rerun_full_contract_pure_vds_on",
         "rerun_full_contract_sidecar_vds_off",
         "rerun_full_contract_sidecar_vds_on",
+        "rerun_qc_unrestricted_sidecar_vds_off",
+        "rerun_qc_unrestricted_sidecar_vds_on",
         "rerun_restart_absent_same_bootstrap_vds_off",
         "rerun_boundary_start0_strip0_limit1_vds_off",
         "rerun_boundary_start1_strip0_unlimited_no_velocity_vds_on",
@@ -936,6 +940,89 @@ def test_input_semantic_registry_uses_owned_observables_not_initialization_logs(
     )
 
 
+def test_unrestricted_qc_gate_requires_nontrivial_spin_and_nonempty_scf_text():
+    contracts = load_contract_registry()
+    cases = {
+        case.name: case
+        for case in _cases_for_profile()
+        if case.name.startswith("rerun_qc_unrestricted_sidecar_vds_")
+    }
+    expected_case_ids = {
+        "rerun_qc_unrestricted_sidecar_vds_off",
+        "rerun_qc_unrestricted_sidecar_vds_on",
+    }
+
+    assert set(cases) == expected_case_ids
+    assert {case.vds for case in cases.values()} == {False, True}
+    for case in cases.values():
+        assert case.fixture_case == "full_contract_rerun"
+        assert case.bundled_subdir == (
+            "bundled_input_with_legacy_sidecar/bundle"
+        )
+        assert case.restart_load_policy == "structural"
+        assert not case.statistical_md
+        assert case.contract_ids == (
+            "output.legacy.mdout",
+            "output.legacy.qc_scf_output",
+            "input.qc.spin_square",
+            "input.qc.scf_text",
+        )
+        assert case.assertion_ids == (
+            "mdout_deterministic_equivalence",
+            "h5_rerun_semantic_equivalence",
+            "qc_scf_exact_equivalence",
+            "input_semantic_equivalence",
+        )
+
+    spin_spec = next(
+        spec
+        for spec in RERUN_INPUT_SEMANTIC_SPECS
+        if spec.contract_id == "input.qc.spin_square"
+    )
+    assert spin_spec == InputSemanticSpec(
+        "input.qc.spin_square", ("QC_S_sq",), 1.0e-4
+    )
+    with pytest.raises(AssertionError, match="all trivial"):
+        assert_module_semantics(
+            "QC spin-square",
+            [{"QC_S_sq": 0.0}],
+            [{"QC_S_sq": 0.0}],
+            spin_spec,
+            deterministic=True,
+        )
+
+    spin_contract = contracts["input.qc.spin_square"]
+    assert spin_contract.status == "supported"
+    assert set(spin_contract.case_ids) == expected_case_ids
+    assert spin_contract.assertion_ids == (
+        "input_semantic_equivalence",
+        "h5_rerun_semantic_equivalence",
+    )
+    for contract_id in ("input.qc.scf_text", "output.legacy.qc_scf_output"):
+        contract = contracts[contract_id]
+        assert contract.status == "supported"
+        assert set(contract.case_ids) == expected_case_ids
+        assert contract.assertion_ids == ("qc_scf_exact_equivalence",)
+
+    qc_type = contracts["input.qc.type"]
+    assert qc_type.status == "deferred"
+    assert "does not materialize /qc/type" in qc_type.reason
+
+
+def test_h5_string_reader_preserves_multiline_scf_text(tmp_path):
+    path = tmp_path / "qc.obs.spg.h5md"
+    dataset = "/parameters/sponge/qc/scf_output"
+    expected = "Step 0\n  indented continuation\nStep 1\n"
+    with h5py.File(path, "w") as h5:
+        h5.create_dataset(
+            dataset,
+            data=expected,
+            dtype=h5py.string_dtype(encoding="utf-8"),
+        )
+
+    assert _h5_string_values(path, dataset) == [expected]
+
+
 def test_input_semantic_contract_inventory_is_explicit_and_evidence_gated():
     contracts = load_contract_registry()
     specialized_semantic_assertions = {
@@ -943,6 +1030,7 @@ def test_input_semantic_contract_inventory_is_explicit_and_evidence_gated():
         "input.bias.metadynamics": (
             "restart_protocol_full_continuation_equivalence"
         ),
+        "input.qc.scf_text": "qc_scf_exact_equivalence",
     }
     runtime_spec_ids = {
         spec.contract_id

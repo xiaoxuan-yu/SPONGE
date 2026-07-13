@@ -274,6 +274,7 @@ RERUN_INPUT_SEMANTIC_SPECS = (
     InputSemanticSpec("input.protocol.soft_wall", ("z_wall",), 1.0e-6),
     InputSemanticSpec("input.protocol.cv", ("distance",), 1.0e-6),
     InputSemanticSpec("input.qc.energy", ("QC",), 1.0e-6),
+    InputSemanticSpec("input.qc.spin_square", ("QC_S_sq",), 1.0e-4),
 )
 
 
@@ -607,7 +608,6 @@ def _cases_for_profile() -> list[AbCase]:
             contract_ids=(
                 "runtime.rerun",
                 "output.legacy.mdout",
-                "output.legacy.qc_scf_output",
                 "output.trajectory",
                 "output.observable",
                 "output.trajectory.vds_off",
@@ -630,7 +630,6 @@ def _cases_for_profile() -> list[AbCase]:
             assertion_ids=(
                 "full_contract_input_inventory",
                 "mdout_deterministic_equivalence",
-                "qc_scf_exact_equivalence",
                 "h5_rerun_semantic_equivalence",
                 "input_semantic_equivalence",
             ),
@@ -647,7 +646,6 @@ def _cases_for_profile() -> list[AbCase]:
             contract_ids=(
                 "runtime.rerun",
                 "output.legacy.mdout",
-                "output.legacy.qc_scf_output",
                 "output.trajectory",
                 "output.observable",
                 "output.trajectory.vds_on",
@@ -670,7 +668,6 @@ def _cases_for_profile() -> list[AbCase]:
             assertion_ids=(
                 "full_contract_input_inventory",
                 "mdout_deterministic_equivalence",
-                "qc_scf_exact_equivalence",
                 "h5_rerun_semantic_equivalence",
                 "input_semantic_equivalence",
             ),
@@ -687,7 +684,6 @@ def _cases_for_profile() -> list[AbCase]:
             contract_ids=(
                 "runtime.rerun",
                 "output.legacy.mdout",
-                "output.legacy.qc_scf_output",
                 "output.trajectory",
                 "output.observable",
                 "output.trajectory.vds_off",
@@ -710,7 +706,6 @@ def _cases_for_profile() -> list[AbCase]:
             assertion_ids=(
                 "full_contract_input_inventory",
                 "mdout_deterministic_equivalence",
-                "qc_scf_exact_equivalence",
                 "h5_rerun_semantic_equivalence",
                 "input_semantic_equivalence",
             ),
@@ -727,7 +722,6 @@ def _cases_for_profile() -> list[AbCase]:
             contract_ids=(
                 "runtime.rerun",
                 "output.legacy.mdout",
-                "output.legacy.qc_scf_output",
                 "output.trajectory",
                 "output.observable",
                 "output.trajectory.vds_on",
@@ -750,8 +744,51 @@ def _cases_for_profile() -> list[AbCase]:
             assertion_ids=(
                 "full_contract_input_inventory",
                 "mdout_deterministic_equivalence",
-                "qc_scf_exact_equivalence",
                 "h5_rerun_semantic_equivalence",
+                "input_semantic_equivalence",
+            ),
+        ),
+        AbCase(
+            name="rerun_qc_unrestricted_sidecar_vds_off",
+            fixture_case="full_contract_rerun",
+            legacy_subdir="legacy_input",
+            bundled_subdir="bundled_input_with_legacy_sidecar/bundle",
+            mode="rerun",
+            vds=False,
+            statistical_md=False,
+            restart_load_policy="structural",
+            contract_ids=(
+                "output.legacy.mdout",
+                "output.legacy.qc_scf_output",
+                "input.qc.spin_square",
+                "input.qc.scf_text",
+            ),
+            assertion_ids=(
+                "mdout_deterministic_equivalence",
+                "h5_rerun_semantic_equivalence",
+                "qc_scf_exact_equivalence",
+                "input_semantic_equivalence",
+            ),
+        ),
+        AbCase(
+            name="rerun_qc_unrestricted_sidecar_vds_on",
+            fixture_case="full_contract_rerun",
+            legacy_subdir="legacy_input",
+            bundled_subdir="bundled_input_with_legacy_sidecar/bundle",
+            mode="rerun",
+            vds=True,
+            statistical_md=False,
+            restart_load_policy="structural",
+            contract_ids=(
+                "output.legacy.mdout",
+                "output.legacy.qc_scf_output",
+                "input.qc.spin_square",
+                "input.qc.scf_text",
+            ),
+            assertion_ids=(
+                "mdout_deterministic_equivalence",
+                "h5_rerun_semantic_equivalence",
+                "qc_scf_exact_equivalence",
                 "input_semantic_equivalence",
             ),
         ),
@@ -2714,12 +2751,81 @@ def _prepare_case_pair(
 
     legacy_dir = _copy_case(case, "legacy", case.legacy_subdir, case_root)
     bundled_dir = _copy_case(case, "bundled", case.bundled_subdir, case_root)
+    if "input.qc.spin_square" in case.contract_ids:
+        _prepare_unrestricted_qc_inputs(legacy_dir, bundled_dir)
     _validate_full_contract_input(case, bundled_dir)
     if "input.restart_load.absent" in case.contract_ids:
         _prepare_restart_absent_inputs(legacy_dir, bundled_dir)
         _validate_restart_absent_routes(legacy_dir, bundled_dir)
     _prepare_rerun_trajectory_variant(case, bundled_dir)
     return legacy_dir, bundled_dir
+
+
+def _prepare_unrestricted_qc_inputs(
+    legacy_dir: Path, bundled_dir: Path
+) -> None:
+    qc_type_paths = (
+        legacy_dir / "qc_type.txt",
+        bundled_dir / "legacy_sidecars" / "qc_type_in_file" / "qc_type.txt",
+    )
+    for qc_type_path in qc_type_paths:
+        lines = qc_type_path.read_text(encoding="utf-8").splitlines()
+        if not lines or lines[0].split() != ["2", "0", "1"]:
+            raise AssertionError(
+                f"unrestricted QC fixture has unexpected header: {qc_type_path}"
+            )
+        lines[0] = "2 0 3"
+        qc_type_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+    topology_path = bundled_dir / "topology.spgt.h5"
+    with h5py.File(topology_path, "r+") as topology:
+        required = {
+            "/qc/type/count",
+            "/qc/type/atom_index",
+            "/qc/type/symbol",
+            "/qc/type/charge",
+            "/qc/type/multiplicity",
+            "/parameters/sponge/files/legacy_sidecars/key",
+            "/parameters/sponge/files/legacy_sidecars/path",
+        }
+        missing = sorted(path for path in required if path not in topology)
+        if missing:
+            raise AssertionError(
+                f"unrestricted QC bundled fixture is incomplete: {missing}"
+            )
+        if int(topology["/qc/type/count"][()]) != 2:
+            raise AssertionError(
+                "unrestricted QC fixture must contain two atoms"
+            )
+        if topology["/qc/type/atom_index"][...].tolist() != [0, 1]:
+            raise AssertionError("unrestricted QC fixture atom indices changed")
+        if topology["/qc/type/symbol"].asstr()[...].tolist() != ["H", "N"]:
+            raise AssertionError("unrestricted QC fixture symbols changed")
+        if int(topology["/qc/type/charge"][()]) != 0:
+            raise AssertionError("unrestricted QC fixture charge changed")
+        multiplicity = topology["/qc/type/multiplicity"]
+        if int(multiplicity[()]) != 1:
+            raise AssertionError(
+                "unrestricted QC fixture source multiplicity must be one"
+            )
+        multiplicity[...] = 3
+
+        keys = (
+            topology["/parameters/sponge/files/legacy_sidecars/key"]
+            .asstr()[...]
+            .tolist()
+        )
+        paths = (
+            topology["/parameters/sponge/files/legacy_sidecars/path"]
+            .asstr()[...]
+            .tolist()
+        )
+        bindings = dict(zip(keys, paths, strict=True))
+        expected_sidecar = "legacy_sidecars/qc_type_in_file/qc_type.txt"
+        if bindings.get("qc_type_in_file") != expected_sidecar:
+            raise AssertionError(
+                "unrestricted QC bundle does not bind the expected sidecar"
+            )
 
 
 def _prepare_restart_absent_inputs(
@@ -3782,6 +3888,8 @@ def _prepare_mdin(
         "vel",
         "frc",
         "rst",
+        "qc_restricted",
+        "qc_scf_print_iter",
     }
     if case.mode in {"normal", "chunk_boundary"}:
         remove_keys.update(
@@ -3873,6 +3981,10 @@ def _prepare_mdin(
             f'output_h5_observable_path = "{OBSERVABLE_REL.as_posix()}"',
         ]
     )
+    if "input.qc.spin_square" in case.contract_ids:
+        additions.append("qc_restricted = 0")
+    if "input.qc.scf_text" in case.contract_ids:
+        additions.append("qc_scf_print_iter = 1")
     if case.mode == "normal":
         additions.append(f'output_h5_restart_path = "{RESTART_REL.as_posix()}"')
     mdin_path.write_text(
@@ -6944,7 +7056,11 @@ def _h5_string_values(path: Path, dataset: str) -> list[str]:
         raise AssertionError(
             f"H5 dataset is not a string array: {path}:{dataset}"
         )
-    return re.findall(r'"((?:\\.|[^"\\])*)"', _h5_data_text(path, dataset))
+    with h5py.File(path, "r") as h5:
+        values = h5[dataset].asstr()[...]
+        if isinstance(values, str):
+            return [values]
+        return [str(value) for value in values.flat]
 
 
 def _normalize_h5dump(text: str) -> str:

@@ -643,7 +643,47 @@ Acceptance:
 - Registry, manifest, real CPU A/B, related CTest, Ruff, and diff checks pass,
   followed by exactly one PR-scoped commit.
 
-## 23. Artifacts and Temporary-Space Policy
+## 23. PR 20: Unrestricted QC Observable and SCF Text Gate
+
+Close the non-trivial QC spin-square and non-empty SCF text contracts with a
+deterministic unrestricted-QC rerun under both VDS modes.
+
+- Start from one two-atom `H/N` full-contract fixture and change both branches
+  from singlet/restricted to triplet/unrestricted QC. Keep atom indices,
+  symbols, charge, coordinates, and every non-QC input unchanged.
+- Keep the bundled sidecar QC type payload and its typed `/qc/type` metadata
+  synchronized at multiplicity three. This case proves output behavior only;
+  it does not promote `input.qc.type`, because the pure bundled runtime still
+  does not materialize `/qc/type` into the QC input consumer.
+- Require a present, finite, non-zero `QC_S_sq` value in every branch and exact
+  deterministic legacy/bundled mdout equivalence. Bridge the same values to
+  `/observables/all/qc/spin_square/{step,time,value}`.
+- Enable `qc_scf_print_iter`, require non-empty legacy and bundled
+  `qc_scf_output`, normalize line endings, and compare the complete text.
+  Require both bundled trajectory and observable files to archive exactly the
+  same text at `/parameters/sponge/qc/scf_output`.
+- Run the focused case with VDS disabled and enabled so both trajectory writer
+  implementations carry the QC parameter text while observable behavior stays
+  invariant.
+- Remove `qc_scf_exact_equivalence` evidence from the old full-contract cases,
+  whose SCF files are empty, so successful process startup can no longer
+  satisfy this contract.
+
+Acceptance:
+
+- Both VDS modes produce the same two finite, non-zero spin-square frames in
+  legacy mdout and bundled observable output.
+- SCF output is non-empty and exactly equal across legacy text, bundled text,
+  trajectory metadata, and observable metadata.
+- Zero spin-square, missing observable mapping, empty SCF text, text mismatch,
+  or missing H5 archive fails the gate.
+- `input.qc.spin_square`, `input.qc.scf_text`, and
+  `output.legacy.qc_scf_output` emit E3 evidence only from the focused cases;
+  `input.qc.type` remains explicitly deferred.
+- Registry, manifest, both real CPU A/B cases, Ruff, and diff checks pass,
+  followed by exactly one PR-scoped commit.
+
+## 24. Artifacts and Temporary-Space Policy
 
 - Use `SPONGE_BUNDLED_IO_AB_RUN_ROOT` for all heavy runs.
 - Put production artifacts on the workspace filesystem rather than `/tmp`.
@@ -653,7 +693,7 @@ Acceptance:
 - Record artifact byte counts and enforce a configurable per-case quota.
 - Cleanup must only remove directories created by the current gate run.
 
-## 24. PR Completion Log
+## 25. PR Completion Log
 
 Append one row immediately after completing and committing each PR.
 
@@ -680,3 +720,4 @@ Append one row immediately after completing and committing each PR.
 | PR 17: Restart-absent same-bootstrap rerun gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; `ctest --test-dir build-dev-cpu-h5-2 --output-on-failure -R 'test_(restart_h5_reader\|h5_input_validation\|h5_restart_load_runtime_closure)$'`; real `rerun_restart_absent_same_bootstrap_vds_off` CPU A/B; Ruff; `git diff --check` | 90 contract/manifest/comparator tests, two related CTest passes (runtime closure skipped by its build guard), and the real two-frame A/B pass. Both branches use byte-identical coordinate/velocity bootstrap files, the bundled branch has no restart binding or payload, and all mdout columns, frame selection, trajectory, and observable semantics pass E3 comparison. Registry coverage advances to 54 supported, 20 deferred, and 1 unsupported contract. |
 | PR 18: NHC dynamic restart continuation gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; `ctest --test-dir build-dev-cpu-h5-2 --output-on-failure -R 'test_(restart_h5_reader\|h5_restart_load_runtime_closure\|module_h5_mappings_with_mock_backend)$'`; real `normal_nhc_dynamic_restart_continuation` CPU A/B; Ruff; `git diff --check` | 91 contract/manifest/comparator tests, two related CTest passes (runtime closure skipped by its build guard), and the real E4 A/B pass. One producer emits non-zero three-chain state through legacy and H5 restart routes, then a text-restart continuation and `dynamic` H5 continuation compare all mdout columns, particle position/velocity/force/box, NHC trajectories, observable output, and final restart state. Registry coverage advances to 57 supported, 17 deferred, and 1 unsupported contract. |
 | PR 19: Protocol/full metadynamics continuation gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; `ctest --test-dir build-dev-cpu-h5-2 --output-on-failure -R 'test_(restart_h5_reader\|h5_restart_load_runtime_closure\|module_h5_mappings_with_mock_backend)$'`; real `normal_meta_protocol_full_restart_continuation` CPU A/B; Ruff; `git diff --check` | 92 contract/manifest/comparator tests, two related CTest passes (runtime closure skipped by its build guard), and the real E4 A/B pass. One producer checkpoint with three non-zero hills forks into pure legacy, H5 `protocol` plus legacy NHC, and H5 `full` routes. All mdout columns, particle/NHC/metadynamics streams, final hill/potential state, observable output, and restart state agree within existing text-precision tolerances. Registry coverage advances to 60 supported, 14 deferred, and 1 unsupported contract. |
+| PR 20: Unrestricted QC observable and SCF text gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; real `rerun_qc_unrestricted_sidecar_vds_off/on` CPU A/B; Ruff; `git diff --check` | Triplet unrestricted QC produces two finite non-zero spin-square frames in both branches and archives a non-empty exact SCF trace in trajectory and observable output under both VDS modes. Empty-output evidence was removed from the old full-contract cases. `input.qc.type` remains deferred because pure `/qc/type` is not consumed. Registry coverage advances to 62 supported, 12 deferred, and 1 unsupported contract. |
