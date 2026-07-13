@@ -56,6 +56,7 @@ FOCUSED_EDIP_FIXTURE = "focused_edip_two_atom"
 FOCUSED_EAM_FUNCFL_FIXTURE = "focused_eam_funcfl_two_atom"
 FOCUSED_EAM_SETFL_FIXTURE = "focused_eam_setfl_two_atom"
 FOCUSED_POSITIONAL_RESTRAINT_FIXTURE = "focused_positional_restraint_two_atom"
+FOCUSED_SOFT_WALL_FIXTURE = "focused_soft_wall_two_atom"
 FOCUSED_SW_SIDECAR_FIXTURE = "focused_sw_sidecar_three_atom"
 FOCUSED_SW_TYPED_FIXTURE = "focused_sw_typed_three_atom"
 FOCUSED_TERSOFF_SIDECAR_FIXTURE = "focused_tersoff_sidecar_three_atom"
@@ -305,6 +306,9 @@ INPUT_SEMANTIC_SPECS_BY_CASE = {
             "input.protocol.positional_restraint", ("restrain",), 1.0e-6
         ),
     ),
+    "normal_soft_wall_typed_nonzero": (
+        InputSemanticSpec("input.protocol.soft_wall", ("z_wall",), 1.0e-6),
+    ),
     "normal_sw_sidecar_pair_three_body": (
         InputSemanticSpec("input.manybody.sw.sidecar", ("SW",), 1.0e-6),
     ),
@@ -447,6 +451,7 @@ RERUN_INPUT_SEMANTIC_SPECS = (
     InputSemanticSpec(
         "input.protocol.positional_restraint.sidecar", ("restrain",), 1.0e-6
     ),
+    InputSemanticSpec("input.protocol.soft_wall", ("z_wall",), 1.0e-6),
     InputSemanticSpec("input.protocol.soft_wall.sidecar", ("z_wall",), 1.0e-6),
     InputSemanticSpec("input.protocol.cv", ("distance",), 1.0e-6),
     InputSemanticSpec("input.qc.energy", ("QC",), 1.0e-6),
@@ -830,6 +835,28 @@ def _cases_for_profile() -> list[AbCase]:
             contract_ids=(
                 "output.legacy.mdout",
                 "input.protocol.positional_restraint",
+            ),
+            assertion_ids=(
+                "mdout_deterministic_equivalence",
+                "input_semantic_equivalence",
+            ),
+            normal_step_limit=1,
+            normal_interval=1,
+            normal_dt=0.0,
+            input_behavior_only=True,
+        ),
+        AbCase(
+            name="normal_soft_wall_typed_nonzero",
+            fixture_case=FOCUSED_SOFT_WALL_FIXTURE,
+            legacy_subdir="generated_legacy",
+            bundled_subdir="generated_bundled",
+            mode="normal",
+            vds=False,
+            statistical_md=False,
+            restart_load_policy="structural",
+            contract_ids=(
+                "output.legacy.mdout",
+                "input.protocol.soft_wall",
             ),
             assertion_ids=(
                 "mdout_deterministic_equivalence",
@@ -1395,6 +1422,7 @@ def _cases_for_profile() -> list[AbCase]:
                 "input.custom.listed",
                 "input.manybody.eam",
                 "input.protocol.positional_restraint",
+                "input.protocol.soft_wall",
                 "input.protocol.cv",
                 "input.qc.energy",
             ),
@@ -1432,6 +1460,7 @@ def _cases_for_profile() -> list[AbCase]:
                 "input.custom.listed",
                 "input.manybody.eam",
                 "input.protocol.positional_restraint",
+                "input.protocol.soft_wall",
                 "input.protocol.cv",
                 "input.qc.energy",
             ),
@@ -2059,6 +2088,50 @@ def _failure_cases() -> list[AbCase]:
                 "Materialize_H5_Native_Positional_Restraint",
                 "restraint weight",
                 "must have shape [2,3]",
+            ),
+            **nb14_metadata_shared,
+        ),
+        AbCase(
+            name="failure_h5_soft_wall_dual_owner",
+            failure_mutation="h5_soft_wall_dual_owner",
+            failure_branches=("bundled",),
+            expected_error_category="spongeErrorConflictingCommand",
+            expected_diagnostic_tokens=(
+                "Materialize_H5_Native_Soft_Wall",
+                "cannot both own soft-wall state",
+            ),
+            **nb14_metadata_shared,
+        ),
+        AbCase(
+            name="failure_h5_soft_wall_count_shape",
+            failure_mutation="h5_soft_wall_count_shape",
+            failure_branches=("bundled",),
+            expected_error_category="spongeErrorBadFileFormat",
+            expected_diagnostic_tokens=(
+                "Materialize_H5_Native_Soft_Wall",
+                "soft-wall count dataset /wall/soft/count must be scalar",
+            ),
+            **nb14_metadata_shared,
+        ),
+        AbCase(
+            name="failure_h5_soft_wall_name_shape",
+            failure_mutation="h5_soft_wall_name_shape",
+            failure_branches=("bundled",),
+            expected_error_category="spongeErrorBadFileFormat",
+            expected_diagnostic_tokens=(
+                "Materialize_H5_Native_Soft_Wall",
+                "/wall/soft/name must have shape [1]",
+            ),
+            **nb14_metadata_shared,
+        ),
+        AbCase(
+            name="failure_h5_soft_wall_potential_shape",
+            failure_mutation="h5_soft_wall_potential_shape",
+            failure_branches=("bundled",),
+            expected_error_category="spongeErrorBadFileFormat",
+            expected_diagnostic_tokens=(
+                "Materialize_H5_Native_Soft_Wall",
+                "/wall/soft/potential must have shape [1]",
             ),
             **nb14_metadata_shared,
         ),
@@ -3833,6 +3906,8 @@ def _prepare_case_pair(
             return _prepare_focused_eam_pair(case.fixture_case, case_root)
         if case.fixture_case == FOCUSED_POSITIONAL_RESTRAINT_FIXTURE:
             return _prepare_focused_positional_restraint_pair(case_root)
+        if case.fixture_case == FOCUSED_SOFT_WALL_FIXTURE:
+            return _prepare_focused_soft_wall_pair(case_root)
         if case.fixture_case == FOCUSED_SW_SIDECAR_FIXTURE:
             return _prepare_focused_sw_sidecar_pair(case_root)
         if case.fixture_case == FOCUSED_SW_TYPED_FIXTURE:
@@ -3898,6 +3973,7 @@ def _prepare_case_pair(
     _prepare_full_contract_nb14_owner(case, bundled_dir)
     _prepare_full_contract_eam_owner(case, bundled_dir)
     _prepare_full_contract_positional_restraint_owner(case, bundled_dir)
+    _prepare_full_contract_soft_wall_owner(case, bundled_dir)
     _validate_full_contract_input(case, bundled_dir)
     if "input.restart_load.absent" in case.contract_ids:
         _prepare_restart_absent_inputs(legacy_dir, bundled_dir)
@@ -4027,6 +4103,41 @@ def _prepare_full_contract_positional_restraint_owner(
             )
         del protocol["/restraint/default"]
         del restart[reference_path]
+
+
+def _prepare_full_contract_soft_wall_owner(
+    case: AbCase, bundled_dir: Path
+) -> None:
+    if case.fixture_case != "full_contract_rerun":
+        return
+    protocol_path = bundled_dir / "protocol.spgp.h5"
+    sidecar_root = "/parameters/sponge/files/legacy_sidecars"
+    typed_root = "/wall/soft"
+    with h5py.File(protocol_path, "r+") as protocol:
+        typed_owner = typed_root in protocol
+        sidecar_owner = False
+        if sidecar_root in protocol:
+            sidecar_keys = protocol[f"{sidecar_root}/key"].asstr()[...]
+            sidecar_owner = "soft_walls_in_file" in sidecar_keys
+
+        if "input.full_contract.pure_native" in case.contract_ids:
+            if not typed_owner or sidecar_owner:
+                raise AssertionError(
+                    f"{case.name} pure full-contract fixture requires only "
+                    "the typed soft-wall owner"
+                )
+            return
+        if (
+            "input.full_contract.sidecar" not in case.contract_ids
+            and not sidecar_owner
+        ):
+            return
+        if not typed_owner or not sidecar_owner:
+            raise AssertionError(
+                f"{case.name} sidecar source fixture must contain both "
+                "soft-wall representations before owner selection"
+            )
+        del protocol[typed_root]
 
 
 def _prepare_unrestricted_qc_inputs(
@@ -4841,6 +4952,104 @@ def _validate_focused_positional_restraint_routes(
                 "focused positional restraint reference coordinates changed: "
                 f"{reference}"
             )
+
+
+def _prepare_focused_soft_wall_pair(case_root: Path) -> tuple[Path, Path]:
+    legacy_source = case_root / "focused_soft_wall_source"
+    legacy_dir = case_root / "legacy"
+    converted_dir = case_root / "converted_soft_wall_bundle"
+    bundled_dir = case_root / "bundled"
+    for path in (legacy_source, legacy_dir, converted_dir, bundled_dir):
+        if path.exists():
+            shutil.rmtree(path)
+    _write_focused_soft_wall_input(legacy_source)
+    shutil.copytree(legacy_source, legacy_dir)
+    _convert_legacy_case(legacy_source, converted_dir)
+    shutil.copytree(converted_dir / "bundle", bundled_dir)
+
+    with h5py.File(bundled_dir / "protocol.spgp.h5", "r+") as protocol:
+        for sidecar_root in (
+            "/parameters/sponge/files/legacy_sidecars",
+            "/parameters/restart/protocol_sidecars",
+        ):
+            if sidecar_root in protocol:
+                del protocol[sidecar_root]
+    sidecar_dir = bundled_dir / "legacy_sidecars"
+    if sidecar_dir.exists():
+        shutil.rmtree(sidecar_dir)
+    _validate_focused_soft_wall_routes(legacy_dir, bundled_dir)
+    return legacy_dir, bundled_dir
+
+
+def _write_focused_soft_wall_input(case_dir: Path) -> None:
+    case_dir.mkdir(parents=True, exist_ok=True)
+    (case_dir / "mass.txt").write_text("2\n1.0\n1.0\n", encoding="utf-8")
+    (case_dir / "coordinate.txt").write_text(
+        "2 0.0\n0.0 0.0 2.0\n0.0 0.0 4.0\n10.0 10.0 10.0\n90.0 90.0 90.0\n",
+        encoding="utf-8",
+    )
+    (case_dir / "velocity.txt").write_text(
+        "2\n0.0 0.0 0.0\n0.0 0.0 0.0\n", encoding="utf-8"
+    )
+    (case_dir / "soft_walls.txt").write_text(
+        "[[[ z_wall ]]]\n"
+        "[[ potential ]]\n"
+        "E = (z - 1.0f) * (z - 1.0f);\n"
+        "[[ end ]]\n",
+        encoding="utf-8",
+    )
+    (case_dir / "mdin.spg.toml").write_text(
+        'md_name = "bundled io ab focused soft wall"\n'
+        'mode = "nve"\n'
+        "step_limit = 1\n"
+        "dt = 0.0\n"
+        "cutoff = 4.0\n"
+        'mass_in_file = "mass.txt"\n'
+        'coordinate_in_file = "coordinate.txt"\n'
+        'velocity_in_file = "velocity.txt"\n'
+        'soft_walls_in_file = "soft_walls.txt"\n'
+        "force_whole_output = true\n"
+        "print_zeroth_frame = 0\n"
+        "write_mdout_interval = 1\n"
+        "write_information_interval = 1\n",
+        encoding="utf-8",
+    )
+
+
+def _validate_focused_soft_wall_routes(
+    legacy_dir: Path, bundled_dir: Path
+) -> None:
+    legacy_mdin = (legacy_dir / "mdin.spg.toml").read_text(encoding="utf-8")
+    bundled_mdin = (bundled_dir / "mdin.bundled.spg.toml").read_text(
+        encoding="utf-8"
+    )
+    if not _has_key_line(legacy_mdin, "soft_walls_in_file"):
+        raise AssertionError("focused soft-wall legacy branch lost its owner")
+    if _has_key_line(bundled_mdin, "soft_walls_in_file"):
+        raise AssertionError(
+            "focused soft-wall bundled branch retained sidecar"
+        )
+    if (bundled_dir / "legacy_sidecars").exists():
+        raise AssertionError(
+            "focused soft-wall bundled branch retained sidecars"
+        )
+
+    with h5py.File(bundled_dir / "protocol.spgp.h5", "r") as protocol:
+        count = int(protocol["/wall/soft/count"][()])
+        names = protocol["/wall/soft/name"].asstr()[...].tolist()
+        potentials = protocol["/wall/soft/potential"].asstr()[...].tolist()
+        if count != 1 or names != ["z_wall"]:
+            raise AssertionError(
+                "focused soft-wall typed identity changed: "
+                f"count={count}, names={names}"
+            )
+        expected = "E = (z - 1.0f) * (z - 1.0f);"
+        if potentials != [expected]:
+            raise AssertionError(
+                f"focused soft-wall potential changed: {potentials}"
+            )
+        if "/parameters/sponge/files/legacy_sidecars" in protocol:
+            raise AssertionError("focused soft-wall protocol retained sidecars")
 
 
 def _prepare_focused_edip_pair(case_root: Path) -> tuple[Path, Path]:
@@ -8306,6 +8515,8 @@ def _mutate_failure_mdin(case: AbCase, mdin_path: Path, branch: str) -> None:
         )
     elif mutation == "h5_positional_restraint_dual_owner":
         additions.append('restrain_atom_id = "duplicate_restrain_atom_id.txt"')
+    elif mutation == "h5_soft_wall_dual_owner":
+        additions.append('soft_walls_in_file = "duplicate_soft_walls.txt"')
     elif mutation in {
         "unsupported_sidecar_key",
         "sidecar_length_mismatch",
@@ -8319,6 +8530,9 @@ def _mutate_failure_mdin(case: AbCase, mdin_path: Path, branch: str) -> None:
         "h5_eam_unknown_format",
         "h5_eam_embed_shape",
         "h5_positional_restraint_weight_shape",
+        "h5_soft_wall_count_shape",
+        "h5_soft_wall_name_shape",
+        "h5_soft_wall_potential_shape",
         "restart_dynamic_without_owner",
         "restart_protocol_without_owner",
         "restart_full_without_owner",
@@ -8351,7 +8565,12 @@ def _mutate_failure_h5(case: AbCase, case_dir: Path, branch: str) -> None:
         "h5_eam_unknown_format",
         "h5_eam_embed_shape",
     }
-    protocol_mutations = {"h5_positional_restraint_weight_shape"}
+    protocol_mutations = {
+        "h5_positional_restraint_weight_shape",
+        "h5_soft_wall_count_shape",
+        "h5_soft_wall_name_shape",
+        "h5_soft_wall_potential_shape",
+    }
     if (
         mutation
         not in sidecar_mutations | metadata_mutations | protocol_mutations
@@ -8365,12 +8584,31 @@ def _mutate_failure_h5(case: AbCase, case_dir: Path, branch: str) -> None:
     if mutation in protocol_mutations:
         protocol_path = case_dir / "protocol.spgp.h5"
         with h5py.File(protocol_path, "r+") as protocol:
-            del protocol["/restraint/default/weight"]
-            protocol.create_dataset(
-                "/restraint/default/weight",
-                data=[[10.0, 0.0], [0.0, 20.0]],
-                dtype="f4",
-            )
+            if mutation == "h5_positional_restraint_weight_shape":
+                del protocol["/restraint/default/weight"]
+                protocol.create_dataset(
+                    "/restraint/default/weight",
+                    data=[[10.0, 0.0], [0.0, 20.0]],
+                    dtype="f4",
+                )
+            elif mutation == "h5_soft_wall_count_shape":
+                del protocol["/wall/soft/count"]
+                protocol.create_dataset(
+                    "/wall/soft/count", data=[1], dtype="i8"
+                )
+            else:
+                dataset_name = (
+                    "name"
+                    if mutation == "h5_soft_wall_name_shape"
+                    else "potential"
+                )
+                path = f"/wall/soft/{dataset_name}"
+                del protocol[path]
+                protocol.create_dataset(
+                    path,
+                    data=[],
+                    dtype=h5py.string_dtype(encoding="utf-8"),
+                )
         return
     if mutation in metadata_mutations:
         with h5py.File(topology_path, "r+") as topology:
@@ -9106,6 +9344,13 @@ def _compare_input_semantics(
             ):
                 replica_result["oracle"] = (
                     _compare_focused_positional_restraint_behavior(case, run)
+                )
+            elif (
+                spec.contract_id == "input.protocol.soft_wall"
+                and case.name == "normal_soft_wall_typed_nonzero"
+            ):
+                replica_result["oracle"] = _compare_focused_soft_wall_behavior(
+                    case, run
                 )
             elif spec.contract_id == "input.qc.type":
                 replica_result["oracle"] = _compare_typed_qc_type(case, run)
@@ -10552,6 +10797,127 @@ def _run_positional_restraint_control(
         )
     force = _read_native_float32_file(control_dir / "output" / "legacy.frc")
     result = {"energy": rows[0]["restrain"], "force": force}
+    shutil.rmtree(control_dir)
+    return result
+
+
+def _compare_focused_soft_wall_behavior(
+    case: AbCase, run: AbRun
+) -> dict[str, object]:
+    materialized = (
+        run.bundled_dir / ".sponge_h5_native_protocol" / "soft_walls.txt"
+    )
+    if not materialized.exists() or materialized.stat().st_size == 0:
+        raise AssertionError(
+            f"{case.name} did not materialize the bundled soft-wall payload"
+        )
+    materialized_text = materialized.read_text(encoding="utf-8")
+    for token in (
+        "[[[ z_wall ]]]",
+        "[[ potential ]]",
+        "E = (z - 1.0f) * (z - 1.0f);",
+        "[[ end ]]",
+    ):
+        if token not in materialized_text:
+            raise AssertionError(
+                f"{case.name} materialized soft wall is missing {token!r}"
+            )
+
+    legacy_force = _read_native_float32_file(
+        run.legacy_dir / "output" / "legacy.frc"
+    )
+    bundled_force = _read_native_float32_file(
+        run.bundled_dir / "output" / "legacy.frc"
+    )
+    force_result = _assert_nontrivial_equivalent_forces(
+        f"{case.name} soft-wall force", legacy_force, bundled_force
+    )
+    rows = _read_mdout(run.bundled_dir / "mdout.txt")["rows"]
+    if len(rows) != 1 or not math.isfinite(rows[0].get("z_wall", math.nan)):
+        raise AssertionError(f"{case.name} did not emit one finite soft wall")
+    _assert_numeric_sequences_close(
+        f"{case.name} soft-wall energy oracle",
+        (10.0,),
+        (rows[0]["z_wall"],),
+        relative_tolerance=0.0,
+        absolute_tolerance=1.0e-6,
+    )
+    _assert_numeric_sequences_close(
+        f"{case.name} soft-wall force oracle",
+        (0.0, 0.0, -2.0, 0.0, 0.0, -6.0),
+        bundled_force,
+        relative_tolerance=0.0,
+        absolute_tolerance=1.0e-6,
+    )
+
+    control = _run_soft_wall_zero_potential_control(case, run)
+    _assert_numeric_sequences_close(
+        f"{case.name} zero-potential energy oracle",
+        (0.0,),
+        (control["energy"],),
+        relative_tolerance=0.0,
+        absolute_tolerance=1.0e-6,
+    )
+    _assert_numeric_sequences_close(
+        f"{case.name} zero-potential force oracle",
+        (0.0,) * 6,
+        control["force"],
+        relative_tolerance=0.0,
+        absolute_tolerance=1.0e-6,
+    )
+    return {
+        "energy": rows[0]["z_wall"],
+        "force": force_result,
+        "zero_potential_control": control,
+        "bundled_materialized_path": str(
+            materialized.relative_to(run.bundled_dir)
+        ),
+    }
+
+
+def _run_soft_wall_zero_potential_control(
+    case: AbCase, run: AbRun
+) -> dict[str, object]:
+    control_dir = run.bundled_dir.parent / "bundled_soft_wall_zero_potential"
+    if control_dir.exists():
+        shutil.rmtree(control_dir)
+    shutil.copytree(run.bundled_dir, control_dir)
+    for path in (
+        control_dir / "output",
+        control_dir / ".sponge_h5_native_protocol",
+    ):
+        if path.exists():
+            shutil.rmtree(path)
+    (control_dir / "output").mkdir()
+    for file_name in ("mdout.txt", "mdinfo.txt", "run.stdout", "run.stderr"):
+        path = control_dir / file_name
+        if path.exists():
+            path.unlink()
+
+    with h5py.File(control_dir / "protocol.spgp.h5", "r+") as protocol:
+        del protocol["/wall/soft/potential"]
+        protocol.create_dataset(
+            "/wall/soft/potential",
+            data=["E = 0.0f * z;"],
+            dtype=h5py.string_dtype(encoding="utf-8"),
+        )
+    outcome = _run_sponge_process(control_dir, _mdin_name(control_dir))
+    if outcome.returncode != 0:
+        raise AssertionError(
+            f"{case.name} zero-potential control failed with code "
+            f"{outcome.returncode}\n{outcome.stdout}\n{outcome.stderr}"
+        )
+    rows = _read_mdout(control_dir / "mdout.txt")["rows"]
+    if len(rows) != 1:
+        raise AssertionError(
+            f"{case.name} zero-potential control emitted {len(rows)} rows"
+        )
+    result = {
+        "energy": rows[0]["z_wall"],
+        "force": _read_native_float32_file(
+            control_dir / "output" / "legacy.frc"
+        ),
+    }
     shutil.rmtree(control_dir)
     return result
 
@@ -12893,6 +13259,8 @@ def _validate_full_contract_input(
         ):
             effective_required_paths.discard("/restraint/default/atom_indices")
             effective_required_paths.discard("/restraint/default/weight")
+        if file_name == "protocol.spgp.h5" and "/wall/soft" not in paths:
+            effective_required_paths.discard("/wall/soft/potential")
         if file_name == "restart.spgr.h5":
             reference_path = (
                 "/parameters/restart/references/restraint/default/coordinate"
@@ -12973,10 +13341,21 @@ def _validate_full_contract_input(
         sidecar_restraint_parts = [
             key in protocol_sidecar_keys for key in restraint_sidecar_keys
         ]
+        soft_wall_typed_paths = (
+            "/wall/soft/count",
+            "/wall/soft/name",
+            "/wall/soft/potential",
+        )
+        typed_soft_wall_parts = [
+            path in protocol for path in soft_wall_typed_paths
+        ]
+        sidecar_soft_wall_owner = "soft_walls_in_file" in protocol_sidecar_keys
     typed_restraint_owner = all(typed_restraint_parts)
     partial_typed_restraint_owner = any(typed_restraint_parts)
     sidecar_restraint_owner = all(sidecar_restraint_parts)
     partial_sidecar_restraint_owner = any(sidecar_restraint_parts)
+    typed_soft_wall_owner = all(typed_soft_wall_parts)
+    partial_typed_soft_wall_owner = any(typed_soft_wall_parts)
     if partial_typed_owner and not typed_owner:
         raise AssertionError(
             f"{case.name} full-contract input has an incomplete typed residue "
@@ -13020,6 +13399,17 @@ def _validate_full_contract_input(
         raise AssertionError(
             f"{case.name} full-contract input requires exactly one positional "
             f"restraint owner, found {owner_count}"
+        )
+    if partial_typed_soft_wall_owner and not typed_soft_wall_owner:
+        raise AssertionError(
+            f"{case.name} full-contract input has an incomplete typed "
+            "soft-wall owner"
+        )
+    if typed_soft_wall_owner == sidecar_soft_wall_owner:
+        owner_count = int(typed_soft_wall_owner) + int(sidecar_soft_wall_owner)
+        raise AssertionError(
+            f"{case.name} full-contract input requires exactly one soft-wall "
+            f"owner, found {owner_count}"
         )
 
     has_sidecars = any("legacy_sidecars" in path for path in all_paths)

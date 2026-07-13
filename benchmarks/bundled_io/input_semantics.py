@@ -46,6 +46,7 @@ REQUIRED_INPUT_SEMANTIC_CONTRACTS = frozenset(
         "input.protocol.positional_restraint.sidecar",
         "input.protocol.steering",
         "input.protocol.steering.cv_sidecar",
+        "input.protocol.soft_wall",
         "input.protocol.soft_wall.sidecar",
         "input.protocol.sits",
         "input.protocol.sits.nk_typed_restart",

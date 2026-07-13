@@ -1554,7 +1554,47 @@ Acceptance:
 - SPONGE rebuild, fixture-equivalence CTest, contract smoke, Ruff, formatting,
   clang-format, and diff checks pass, followed by one PR-scoped commit.
 
-## 49. Artifacts and Temporary-Space Policy
+## 49. PR 52: Typed Soft-Wall Behavior Contract
+
+Close the final pure full-contract runtime gap by materializing typed
+`/wall/soft/{count,name,potential}` through the established `SOFT_WALLS`
+configuration parser.
+
+- Require a positive scalar count and exact `[count]` name/potential vectors.
+  Reject empty, duplicate, overlong, or configuration-delimiter-bearing module
+  names, empty potentials, and potential lines that can inject a legacy
+  configuration section.
+- Materialize each typed entry as one `[[[ name ]]]` section with exactly one
+  `[[ potential ]]` value, then inject `soft_walls_in_file` only after rejecting
+  a typed/legacy dual owner.
+- Add an isolated two-atom pure typed A/B case. Require the exact non-zero
+  `z_wall` energy and complete six-value force fingerprint, then change only
+  the typed potential to a zero expression and require zero energy and force.
+- Make full-contract pure and sidecar fixtures select exactly one soft-wall
+  owner. Pure retains `/wall/soft`; sidecar removes the dormant typed group and
+  retains `soft_walls_in_file` in the protocol sidecar table.
+- Add process-level failures for dual ownership and invalid count, name, and
+  potential dataset shapes. Promote typed soft wall only after the focused and
+  full-contract runtime gates pass.
+
+Acceptance:
+
+- The focused case matches at `z_wall=10.0` with force
+  `(0,0,-2,0,0,-6)`. Its typed zero-potential control has zero soft-wall energy
+  and force.
+- Pure full-contract VDS-off/on now matches every legacy mdout column,
+  including `z_wall`, and passes complete rerun trajectory and observable
+  equivalence. Sidecar VDS-off/on remains green.
+- Dual owners and all three typed shape mutations exit through stable
+  conflict/bad-file-format diagnostics; the complete 29-case failure sweep
+  remains green.
+- Registry coverage advances to 85 supported contracts, one explicitly
+  deferred typed CV-restraint contract, and one explicitly unsupported VDS
+  contract.
+- SPONGE rebuild, fixture-equivalence CTest, contract smoke, Ruff, formatting,
+  clang-format, and diff checks pass, followed by one PR-scoped commit.
+
+## 50. Artifacts and Temporary-Space Policy
 
 - Use `SPONGE_BUNDLED_IO_AB_RUN_ROOT` for all heavy runs.
 - Put production artifacts on the workspace filesystem rather than `/tmp`.
@@ -1564,7 +1604,7 @@ Acceptance:
 - Record artifact byte counts and enforce a configurable per-case quota.
 - Cleanup must only remove directories created by the current gate run.
 
-## 50. PR Completion Log
+## 51. PR Completion Log
 
 Append one row immediately after completing and committing each PR.
 
@@ -1623,3 +1663,4 @@ Append one row immediately after completing and committing each PR.
 | PR 49: Canonical and extra NB14 behavior contracts | Complete | This commit | canonical/extra focused CPU A/B plus zero-LJ controls; pure full-contract VDS-off/on progression; sidecar full-contract VDS-off/on; dual-root and extra-shape process failures; 21-case failure sweep; native topology reader and fixture-equivalence CTests; SPONGE rebuild; 142-test smoke; Ruff; format; clang-format; `git diff --check` | The registry now distinguishes `nb14_in_file` scaling from raw `nb14_extra_in_file` A/B semantics. A small independently owned H5 helper preserves the untracked topology-reader boundary. Both pure typed routes match exact non-zero energies and complete force fingerprints, parameter-zero controls change force, and full-contract fixtures enforce exactly one NB14 owner. Pure full-contract NB14 columns are restored; EAM/restraint/soft-wall remain visible. |
 | PR 50: Typed EAM funcfl/setfl behavior contracts | Complete | This commit | focused funcfl/setfl CPU A/B plus zero-pair controls; pure full-contract VDS-off/on progression; sidecar full-contract VDS-off/on; unknown-format and table-shape process failures; complete failure sweep; fixture-equivalence CTest; SPONGE rebuild; contract smoke; Ruff; format; clang-format; `git diff --check` | Typed EAM input now materializes both legacy formats and optional atom types through the established EAM runtime parser. Exact energy and full-force oracles plus zero-pair controls prove table consumption, full-contract fixtures enforce exactly one EAM owner, and pure rerun now advances to only restraint/soft-wall gaps. |
 | PR 51: Typed positional-restraint behavior contract | Complete | This commit | focused typed positional-restraint CPU A/B plus three independent payload controls; pure full-contract VDS-off/on progression; sidecar VDS-off/on; two residue COM/virial regressions; dual-owner and weight-shape process failures; 25-case failure sweep; fixture-equivalence CTest; SPONGE rebuild; 142-test smoke; Ruff; format; clang-format; `git diff --check` | Protocol atom IDs/weights and restart reference coordinates now form one validated typed owner and materialize through the established positional-restraint parser. Exact energy/full-force oracles prove all three payload fields are consumed. The registry separates typed and sidecar evidence, retains CV restraint and typed soft wall as deferred, and pure rerun advances to only the soft-wall gap. |
+| PR 52: Typed soft-wall behavior contract | Complete | This commit | focused typed soft-wall CPU A/B plus zero-potential control; pure and sidecar full-contract VDS-off/on; dual-owner and three shape process failures; 29-case failure sweep; fixture-equivalence CTest; SPONGE rebuild; 142-test smoke; Ruff; format; clang-format; `git diff --check` | Typed `/wall/soft/{count,name,potential}` now validates and materializes through the established soft-wall parser. The focused gate matches `z_wall=10.0` and force `(0,0,-2,0,0,-6)` while the typed zero-potential control zeros both. Full-contract fixtures enforce exactly one owner, and pure VDS-off/on now pass the complete rerun behavior gate. Registry coverage reaches 85 supported, one deferred, and one unsupported contract. |

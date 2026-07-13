@@ -14,6 +14,7 @@
 #include "load/native/eam_h5.hpp"
 #include "load/native/nb14_extra_h5.hpp"
 #include "load/native/restraint_h5.hpp"
+#include "load/native/soft_wall_h5.hpp"
 #include "utils/h5md/topology_h5_reader.hpp"
 
 namespace
@@ -256,6 +257,47 @@ void Materialize_H5_Native_Positional_Restraint(CONTROLLER* controller,
     }
 }
 
+void Materialize_H5_Native_Soft_Wall(CONTROLLER* controller)
+{
+    constexpr const char* protocol_key = "input_h5_protocol_path";
+    if (!controller->Command_Exist(protocol_key))
+    {
+        return;
+    }
+
+    SpongeH5MD::NativeSoftWallH5Materializer materializer;
+    if (!materializer.Open(controller->Command(protocol_key)))
+    {
+        controller->Throw_SPONGE_Error(spongeErrorBadFileFormat,
+                                       "Materialize_H5_Native_Soft_Wall",
+                                       materializer.Last_Error().c_str());
+    }
+    if (!materializer.Has_Soft_Wall())
+    {
+        return;
+    }
+    if (controller->Command_Exist("soft_walls", "in_file"))
+    {
+        controller->Throw_SPONGE_Error(
+            spongeErrorConflictingCommand, "Materialize_H5_Native_Soft_Wall",
+            "Reason:\n\tinput.h5.protocol provides native soft walls, but "
+            "soft_walls_in_file is also set. Native H5 and legacy text input "
+            "cannot both own soft-wall state\n");
+    }
+
+    const std::filesystem::path output_path =
+        std::filesystem::absolute(".sponge_h5_native_protocol/soft_walls.txt")
+            .lexically_normal();
+    if (!materializer.Materialize(output_path))
+    {
+        controller->Throw_SPONGE_Error(spongeErrorBadFileFormat,
+                                       "Materialize_H5_Native_Soft_Wall",
+                                       materializer.Last_Error().c_str());
+    }
+    controller->Set_Command("soft_walls_in_file", output_path.string().c_str(),
+                            0);
+}
+
 std::vector<int> Read_H5_Residue_Atom_Numbers(CONTROLLER* controller,
                                               std::size_t atom_count)
 {
@@ -496,6 +538,7 @@ void Xponge::System::Load_Inputs(CONTROLLER* controller)
         Load_Native_Inputs(this, controller);
         Materialize_H5_Native_Positional_Restraint(controller,
                                                    this->atoms.mass.size());
+        Materialize_H5_Native_Soft_Wall(controller);
         Materialize_H5_Native_NB14_Extra(controller, this);
         const auto residue_atom_numbers =
             Read_H5_Residue_Atom_Numbers(controller, this->atoms.mass.size());

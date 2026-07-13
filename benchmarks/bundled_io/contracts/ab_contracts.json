@@ -345,7 +345,11 @@
         "failure_h5_eam_unknown_format",
         "failure_h5_eam_embed_shape",
         "failure_h5_positional_restraint_dual_owner",
-        "failure_h5_positional_restraint_weight_shape"
+        "failure_h5_positional_restraint_weight_shape",
+        "failure_h5_soft_wall_dual_owner",
+        "failure_h5_soft_wall_count_shape",
+        "failure_h5_soft_wall_name_shape",
+        "failure_h5_soft_wall_potential_shape"
       ],
       "assertion_ids": ["stable_failure_semantics"],
       "reason": ""
@@ -549,13 +553,12 @@
       "contract_id": "input.protocol.soft_wall",
       "direction": "input",
       "component": "protocol",
-      "status": "deferred",
+      "status": "supported",
       "minimum_evidence": "E3",
       "legacy_surface": "soft_walls_in_file",
-      "bundled_surface": "/wall/soft/{name,potential}",
-      "case_ids": [],
-      "assertion_ids": [],
-      "reason": "Typed soft-wall datasets are converted but are not yet materialized into the SOFT_WALLS runtime parser."
+      "bundled_surface": "/wall/soft/{count,name,potential}",
+      "case_ids": ["normal_soft_wall_typed_nonzero", "rerun_full_contract_pure_vds_off", "rerun_full_contract_pure_vds_on"],
+      "assertion_ids": ["input_semantic_equivalence"]
     },
     {
       "contract_id": "input.protocol.cv",
