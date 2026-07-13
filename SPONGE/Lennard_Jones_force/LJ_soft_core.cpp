@@ -463,6 +463,10 @@ void LJ_SOFT_CORE::Initial(CONTROLLER* controller, float cutoff,
 
     if (lj_soft_to_use != NULL && lj_soft_to_use->atom_numbers > 0)
     {
+        const bool native_h5_parameters =
+            module_name == NULL &&
+            controller->commands.count("input_h5_topology_path") != 0 &&
+            controller->commands.count("LJ_soft_core_in_file") == 0;
         if (controller->Command_Exist("lambda_lj"))
         {
             this->lambda = atof(controller->Command("lambda_lj"));
@@ -543,19 +547,23 @@ void LJ_SOFT_CORE::Initial(CONTROLLER* controller, float cutoff,
 
         for (int i = 0; i < pair_type_numbers_A; i++)
         {
-            h_LJ_AA[i] = lj_soft_to_use->LJ_AA[i];
+            h_LJ_AA[i] = lj_soft_to_use->LJ_AA[i] *
+                         (native_h5_parameters ? 12.0f : 1.0f);
         }
         for (int i = 0; i < pair_type_numbers_A; i++)
         {
-            h_LJ_AB[i] = lj_soft_to_use->LJ_AB[i];
+            h_LJ_AB[i] = lj_soft_to_use->LJ_AB[i] *
+                         (native_h5_parameters ? 6.0f : 1.0f);
         }
         for (int i = 0; i < pair_type_numbers_B; ++i)
         {
-            h_LJ_BA[i] = lj_soft_to_use->LJ_BA[i];
+            h_LJ_BA[i] = lj_soft_to_use->LJ_BA[i] *
+                         (native_h5_parameters ? 12.0f : 1.0f);
         }
         for (int i = 0; i < pair_type_numbers_B; ++i)
         {
-            h_LJ_BB[i] = lj_soft_to_use->LJ_BB[i];
+            h_LJ_BB[i] = lj_soft_to_use->LJ_BB[i] *
+                         (native_h5_parameters ? 6.0f : 1.0f);
         }
         for (int i = 0; i < atom_numbers; i++)
         {

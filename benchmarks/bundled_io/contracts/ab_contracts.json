@@ -581,13 +581,12 @@
       "contract_id": "input.topology.lj_soft_core",
       "direction": "input",
       "component": "softcore",
-      "status": "deferred",
+      "status": "supported",
       "minimum_evidence": "E3",
       "legacy_surface": "LJ_soft_core_in_file",
       "bundled_surface": "/forcefield/lj_soft_core",
-      "case_ids": [],
-      "assertion_ids": [],
-      "reason": "The broad fixture emits only trivial LJ_soft values; a focused non-zero case is pending."
+      "case_ids": ["normal_lj_soft_core_nonzero"],
+      "assertion_ids": ["input_semantic_equivalence"]
     },
     {
       "contract_id": "input.topology.subsystem_division",
@@ -599,7 +598,7 @@
       "bundled_surface": "/forcefield/subsys_division",
       "case_ids": [],
       "assertion_ids": [],
-      "reason": "A subsystem-owned softcore result distinguishing the partition is pending."
+      "reason": "The native subsystem mask reaches LJ_SOFT_CORE state but is not consumed by the current force kernel, so no partition-distinguishing E3 result exists."
     },
     {
       "contract_id": "input.topology.virtual_atoms",

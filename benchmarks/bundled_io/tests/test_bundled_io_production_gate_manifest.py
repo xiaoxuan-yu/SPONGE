@@ -37,6 +37,7 @@ from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
     FOCUSED_CUSTOM_PAIR_FIXTURE,
     FOCUSED_EDIP_FIXTURE,
     FOCUSED_EXCLUSIONS_FIXTURE,
+    FOCUSED_LJ_SOFT_CORE_FIXTURE,
     INPUT_SEMANTIC_SPECS_BY_CASE,
     MDINFO_CONTRACT_KEYS,
     PROFILE_LIMITS,
@@ -243,6 +244,7 @@ def test_ab_production_harness_has_executable_contract_coverage():
         "normal_edip_nonzero",
         "normal_custom_pair_nonzero",
         "normal_exclusions_coulomb_oracle",
+        "normal_lj_soft_core_nonzero",
         "normal_vds_chunk_minus_one",
         "normal_vds_chunk_exact",
         "normal_vds_chunk_plus_one",
@@ -623,6 +625,54 @@ def test_focused_exclusions_case_requires_native_payload_and_coulomb_oracle():
     assert contracts["input.topology.exclusions"].assertion_ids == (
         "input_semantic_equivalence",
     )
+
+
+def test_focused_lj_soft_core_case_requires_pure_h5_nonzero_energy_and_force():
+    contracts = load_contract_registry()
+    case = next(
+        case
+        for case in _cases_for_profile()
+        if case.name == "normal_lj_soft_core_nonzero"
+    )
+    spec = INPUT_SEMANTIC_SPECS_BY_CASE[case.name]
+
+    assert case.fixture_case == FOCUSED_LJ_SOFT_CORE_FIXTURE
+    assert case.statistical_md is False
+    assert case.normal_step_limit == 1
+    assert case.normal_dt == 0.0
+    assert case.input_behavior_only is True
+    assert case.contract_ids == (
+        "output.legacy.mdout",
+        "input.topology.lj_soft_core",
+    )
+    assert spec == (
+        InputSemanticSpec("input.topology.lj_soft_core", ("LJ_soft",), 1.0e-6),
+    )
+    contract = contracts["input.topology.lj_soft_core"]
+    assert contract.status == "supported"
+    assert contract.case_ids == (case.name,)
+    assert contract.assertion_ids == ("input_semantic_equivalence",)
+    subsystem = contracts["input.topology.subsystem_division"]
+    assert subsystem.status == "deferred"
+    assert "not consumed" in subsystem.reason
+
+
+def test_focused_lj_soft_core_gate_rejects_trivial_energy_and_force():
+    spec = InputSemanticSpec(
+        "input.topology.lj_soft_core", ("LJ_soft",), 1.0e-6
+    )
+    with pytest.raises(AssertionError, match="all trivial"):
+        assert_module_semantics(
+            "LJ soft-core",
+            [{"LJ_soft": 0.0}],
+            [{"LJ_soft": 0.0}],
+            spec,
+            deterministic=True,
+        )
+    with pytest.raises(AssertionError, match="bundled force is all trivial"):
+        _assert_nontrivial_equivalent_forces(
+            "LJ soft-core force", [1.0, -1.0], [0.0, 0.0]
+        )
 
 
 @pytest.mark.parametrize(

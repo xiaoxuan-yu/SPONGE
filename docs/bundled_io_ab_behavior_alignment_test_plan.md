@@ -458,7 +458,34 @@ Acceptance:
   rejected by unit tests.
 - Registry, manifest, real focused CPU A/B, Ruff, and diff checks pass.
 
-## 17. Artifacts and Temporary-Space Policy
+## 17. PR 14: Focused Native LJ Soft-Core Behavior Gate
+
+Close the LJ soft-core input contract with a two-atom periodic fixture whose
+A-state interaction is absent and B-state interaction produces distinguishable
+soft-core energy and force at `lambda_lj = 0.5`.
+
+- Convert the legacy `LJ_soft_core_in_file` payload to native
+  `/forcefield/lj_soft_core`, then remove the legacy key, sidecar table, and
+  sidecar directory from the bundled branch.
+- Preserve source-semantic pair values in H5 and apply the legacy loader's
+  `12/6` A/B normalization exactly once when pure native H5 owns the payload.
+- Require non-zero, cross-branch equivalent `LJ_soft` energy and force values,
+  plus complete deterministic mdout equivalence.
+- Keep `/forcefield/subsys_division` absent so this case proves only the
+  soft-core parameter contract. Subsystem division remains deferred because
+  the current force kernel copies but does not consume its mask.
+
+Acceptance:
+
+- The bundled branch has no `LJ_soft_core_in_file`, subsystem input, or legacy
+  sidecars, and contains the exact native atom-type and pair datasets.
+- Both branches emit the same non-zero `LJ_soft` result and six-value force
+  payload; zero or mismatched energy/force mutations are rejected.
+- Legacy text, H5 fixture-equivalence, and native-reader tests retain their
+  source-semantic parameter values while runtime behavior matches.
+- Registry, manifest, real focused CPU A/B, Ruff, and diff checks pass.
+
+## 18. Artifacts and Temporary-Space Policy
 
 - Use `SPONGE_BUNDLED_IO_AB_RUN_ROOT` for all heavy runs.
 - Put production artifacts on the workspace filesystem rather than `/tmp`.
@@ -468,7 +495,7 @@ Acceptance:
 - Record artifact byte counts and enforce a configurable per-case quota.
 - Cleanup must only remove directories created by the current gate run.
 
-## 18. PR Completion Log
+## 19. PR Completion Log
 
 Append one row immediately after completing and committing each PR.
 
@@ -489,3 +516,4 @@ Append one row immediately after completing and committing each PR.
 | PR 11: Restart owner-state failure semantics | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; three real bundled CPU failure cases; Ruff; `git diff --check` | 79 contract/manifest/comparator tests and all three F1 process cases pass. Dynamic, protocol, and full policies each exit with code 235 and `spongeErrorConflictingCommand`; diagnostics distinguish missing Nose-Hoover-chain and metadynamics owners. |
 | PR 12: Focused non-zero custom-pair input gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; real `normal_custom_pair_nonzero` CPU A/B; Ruff; `git diff --check` | 80 contract/manifest/comparator tests and the focused real A/B pass. The pure bundled branch has no legacy custom-force keys or sidecars, materializes both native inputs, and matches legacy at `custom_pair=31.57` with maximum force `252.554443359375`. |
 | PR 13: Focused native exclusion semantics gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; real `normal_exclusions_coulomb_oracle` CPU A/B; Ruff; `git diff --check` | 83 contract/manifest/comparator tests and the focused real A/B pass. The pure bundled branch uses offsets/list `[0,1,1,1]`/`[1]`, and both branches match the `-1/12` energy and analytic nine-value force oracle with maximum force `0.1111111119389534`. |
+| PR 14: Focused native LJ soft-core behavior gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; `ctest --test-dir build-dev-cpu-h5-2 --output-on-failure -R 'test_topology_native_h5_reader|test_h5_input_fixture_equivalence'`; real `normal_lj_soft_core_nonzero` CPU A/B; Ruff; `git diff --check` | 85 contract/manifest/comparator tests, both H5 input contract tests, and the focused real A/B pass. The gate first exposed legacy `potential=-0.06` versus bundled `-0.01`; pure native runtime normalization now matches legacy at `LJ_soft=-0.06`, `eff_pot=-0.056708537`, maximum force `0.1920633763074875`, and zero full-mdout error. Subsystem division remains deferred because its mask is not consumed by the force kernel. |

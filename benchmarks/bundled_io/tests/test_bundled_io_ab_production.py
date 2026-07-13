@@ -52,6 +52,7 @@ SITS_FF19SB_CMAP_FIXTURE = "sits_ff19sb_cmap_peptide"
 FOCUSED_EDIP_FIXTURE = "focused_edip_two_atom"
 FOCUSED_CUSTOM_PAIR_FIXTURE = "focused_custom_pair_two_atom"
 FOCUSED_EXCLUSIONS_FIXTURE = "focused_exclusions_three_atom"
+FOCUSED_LJ_SOFT_CORE_FIXTURE = "focused_lj_soft_core_two_atom"
 SITS_FF19SB_CMAP_SOURCE = (
     REPO_ROOT / "benchmarks" / "performance" / "sits" / "statics" / "ala2_sits"
 )
@@ -218,6 +219,9 @@ INPUT_SEMANTIC_SPECS_BY_CASE = {
     ),
     "normal_exclusions_coulomb_oracle": (
         InputSemanticSpec("input.topology.exclusions", ("Coulomb",), 1.0e-6),
+    ),
+    "normal_lj_soft_core_nonzero": (
+        InputSemanticSpec("input.topology.lj_soft_core", ("LJ_soft",), 1.0e-6),
     ),
 }
 
@@ -442,6 +446,28 @@ def _cases_for_profile() -> list[AbCase]:
             contract_ids=(
                 "output.legacy.mdout",
                 "input.topology.exclusions",
+            ),
+            assertion_ids=(
+                "mdout_deterministic_equivalence",
+                "input_semantic_equivalence",
+            ),
+            normal_step_limit=1,
+            normal_interval=1,
+            normal_dt=0.0,
+            input_behavior_only=True,
+        ),
+        AbCase(
+            name="normal_lj_soft_core_nonzero",
+            fixture_case=FOCUSED_LJ_SOFT_CORE_FIXTURE,
+            legacy_subdir="generated_legacy",
+            bundled_subdir="generated_bundled",
+            mode="normal",
+            vds=False,
+            statistical_md=False,
+            restart_load_policy="structural",
+            contract_ids=(
+                "output.legacy.mdout",
+                "input.topology.lj_soft_core",
             ),
             assertion_ids=(
                 "mdout_deterministic_equivalence",
@@ -1423,6 +1449,8 @@ def _prepare_case_pair(
             return _prepare_focused_custom_pair_pair(case_root)
         if case.fixture_case == FOCUSED_EXCLUSIONS_FIXTURE:
             return _prepare_focused_exclusions_pair(case_root)
+        if case.fixture_case == FOCUSED_LJ_SOFT_CORE_FIXTURE:
+            return _prepare_focused_lj_soft_core_pair(case_root)
         return _prepare_normal_tip3p_pair(case_root, replica_seed)
 
     legacy_dir = _copy_case(case, "legacy", case.legacy_subdir, case_root)
@@ -1879,6 +1907,163 @@ def _validate_focused_exclusions_routes(
         raise AssertionError(
             "focused exclusions native payload changed: "
             f"offsets={offsets}, list={excluded}"
+        )
+
+
+def _prepare_focused_lj_soft_core_pair(case_root: Path) -> tuple[Path, Path]:
+    legacy_source = case_root / "focused_lj_soft_core_source"
+    legacy_dir = case_root / "legacy"
+    converted_dir = case_root / "converted_focused_lj_soft_core_bundle"
+    bundled_dir = case_root / "bundled"
+    for path in (legacy_source, legacy_dir, converted_dir, bundled_dir):
+        if path.exists():
+            shutil.rmtree(path)
+    _write_focused_lj_soft_core_input(legacy_source)
+    shutil.copytree(legacy_source, legacy_dir)
+    _convert_legacy_case(legacy_source, converted_dir)
+    shutil.copytree(converted_dir / "bundle", bundled_dir)
+
+    bundled_mdin = bundled_dir / "mdin.bundled.spg.toml"
+    bundled_mdin.write_text(
+        _remove_key_lines(
+            bundled_mdin.read_text(encoding="utf-8"),
+            {"LJ_soft_core_in_file"},
+        ).rstrip()
+        + "\n",
+        encoding="utf-8",
+    )
+    topology_path = bundled_dir / "topology.spgt.h5"
+    with h5py.File(topology_path, "r+") as topology:
+        sidecar_table = "/parameters/sponge/files/legacy_sidecars"
+        if sidecar_table in topology:
+            del topology[sidecar_table]
+    legacy_sidecars = bundled_dir / "legacy_sidecars"
+    if legacy_sidecars.exists():
+        shutil.rmtree(legacy_sidecars)
+    _validate_focused_lj_soft_core_routes(legacy_dir, bundled_dir)
+    return legacy_dir, bundled_dir
+
+
+def _write_focused_lj_soft_core_input(case_dir: Path) -> None:
+    case_dir.mkdir(parents=True, exist_ok=True)
+    (case_dir / "mass.txt").write_text("2\n12.0\n12.0\n", encoding="utf-8")
+    (case_dir / "charge.txt").write_text("2\n0.0\n0.0\n", encoding="utf-8")
+    (case_dir / "coordinate.txt").write_text(
+        "2 0.0\n0.0 0.0 0.0\n1.5 0.0 0.0\n20.0 20.0 20.0\n90.0 90.0 90.0\n",
+        encoding="utf-8",
+    )
+    (case_dir / "velocity.txt").write_text(
+        "2\n0.0 0.0 0.0\n0.0 0.0 0.0\n", encoding="utf-8"
+    )
+    (case_dir / "lj_soft_core.txt").write_text(
+        "2 1 1\n0.0\n0.0\n2.0\n1.5\n0 0\n0 0\n",
+        encoding="utf-8",
+    )
+    (case_dir / "mdin.spg.toml").write_text(
+        'md_name = "bundled io ab focused lj soft core"\n'
+        'mode = "nve"\n'
+        "pbc = true\n"
+        "step_limit = 1\n"
+        "dt = 0.0\n"
+        "cutoff = 4.0\n"
+        "skin = 0.4\n"
+        "lambda_lj = 0.5\n"
+        "soft_core_alpha = 0.5\n"
+        "soft_core_powfer = 1.0\n"
+        "soft_core_sigma = 3.0\n"
+        "soft_core_sigma_min = 0.0\n"
+        'mass_in_file = "mass.txt"\n'
+        'charge_in_file = "charge.txt"\n'
+        'coordinate_in_file = "coordinate.txt"\n'
+        'velocity_in_file = "velocity.txt"\n'
+        'LJ_soft_core_in_file = "lj_soft_core.txt"\n'
+        "print_zeroth_frame = 0\n"
+        "write_mdout_interval = 1\n"
+        "write_information_interval = 1\n",
+        encoding="utf-8",
+    )
+
+
+def _validate_focused_lj_soft_core_routes(
+    legacy_dir: Path, bundled_dir: Path
+) -> None:
+    legacy_mdin = (legacy_dir / "mdin.spg.toml").read_text(encoding="utf-8")
+    bundled_mdin = (bundled_dir / "mdin.bundled.spg.toml").read_text(
+        encoding="utf-8"
+    )
+    if not _has_key_line(legacy_mdin, "LJ_soft_core_in_file"):
+        raise AssertionError("focused LJ soft-core legacy route is missing")
+    if _has_key_line(bundled_mdin, "LJ_soft_core_in_file"):
+        raise AssertionError(
+            "focused LJ soft-core bundle retained LJ_soft_core_in_file"
+        )
+    if _has_key_line(bundled_mdin, "subsys_division_in_file"):
+        raise AssertionError(
+            "focused LJ soft-core bundle unexpectedly retained subsystem input"
+        )
+    if (bundled_dir / "legacy_sidecars").exists():
+        raise AssertionError("focused LJ soft-core bundle retained sidecars")
+
+    topology_path = bundled_dir / "topology.spgt.h5"
+    topology_paths = _h5_paths(topology_path)
+    if "/parameters/sponge/files/legacy_sidecars" in topology_paths:
+        raise AssertionError("focused LJ soft-core topology retained sidecars")
+    required = {
+        "/forcefield/lj_soft_core/atom_type_A",
+        "/forcefield/lj_soft_core/atom_type_B",
+        "/forcefield/lj_soft_core/atom_type_count_A",
+        "/forcefield/lj_soft_core/atom_type_count_B",
+        "/forcefield/lj_soft_core/pair_AA",
+        "/forcefield/lj_soft_core/pair_AB",
+        "/forcefield/lj_soft_core/pair_BA",
+        "/forcefield/lj_soft_core/pair_BB",
+    }
+    missing = sorted(required - topology_paths)
+    if missing:
+        raise AssertionError(
+            f"focused LJ soft-core topology is missing datasets: {missing}"
+        )
+    if "/forcefield/subsys_division" in topology_paths:
+        raise AssertionError(
+            "focused LJ soft-core case must isolate softcore from subsystem division"
+        )
+    with h5py.File(topology_path, "r") as topology:
+        payload = {
+            "atom_type_A": topology["/forcefield/lj_soft_core/atom_type_A"][
+                ...
+            ].tolist(),
+            "atom_type_B": topology["/forcefield/lj_soft_core/atom_type_B"][
+                ...
+            ].tolist(),
+            "pair_AA": topology["/forcefield/lj_soft_core/pair_AA"][
+                ...
+            ].tolist(),
+            "pair_AB": topology["/forcefield/lj_soft_core/pair_AB"][
+                ...
+            ].tolist(),
+            "pair_BA": topology["/forcefield/lj_soft_core/pair_BA"][
+                ...
+            ].tolist(),
+            "pair_BB": topology["/forcefield/lj_soft_core/pair_BB"][
+                ...
+            ].tolist(),
+        }
+        type_counts = (
+            int(topology["/forcefield/lj_soft_core/atom_type_count_A"][()]),
+            int(topology["/forcefield/lj_soft_core/atom_type_count_B"][()]),
+        )
+    expected_payload = {
+        "atom_type_A": [0, 0],
+        "atom_type_B": [0, 0],
+        "pair_AA": [0.0],
+        "pair_AB": [0.0],
+        "pair_BA": [2.0],
+        "pair_BB": [1.5],
+    }
+    if payload != expected_payload or type_counts != (1, 1):
+        raise AssertionError(
+            "focused LJ soft-core native payload changed: "
+            f"payload={payload}, type_counts={type_counts}"
         )
 
 
@@ -2684,6 +2869,10 @@ def _compare_input_semantics(
                 replica_result["oracle"] = _compare_focused_exclusions_oracle(
                     case, run
                 )
+            elif spec.contract_id == "input.topology.lj_soft_core":
+                replica_result["force"] = _compare_focused_lj_soft_core_forces(
+                    case, run
+                )
             replica_results.append(replica_result)
         results.append(
             {
@@ -2783,6 +2972,21 @@ def _compare_focused_exclusions_oracle(
         "branches": branch_results,
         "cross_branch_force": cross_branch,
     }
+
+
+def _compare_focused_lj_soft_core_forces(
+    case: AbCase, run: AbRun
+) -> dict[str, object]:
+    legacy = _read_native_float32_file(run.legacy_dir / "output" / "legacy.frc")
+    bundled = _read_native_float32_file(
+        run.bundled_dir / "output" / "legacy.frc"
+    )
+    result = _assert_nontrivial_equivalent_forces(
+        f"{case.name} LJ soft-core force", legacy, bundled
+    )
+    result["bundled_native_path"] = "/forcefield/lj_soft_core"
+    result["subsystem_division_present"] = False
+    return result
 
 
 def _assert_exclusion_coulomb_oracle(
