@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 try:
     import tomllib
 except ModuleNotFoundError:  # Python 3.10
@@ -13,9 +15,16 @@ from benchmarks.bundled_io.ab_contracts import (
     validate_contract_registry,
     validate_implementation_inventory,
 )
+from benchmarks.bundled_io.input_semantics import (
+    REQUIRED_INPUT_SEMANTIC_CONTRACTS,
+    InputSemanticSpec,
+    assert_module_semantics,
+)
 from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
+    INPUT_SEMANTIC_SPECS_BY_CASE,
     MDINFO_CONTRACT_KEYS,
     PROFILE_LIMITS,
+    RERUN_INPUT_SEMANTIC_SPECS,
     _cases_for_profile,
     _parse_mdinfo_key_values,
 )
@@ -311,3 +320,80 @@ def test_output_behavior_closure_keeps_family_module_restart_and_repair_gates():
             assert function in source, (
                 f"{path.name} no longer covers {function}"
             )
+
+
+def test_input_semantic_gate_requires_nontrivial_owned_result():
+    result = assert_module_semantics(
+        "bond",
+        [{"bond": 2.0}, {"bond": 3.0}],
+        [{"bond": 2.0}, {"bond": 3.0}],
+        InputSemanticSpec("input.topology.bond", ("bond",)),
+        deterministic=True,
+    )
+
+    assert result["legacy_nontrivial"] is True
+    assert result["bundled_nontrivial"] is True
+
+
+def test_input_semantic_registry_uses_owned_observables_not_initialization_logs():
+    specs = [
+        *RERUN_INPUT_SEMANTIC_SPECS,
+        *(
+            spec
+            for case_specs in INPUT_SEMANTIC_SPECS_BY_CASE.values()
+            for spec in case_specs
+        ),
+    ]
+
+    assert specs
+    assert all(spec.observables for spec in specs)
+    assert all(
+        "initial" not in observable.lower()
+        for spec in specs
+        for observable in spec.observables
+    )
+
+
+def test_input_semantic_contract_inventory_is_explicit_and_evidence_gated():
+    contracts = load_contract_registry()
+    runtime_spec_ids = {
+        spec.contract_id
+        for specs in INPUT_SEMANTIC_SPECS_BY_CASE.values()
+        for spec in specs
+    } | {spec.contract_id for spec in RERUN_INPUT_SEMANTIC_SPECS}
+
+    assert REQUIRED_INPUT_SEMANTIC_CONTRACTS <= set(contracts)
+    assert runtime_spec_ids == {
+        contract_id
+        for contract_id in REQUIRED_INPUT_SEMANTIC_CONTRACTS
+        if contracts[contract_id].status == "supported"
+    }
+    for contract_id in REQUIRED_INPUT_SEMANTIC_CONTRACTS:
+        contract = contracts[contract_id]
+        assert contract.minimum_evidence == "E3"
+        if contract.status == "supported":
+            assert "input_semantic_equivalence" in contract.assertion_ids
+        else:
+            assert contract.status == "deferred"
+            assert contract.reason
+
+
+@pytest.mark.parametrize(
+    ("legacy", "bundled", "message"),
+    [
+        ([{"other": 1.0}], [{"bond": 1.0}], "missing module-owned observable"),
+        ([{"bond": 0.0}], [{"bond": 0.0}], "all trivial"),
+        ([{"bond": 1.0}], [{"bond": 2.0}], "mismatch at row"),
+    ],
+)
+def test_input_semantic_gate_rejects_activation_only_evidence(
+    legacy, bundled, message
+):
+    with pytest.raises(AssertionError, match=message):
+        assert_module_semantics(
+            "bond",
+            legacy,
+            bundled,
+            InputSemanticSpec("input.topology.bond", ("bond",)),
+            deterministic=True,
+        )

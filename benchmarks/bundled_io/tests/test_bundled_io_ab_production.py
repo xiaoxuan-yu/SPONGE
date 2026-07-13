@@ -31,6 +31,10 @@ from benchmarks.bundled_io.ab_statistics import (
     holm_correct_equivalence_family,
     normal_cdf,
 )
+from benchmarks.bundled_io.input_semantics import (
+    InputSemanticSpec,
+    assert_module_semantics,
+)
 from benchmarks.bundled_io.trajectory_statistics import (
     trajectory_observable_series,
 )
@@ -191,6 +195,51 @@ TRAJECTORY_REL = Path("output") / "ab.spg.h5md"
 OBSERVABLE_REL = Path("output") / "ab.obs.spg.h5md"
 RESTART_REL = Path("output") / "ab.spgr.h5"
 
+INPUT_SEMANTIC_SPECS_BY_CASE = {
+    "normal_core_h5_output": (
+        InputSemanticSpec("input.topology.mass", ("temperature",), 1.0),
+        InputSemanticSpec("input.topology.charge", ("PM",), 1.0e-6),
+        InputSemanticSpec(
+            "input.topology.lj", ("LJ_short", "LJ_long", "LJ"), 1.0e-6
+        ),
+    ),
+    "normal_sits_ff19sb_cmap_peptide": (
+        InputSemanticSpec("input.topology.cmap", ("cmap",), 1.0e-6),
+    ),
+}
+
+RERUN_INPUT_SEMANTIC_SPECS = (
+    InputSemanticSpec("input.topology.nb14", ("nb14_LJ", "nb14_EE"), 1.0e-6),
+    InputSemanticSpec("input.topology.bond", ("bond",), 1.0e-6),
+    InputSemanticSpec("input.topology.angle", ("angle",), 1.0e-6),
+    InputSemanticSpec("input.topology.urey_bradley", ("urey_bradley",), 1.0e-6),
+    InputSemanticSpec("input.topology.dihedral", ("dihedral",), 1.0e-6),
+    InputSemanticSpec("input.custom.listed", ("custom_bond",), 1.0e-6),
+    InputSemanticSpec("input.manybody.eam", ("EAM",), 1.0e-6),
+    InputSemanticSpec(
+        "input.manybody.reaxff",
+        (
+            "REAXFF_EEQ",
+            "REAXFF_BOND",
+            "REAXFF_VDW",
+            "REAXFF_ELP",
+            "REAXFF_OVUN",
+            "REAXFF_ANG",
+            "REAXFF_PEN",
+            "REAXFF_COA",
+            "REAXFF_TOR",
+            "REAXFF_CONJ",
+            "REAXFF_HB",
+            "REAXFF",
+        ),
+        1.0e-6,
+    ),
+    InputSemanticSpec("input.protocol.restraint", ("restrain",), 1.0e-6),
+    InputSemanticSpec("input.protocol.soft_wall", ("z_wall",), 1.0e-6),
+    InputSemanticSpec("input.protocol.cv", ("distance",), 1.0e-6),
+    InputSemanticSpec("input.qc.energy", ("QC",), 1.0e-6),
+)
+
 
 @dataclass(frozen=True)
 class AbCase:
@@ -250,6 +299,9 @@ def _cases_for_profile() -> list[AbCase]:
                 "output.observable",
                 "output.restart",
                 "output.trajectory.vds_off",
+                "input.topology.mass",
+                "input.topology.charge",
+                "input.topology.lj",
             ),
             assertion_ids=(
                 "mdout_statistical_equivalence",
@@ -258,6 +310,7 @@ def _cases_for_profile() -> list[AbCase]:
                 "particle_legacy_coexistence",
                 "restart_structural_coexistence",
                 "restart_continuation_equivalence",
+                "input_semantic_equivalence",
             ),
         ),
         AbCase(
@@ -283,17 +336,16 @@ def _cases_for_profile() -> list[AbCase]:
                 "output.restart",
                 "output.trajectory.vds_on",
                 "input.topology.cmap",
-                "input.protocol.sits",
                 "system.ff19sb_ace_ala_nme",
             ),
             assertion_ids=(
                 "mdout_statistical_equivalence",
                 "mdinfo_structured_equivalence",
                 "h5_statistical_equivalence",
-                "cmap_runtime_equivalence",
                 "particle_legacy_coexistence",
                 "restart_structural_coexistence",
                 "restart_continuation_equivalence",
+                "input_semantic_equivalence",
             ),
         ),
         AbCase(
@@ -315,15 +367,25 @@ def _cases_for_profile() -> list[AbCase]:
                 "input.full_contract.inventory",
                 "input.full_contract.pure_native",
                 "input.restart_load.structural",
-                "input.topology.cmap",
                 "input.manybody.reaxff",
+                "input.topology.nb14",
+                "input.topology.bond",
+                "input.topology.angle",
+                "input.topology.urey_bradley",
+                "input.topology.dihedral",
+                "input.custom.listed",
+                "input.manybody.eam",
+                "input.protocol.restraint",
+                "input.protocol.soft_wall",
+                "input.protocol.cv",
+                "input.qc.energy",
             ),
             assertion_ids=(
                 "full_contract_input_inventory",
                 "mdout_deterministic_equivalence",
                 "qc_scf_exact_equivalence",
                 "h5_rerun_semantic_equivalence",
-                "cmap_runtime_equivalence",
+                "input_semantic_equivalence",
             ),
         ),
         AbCase(
@@ -345,15 +407,25 @@ def _cases_for_profile() -> list[AbCase]:
                 "input.full_contract.inventory",
                 "input.full_contract.pure_native",
                 "input.restart_load.structural",
-                "input.topology.cmap",
                 "input.manybody.reaxff",
+                "input.topology.nb14",
+                "input.topology.bond",
+                "input.topology.angle",
+                "input.topology.urey_bradley",
+                "input.topology.dihedral",
+                "input.custom.listed",
+                "input.manybody.eam",
+                "input.protocol.restraint",
+                "input.protocol.soft_wall",
+                "input.protocol.cv",
+                "input.qc.energy",
             ),
             assertion_ids=(
                 "full_contract_input_inventory",
                 "mdout_deterministic_equivalence",
                 "qc_scf_exact_equivalence",
                 "h5_rerun_semantic_equivalence",
-                "cmap_runtime_equivalence",
+                "input_semantic_equivalence",
             ),
         ),
         AbCase(
@@ -375,15 +447,25 @@ def _cases_for_profile() -> list[AbCase]:
                 "input.full_contract.inventory",
                 "input.full_contract.sidecar",
                 "input.restart_load.structural",
-                "input.topology.cmap",
                 "input.manybody.reaxff",
+                "input.topology.nb14",
+                "input.topology.bond",
+                "input.topology.angle",
+                "input.topology.urey_bradley",
+                "input.topology.dihedral",
+                "input.custom.listed",
+                "input.manybody.eam",
+                "input.protocol.restraint",
+                "input.protocol.soft_wall",
+                "input.protocol.cv",
+                "input.qc.energy",
             ),
             assertion_ids=(
                 "full_contract_input_inventory",
                 "mdout_deterministic_equivalence",
                 "qc_scf_exact_equivalence",
                 "h5_rerun_semantic_equivalence",
-                "cmap_runtime_equivalence",
+                "input_semantic_equivalence",
             ),
         ),
         AbCase(
@@ -405,19 +487,35 @@ def _cases_for_profile() -> list[AbCase]:
                 "input.full_contract.inventory",
                 "input.full_contract.sidecar",
                 "input.restart_load.structural",
-                "input.topology.cmap",
                 "input.manybody.reaxff",
+                "input.topology.nb14",
+                "input.topology.bond",
+                "input.topology.angle",
+                "input.topology.urey_bradley",
+                "input.topology.dihedral",
+                "input.custom.listed",
+                "input.manybody.eam",
+                "input.protocol.restraint",
+                "input.protocol.soft_wall",
+                "input.protocol.cv",
+                "input.qc.energy",
             ),
             assertion_ids=(
                 "full_contract_input_inventory",
                 "mdout_deterministic_equivalence",
                 "qc_scf_exact_equivalence",
                 "h5_rerun_semantic_equivalence",
-                "cmap_runtime_equivalence",
+                "input_semantic_equivalence",
             ),
         ),
     ]
     return cases
+
+
+def _input_semantic_specs(case: AbCase) -> tuple[InputSemanticSpec, ...]:
+    if case.mode == "rerun":
+        return RERUN_INPUT_SEMANTIC_SPECS
+    return INPUT_SEMANTIC_SPECS_BY_CASE.get(case.name, ())
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -1155,6 +1253,22 @@ def _compare_outputs(
         "mdout": mdout_comparison,
         "h5": h5_comparison,
     }
+    input_semantics = _compare_input_semantics(case, runs)
+    if input_semantics:
+        comparison["input_semantics"] = input_semantics
+        evidence.append(
+            AssertionEvidence(
+                assertion_id="input_semantic_equivalence",
+                evidence_level="E3",
+                details={
+                    "contracts": [
+                        item["contract_id"] for item in input_semantics
+                    ],
+                    "criterion": "present_nontrivial_module_owned_result",
+                    "results": input_semantics,
+                },
+            )
+        )
     if "output.legacy.mdinfo" in case.contract_ids:
         mdinfo_comparison = _compare_mdinfo_structured(case, runs)
         comparison["mdinfo"] = mdinfo_comparison
@@ -1211,21 +1325,6 @@ def _compare_outputs(
             _compare_cmap_materialization(run.legacy_dir, run.bundled_dir)
             for run in runs
         ]
-        evidence.append(
-            AssertionEvidence(
-                assertion_id="cmap_runtime_equivalence",
-                evidence_level="E3",
-                details={
-                    "replica_count": len(runs),
-                    "mdout_equivalence_assertion": (
-                        "mdout_statistical_equivalence"
-                        if case.statistical_md
-                        else "mdout_deterministic_equivalence"
-                    ),
-                    "both_branches_initialized": True,
-                },
-            )
-        )
     if "output.legacy.qc_scf_output" in case.contract_ids:
         qc_scf = _compare_qc_scf_output(case, runs)
         comparison["qc_scf_output"] = qc_scf
@@ -1237,6 +1336,40 @@ def _compare_outputs(
             )
         )
     return comparison, tuple(evidence)
+
+
+def _compare_input_semantics(
+    case: AbCase, runs: Sequence[AbRun]
+) -> list[dict[str, object]]:
+    specs = _input_semantic_specs(case)
+    results = []
+    for spec in specs:
+        replica_results = []
+        for run in runs:
+            legacy = _read_mdout(run.legacy_dir / "mdout.txt")
+            bundled = _read_mdout(run.bundled_dir / "mdout.txt")
+            replica_results.append(
+                assert_module_semantics(
+                    f"{case.name} replica {run.replica_index} {spec.contract_id}",
+                    legacy["rows"],
+                    bundled["rows"],
+                    spec,
+                    deterministic=not case.statistical_md,
+                )
+            )
+        results.append(
+            {
+                "contract_id": spec.contract_id,
+                "observables": list(spec.observables),
+                "replicas": replica_results,
+                "cross_branch_comparison": (
+                    "mdout_statistical_equivalence"
+                    if case.statistical_md
+                    else "module_owned_deterministic_rows"
+                ),
+            }
+        )
+    return results
 
 
 def _normalize_line_endings(text: str) -> str:
@@ -1358,7 +1491,9 @@ def _compare_restart_continuation(
             shutil.rmtree(destination)
         shutil.copytree(source_dir, destination)
         if branch == "h5":
-            shutil.copy2(run.legacy_dir / RESTART_REL, destination / RESTART_REL)
+            shutil.copy2(
+                run.legacy_dir / RESTART_REL, destination / RESTART_REL
+            )
         mdin_path = destination / source_mdin
         text = _remove_key_lines(
             mdin_path.read_text(encoding="utf-8"),

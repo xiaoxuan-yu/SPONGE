@@ -84,13 +84,20 @@ def test_known_unmaterialized_topology_contracts_are_explicitly_deferred():
 
     for contract_id in (
         "input.topology.improper",
-        "input.topology.nb14",
         "input.topology.virtual_atoms_alias",
     ):
         contract = contracts[contract_id]
         assert contract.status == "deferred"
         assert contract.minimum_evidence == "E3"
         assert contract.reason
+
+
+def test_nb14_is_promoted_only_with_module_owned_runtime_evidence():
+    contract = load_contract_registry()["input.topology.nb14"]
+
+    assert contract.status == "supported"
+    assert contract.minimum_evidence == "E3"
+    assert contract.assertion_ids == ("input_semantic_equivalence",)
 
 
 def test_removing_an_inventory_owner_fails_the_gate():
