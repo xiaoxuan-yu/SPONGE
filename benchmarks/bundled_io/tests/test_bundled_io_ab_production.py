@@ -71,6 +71,7 @@ FOCUSED_VIRTUAL_ATOMS_ALL_TYPES_FIXTURE = "focused_virtual_atoms_all_types"
 FOCUSED_VIRTUAL_ATOMS_ALIAS_FIXTURE = "focused_virtual_atoms_plural_alias"
 FOCUSED_VIRTUAL_ATOMS_PBC_FIXTURE = "focused_virtual_atoms_pbc_boundary"
 FOCUSED_CONSTRAINT_SIDECAR_FIXTURE = "focused_constraint_sidecar_two_atom"
+FOCUSED_CONSTRAINT_TYPED_FIXTURE = "focused_constraint_typed_two_atom"
 FOCUSED_STEERING_CV_SIDECAR_FIXTURE = "focused_steering_cv_sidecar_two_atom"
 FOCUSED_SITS_NK_TYPED_RESTART_FIXTURE = "focused_sits_nk_typed_restart_two_atom"
 SUPPORTED_TOPOLOGY_SCHEMA_VERSIONS = (
@@ -997,6 +998,28 @@ def _cases_for_profile() -> list[AbCase]:
             contract_ids=(
                 "output.legacy.mdout",
                 "input.protocol.constraint.sidecar",
+            ),
+            assertion_ids=(
+                "mdout_deterministic_equivalence",
+                "constraint_geometry_equivalence",
+            ),
+            normal_step_limit=4,
+            normal_interval=1,
+            normal_dt=0.001,
+            input_behavior_only=True,
+        ),
+        AbCase(
+            name="normal_constraint_typed_projection",
+            fixture_case=FOCUSED_CONSTRAINT_TYPED_FIXTURE,
+            legacy_subdir="generated_legacy",
+            bundled_subdir="generated_bundled",
+            mode="normal",
+            vds=False,
+            statistical_md=False,
+            restart_load_policy="structural",
+            contract_ids=(
+                "output.legacy.mdout",
+                "input.protocol.constraint",
             ),
             assertion_ids=(
                 "mdout_deterministic_equivalence",
@@ -3423,6 +3446,8 @@ def _prepare_case_pair(
             )
         if case.fixture_case == FOCUSED_CONSTRAINT_SIDECAR_FIXTURE:
             return _prepare_focused_constraint_sidecar_pair(case_root)
+        if case.fixture_case == FOCUSED_CONSTRAINT_TYPED_FIXTURE:
+            return _prepare_focused_constraint_typed_pair(case_root)
         if case.fixture_case == FOCUSED_STEERING_CV_SIDECAR_FIXTURE:
             return _prepare_focused_steering_cv_sidecar_pair(case_root)
         return _prepare_normal_tip3p_pair(case_root, replica_seed)
@@ -5905,6 +5930,70 @@ def _validate_focused_constraint_sidecar_routes(
     if legacy_payload != bundled_payload:
         raise AssertionError(
             "focused constraint sidecar payload differs from legacy input"
+        )
+
+
+def _prepare_focused_constraint_typed_pair(
+    case_root: Path,
+) -> tuple[Path, Path]:
+    legacy_dir, bundled_dir = _prepare_focused_constraint_sidecar_pair(
+        case_root
+    )
+    protocol_path = bundled_dir / "protocol.spgp.h5"
+    sidecar_root = "/parameters/sponge/files/legacy_sidecars"
+    with h5py.File(protocol_path, "r+") as protocol:
+        if sidecar_root not in protocol:
+            raise AssertionError(
+                "focused constraint conversion lost protocol sidecars"
+            )
+        del protocol[sidecar_root]
+    sidecar_dir = bundled_dir / "legacy_sidecars"
+    if not sidecar_dir.exists():
+        raise AssertionError("focused constraint bundle lost sidecar payload")
+    shutil.rmtree(sidecar_dir)
+    _validate_focused_constraint_typed_routes(legacy_dir, bundled_dir)
+    return legacy_dir, bundled_dir
+
+
+def _validate_focused_constraint_typed_routes(
+    legacy_dir: Path, bundled_dir: Path
+) -> None:
+    legacy_mdin = (legacy_dir / "mdin.spg.toml").read_text(encoding="utf-8")
+    bundled_mdin = (bundled_dir / "mdin.bundled.spg.toml").read_text(
+        encoding="utf-8"
+    )
+    if not _has_key_line(legacy_mdin, "constrain_in_file"):
+        raise AssertionError("focused typed constraint legacy route is missing")
+    if _has_key_line(bundled_mdin, "constrain_in_file"):
+        raise AssertionError(
+            "focused typed constraint retained constrain_in_file"
+        )
+    if not _has_key_line(bundled_mdin, "constrain_mode"):
+        raise AssertionError("focused typed constraint lost constrain_mode")
+    if (bundled_dir / "legacy_sidecars").exists():
+        raise AssertionError("focused typed constraint retained sidecar files")
+
+    protocol_path = bundled_dir / "protocol.spgp.h5"
+    protocol_paths = _h5_paths(protocol_path)
+    sidecar_root = "/parameters/sponge/files/legacy_sidecars"
+    if sidecar_root in protocol_paths:
+        raise AssertionError("focused typed constraint retained sidecar table")
+    required = {
+        "/constraint/default/pairs/atoms",
+        "/constraint/default/pairs/r0",
+    }
+    missing = sorted(required - protocol_paths)
+    if missing:
+        raise AssertionError(
+            f"focused typed constraint is missing datasets: {missing}"
+        )
+    with h5py.File(protocol_path, "r") as protocol:
+        atoms = protocol["/constraint/default/pairs/atoms"][...].tolist()
+        distances = protocol["/constraint/default/pairs/r0"][...].tolist()
+    if atoms != [[0, 1]] or distances != [1.5]:
+        raise AssertionError(
+            "focused typed constraint payload changed: "
+            f"atoms={atoms}, r0={distances}"
         )
 
 
@@ -8715,13 +8804,124 @@ def _compare_focused_constraint_projection(
             velocities["legacy"], velocities["bundled"], strict=True
         )
     )
-    return {
+    result = {
         "method": "per_frame_distance_and_radial_velocity_projection",
+        "route": (
+            "typed_h5_constraint_pairs"
+            if case.fixture_case == FOCUSED_CONSTRAINT_TYPED_FIXTURE
+            else "isolated_h5_constrain_in_file_protocol_sidecar"
+        ),
         "target_distance": 1.5,
         "initial_relative_radial_speed": 2.0,
         "branches": branch_results,
         "cross_branch_position_max_absolute_error": position_error,
         "cross_branch_velocity_max_absolute_error": velocity_error,
+    }
+    if case.fixture_case == FOCUSED_CONSTRAINT_TYPED_FIXTURE:
+        result["target_distance_control"] = (
+            _run_typed_constraint_target_control(case, run)
+        )
+        result["invalid_pair_control"] = (
+            _run_typed_constraint_invalid_pair_control(case, run)
+        )
+    return result
+
+
+def _run_typed_constraint_target_control(
+    case: AbCase, run: AbRun
+) -> dict[str, object]:
+    control_dir = run.bundled_dir.parent / "bundled_constraint_r0_control"
+    if control_dir.exists():
+        shutil.rmtree(control_dir)
+    shutil.copytree(run.bundled_dir, control_dir)
+    output_dir = control_dir / "output"
+    if output_dir.exists():
+        shutil.rmtree(output_dir)
+    output_dir.mkdir(parents=True)
+    for file_name in ("mdout.txt", "mdinfo.txt", "run.stdout", "run.stderr"):
+        path = control_dir / file_name
+        if path.exists():
+            path.unlink()
+
+    with h5py.File(control_dir / "protocol.spgp.h5", "r+") as protocol:
+        distances = protocol["/constraint/default/pairs/r0"]
+        if distances[...].tolist() != [1.5]:
+            raise AssertionError(f"{case.name} target control lost baseline r0")
+        distances[...] = [2.0]
+    with h5py.File(control_dir / "restart.spgr.h5", "r+") as restart:
+        position = restart["/particles/all/position/value"]
+        if position.shape != (1, 2, 3) or not math.isclose(
+            float(position[0, 1, 0]), 1.5, rel_tol=0.0, abs_tol=1.0e-7
+        ):
+            raise AssertionError(
+                f"{case.name} target control lost baseline coordinate"
+            )
+        position[0, 1, 0] = 2.0
+
+    outcome = _run_sponge_process(control_dir, _mdin_name(control_dir))
+    if outcome.returncode != 0:
+        raise AssertionError(
+            f"{case.name} typed r0 control failed with code "
+            f"{outcome.returncode}\n{outcome.stdout}\n{outcome.stderr}"
+        )
+    control_result = _assert_constraint_projection_oracle(
+        f"{case.name} typed r0 control",
+        _read_native_float32_file(control_dir / "output" / "legacy.crd"),
+        _read_native_float32_file(control_dir / "output" / "legacy.vel"),
+        target_distance=2.0,
+    )
+    return {
+        "baseline_target_distance": 1.5,
+        "control_target_distance": 2.0,
+        "control_initial_distance": 2.0,
+        "target_delta": 0.5,
+        "exit_code": outcome.returncode,
+        **control_result,
+    }
+
+
+def _run_typed_constraint_invalid_pair_control(
+    case: AbCase, run: AbRun
+) -> dict[str, object]:
+    control_dir = run.bundled_dir.parent / "bundled_constraint_invalid_pair"
+    if control_dir.exists():
+        shutil.rmtree(control_dir)
+    shutil.copytree(run.bundled_dir, control_dir)
+    output_dir = control_dir / "output"
+    if output_dir.exists():
+        shutil.rmtree(output_dir)
+    output_dir.mkdir(parents=True)
+    for file_name in ("mdout.txt", "mdinfo.txt", "run.stdout", "run.stderr"):
+        path = control_dir / file_name
+        if path.exists():
+            path.unlink()
+    with h5py.File(control_dir / "protocol.spgp.h5", "r+") as protocol:
+        protocol["/constraint/default/pairs/atoms"][...] = [[0, 2]]
+
+    outcome = _run_sponge_process(control_dir, _mdin_name(control_dir))
+    combined = outcome.stdout + outcome.stderr
+    category = _failure_category(combined)
+    expected_tokens = (
+        "/constraint/default/pairs/atoms",
+        "invalid pair [0, 2]",
+        "row 0",
+    )
+    missing = [token for token in expected_tokens if token not in combined]
+    if (
+        outcome.returncode == 0
+        or category != "spongeErrorBadFileFormat"
+        or missing
+    ):
+        raise AssertionError(
+            f"{case.name} invalid typed constraint was not rejected: "
+            f"code={outcome.returncode}, category={category}, "
+            f"missing={missing}\n{combined}"
+        )
+    return {
+        "mutated_pair": [0, 2],
+        "exit_code": outcome.returncode,
+        "failure_category": category,
+        "diagnostic_tokens": list(expected_tokens),
     }
 
 

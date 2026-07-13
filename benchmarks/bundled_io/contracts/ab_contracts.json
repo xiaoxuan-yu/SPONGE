@@ -753,13 +753,13 @@
       "contract_id": "input.protocol.constraint",
       "direction": "input",
       "component": "protocol",
-      "status": "deferred",
+      "status": "supported",
       "minimum_evidence": "E3",
       "legacy_surface": "constrain_in_file converted to native constraint data",
-      "bundled_surface": "native typed /constraint consumption",
-      "case_ids": [],
-      "assertion_ids": [],
-      "reason": "The converter emits typed /constraint data, but the bundled runtime does not materialize that native payload into the constrain_in_file consumer. Sidecar behavior is tracked separately."
+      "bundled_surface": "/constraint/default/pairs/atoms and /constraint/default/pairs/r0",
+      "case_ids": ["normal_constraint_typed_projection"],
+      "assertion_ids": ["constraint_geometry_equivalence"],
+      "reason": ""
     },
     {
       "contract_id": "input.protocol.constraint.sidecar",

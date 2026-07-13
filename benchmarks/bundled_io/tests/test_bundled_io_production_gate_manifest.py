@@ -37,6 +37,7 @@ from benchmarks.bundled_io.tests.test_bundled_io_ab_execution_matrix import (
 )
 from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
     FOCUSED_CONSTRAINT_SIDECAR_FIXTURE,
+    FOCUSED_CONSTRAINT_TYPED_FIXTURE,
     FOCUSED_CORE_TOPOLOGY_FIXTURE,
     FOCUSED_CUSTOM_PAIR_FIXTURE,
     FOCUSED_EDIP_FIXTURE,
@@ -298,6 +299,7 @@ def test_ab_production_harness_has_executable_contract_coverage():
         "normal_virtual_atoms_pbc_boundary",
         "normal_virtual_atoms_plural_alias",
         "normal_constraint_sidecar_projection",
+        "normal_constraint_typed_projection",
         "normal_sits_nk_typed_restart_nonzero",
         "normal_steering_cv_sidecar_nonzero",
         "normal_vds_chunk_minus_one",
@@ -1661,10 +1663,34 @@ def test_focused_constraint_sidecar_case_requires_projected_runtime_behavior():
     assert sidecar.status == "supported"
     assert sidecar.case_ids == (case.name,)
     assert sidecar.assertion_ids == ("constraint_geometry_equivalence",)
+
+
+def test_focused_typed_constraint_case_requires_payload_projection():
+    contracts = load_contract_registry()
+    case = next(
+        case
+        for case in _cases_for_profile()
+        if case.name == "normal_constraint_typed_projection"
+    )
+
+    assert case.fixture_case == FOCUSED_CONSTRAINT_TYPED_FIXTURE
+    assert case.statistical_md is False
+    assert case.normal_step_limit == 4
+    assert case.normal_interval == 1
+    assert case.normal_dt == 0.001
+    assert case.input_behavior_only is True
+    assert case.contract_ids == (
+        "output.legacy.mdout",
+        "input.protocol.constraint",
+    )
+    assert case.assertion_ids == (
+        "mdout_deterministic_equivalence",
+        "constraint_geometry_equivalence",
+    )
     typed = contracts["input.protocol.constraint"]
-    assert typed.status == "deferred"
-    assert "does not materialize" in typed.reason
-    assert "Sidecar behavior is tracked separately" in typed.reason
+    assert typed.status == "supported"
+    assert typed.case_ids == (case.name,)
+    assert typed.assertion_ids == ("constraint_geometry_equivalence",)
 
 
 @pytest.mark.parametrize(
@@ -2154,6 +2180,7 @@ def test_input_semantic_contract_inventory_is_explicit_and_evidence_gated():
         "input.protocol.constraint.sidecar": (
             "constraint_geometry_equivalence"
         ),
+        "input.protocol.constraint": "constraint_geometry_equivalence",
         "input.qc.scf_text": "qc_scf_exact_equivalence",
     }
     runtime_spec_ids = {

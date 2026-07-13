@@ -1,5 +1,7 @@
 ﻿#include "xponge.h"
 
+#include <array>
+#include <cmath>
 #include <cstdint>
 #include <sstream>
 #include <stdexcept>
@@ -173,6 +175,107 @@ std::vector<int> Read_H5_Residue_Atom_Numbers(CONTROLLER* controller,
     }
     return {};
 }
+
+bool Read_H5_Distance_Constraints(CONTROLLER* controller,
+                                  std::size_t atom_count,
+                                  Xponge::DistanceConstraints* constraints)
+{
+    constexpr const char* input_key = "input_h5_protocol_path";
+    constexpr const char* atoms_path = "/constraint/default/pairs/atoms";
+    constexpr const char* distance_path = "/constraint/default/pairs/r0";
+    if (!controller->Command_Exist(input_key))
+    {
+        return false;
+    }
+
+    try
+    {
+        HighFive::File file(controller->Command(input_key),
+                            HighFive::File::ReadOnly);
+        const bool has_atoms = file.exist(atoms_path);
+        const bool has_distances = file.exist(distance_path);
+        if (!has_atoms && !has_distances)
+        {
+            return false;
+        }
+        if (controller->Command_Exist("constrain_in_file"))
+        {
+            return false;
+        }
+        if (!has_atoms || !has_distances)
+        {
+            throw std::runtime_error(
+                "typed constraints require both atoms and r0 datasets");
+        }
+        HighFive::DataSet atoms_dataset = file.getDataSet(atoms_path);
+        const auto atom_dimensions = atoms_dataset.getSpace().getDimensions();
+        if (atom_dimensions.size() != 2 || atom_dimensions[1] != 2 ||
+            atom_dimensions[0] == 0)
+        {
+            throw std::runtime_error(
+                "/constraint/default/pairs/atoms must have shape [n,2] with "
+                "n > 0");
+        }
+        HighFive::DataSet distance_dataset = file.getDataSet(distance_path);
+        const auto distance_dimensions =
+            distance_dataset.getSpace().getDimensions();
+        if (distance_dimensions.size() != 1 ||
+            distance_dimensions[0] != atom_dimensions[0])
+        {
+            throw std::runtime_error(
+                "/constraint/default/pairs/r0 must have shape [n] matching "
+                "the atoms dataset");
+        }
+
+        std::vector<std::array<std::int64_t, 2>> atoms;
+        std::vector<float> distances;
+        atoms_dataset.read(atoms);
+        distance_dataset.read(distances);
+        Xponge::DistanceConstraints result;
+        result.atom_a.reserve(distances.size());
+        result.atom_b.reserve(distances.size());
+        result.r0.reserve(distances.size());
+        for (std::size_t pair = 0; pair < distances.size(); ++pair)
+        {
+            const std::int64_t atom_a = atoms[pair][0];
+            const std::int64_t atom_b = atoms[pair][1];
+            if (atom_a < 0 || atom_b < 0 ||
+                atom_a >= static_cast<std::int64_t>(atom_count) ||
+                atom_b >= static_cast<std::int64_t>(atom_count) ||
+                atom_a == atom_b)
+            {
+                std::ostringstream message;
+                message << atoms_path << " contains invalid pair [" << atom_a
+                        << ", " << atom_b << "] at row " << pair;
+                throw std::runtime_error(message.str());
+            }
+            if (!std::isfinite(distances[pair]) || distances[pair] <= 0.0f)
+            {
+                std::ostringstream message;
+                message << distance_path
+                        << " contains a non-positive or non-finite distance at "
+                           "row "
+                        << pair;
+                throw std::runtime_error(message.str());
+            }
+            result.atom_a.push_back(static_cast<int>(atom_a));
+            result.atom_b.push_back(static_cast<int>(atom_b));
+            result.r0.push_back(distances[pair]);
+        }
+        *constraints = result;
+        return true;
+    }
+    catch (const std::exception& error)
+    {
+        const std::string message =
+            std::string("Reason:\n\tfailed to read typed constraints from ") +
+            atoms_path + ": " + error.what() + "\n";
+        controller->Throw_SPONGE_Error(spongeErrorBadFileFormat,
+                                       "Xponge::Read_H5_Distance_Constraints",
+                                       message.c_str());
+    }
+    return false;
+}
 }  // namespace
 
 void Xponge::System::Load_Inputs(CONTROLLER* controller)
@@ -196,6 +299,12 @@ void Xponge::System::Load_Inputs(CONTROLLER* controller)
         if (!residue_atom_numbers.empty())
         {
             this->residues.atom_numbers = residue_atom_numbers;
+        }
+        Xponge::DistanceConstraints constraints;
+        if (Read_H5_Distance_Constraints(controller, this->atoms.mass.size(),
+                                         &constraints))
+        {
+            this->classical_force_field.constraints = constraints;
         }
     }
 }

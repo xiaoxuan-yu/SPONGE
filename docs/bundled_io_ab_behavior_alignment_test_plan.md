@@ -1067,7 +1067,47 @@ Acceptance:
   SPONGE rebuild, Ruff, clang-format, and diff checks pass, followed by exactly
   one PR-scoped commit.
 
-## 35. Artifacts and Temporary-Space Policy
+## 35. PR 38: Typed Constraint Projection Behavior Gate
+
+Close `input.protocol.constraint` by materializing typed protocol pairs into
+`Xponge::system.classical_force_field.constraints` before the SHAKE/SETTLE
+runtime builds its constraint list.
+
+- Preserve migration compatibility: when `constrain_in_file` is bound by the
+  protocol sidecar table, the sidecar remains the owner even if the converted
+  H5 file also retains typed constraint datasets.
+- For a pure typed route, require both
+  `/constraint/default/pairs/atoms` with shape `[n,2]` and
+  `/constraint/default/pairs/r0` with shape `[n]`. Reject empty payloads,
+  mismatched lengths, out-of-range or self pairs, and non-positive/non-finite
+  distances.
+- Reuse the deterministic two-atom projection fixture. The legacy branch
+  consumes `constrain_in_file`; the bundled branch contains only typed pair
+  `[0,1]` with `r0=1.5`, with no constraint command, sidecar table, or sidecar
+  directory.
+- Compare all four position and velocity frames. Require zero distance error
+  and reduction of the initial relative radial speed from `2.0` to at most
+  `1e-4` through both routes.
+- Change only the typed target and matching bootstrap distance to `2.0` while
+  retaining non-zero relative motion. Require all four frames to converge to
+  the new target; an implementation that ignores the typed payload must fail.
+
+Acceptance:
+
+- Legacy and pure typed routes have identical complete mdout, position, and
+  velocity behavior at `r0=1.5`; both report four projected frames and maximum
+  distance residual `0`.
+- The `r0=2.0` control reports four projected frames, zero distance residual,
+  and radial velocity residual below `1e-4`.
+- An out-of-range typed pair `[0,2]` exits with
+  `spongeErrorBadFileFormat` and stable dataset/row diagnostics.
+- The existing constraint sidecar projection gate remains green, proving that
+  typed materialization does not override the migration route.
+- Registry, manifest, real CPU A/B, full smoke, related input CTests, SPONGE
+  rebuild, Ruff, clang-format, and diff checks pass, followed by exactly one
+  PR-scoped commit.
+
+## 36. Artifacts and Temporary-Space Policy
 
 - Use `SPONGE_BUNDLED_IO_AB_RUN_ROOT` for all heavy runs.
 - Put production artifacts on the workspace filesystem rather than `/tmp`.
@@ -1077,7 +1117,7 @@ Acceptance:
 - Record artifact byte counts and enforce a configurable per-case quota.
 - Cleanup must only remove directories created by the current gate run.
 
-## 36. PR Completion Log
+## 37. PR Completion Log
 
 Append one row immediately after completing and committing each PR.
 
@@ -1122,3 +1162,4 @@ Append one row immediately after completing and committing each PR.
 | PR 35: Subsystem-division energy-partition behavior gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract` (130 tests); 90-test production manifest; real `normal_lj_soft_core_nonzero` and `normal_subsystem_division_partition` CPU A/B plus all-intra legacy/bundled controls; two native topology reader CTests; SPONGE rebuild; Ruff; clang-format; `git diff --check` | The legacy `[0,1]` sidecar and pure typed bundled dataset both produce `LJ_soft_inter=-0.06`, `LJ_soft_intra=0.00`, and the same complete force. Same-semantic `[0,0]` controls move the full `-0.06` to the intra observable while preserving total soft-core energy and force, proving mask consumption without changing dynamics. Registry coverage advances to 74 supported, 8 deferred, and 1 unsupported contract. |
 | PR 36: Typed residue runtime-behavior gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract` (131 tests); 91-test production manifest; real typed PBC and COM-virial CPU A/B plus both sidecar residue regressions; two native topology reader CTests; SPONGE rebuild; Ruff; clang-format; `git diff --check` | Pure typed `/atoms/residue_index=[0,0,1,1]` and `/residues/atom_offset=[0,2,4]` materialize into the native `[2,2]` runtime partition without a topology sidecar. They match legacy at `bond=2.0`, the whole-molecule PBC fingerprint `(19,21,25,28)`, `restrain=2.0`, `pressure=0.04`, and `Pxx=0.11`. A typed `[1,3]` control preserves the complete force and energy while changing pressure/Pxx to `-11.53/-34.60`; inconsistent typed datasets and legacy/typed ownership conflicts are rejected. Registry coverage advances to 75 supported, 7 deferred, and 1 unsupported contract. |
 | PR 37: Typed SW pair/three-body behavior gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; real `normal_sw_typed_pair_three_body` and `normal_sw_sidecar_pair_three_body` CPU A/B cases; related native topology CTests; SPONGE rebuild; Ruff; clang-format; `git diff --check` | Pure typed `/manybody/sw` with no SW command or sidecars matches the legacy pair/three-body route at `SW=194.50` and maximum force `404.27862548828125`. A typed lambda-zero control changes energy to `158.79` and maximum force to `343.52105712890625`, proving that the typed three-body payload reaches the force kernel. Registry coverage advances to 76 supported, 6 deferred, and 1 unsupported contract. |
+| PR 38: Typed constraint projection behavior gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract` (133 tests); 93-test production manifest; real `normal_constraint_typed_projection` and `normal_constraint_sidecar_projection` CPU A/B cases; input-validation and fixture-equivalence CTests; SPONGE rebuild; Ruff; clang-format; `git diff --check` | Pure typed pair `[0,1]` with `r0=1.5` and no constraint sidecar matches the legacy route across four complete position/velocity frames with zero distance residual and radial velocity residual `3.411315e-6`. A typed `r0=2.0` control follows the new target with residual `0`; out-of-range pair `[0,2]` is rejected as `spongeErrorBadFileFormat`. Sidecar precedence remains unchanged. Registry coverage advances to 77 supported, 5 deferred, and 1 unsupported contract. |
