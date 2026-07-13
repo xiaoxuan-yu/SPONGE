@@ -683,7 +683,45 @@ Acceptance:
 - Registry, manifest, both real CPU A/B cases, Ruff, and diff checks pass,
   followed by exactly one PR-scoped commit.
 
-## 24. Artifacts and Temporary-Space Policy
+## 24. PR 21: Constraint Sidecar Projection Gate
+
+Close the executable constraint sidecar contract with a deterministic,
+non-trivial two-atom projection while keeping native typed `/constraint`
+consumption explicitly separate.
+
+- Generate two equal-mass atoms at the target distance `1.5` with opposing
+  radial velocities `-1.0` and `1.0`, so merely parsing or initializing the
+  constraint module cannot satisfy the gate.
+- Convert the same legacy input into a bundle. Require the converter's typed
+  `/constraint/default/pairs/{atoms,r0}` payload and the exact
+  `constrain_in_file` sidecar binding to coexist, while the bundled mdin does
+  not retain a direct legacy key.
+- Run four deterministic NVE steps with SHAKE enabled. For every emitted
+  frame, require the pair-distance residual to stay below `1e-5` and the
+  relative radial-velocity residual to stay below `1e-4` in both branches.
+- Compare the complete legacy/bundled position and velocity trajectories with
+  the existing deterministic tolerances, in addition to full mdout equality.
+- Record this evidence for `input.protocol.constraint.sidecar` only. Keep
+  `input.protocol.constraint` deferred until the runtime consumes typed
+  `/constraint` without the sidecar table.
+- Mutation tests must reject both a wrong constrained distance and an
+  unprojected radial velocity, preventing module-startup evidence from passing.
+
+Acceptance:
+
+- Both branches reduce the initial relative radial speed from `2.0` to at most
+  `1e-4` and preserve the target distance in every one of four frames.
+- The sidecar payload is byte-identical to the legacy constraint file and is
+  bound only through the protocol H5 sidecar table in the bundled branch.
+- Removing constraint execution, changing the target geometry, retaining
+  radial motion, changing the schedule, or diverging either trajectory fails
+  the gate.
+- `input.protocol.constraint.sidecar` emits E3 evidence from the focused case;
+  native typed `input.protocol.constraint` remains explicitly deferred.
+- Registry, manifest, real CPU A/B, Ruff, and diff checks pass, followed by
+  exactly one PR-scoped commit.
+
+## 25. Artifacts and Temporary-Space Policy
 
 - Use `SPONGE_BUNDLED_IO_AB_RUN_ROOT` for all heavy runs.
 - Put production artifacts on the workspace filesystem rather than `/tmp`.
@@ -693,7 +731,7 @@ Acceptance:
 - Record artifact byte counts and enforce a configurable per-case quota.
 - Cleanup must only remove directories created by the current gate run.
 
-## 25. PR Completion Log
+## 26. PR Completion Log
 
 Append one row immediately after completing and committing each PR.
 
@@ -721,3 +759,4 @@ Append one row immediately after completing and committing each PR.
 | PR 18: NHC dynamic restart continuation gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; `ctest --test-dir build-dev-cpu-h5-2 --output-on-failure -R 'test_(restart_h5_reader\|h5_restart_load_runtime_closure\|module_h5_mappings_with_mock_backend)$'`; real `normal_nhc_dynamic_restart_continuation` CPU A/B; Ruff; `git diff --check` | 91 contract/manifest/comparator tests, two related CTest passes (runtime closure skipped by its build guard), and the real E4 A/B pass. One producer emits non-zero three-chain state through legacy and H5 restart routes, then a text-restart continuation and `dynamic` H5 continuation compare all mdout columns, particle position/velocity/force/box, NHC trajectories, observable output, and final restart state. Registry coverage advances to 57 supported, 17 deferred, and 1 unsupported contract. |
 | PR 19: Protocol/full metadynamics continuation gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; `ctest --test-dir build-dev-cpu-h5-2 --output-on-failure -R 'test_(restart_h5_reader\|h5_restart_load_runtime_closure\|module_h5_mappings_with_mock_backend)$'`; real `normal_meta_protocol_full_restart_continuation` CPU A/B; Ruff; `git diff --check` | 92 contract/manifest/comparator tests, two related CTest passes (runtime closure skipped by its build guard), and the real E4 A/B pass. One producer checkpoint with three non-zero hills forks into pure legacy, H5 `protocol` plus legacy NHC, and H5 `full` routes. All mdout columns, particle/NHC/metadynamics streams, final hill/potential state, observable output, and restart state agree within existing text-precision tolerances. Registry coverage advances to 60 supported, 14 deferred, and 1 unsupported contract. |
 | PR 20: Unrestricted QC observable and SCF text gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; real `rerun_qc_unrestricted_sidecar_vds_off/on` CPU A/B; Ruff; `git diff --check` | Triplet unrestricted QC produces two finite non-zero spin-square frames in both branches and archives a non-empty exact SCF trace in trajectory and observable output under both VDS modes. Empty-output evidence was removed from the old full-contract cases. `input.qc.type` remains deferred because pure `/qc/type` is not consumed. Registry coverage advances to 62 supported, 12 deferred, and 1 unsupported contract. |
+| PR 21: Constraint sidecar projection gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; real `normal_constraint_sidecar_projection` CPU A/B; Ruff; `git diff --check` | 97 contract/manifest/comparator tests and the real four-frame A/B pass. Both branches preserve distance `1.5` with zero measured residual and reduce relative radial speed from `2.0` to `3.411315e-6`; complete position and velocity trajectories are identical. The supported sidecar contract is separated from deferred native typed `/constraint` consumption. Registry coverage advances to 63 supported, 12 deferred, and 1 unsupported contract. |

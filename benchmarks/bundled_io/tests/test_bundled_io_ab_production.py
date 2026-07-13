@@ -56,6 +56,7 @@ FOCUSED_LJ_SOFT_CORE_FIXTURE = "focused_lj_soft_core_two_atom"
 FOCUSED_VIRTUAL_ATOMS_ALL_TYPES_FIXTURE = "focused_virtual_atoms_all_types"
 FOCUSED_VIRTUAL_ATOMS_ALIAS_FIXTURE = "focused_virtual_atoms_plural_alias"
 FOCUSED_VIRTUAL_ATOMS_PBC_FIXTURE = "focused_virtual_atoms_pbc_boundary"
+FOCUSED_CONSTRAINT_SIDECAR_FIXTURE = "focused_constraint_sidecar_two_atom"
 SITS_FF19SB_CMAP_SOURCE = (
     REPO_ROOT / "benchmarks" / "performance" / "sits" / "statics" / "ala2_sits"
 )
@@ -594,6 +595,28 @@ def _cases_for_profile() -> list[AbCase]:
             normal_step_limit=1,
             normal_interval=1,
             normal_dt=0.0,
+            input_behavior_only=True,
+        ),
+        AbCase(
+            name="normal_constraint_sidecar_projection",
+            fixture_case=FOCUSED_CONSTRAINT_SIDECAR_FIXTURE,
+            legacy_subdir="generated_legacy",
+            bundled_subdir="generated_bundled",
+            mode="normal",
+            vds=False,
+            statistical_md=False,
+            restart_load_policy="structural",
+            contract_ids=(
+                "output.legacy.mdout",
+                "input.protocol.constraint.sidecar",
+            ),
+            assertion_ids=(
+                "mdout_deterministic_equivalence",
+                "constraint_geometry_equivalence",
+            ),
+            normal_step_limit=4,
+            normal_interval=1,
+            normal_dt=0.001,
             input_behavior_only=True,
         ),
         AbCase(
@@ -2747,6 +2770,8 @@ def _prepare_case_pair(
             FOCUSED_VIRTUAL_ATOMS_PBC_FIXTURE,
         }:
             return _prepare_focused_virtual_atoms_pair(case.fixture_case, case_root)
+        if case.fixture_case == FOCUSED_CONSTRAINT_SIDECAR_FIXTURE:
+            return _prepare_focused_constraint_sidecar_pair(case_root)
         return _prepare_normal_tip3p_pair(case_root, replica_seed)
 
     legacy_dir = _copy_case(case, "legacy", case.legacy_subdir, case_root)
@@ -3716,6 +3741,120 @@ def _validate_focused_virtual_atoms_routes(
         )
 
 
+def _prepare_focused_constraint_sidecar_pair(
+    case_root: Path,
+) -> tuple[Path, Path]:
+    legacy_source = case_root / "focused_constraint_sidecar_source"
+    legacy_dir = case_root / "legacy"
+    converted_dir = case_root / "converted_focused_constraint_sidecar_bundle"
+    bundled_dir = case_root / "bundled"
+    for path in (legacy_source, legacy_dir, converted_dir, bundled_dir):
+        if path.exists():
+            shutil.rmtree(path)
+    _write_focused_constraint_sidecar_input(legacy_source)
+    shutil.copytree(legacy_source, legacy_dir)
+    _convert_legacy_case(legacy_source, converted_dir)
+    shutil.copytree(converted_dir / "bundle", bundled_dir)
+    _validate_focused_constraint_sidecar_routes(legacy_dir, bundled_dir)
+    return legacy_dir, bundled_dir
+
+
+def _write_focused_constraint_sidecar_input(case_dir: Path) -> None:
+    case_dir.mkdir(parents=True, exist_ok=True)
+    (case_dir / "mass.txt").write_text("2\n12.0\n12.0\n", encoding="utf-8")
+    (case_dir / "coordinate.txt").write_text(
+        "2 0.0\n0.0 0.0 0.0\n1.5 0.0 0.0\n10.0 10.0 10.0\n90.0 90.0 90.0\n",
+        encoding="utf-8",
+    )
+    (case_dir / "velocity.txt").write_text(
+        "2\n-1.0 0.0 0.0\n1.0 0.0 0.0\n", encoding="utf-8"
+    )
+    (case_dir / "constrain.txt").write_text("1\n0 1 1.5\n", encoding="utf-8")
+    (case_dir / "mdin.spg.toml").write_text(
+        'md_name = "bundled io ab focused constraint sidecar"\n'
+        'mode = "nve"\n'
+        "step_limit = 4\n"
+        "dt = 0.001\n"
+        "cutoff = 4.0\n"
+        "skin = 0.4\n"
+        'mass_in_file = "mass.txt"\n'
+        'coordinate_in_file = "coordinate.txt"\n'
+        'velocity_in_file = "velocity.txt"\n'
+        'constrain_in_file = "constrain.txt"\n'
+        'constrain_mode = "SHAKE"\n'
+        "print_zeroth_frame = 1\n"
+        "write_mdout_interval = 1\n"
+        "write_trajectory_interval = 1\n"
+        "write_information_interval = 1\n",
+        encoding="utf-8",
+    )
+
+
+def _validate_focused_constraint_sidecar_routes(
+    legacy_dir: Path, bundled_dir: Path
+) -> None:
+    legacy_mdin = (legacy_dir / "mdin.spg.toml").read_text(encoding="utf-8")
+    bundled_mdin = (bundled_dir / "mdin.bundled.spg.toml").read_text(
+        encoding="utf-8"
+    )
+    if not _has_key_line(legacy_mdin, "constrain_in_file"):
+        raise AssertionError(
+            "focused constraint legacy route lost constrain_in_file"
+        )
+    if _has_key_line(bundled_mdin, "constrain_in_file"):
+        raise AssertionError(
+            "focused constraint bundled mdin retained constrain_in_file"
+        )
+    for branch, mdin in (("legacy", legacy_mdin), ("bundled", bundled_mdin)):
+        if not _has_key_line(mdin, "constrain_mode"):
+            raise AssertionError(
+                f"focused constraint {branch} route lost constrain_mode"
+            )
+
+    protocol_path = bundled_dir / "protocol.spgp.h5"
+    required = {
+        "/constraint/default/pairs/atoms",
+        "/constraint/default/pairs/r0",
+        "/parameters/sponge/files/legacy_sidecars/key",
+        "/parameters/sponge/files/legacy_sidecars/path",
+    }
+    missing = sorted(required - _h5_paths(protocol_path))
+    if missing:
+        raise AssertionError(
+            f"focused constraint protocol is missing datasets: {missing}"
+        )
+    with h5py.File(protocol_path, "r") as protocol:
+        atoms = protocol["/constraint/default/pairs/atoms"][...].tolist()
+        distances = protocol["/constraint/default/pairs/r0"][...].tolist()
+        keys = (
+            protocol["/parameters/sponge/files/legacy_sidecars/key"]
+            .asstr()[...]
+            .tolist()
+        )
+        paths = (
+            protocol["/parameters/sponge/files/legacy_sidecars/path"]
+            .asstr()[...]
+            .tolist()
+        )
+    if atoms != [[0, 1]] or distances != [1.5]:
+        raise AssertionError(
+            "focused constraint typed payload changed: "
+            f"atoms={atoms}, r0={distances}"
+        )
+    bindings = dict(zip(keys, paths, strict=True))
+    expected_path = "legacy_sidecars/constrain_in_file/constrain.txt"
+    if bindings != {"constrain_in_file": expected_path}:
+        raise AssertionError(
+            f"focused constraint sidecar binding changed: {bindings}"
+        )
+    legacy_payload = (legacy_dir / "constrain.txt").read_bytes()
+    bundled_payload = (bundled_dir / expected_path).read_bytes()
+    if legacy_payload != bundled_payload:
+        raise AssertionError(
+            "focused constraint sidecar payload differs from legacy input"
+        )
+
+
 def _write_sits_ff19sb_cmap_mdin(case_dir: Path, replica_seed: int):
     _assert_sits_ff19sb_cmap_fixture(case_dir / "ALA_cmap.txt")
     masses = read_mass_values(case_dir / "ALA_mass.txt")
@@ -4339,6 +4478,16 @@ def _compare_outputs(
                 },
             )
         )
+    if "constraint_geometry_equivalence" in case.assertion_ids:
+        constraint = _compare_focused_constraint_projection(case, runs[0])
+        comparison["constraint"] = constraint
+        evidence.append(
+            AssertionEvidence(
+                assertion_id="constraint_geometry_equivalence",
+                evidence_level="E3",
+                details=constraint,
+            )
+        )
     if "output.legacy.mdinfo" in case.contract_ids:
         mdinfo_comparison = _compare_mdinfo_structured(case, runs)
         comparison["mdinfo"] = mdinfo_comparison
@@ -4649,6 +4798,163 @@ def _compare_focused_lj_soft_core_forces(
     result["bundled_native_path"] = "/forcefield/lj_soft_core"
     result["subsystem_division_present"] = False
     return result
+
+
+def _compare_focused_constraint_projection(
+    case: AbCase, run: AbRun
+) -> dict[str, object]:
+    branch_results = {}
+    positions = {}
+    velocities = {}
+    for branch, directory in (
+        ("legacy", run.legacy_dir),
+        ("bundled", run.bundled_dir),
+    ):
+        branch_positions = _read_native_float32_file(
+            directory / "output" / "legacy.crd"
+        )
+        branch_velocities = _read_native_float32_file(
+            directory / "output" / "legacy.vel"
+        )
+        branch_results[branch] = _assert_constraint_projection_oracle(
+            f"{case.name} {branch}", branch_positions, branch_velocities
+        )
+        if branch_results[branch]["frame_count"] != case.normal_step_limit:
+            raise AssertionError(
+                f"{case.name} {branch} constrained frame count changed: "
+                f"expected={case.normal_step_limit}, "
+                f"actual={branch_results[branch]['frame_count']}"
+            )
+        positions[branch] = branch_positions
+        velocities[branch] = branch_velocities
+
+    position_relative, position_absolute = _deterministic_tolerance("position")
+    velocity_relative, velocity_absolute = _deterministic_tolerance("velocity")
+    frame_count = int(branch_results["legacy"]["frame_count"])
+    _assert_periodic_positions_close(
+        f"{case.name} constrained positions",
+        positions["legacy"],
+        positions["bundled"],
+        (frame_count, 2, 3),
+        (10.0, 0.0, 0.0, 0.0, 10.0, 0.0, 0.0, 0.0, 10.0),
+        relative_tolerance=position_relative,
+        absolute_tolerance=position_absolute,
+    )
+    _assert_numeric_sequences_close(
+        f"{case.name} constrained velocities",
+        velocities["legacy"],
+        velocities["bundled"],
+        relative_tolerance=velocity_relative,
+        absolute_tolerance=velocity_absolute,
+    )
+    position_error = max(
+        abs(
+            (left - right)
+            - round((left - right) / 10.0) * 10.0
+        )
+        for left, right in zip(
+            positions["legacy"], positions["bundled"], strict=True
+        )
+    )
+    velocity_error = max(
+        abs(left - right)
+        for left, right in zip(
+            velocities["legacy"], velocities["bundled"], strict=True
+        )
+    )
+    return {
+        "method": "per_frame_distance_and_radial_velocity_projection",
+        "target_distance": 1.5,
+        "initial_relative_radial_speed": 2.0,
+        "branches": branch_results,
+        "cross_branch_position_max_absolute_error": position_error,
+        "cross_branch_velocity_max_absolute_error": velocity_error,
+    }
+
+
+def _assert_constraint_projection_oracle(
+    label: str,
+    positions: Sequence[float],
+    velocities: Sequence[float],
+    *,
+    target_distance: float = 1.5,
+    initial_relative_radial_speed: float = 2.0,
+    box_length: float = 10.0,
+) -> dict[str, object]:
+    frame_width = 6
+    if not positions or len(positions) != len(velocities):
+        raise AssertionError(
+            f"{label} constraint trajectory length mismatch: "
+            f"position={len(positions)}, velocity={len(velocities)}"
+        )
+    if len(positions) % frame_width != 0:
+        raise AssertionError(
+            f"{label} constraint trajectory is not two-atom XYZ data"
+        )
+    if (
+        not math.isfinite(initial_relative_radial_speed)
+        or abs(initial_relative_radial_speed) < 1.0
+    ):
+        raise AssertionError(
+            f"{label} initial radial motion is not non-trivial"
+        )
+    if not math.isfinite(box_length) or box_length <= 2.0 * target_distance:
+        raise AssertionError(f"{label} periodic box is invalid: {box_length}")
+
+    distance_residuals = []
+    radial_velocity_residuals = []
+    for offset in range(0, len(positions), frame_width):
+        displacement = tuple(
+            delta - round(delta / box_length) * box_length
+            for delta in (
+                positions[offset + 3 + axis] - positions[offset + axis]
+                for axis in range(3)
+            )
+        )
+        distance = math.sqrt(sum(value * value for value in displacement))
+        if not math.isfinite(distance) or distance <= 0.0:
+            raise AssertionError(
+                f"{label} has invalid constrained distance at frame "
+                f"{offset // frame_width}: {distance}"
+            )
+        relative_velocity = tuple(
+            velocities[offset + 3 + axis] - velocities[offset + axis]
+            for axis in range(3)
+        )
+        radial_velocity = sum(
+            relative_velocity[axis] * displacement[axis] / distance
+            for axis in range(3)
+        )
+        if not math.isfinite(radial_velocity):
+            raise AssertionError(
+                f"{label} has non-finite radial velocity at frame "
+                f"{offset // frame_width}: {radial_velocity}"
+            )
+        distance_residuals.append(abs(distance - target_distance))
+        radial_velocity_residuals.append(abs(radial_velocity))
+
+    maximum_distance_residual = max(distance_residuals)
+    maximum_radial_velocity_residual = max(radial_velocity_residuals)
+    if maximum_distance_residual > 1.0e-5:
+        raise AssertionError(
+            f"{label} constraint distance residual exceeds tolerance: "
+            f"{maximum_distance_residual}"
+        )
+    if maximum_radial_velocity_residual > 1.0e-4:
+        raise AssertionError(
+            f"{label} constraint radial velocity residual exceeds tolerance: "
+            f"{maximum_radial_velocity_residual}"
+        )
+    return {
+        "frame_count": len(positions) // frame_width,
+        "periodic_box_length": box_length,
+        "maximum_distance_residual": maximum_distance_residual,
+        "maximum_radial_velocity_residual": maximum_radial_velocity_residual,
+        "radial_speed_reduction_factor": (
+            abs(initial_relative_radial_speed)
+            / max(maximum_radial_velocity_residual, 1.0e-30)
+        ),
+    }
 
 
 def _focused_virtual_atom_coordinate_oracle(

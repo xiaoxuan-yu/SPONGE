@@ -35,6 +35,7 @@ from benchmarks.bundled_io.tests.test_bundled_io_ab_execution_matrix import (
     MATRIX_RUNTIME_CASES,
 )
 from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
+    FOCUSED_CONSTRAINT_SIDECAR_FIXTURE,
     FOCUSED_CUSTOM_PAIR_FIXTURE,
     FOCUSED_EDIP_FIXTURE,
     FOCUSED_EXCLUSIONS_FIXTURE,
@@ -46,6 +47,7 @@ from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
     MDINFO_CONTRACT_KEYS,
     PROFILE_LIMITS,
     RERUN_INPUT_SEMANTIC_SPECS,
+    _assert_constraint_projection_oracle,
     _assert_exclusion_coulomb_oracle,
     _assert_nontrivial_equivalent_forces,
     _assert_virtual_atom_oracle,
@@ -256,6 +258,7 @@ def test_ab_production_harness_has_executable_contract_coverage():
         "normal_virtual_atoms_all_types",
         "normal_virtual_atoms_pbc_boundary",
         "normal_virtual_atoms_plural_alias",
+        "normal_constraint_sidecar_projection",
         "normal_vds_chunk_minus_one",
         "normal_vds_chunk_exact",
         "normal_vds_chunk_plus_one",
@@ -875,6 +878,63 @@ def test_focused_virtual_atom_gate_rejects_semantic_mutations():
         )
 
 
+def test_focused_constraint_sidecar_case_requires_projected_runtime_behavior():
+    contracts = load_contract_registry()
+    case = next(
+        case
+        for case in _cases_for_profile()
+        if case.name == "normal_constraint_sidecar_projection"
+    )
+
+    assert case.fixture_case == FOCUSED_CONSTRAINT_SIDECAR_FIXTURE
+    assert case.statistical_md is False
+    assert case.normal_step_limit == 4
+    assert case.normal_interval == 1
+    assert case.normal_dt == 0.001
+    assert case.input_behavior_only is True
+    assert case.contract_ids == (
+        "output.legacy.mdout",
+        "input.protocol.constraint.sidecar",
+    )
+    assert case.assertion_ids == (
+        "mdout_deterministic_equivalence",
+        "constraint_geometry_equivalence",
+    )
+
+    sidecar = contracts["input.protocol.constraint.sidecar"]
+    assert sidecar.status == "supported"
+    assert sidecar.case_ids == (case.name,)
+    assert sidecar.assertion_ids == ("constraint_geometry_equivalence",)
+    typed = contracts["input.protocol.constraint"]
+    assert typed.status == "deferred"
+    assert "does not materialize" in typed.reason
+    assert "Sidecar behavior is tracked separately" in typed.reason
+
+
+@pytest.mark.parametrize(
+    ("positions", "velocities", "message"),
+    [
+        (
+            (0.0, 0.0, 0.0, 1.6, 0.0, 0.0),
+            (0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+            "distance residual exceeds tolerance",
+        ),
+        (
+            (0.0, 0.0, 0.0, 1.5, 0.0, 0.0),
+            (-1.0, 0.0, 0.0, 1.0, 0.0, 0.0),
+            "radial velocity residual exceeds tolerance",
+        ),
+    ],
+)
+def test_focused_constraint_gate_rejects_ignored_or_wrong_constraint(
+    positions, velocities, message
+):
+    with pytest.raises(AssertionError, match=message):
+        _assert_constraint_projection_oracle(
+            "constraint mutation", positions, velocities
+        )
+
+
 @pytest.mark.parametrize(
     ("rows", "forces", "message"),
     [
@@ -1029,6 +1089,9 @@ def test_input_semantic_contract_inventory_is_explicit_and_evidence_gated():
         "input.bias.nhc": "restart_dynamic_continuation_equivalence",
         "input.bias.metadynamics": (
             "restart_protocol_full_continuation_equivalence"
+        ),
+        "input.protocol.constraint.sidecar": (
+            "constraint_geometry_equivalence"
         ),
         "input.qc.scf_text": "qc_scf_exact_equivalence",
     }
