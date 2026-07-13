@@ -580,7 +580,19 @@
       "bundled_surface": "/atoms/residue_index",
       "case_ids": [],
       "assertion_ids": [],
-      "reason": "Exact reader equivalence exists, but a residue-owned runtime/state assertion is pending."
+      "reason": "The typed /atoms/residue_index dataset is not materialized into Xponge::system.residues at runtime. The H5 sidecar route is tracked separately."
+    },
+    {
+      "contract_id": "input.topology.residue.sidecar",
+      "direction": "input",
+      "component": "core_topology",
+      "status": "supported",
+      "minimum_evidence": "E3",
+      "legacy_surface": "residue_in_file",
+      "bundled_surface": "topology H5 legacy_sidecars residue_in_file binding",
+      "case_ids": ["normal_residue_sidecar_pbc_mapping"],
+      "assertion_ids": ["input_semantic_equivalence"],
+      "reason": ""
     },
     {
       "contract_id": "input.topology.exclusions",

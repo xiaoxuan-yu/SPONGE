@@ -11,6 +11,7 @@ REQUIRED_INPUT_SEMANTIC_CONTRACTS = frozenset(
         "input.topology.mass",
         "input.topology.charge",
         "input.topology.residue",
+        "input.topology.residue.sidecar",
         "input.topology.exclusions",
         "input.topology.lj",
         "input.topology.nb14",

@@ -54,6 +54,7 @@ FOCUSED_SW_SIDECAR_FIXTURE = "focused_sw_sidecar_three_atom"
 FOCUSED_TERSOFF_SIDECAR_FIXTURE = "focused_tersoff_sidecar_three_atom"
 FOCUSED_CUSTOM_PAIR_FIXTURE = "focused_custom_pair_two_atom"
 FOCUSED_EXCLUSIONS_FIXTURE = "focused_exclusions_three_atom"
+FOCUSED_RESIDUE_SIDECAR_FIXTURE = "focused_residue_sidecar_pbc_four_atom"
 FOCUSED_GB_HYBRID_FIXTURE = "focused_gb_hybrid_two_atom"
 FOCUSED_IMPROPER_NATIVE_FIXTURE = "focused_improper_native_four_atom"
 FOCUSED_LJ_SOFT_CORE_FIXTURE = "focused_lj_soft_core_two_atom"
@@ -253,6 +254,13 @@ INPUT_SEMANTIC_SPECS_BY_CASE = {
     ),
     "normal_exclusions_coulomb_oracle": (
         InputSemanticSpec("input.topology.exclusions", ("Coulomb",), 1.0e-6),
+    ),
+    "normal_residue_sidecar_pbc_mapping": (
+        InputSemanticSpec(
+            "input.topology.residue.sidecar",
+            ("bond",),
+            1.0e-6,
+        ),
     ),
     "normal_gb_hybrid_nonzero": (
         InputSemanticSpec(
@@ -608,6 +616,28 @@ def _cases_for_profile() -> list[AbCase]:
             contract_ids=(
                 "output.legacy.mdout",
                 "input.topology.exclusions",
+            ),
+            assertion_ids=(
+                "mdout_deterministic_equivalence",
+                "input_semantic_equivalence",
+            ),
+            normal_step_limit=1,
+            normal_interval=1,
+            normal_dt=0.0,
+            input_behavior_only=True,
+        ),
+        AbCase(
+            name="normal_residue_sidecar_pbc_mapping",
+            fixture_case=FOCUSED_RESIDUE_SIDECAR_FIXTURE,
+            legacy_subdir="generated_legacy",
+            bundled_subdir="generated_bundled",
+            mode="normal",
+            vds=False,
+            statistical_md=False,
+            restart_load_policy="structural",
+            contract_ids=(
+                "output.legacy.mdout",
+                "input.topology.residue.sidecar",
             ),
             assertion_ids=(
                 "mdout_deterministic_equivalence",
@@ -3136,6 +3166,8 @@ def _prepare_case_pair(
             return _prepare_focused_custom_pair_pair(case_root)
         if case.fixture_case == FOCUSED_EXCLUSIONS_FIXTURE:
             return _prepare_focused_exclusions_pair(case_root)
+        if case.fixture_case == FOCUSED_RESIDUE_SIDECAR_FIXTURE:
+            return _prepare_focused_residue_sidecar_pair(case_root)
         if case.fixture_case == FOCUSED_GB_HYBRID_FIXTURE:
             return _prepare_focused_gb_hybrid_pair(case_root)
         if case.fixture_case == FOCUSED_IMPROPER_NATIVE_FIXTURE:
@@ -4008,6 +4040,168 @@ def _validate_focused_exclusions_routes(
         raise AssertionError(
             "focused exclusions native payload changed: "
             f"offsets={offsets}, list={excluded}"
+        )
+
+
+def _prepare_focused_residue_sidecar_pair(
+    case_root: Path,
+) -> tuple[Path, Path]:
+    legacy_source = case_root / "focused_residue_sidecar_source"
+    legacy_dir = case_root / "legacy"
+    converted_dir = case_root / "converted_focused_residue_sidecar_bundle"
+    bundled_dir = case_root / "bundled"
+    for path in (legacy_source, legacy_dir, converted_dir, bundled_dir):
+        if path.exists():
+            shutil.rmtree(path)
+    _write_focused_residue_sidecar_input(legacy_source)
+    shutil.copytree(legacy_source, legacy_dir)
+    _convert_legacy_case(legacy_source, converted_dir)
+    shutil.copytree(converted_dir / "bundle", bundled_dir)
+
+    topology_path = bundled_dir / "topology.spgt.h5"
+    sidecar_root = "/parameters/sponge/files/legacy_sidecars"
+    with h5py.File(topology_path, "r+") as topology:
+        if sidecar_root not in topology:
+            raise AssertionError(
+                "focused residue conversion did not emit topology sidecars"
+            )
+        sidecars = topology[sidecar_root]
+        keys = sidecars["key"].asstr()[...].tolist()
+        paths = sidecars["path"].asstr()[...].tolist()
+        try:
+            residue_index = keys.index("residue_in_file")
+        except ValueError as error:
+            raise AssertionError(
+                "focused residue conversion did not bind residue_in_file"
+            ) from error
+        residue_path = paths[residue_index]
+        del sidecars["key"]
+        del sidecars["path"]
+        string_dtype = h5py.string_dtype(encoding="utf-8")
+        sidecars.create_dataset(
+            "key", data=["residue_in_file"], dtype=string_dtype
+        )
+        sidecars.create_dataset("path", data=[residue_path], dtype=string_dtype)
+        for typed_path in ("/atoms/residue_index", "/residues/atom_offset"):
+            if typed_path in topology:
+                del topology[typed_path]
+
+    sidecar_dir = bundled_dir / "legacy_sidecars"
+    for child in sidecar_dir.iterdir():
+        if child.name not in {"residue_in_file", "constrain_in_file"}:
+            if child.is_dir():
+                shutil.rmtree(child)
+            else:
+                child.unlink()
+    _validate_focused_residue_sidecar_routes(legacy_dir, bundled_dir)
+    return legacy_dir, bundled_dir
+
+
+def _write_focused_residue_sidecar_input(case_dir: Path) -> None:
+    case_dir.mkdir(parents=True, exist_ok=True)
+    (case_dir / "mass.txt").write_text(
+        "4\n1.0\n1.0\n1.0\n1.0\n", encoding="utf-8"
+    )
+    (case_dir / "coordinate.txt").write_text(
+        "4 0.0\n"
+        "19.0 0.0 0.0\n"
+        "1.0 0.0 0.0\n"
+        "5.0 0.0 0.0\n"
+        "8.0 0.0 0.0\n"
+        "20.0 20.0 20.0\n"
+        "90.0 90.0 90.0\n",
+        encoding="utf-8",
+    )
+    (case_dir / "velocity.txt").write_text(
+        "4\n0.0 0.0 0.0\n0.0 0.0 0.0\n0.0 0.0 0.0\n0.0 0.0 0.0\n",
+        encoding="utf-8",
+    )
+    (case_dir / "residue.txt").write_text("4 2\n2\n2\n", encoding="utf-8")
+    (case_dir / "bond.txt").write_text(
+        "3\n0 1 2.0 1.0\n1 2 0.0 4.0\n2 3 0.0 3.0\n",
+        encoding="utf-8",
+    )
+    (case_dir / "constrain.txt").write_text(
+        "2\n0 1 2.0\n2 3 3.0\n",
+        encoding="utf-8",
+    )
+    (case_dir / "mdin.spg.toml").write_text(
+        'md_name = "bundled io ab focused residue sidecar"\n'
+        'mode = "nve"\n'
+        "step_limit = 1\n"
+        "dt = 0.0\n"
+        "cutoff = 8.0\n"
+        'mass_in_file = "mass.txt"\n'
+        'coordinate_in_file = "coordinate.txt"\n'
+        'velocity_in_file = "velocity.txt"\n'
+        'residue_in_file = "residue.txt"\n'
+        'bond_in_file = "bond.txt"\n'
+        'constrain_in_file = "constrain.txt"\n'
+        'constrain_mode = "SHAKE"\n'
+        "force_whole_output = true\n"
+        "print_zeroth_frame = 0\n"
+        "write_mdout_interval = 1\n"
+        "write_information_interval = 1\n",
+        encoding="utf-8",
+    )
+
+
+def _validate_focused_residue_sidecar_routes(
+    legacy_dir: Path, bundled_dir: Path
+) -> None:
+    legacy_mdin = (legacy_dir / "mdin.spg.toml").read_text(encoding="utf-8")
+    bundled_mdin = (bundled_dir / "mdin.bundled.spg.toml").read_text(
+        encoding="utf-8"
+    )
+    if not _has_key_line(legacy_mdin, "residue_in_file"):
+        raise AssertionError("focused residue legacy route is missing")
+    if _has_key_line(bundled_mdin, "residue_in_file"):
+        raise AssertionError(
+            "focused residue bundled mdin retained residue_in_file"
+        )
+
+    topology_path = bundled_dir / "topology.spgt.h5"
+    topology_paths = _h5_paths(topology_path)
+    for typed_path in ("/atoms/residue_index", "/residues/atom_offset"):
+        if typed_path in topology_paths:
+            raise AssertionError(
+                f"focused residue sidecar route retained {typed_path}"
+            )
+    sidecar_root = "/parameters/sponge/files/legacy_sidecars"
+    keys = _h5_string_values(topology_path, f"{sidecar_root}/key")
+    paths = _h5_string_values(topology_path, f"{sidecar_root}/path")
+    if keys != ["residue_in_file"]:
+        raise AssertionError(
+            f"focused residue bundled sidecar keys changed: {keys}"
+        )
+    if len(paths) != 1 or not paths[0].endswith("/residue_in_file/residue.txt"):
+        raise AssertionError(
+            f"focused residue bundled sidecar path changed: {paths}"
+        )
+    bundled_payload = bundled_dir / paths[0]
+    if (
+        bundled_payload.read_bytes()
+        != (legacy_dir / "residue.txt").read_bytes()
+    ):
+        raise AssertionError(
+            "focused residue sidecar payload differs from legacy"
+        )
+    expected_sidecars = ["constrain_in_file", "residue_in_file"]
+    if (
+        sorted(
+            path.name for path in (bundled_dir / "legacy_sidecars").iterdir()
+        )
+        != expected_sidecars
+    ):
+        raise AssertionError(
+            "focused residue bundle retained unrelated sidecars"
+        )
+    protocol_path = bundled_dir / "protocol.spgp.h5"
+    protocol_root = "/parameters/sponge/files/legacy_sidecars"
+    protocol_keys = _h5_string_values(protocol_path, f"{protocol_root}/key")
+    if protocol_keys != ["constrain_in_file"]:
+        raise AssertionError(
+            f"focused residue support constraint route changed: {protocol_keys}"
         )
 
 
@@ -5946,6 +6140,10 @@ def _compare_input_semantics(
                 replica_result["oracle"] = _compare_focused_exclusions_oracle(
                     case, run
                 )
+            elif spec.contract_id == "input.topology.residue.sidecar":
+                replica_result["oracle"] = _compare_focused_residue_pbc_mapping(
+                    case, run
+                )
             elif spec.contract_id == "input.topology.gb.hybrid_activation":
                 replica_result["force"] = _compare_focused_gb_forces(case, run)
             elif spec.contract_id == "input.topology.improper.native_runtime":
@@ -6469,6 +6667,119 @@ def _compare_focused_exclusions_oracle(
         "excluded_pair": [0, 1],
         "branches": branch_results,
         "cross_branch_force": cross_branch,
+    }
+
+
+def _compare_focused_residue_pbc_mapping(
+    case: AbCase, run: AbRun
+) -> dict[str, object]:
+    branches = {}
+    forces = {}
+    for branch, directory in (
+        ("legacy", run.legacy_dir),
+        ("bundled", run.bundled_dir),
+    ):
+        rows = _read_mdout(directory / "mdout.txt")["rows"]
+        branch_forces = _read_native_float32_file(
+            directory / "output" / "legacy.frc"
+        )
+        mdinfo = (directory / "mdinfo.txt").read_text(encoding="utf-8")
+        residue_match = re.search(r"\bresidue_numbers is\s+(\d+)\b", mdinfo)
+        if residue_match is None:
+            raise AssertionError(
+                f"{case.name} {branch} mdinfo has no residue count"
+            )
+        stdout = (directory / "run.stdout").read_text(encoding="utf-8")
+        runtime_match = re.search(
+            r"rank_id=0, atom_numbers=4, residue_numbers=(\d+)", stdout
+        )
+        if runtime_match is None:
+            raise AssertionError(
+                f"{case.name} {branch} has no runtime domain residue count"
+            )
+        with h5py.File(directory / TRAJECTORY_REL, "r") as trajectory:
+            positions = (
+                trajectory["/particles/all/position/value"][...]
+                .reshape(-1)
+                .tolist()
+            )
+        branches[branch] = _assert_residue_pbc_mapping_oracle(
+            f"{case.name} {branch}",
+            rows,
+            branch_forces,
+            residue_numbers=int(residue_match.group(1)),
+            runtime_residue_numbers=int(runtime_match.group(1)),
+            positions=positions,
+        )
+        forces[branch] = branch_forces
+    cross_branch_force = _assert_nontrivial_equivalent_forces(
+        f"{case.name} residue PBC support force",
+        forces["legacy"],
+        forces["bundled"],
+    )
+    return {
+        "route": "isolated_h5_residue_in_file_topology_sidecar",
+        "residue_atom_counts": [2, 2],
+        "runtime_consumer": "force_whole_output molecule coordinate mapping",
+        "branches": branches,
+        "cross_branch_force": cross_branch_force,
+    }
+
+
+def _assert_residue_pbc_mapping_oracle(
+    label: str,
+    rows: Sequence[dict[str, float]],
+    forces: Sequence[float],
+    *,
+    residue_numbers: int,
+    runtime_residue_numbers: int,
+    positions: Sequence[float],
+) -> dict[str, object]:
+    if len(rows) != 1:
+        raise AssertionError(f"{label} expected one mdout row, got {len(rows)}")
+    row = rows[0]
+    if "bond" not in row or not math.isfinite(row["bond"]) or row["bond"] <= 0:
+        raise AssertionError(
+            f"{label} has no nonzero support force-field result"
+        )
+    if residue_numbers != 2:
+        raise AssertionError(
+            f"{label} residue state mismatch: expected 2, got {residue_numbers}"
+        )
+    if runtime_residue_numbers != 2:
+        raise AssertionError(
+            f"{label} runtime residue partition mismatch: expected 2, "
+            f"got {runtime_residue_numbers}"
+        )
+    expected_positions = (
+        19.0,
+        0.0,
+        0.0,
+        21.0,
+        0.0,
+        0.0,
+        25.0,
+        0.0,
+        0.0,
+        28.0,
+        0.0,
+        0.0,
+    )
+    _assert_numeric_sequences_close(
+        f"{label} residue-owned PBC mapping oracle",
+        expected_positions,
+        positions,
+        relative_tolerance=0.0,
+        absolute_tolerance=1.0e-6,
+    )
+    if len(forces) != 12 or max(abs(value) for value in forces) <= 1.0:
+        raise AssertionError(f"{label} support force is absent or incomplete")
+    return {
+        "bond": row["bond"],
+        "residue_numbers": residue_numbers,
+        "runtime_residue_numbers": runtime_residue_numbers,
+        "mapped_positions": list(positions),
+        "maximum_abs_force": max(abs(value) for value in forces),
     }
 
 

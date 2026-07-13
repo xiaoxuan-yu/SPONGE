@@ -42,6 +42,7 @@ from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
     FOCUSED_GB_HYBRID_FIXTURE,
     FOCUSED_IMPROPER_NATIVE_FIXTURE,
     FOCUSED_LJ_SOFT_CORE_FIXTURE,
+    FOCUSED_RESIDUE_SIDECAR_FIXTURE,
     FOCUSED_SITS_NK_TYPED_RESTART_FIXTURE,
     FOCUSED_STEERING_CV_SIDECAR_FIXTURE,
     FOCUSED_SW_SIDECAR_FIXTURE,
@@ -58,6 +59,7 @@ from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
     _assert_exclusion_coulomb_oracle,
     _assert_gb_force_oracle,
     _assert_nontrivial_equivalent_forces,
+    _assert_residue_pbc_mapping_oracle,
     _assert_sits_nk_typed_restart_oracle,
     _assert_steering_cv_oracle,
     _assert_sw_pair_three_body_oracle,
@@ -271,6 +273,7 @@ def test_ab_production_harness_has_executable_contract_coverage():
         "normal_tersoff_sidecar_angular",
         "normal_custom_pair_nonzero",
         "normal_exclusions_coulomb_oracle",
+        "normal_residue_sidecar_pbc_mapping",
         "normal_gb_hybrid_nonzero",
         "normal_improper_native_nonzero",
         "normal_lj_soft_core_nonzero",
@@ -1064,6 +1067,36 @@ def test_focused_exclusions_case_requires_native_payload_and_coulomb_oracle():
     )
 
 
+def test_focused_residue_case_requires_runtime_partition_and_pbc_mapping():
+    contracts = load_contract_registry()
+    case = next(
+        case
+        for case in _cases_for_profile()
+        if case.name == "normal_residue_sidecar_pbc_mapping"
+    )
+    spec = INPUT_SEMANTIC_SPECS_BY_CASE[case.name]
+
+    assert case.fixture_case == FOCUSED_RESIDUE_SIDECAR_FIXTURE
+    assert case.statistical_md is False
+    assert case.normal_step_limit == 1
+    assert case.normal_dt == 0.0
+    assert case.input_behavior_only is True
+    assert case.contract_ids == (
+        "output.legacy.mdout",
+        "input.topology.residue.sidecar",
+    )
+    assert spec == (
+        InputSemanticSpec("input.topology.residue.sidecar", ("bond",), 1.0e-6),
+    )
+    sidecar = contracts["input.topology.residue.sidecar"]
+    assert sidecar.status == "supported"
+    assert sidecar.case_ids == (case.name,)
+    assert sidecar.assertion_ids == ("input_semantic_equivalence",)
+    typed = contracts["input.topology.residue"]
+    assert typed.status == "deferred"
+    assert "not materialized" in typed.reason
+
+
 def test_focused_gb_case_requires_native_state_and_sidecar_activation_behavior():
     contracts = load_contract_registry()
     case = next(
@@ -1563,6 +1596,57 @@ def test_focused_exclusions_oracle_rejects_ignored_or_wrong_payload(
 ):
     with pytest.raises(AssertionError, match=message):
         _assert_exclusion_coulomb_oracle("exclusions", rows, forces)
+
+
+def test_focused_residue_gate_rejects_wrong_partition_or_mapping():
+    rows = [{"bond": 2.0}]
+    forces = (4.0, 0.0, 0.0, -4.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    positions = (
+        19.0,
+        0.0,
+        0.0,
+        21.0,
+        0.0,
+        0.0,
+        25.0,
+        0.0,
+        0.0,
+        28.0,
+        0.0,
+        0.0,
+    )
+    result = _assert_residue_pbc_mapping_oracle(
+        "residue",
+        rows,
+        forces,
+        residue_numbers=2,
+        runtime_residue_numbers=2,
+        positions=positions,
+    )
+    assert result["runtime_residue_numbers"] == 2
+    assert result["maximum_abs_force"] == 4.0
+
+    with pytest.raises(
+        AssertionError, match="runtime residue partition mismatch"
+    ):
+        _assert_residue_pbc_mapping_oracle(
+            "split-to-singletons",
+            rows,
+            forces,
+            residue_numbers=2,
+            runtime_residue_numbers=4,
+            positions=positions,
+        )
+    wrong_positions = (*positions[:6], 5.0, *positions[7:])
+    with pytest.raises(AssertionError, match="PBC mapping oracle mismatch"):
+        _assert_residue_pbc_mapping_oracle(
+            "wrong mapping",
+            rows,
+            forces,
+            residue_numbers=2,
+            runtime_residue_numbers=2,
+            positions=wrong_positions,
+        )
 
 
 @pytest.mark.parametrize(
