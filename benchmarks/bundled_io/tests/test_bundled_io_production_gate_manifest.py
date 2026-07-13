@@ -36,10 +36,12 @@ from benchmarks.bundled_io.tests.test_bundled_io_ab_execution_matrix import (
 from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
     FOCUSED_CUSTOM_PAIR_FIXTURE,
     FOCUSED_EDIP_FIXTURE,
+    FOCUSED_EXCLUSIONS_FIXTURE,
     INPUT_SEMANTIC_SPECS_BY_CASE,
     MDINFO_CONTRACT_KEYS,
     PROFILE_LIMITS,
     RERUN_INPUT_SEMANTIC_SPECS,
+    _assert_exclusion_coulomb_oracle,
     _assert_nontrivial_equivalent_forces,
     _cases_for_profile,
     _expected_rerun_frame_indices,
@@ -240,6 +242,7 @@ def test_ab_production_harness_has_executable_contract_coverage():
         "normal_sits_ff19sb_cmap_peptide",
         "normal_edip_nonzero",
         "normal_custom_pair_nonzero",
+        "normal_exclusions_coulomb_oracle",
         "normal_vds_chunk_minus_one",
         "normal_vds_chunk_exact",
         "normal_vds_chunk_plus_one",
@@ -592,6 +595,66 @@ def test_focused_custom_pair_case_requires_pure_h5_nonzero_energy_and_force():
     assert contracts["input.custom.pairwise"].assertion_ids == (
         "input_semantic_equivalence",
     )
+
+
+def test_focused_exclusions_case_requires_native_payload_and_coulomb_oracle():
+    contracts = load_contract_registry()
+    case = next(
+        case
+        for case in _cases_for_profile()
+        if case.name == "normal_exclusions_coulomb_oracle"
+    )
+    spec = INPUT_SEMANTIC_SPECS_BY_CASE[case.name]
+
+    assert case.fixture_case == FOCUSED_EXCLUSIONS_FIXTURE
+    assert case.statistical_md is False
+    assert case.normal_step_limit == 1
+    assert case.normal_dt == 0.0
+    assert case.input_behavior_only is True
+    assert case.contract_ids == (
+        "output.legacy.mdout",
+        "input.topology.exclusions",
+    )
+    assert spec == (
+        InputSemanticSpec("input.topology.exclusions", ("Coulomb",), 1.0e-6),
+    )
+    assert contracts["input.topology.exclusions"].status == "supported"
+    assert contracts["input.topology.exclusions"].case_ids == (case.name,)
+    assert contracts["input.topology.exclusions"].assertion_ids == (
+        "input_semantic_equivalence",
+    )
+
+
+@pytest.mark.parametrize(
+    ("rows", "forces", "message"),
+    [
+        (
+            [{"eff_pot": -13.0 / 12.0}],
+            (
+                -1.0 / 16.0,
+                0.0,
+                0.0,
+                1.0 / 9.0,
+                0.0,
+                0.0,
+                1.0 / 16.0 - 1.0 / 9.0,
+                0.0,
+                0.0,
+            ),
+            "exclusion energy mismatch",
+        ),
+        (
+            [{"eff_pot": -1.0 / 12.0}],
+            (0.0,) * 9,
+            "exclusion force oracle mismatch",
+        ),
+    ],
+)
+def test_focused_exclusions_oracle_rejects_ignored_or_wrong_payload(
+    rows, forces, message
+):
+    with pytest.raises(AssertionError, match=message):
+        _assert_exclusion_coulomb_oracle("exclusions", rows, forces)
 
 
 @pytest.mark.parametrize(

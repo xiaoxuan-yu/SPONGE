@@ -436,7 +436,29 @@ Acceptance:
   branches, and all legacy force-route values match within the force tolerance.
 - Registry, manifest, real focused CPU A/B, Ruff, and diff checks pass.
 
-## 16. Artifacts and Temporary-Space Policy
+## 16. PR 13: Focused Native Exclusion Semantics Gate
+
+Close the exclusions contract with a three-atom, non-periodic Coulomb fixture
+whose excluded-pair behavior has an independent analytic oracle.
+
+- Exclude the close `(0, 1)` pair while retaining two non-zero interactions.
+- Convert to `/topology/exclusions/{offset,list}` and remove all bundled
+  sidecar routes.
+- Require cross-branch deterministic mdout and force equivalence.
+- Independently require energy `1/4 - 1/3 = -1/12` and the corresponding nine
+  Cartesian force values; the unexcluded energy would instead be `-13/12`.
+
+Acceptance:
+
+- Bundled offsets/list are exactly `[0, 1, 1, 1]` and `[1]`, with no
+  `exclude_in_file` or legacy sidecar table.
+- Both branches emit non-zero Coulomb behavior, match each other, and satisfy
+  the analytic energy/force oracle.
+- Energy and force mutations representing ignored or corrupted exclusions are
+  rejected by unit tests.
+- Registry, manifest, real focused CPU A/B, Ruff, and diff checks pass.
+
+## 17. Artifacts and Temporary-Space Policy
 
 - Use `SPONGE_BUNDLED_IO_AB_RUN_ROOT` for all heavy runs.
 - Put production artifacts on the workspace filesystem rather than `/tmp`.
@@ -446,7 +468,7 @@ Acceptance:
 - Record artifact byte counts and enforce a configurable per-case quota.
 - Cleanup must only remove directories created by the current gate run.
 
-## 17. PR Completion Log
+## 18. PR Completion Log
 
 Append one row immediately after completing and committing each PR.
 
@@ -466,3 +488,4 @@ Append one row immediately after completing and committing each PR.
 | PR 10: H5 sidecar-table failure semantics | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; three real bundled CPU failure cases; Ruff; `git diff --check` | 79 contract/manifest/comparator tests and all three F1 process cases pass. Unsupported key, key/path length mismatch, and same-key different-path conflict each exit with code 238 and `spongeErrorValueErrorCommand`, while retaining route-specific stable diagnostic tokens. |
 | PR 11: Restart owner-state failure semantics | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; three real bundled CPU failure cases; Ruff; `git diff --check` | 79 contract/manifest/comparator tests and all three F1 process cases pass. Dynamic, protocol, and full policies each exit with code 235 and `spongeErrorConflictingCommand`; diagnostics distinguish missing Nose-Hoover-chain and metadynamics owners. |
 | PR 12: Focused non-zero custom-pair input gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; real `normal_custom_pair_nonzero` CPU A/B; Ruff; `git diff --check` | 80 contract/manifest/comparator tests and the focused real A/B pass. The pure bundled branch has no legacy custom-force keys or sidecars, materializes both native inputs, and matches legacy at `custom_pair=31.57` with maximum force `252.554443359375`. |
+| PR 13: Focused native exclusion semantics gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; real `normal_exclusions_coulomb_oracle` CPU A/B; Ruff; `git diff --check` | 83 contract/manifest/comparator tests and the focused real A/B pass. The pure bundled branch uses offsets/list `[0,1,1,1]`/`[1]`, and both branches match the `-1/12` energy and analytic nine-value force oracle with maximum force `0.1111111119389534`. |

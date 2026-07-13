@@ -558,13 +558,12 @@
       "contract_id": "input.topology.exclusions",
       "direction": "input",
       "component": "nonbonded",
-      "status": "deferred",
+      "status": "supported",
       "minimum_evidence": "E3",
       "legacy_surface": "exclude_in_file",
       "bundled_surface": "/topology/exclusions",
-      "case_ids": [],
-      "assertion_ids": [],
-      "reason": "A focused nonbonded-energy delta fixture proving exclusion semantics is pending."
+      "case_ids": ["normal_exclusions_coulomb_oracle"],
+      "assertion_ids": ["input_semantic_equivalence"]
     },
     {
       "contract_id": "input.topology.gb",

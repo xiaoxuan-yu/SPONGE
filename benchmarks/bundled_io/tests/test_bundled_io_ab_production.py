@@ -51,6 +51,7 @@ XPONGE_DEV_ROOT = REPO_ROOT.parent / "XPONGE"
 SITS_FF19SB_CMAP_FIXTURE = "sits_ff19sb_cmap_peptide"
 FOCUSED_EDIP_FIXTURE = "focused_edip_two_atom"
 FOCUSED_CUSTOM_PAIR_FIXTURE = "focused_custom_pair_two_atom"
+FOCUSED_EXCLUSIONS_FIXTURE = "focused_exclusions_three_atom"
 SITS_FF19SB_CMAP_SOURCE = (
     REPO_ROOT / "benchmarks" / "performance" / "sits" / "statics" / "ala2_sits"
 )
@@ -214,6 +215,9 @@ INPUT_SEMANTIC_SPECS_BY_CASE = {
     ),
     "normal_custom_pair_nonzero": (
         InputSemanticSpec("input.custom.pairwise", ("custom_pair",), 1.0e-6),
+    ),
+    "normal_exclusions_coulomb_oracle": (
+        InputSemanticSpec("input.topology.exclusions", ("Coulomb",), 1.0e-6),
     ),
 }
 
@@ -416,6 +420,28 @@ def _cases_for_profile() -> list[AbCase]:
             contract_ids=(
                 "output.legacy.mdout",
                 "input.custom.pairwise",
+            ),
+            assertion_ids=(
+                "mdout_deterministic_equivalence",
+                "input_semantic_equivalence",
+            ),
+            normal_step_limit=1,
+            normal_interval=1,
+            normal_dt=0.0,
+            input_behavior_only=True,
+        ),
+        AbCase(
+            name="normal_exclusions_coulomb_oracle",
+            fixture_case=FOCUSED_EXCLUSIONS_FIXTURE,
+            legacy_subdir="generated_legacy",
+            bundled_subdir="generated_bundled",
+            mode="normal",
+            vds=False,
+            statistical_md=False,
+            restart_load_policy="structural",
+            contract_ids=(
+                "output.legacy.mdout",
+                "input.topology.exclusions",
             ),
             assertion_ids=(
                 "mdout_deterministic_equivalence",
@@ -1395,6 +1421,8 @@ def _prepare_case_pair(
             return _prepare_focused_edip_pair(case_root)
         if case.fixture_case == FOCUSED_CUSTOM_PAIR_FIXTURE:
             return _prepare_focused_custom_pair_pair(case_root)
+        if case.fixture_case == FOCUSED_EXCLUSIONS_FIXTURE:
+            return _prepare_focused_exclusions_pair(case_root)
         return _prepare_normal_tip3p_pair(case_root, replica_seed)
 
     legacy_dir = _copy_case(case, "legacy", case.legacy_subdir, case_root)
@@ -1747,6 +1775,110 @@ def _validate_focused_custom_pair_routes(
         raise AssertionError(
             "focused custom-pair topology is missing datasets: "
             f"{missing}"
+        )
+
+
+def _prepare_focused_exclusions_pair(case_root: Path) -> tuple[Path, Path]:
+    legacy_source = case_root / "focused_exclusions_source"
+    legacy_dir = case_root / "legacy"
+    converted_dir = case_root / "converted_focused_exclusions_bundle"
+    bundled_dir = case_root / "bundled"
+    for path in (legacy_source, legacy_dir, converted_dir, bundled_dir):
+        if path.exists():
+            shutil.rmtree(path)
+    _write_focused_exclusions_input(legacy_source)
+    shutil.copytree(legacy_source, legacy_dir)
+    _convert_legacy_case(legacy_source, converted_dir)
+    shutil.copytree(converted_dir / "bundle", bundled_dir)
+    topology_path = bundled_dir / "topology.spgt.h5"
+    with h5py.File(topology_path, "r+") as topology:
+        sidecar_table = "/parameters/sponge/files/legacy_sidecars"
+        if sidecar_table in topology:
+            del topology[sidecar_table]
+    legacy_sidecars = bundled_dir / "legacy_sidecars"
+    if legacy_sidecars.exists():
+        shutil.rmtree(legacy_sidecars)
+    _validate_focused_exclusions_routes(legacy_dir, bundled_dir)
+    return legacy_dir, bundled_dir
+
+
+def _write_focused_exclusions_input(case_dir: Path) -> None:
+    case_dir.mkdir(parents=True, exist_ok=True)
+    (case_dir / "mass.txt").write_text(
+        "3\n12.0\n12.0\n12.0\n", encoding="utf-8"
+    )
+    (case_dir / "charge.txt").write_text(
+        "3\n1.0\n-1.0\n1.0\n", encoding="utf-8"
+    )
+    (case_dir / "coordinate.txt").write_text(
+        "3 0.0\n"
+        "0.0 0.0 0.0\n"
+        "1.0 0.0 0.0\n"
+        "4.0 0.0 0.0\n"
+        "1000.0 1000.0 1000.0\n"
+        "90.0 90.0 90.0\n",
+        encoding="utf-8",
+    )
+    (case_dir / "velocity.txt").write_text(
+        "3\n0.0 0.0 0.0\n0.0 0.0 0.0\n0.0 0.0 0.0\n",
+        encoding="utf-8",
+    )
+    (case_dir / "exclude.txt").write_text(
+        "3 1\n1 1\n0\n0\n", encoding="utf-8"
+    )
+    (case_dir / "mdin.spg.toml").write_text(
+        'md_name = "bundled io ab focused exclusions"\n'
+        'mode = "nve"\n'
+        "pbc = false\n"
+        "step_limit = 1\n"
+        "dt = 0.0\n"
+        "cutoff = 100.0\n"
+        'mass_in_file = "mass.txt"\n'
+        'charge_in_file = "charge.txt"\n'
+        'coordinate_in_file = "coordinate.txt"\n'
+        'velocity_in_file = "velocity.txt"\n'
+        'exclude_in_file = "exclude.txt"\n'
+        "print_zeroth_frame = 0\n"
+        "write_mdout_interval = 1\n"
+        "write_information_interval = 1\n",
+        encoding="utf-8",
+    )
+
+
+def _validate_focused_exclusions_routes(
+    legacy_dir: Path, bundled_dir: Path
+) -> None:
+    legacy_mdin = (legacy_dir / "mdin.spg.toml").read_text(encoding="utf-8")
+    bundled_mdin = (bundled_dir / "mdin.bundled.spg.toml").read_text(
+        encoding="utf-8"
+    )
+    if not _has_key_line(legacy_mdin, "exclude_in_file"):
+        raise AssertionError("focused exclusions legacy route is missing")
+    if _has_key_line(bundled_mdin, "exclude_in_file"):
+        raise AssertionError("focused exclusions bundle retained exclude_in_file")
+    if (bundled_dir / "legacy_sidecars").exists():
+        raise AssertionError("focused exclusions bundle retained sidecars")
+
+    topology_path = bundled_dir / "topology.spgt.h5"
+    topology_paths = _h5_paths(topology_path)
+    if "/parameters/sponge/files/legacy_sidecars" in topology_paths:
+        raise AssertionError("focused exclusions topology retained sidecars")
+    required = {
+        "/topology/exclusions/offset",
+        "/topology/exclusions/list",
+    }
+    missing = sorted(required - topology_paths)
+    if missing:
+        raise AssertionError(
+            f"focused exclusions topology is missing datasets: {missing}"
+        )
+    with h5py.File(topology_path, "r") as topology:
+        offsets = topology["/topology/exclusions/offset"][...].tolist()
+        excluded = topology["/topology/exclusions/list"][...].tolist()
+    if offsets != [0, 1, 1, 1] or excluded != [1]:
+        raise AssertionError(
+            "focused exclusions native payload changed: "
+            f"offsets={offsets}, list={excluded}"
         )
 
 
@@ -2548,6 +2680,10 @@ def _compare_input_semantics(
                 replica_result["force"] = _compare_focused_custom_pair_forces(
                     case, run
                 )
+            elif spec.contract_id == "input.topology.exclusions":
+                replica_result["oracle"] = _compare_focused_exclusions_oracle(
+                    case, run
+                )
             replica_results.append(replica_result)
         results.append(
             {
@@ -2618,6 +2754,88 @@ def _compare_focused_custom_pair_forces(
         str(path.relative_to(run.bundled_dir)) for path in materialized
     ]
     return result
+
+
+def _compare_focused_exclusions_oracle(
+    case: AbCase, run: AbRun
+) -> dict[str, object]:
+    branch_results = {}
+    forces = {}
+    for branch, directory in (
+        ("legacy", run.legacy_dir),
+        ("bundled", run.bundled_dir),
+    ):
+        rows = _read_mdout(directory / "mdout.txt")["rows"]
+        branch_forces = _read_native_float32_file(
+            directory / "output" / "legacy.frc"
+        )
+        branch_results[branch] = _assert_exclusion_coulomb_oracle(
+            f"{case.name} {branch}", rows, branch_forces
+        )
+        forces[branch] = branch_forces
+    cross_branch = _assert_nontrivial_equivalent_forces(
+        f"{case.name} exclusion force",
+        forces["legacy"],
+        forces["bundled"],
+    )
+    return {
+        "excluded_pair": [0, 1],
+        "branches": branch_results,
+        "cross_branch_force": cross_branch,
+    }
+
+
+def _assert_exclusion_coulomb_oracle(
+    label: str,
+    mdout_rows: Sequence[dict[str, float]],
+    forces: Sequence[float],
+) -> dict[str, object]:
+    if len(mdout_rows) != 1:
+        raise AssertionError(f"{label} oracle requires exactly one mdout row")
+    expected_energy = 1.0 / 4.0 - 1.0 / 3.0
+    actual_energy = mdout_rows[0].get("eff_pot")
+    if actual_energy is None:
+        raise AssertionError(f"{label} oracle requires eff_pot")
+    relative_tolerance, absolute_tolerance = _deterministic_tolerance(
+        "observable"
+    )
+    if not math.isclose(
+        actual_energy,
+        expected_energy,
+        rel_tol=relative_tolerance,
+        abs_tol=absolute_tolerance,
+    ):
+        raise AssertionError(
+            f"{label} exclusion energy mismatch: "
+            f"expected={expected_energy}, actual={actual_energy}"
+        )
+
+    expected_forces = (
+        -1.0 / 16.0,
+        0.0,
+        0.0,
+        1.0 / 9.0,
+        0.0,
+        0.0,
+        1.0 / 16.0 - 1.0 / 9.0,
+        0.0,
+        0.0,
+    )
+    force_relative, force_absolute = _deterministic_tolerance("force")
+    _assert_numeric_sequences_close(
+        f"{label} exclusion force oracle",
+        expected_forces,
+        forces,
+        relative_tolerance=force_relative,
+        absolute_tolerance=force_absolute,
+    )
+    return {
+        "expected_energy": expected_energy,
+        "actual_energy": actual_energy,
+        "unexcluded_energy": -1.0 + expected_energy,
+        "force_value_count": len(expected_forces),
+        "maximum_abs_force": max(abs(value) for value in forces),
+    }
 
 
 def _assert_nontrivial_equivalent_forces(
