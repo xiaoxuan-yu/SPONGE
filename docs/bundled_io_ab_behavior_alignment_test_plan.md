@@ -1636,7 +1636,52 @@ Acceptance:
 - SPONGE rebuild, fixture-equivalence CTest, contract smoke, Ruff, formatting,
   clang-format, and diff checks pass, followed by one PR-scoped commit.
 
-## 51. Artifacts and Temporary-Space Policy
+## 51. PR 54: Attested Production Promotion Evidence
+
+Close the evidence-integrity gap between passing tests and the PR 7c promotion
+evaluator. A production-history row must be derived from the actual contract,
+execution-matrix, and comparator-mutation artifacts rather than authored as a
+set of trusted booleans and performance numbers.
+
+- Give contract, matrix, and comparator reports one shared production run ID.
+- Record all eight frozen comparator-mutation test families through a pytest
+  hook. Parameterized cases count as passed only when every selected node
+  passes; missing, skipped, or failed nodes and a non-zero pytest session exit
+  status cannot attest the run.
+- Merge independently produced CPU rank-1, CPU rank-2, GPU rank-1, and GPU
+  rank-2 matrix reports only when their run IDs match and duplicate scenario
+  payloads are identical.
+- Give the scheduled production CPU rank-1 and rank-2 jobs the same GitHub run
+  ID and upload the real comparator report with the main production artifact.
+  GPU evidence remains an explicit separate-runner input, not a fabricated CI
+  placeholder.
+- Revalidate 100% supported-contract coverage at the declared minimum evidence
+  level and every matrix scenario's backend, OMP, MPI, and rank-0 ownership
+  metadata before deriving a production run.
+- Derive conservative performance values from the maximum observed scenario
+  runtime, finalize, and output-size ratios. Reject missing, negative, NaN, or
+  infinite performance values.
+- Append history atomically and reject duplicate run IDs. Every persisted run
+  records its source commit plus SHA-256 provenance for the contract report,
+  canonical merged matrix report, and comparator report. The history loader
+  rejects unattested handwritten rows.
+
+Acceptance:
+
+- A complete split matrix, complete supported-contract report, and real
+  mutation report derive one loadable production-history row with exact hashes.
+- Missing mutation evidence, below-minimum contract evidence, false environment
+  metadata, stale/conflicting run IDs, non-finite performance values, duplicate
+  history rows, and provenance-free handwritten rows are rejected.
+- The real statistics suite writes all eight mutation families under one run
+  ID, including all parameterizations of non-finite kind/sign checks.
+- This PR does not change `promotion_state=shadow`: final PR 7c promotion still
+  requires three complete, consecutive, retry-free production runs and the
+  cross-process VDS contract remains explicitly unsupported.
+- Contract smoke, the real mutation hook, Ruff, formatting, and diff checks
+  pass, followed by one PR-scoped commit.
+
+## 52. Artifacts and Temporary-Space Policy
 
 - Use `SPONGE_BUNDLED_IO_AB_RUN_ROOT` for all heavy runs.
 - Put production artifacts on the workspace filesystem rather than `/tmp`.
@@ -1646,7 +1691,7 @@ Acceptance:
 - Record artifact byte counts and enforce a configurable per-case quota.
 - Cleanup must only remove directories created by the current gate run.
 
-## 52. PR Completion Log
+## 53. PR Completion Log
 
 Append one row immediately after completing and committing each PR.
 
@@ -1707,3 +1752,4 @@ Append one row immediately after completing and committing each PR.
 | PR 51: Typed positional-restraint behavior contract | Complete | This commit | focused typed positional-restraint CPU A/B plus three independent payload controls; pure full-contract VDS-off/on progression; sidecar VDS-off/on; two residue COM/virial regressions; dual-owner and weight-shape process failures; 25-case failure sweep; fixture-equivalence CTest; SPONGE rebuild; 142-test smoke; Ruff; format; clang-format; `git diff --check` | Protocol atom IDs/weights and restart reference coordinates now form one validated typed owner and materialize through the established positional-restraint parser. Exact energy/full-force oracles prove all three payload fields are consumed. The registry separates typed and sidecar evidence, retains CV restraint and typed soft wall as deferred, and pure rerun advances to only the soft-wall gap. |
 | PR 52: Typed soft-wall behavior contract | Complete | This commit | focused typed soft-wall CPU A/B plus zero-potential control; pure and sidecar full-contract VDS-off/on; dual-owner and three shape process failures; 29-case failure sweep; fixture-equivalence CTest; SPONGE rebuild; 142-test smoke; Ruff; format; clang-format; `git diff --check` | Typed `/wall/soft/{count,name,potential}` now validates and materializes through the established soft-wall parser. The focused gate matches `z_wall=10.0` and force `(0,0,-2,0,0,-6)` while the typed zero-potential control zeros both. Full-contract fixtures enforce exactly one owner, and pure VDS-off/on now pass the complete rerun behavior gate. Registry coverage reaches 85 supported, one deferred, and one unsupported contract. |
 | PR 53: Typed and sidecar CV-restraint behavior contracts | Complete | This commit | focused typed/sidecar CV-restraint CPU A/B plus weight-zero and reordered-definition controls; pure and sidecar full-contract VDS-off/on E3 gates; dual-owner, partial-owner, offset, and definition-conflict process failures; 33-case failure sweep; fixture-equivalence CTest; SPONGE rebuild; 142-test smoke; Ruff; format; clang-format; `git diff --check` | The CV controller now merges all three legacy configuration surfaces, while typed protocol roots pass one structured, conflict-aware materializer. Focused routes match `restrain_cv=1.0` and force `(4,0,0,-4,0,0)`; full-contract routes exercise `restrain_cv=12.06`. Registry coverage reaches 87 supported, zero deferred, and one unsupported contract. |
+| PR 54: Attested production promotion evidence | Complete | This commit | eight derived-evidence positive/negative guards; real 24-test comparator mutation hook; 150-test contract smoke; workflow YAML parse; execution-matrix CLI; Ruff; format; `git diff --check` | Production history is now derived from same-run contract, split CPU/GPU/MPI matrix, and comparator artifacts. Scheduled CPU jobs share one run ID and upload the comparator report. History records conservative scenario performance, source commit, and three SHA-256 provenance values; stale/conflicting IDs, incomplete evidence, failed mutation sessions, non-finite metrics, duplicates, and unattested handwritten rows fail. Promotion remains shadow pending three complete retry-free runs and cross-process VDS closure. |

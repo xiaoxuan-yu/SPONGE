@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
+    EVIDENCE_RUN_ID,
     OBSERVABLE_REL,
     PROFILE,
     PROFILE_LIMITS,
@@ -654,7 +655,13 @@ def _record_matrix_evidence(
     if path.exists():
         report = json.loads(path.read_text(encoding="utf-8"))
     else:
-        report = {"schema_version": "1", "cases": {}}
+        report = {}
+    if report.get("run_id") != EVIDENCE_RUN_ID:
+        report = {
+            "schema_version": 1,
+            "run_id": EVIDENCE_RUN_ID,
+            "cases": {},
+        }
     cases = report.setdefault("cases", {})
     cases[case.scenario_id] = {
         "metadata": {

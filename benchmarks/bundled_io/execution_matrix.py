@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Sequence
@@ -389,6 +390,13 @@ def _parse_production_run(raw: object, index: int) -> ProductionRun:
     mutations = raw.get("comparator_mutations_rejected")
     if not isinstance(passed, bool) or not isinstance(mutations, bool):
         raise AssertionError(f"{label} boolean fields are invalid")
+    _required_commit(raw, "source_commit", label)
+    for key in (
+        "contract_evidence_sha256",
+        "matrix_evidence_sha256",
+        "comparator_evidence_sha256",
+    ):
+        _required_sha256(raw, key, label)
     return ProductionRun(
         run_id=_required_string(raw, "run_id", label),
         passed=passed,
@@ -530,6 +538,24 @@ def _required_string(payload: Mapping[str, object], key: str, label: str) -> str
     value = payload.get(key)
     if not isinstance(value, str) or not value:
         raise AssertionError(f"{label} requires non-empty string {key}")
+    return value
+
+
+def _required_commit(
+    payload: Mapping[str, object], key: str, label: str
+) -> str:
+    value = _required_string(payload, key, label)
+    if re.fullmatch(r"[0-9a-f]{7,64}", value) is None:
+        raise AssertionError(f"{label} has invalid commit ID {key}")
+    return value
+
+
+def _required_sha256(
+    payload: Mapping[str, object], key: str, label: str
+) -> str:
+    value = _required_string(payload, key, label)
+    if re.fullmatch(r"[0-9a-f]{64}", value) is None:
+        raise AssertionError(f"{label} has invalid SHA-256 {key}")
     return value
 
 

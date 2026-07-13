@@ -25,12 +25,21 @@ from benchmarks.bundled_io.execution_matrix import (
     ProductionRun,
     evaluate_promotion_readiness,
     load_execution_matrix,
+    load_production_run_history,
     validate_execution_matrix,
 )
 from benchmarks.bundled_io.input_semantics import (
     REQUIRED_INPUT_SEMANTIC_CONTRACTS,
     InputSemanticSpec,
     assert_module_semantics,
+)
+from benchmarks.bundled_io.promotion_evidence import (
+    REQUIRED_COMPARATOR_MUTATION_NODE_COUNTS,
+    REQUIRED_COMPARATOR_MUTATION_TESTS,
+    append_production_run_history,
+    derive_production_run,
+    merge_matrix_evidence,
+    write_comparator_mutation_report,
 )
 from benchmarks.bundled_io.tests.test_bundled_io_ab_execution_matrix import (
     MATRIX_RUNTIME_CASES,
@@ -2981,8 +2990,268 @@ def test_shadow_workflow_runs_tiers_without_becoming_a_release_gate():
     )
     assert "SPONGE_BUNDLED_IO_AB_MATRIX_SCENARIOS: cpu-rank2" in workflow
     assert "pixi install -e dev-cpu-mpi" in workflow
+    assert (
+        workflow.count(
+            "SPONGE_BUNDLED_IO_AB_RUN_ID: "
+            "${{ github.run_id }}-${{ github.run_attempt }}"
+        )
+        == 2
+    )
+    assert "SPONGE_BUNDLED_IO_AB_COMPARATOR_EVIDENCE:" in workflow
+    assert "ab_comparator_evidence.json" in workflow
     assert workflow.count("continue-on-error: true") == 3
     assert "schedule:" in workflow
     assert "actions/upload-artifact@v4" in workflow
     assert "bundled-io-ab-shadow" not in release
     assert "ab-bundled-io-production" not in release
+
+
+PROMOTION_RUN_ID = "production-20260714-1"
+PROMOTION_SOURCE_COMMIT = "a" * 40
+
+
+def _write_promotion_json(path: Path, payload: object) -> None:
+    path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
+def _promotion_artifacts(tmp_path: Path):
+    matrix = load_execution_matrix()
+    contracts = load_contract_registry()
+    evidence_path = tmp_path / "ab_evidence.json"
+    _write_promotion_json(
+        evidence_path,
+        {
+            "schema_version": "1",
+            "run_id": PROMOTION_RUN_ID,
+            "cases": {
+                "complete_contract_gate": {
+                    "metadata": {"profile": "production"},
+                    "records": [
+                        {
+                            "contract_id": contract_id,
+                            "evidence_level": contract.minimum_evidence,
+                            "status": "passed",
+                        }
+                        for contract_id, contract in contracts.items()
+                        if contract.status == "supported"
+                    ],
+                }
+            },
+        },
+    )
+
+    matrix_cases = {}
+    for index, scenario in enumerate(matrix.scenarios):
+        matrix_cases[scenario.case_ids[0]] = {
+            "metadata": {
+                **scenario.axis_values(),
+                "omp_num_threads": scenario.omp_threads,
+                "mpi_rank_count": scenario.mpi_ranks,
+                "rank0_output_owner": True,
+                "performance": {
+                    "runtime_ratio": 1.0 + index * 0.001,
+                    "finalize_fraction": 0.1 + index * 0.001,
+                    "output_bytes_ratio": 1.0 + index * 0.001,
+                },
+            },
+            "records": [
+                {
+                    "contract_id": "runtime.execution_matrix",
+                    "evidence_level": "E3",
+                    "status": "passed",
+                }
+            ],
+        }
+    midpoint = len(matrix_cases) // 2
+    items = list(matrix_cases.items())
+    matrix_paths = []
+    for part, selected in enumerate((items[:midpoint], items[midpoint:])):
+        path = tmp_path / f"ab_matrix_evidence_{part}.json"
+        _write_promotion_json(
+            path,
+            {
+                "schema_version": 1,
+                "run_id": PROMOTION_RUN_ID,
+                "cases": dict(selected),
+            },
+        )
+        matrix_paths.append(path)
+
+    comparator_path = tmp_path / "ab_comparator_evidence.json"
+    write_comparator_mutation_report(
+        comparator_path,
+        PROMOTION_RUN_ID,
+        {
+            test_name: tuple(
+                (
+                    f"statistics.py::{test_name}[{index}]",
+                    "passed",
+                )
+                for index in range(
+                    REQUIRED_COMPARATOR_MUTATION_NODE_COUNTS[test_name]
+                )
+            )
+            for test_name in REQUIRED_COMPARATOR_MUTATION_TESTS
+        },
+        pytest_exit_status=0,
+    )
+    return matrix, contracts, evidence_path, matrix_paths, comparator_path
+
+
+def _derive_promotion_run(artifacts):
+    matrix, contracts, evidence, matrix_evidence, comparator = artifacts
+    return derive_production_run(
+        run_id=PROMOTION_RUN_ID,
+        source_commit=PROMOTION_SOURCE_COMMIT,
+        retry_count=0,
+        evidence_path=evidence,
+        matrix_evidence_paths=matrix_evidence,
+        comparator_evidence_path=comparator,
+        matrix=matrix,
+        contracts=contracts,
+    )
+
+
+def test_production_run_is_derived_from_complete_hashed_evidence(tmp_path):
+    run, provenance = _derive_promotion_run(_promotion_artifacts(tmp_path))
+
+    assert run.run_id == PROMOTION_RUN_ID
+    assert run.passed is True
+    assert run.comparator_mutations_rejected is True
+    assert run.runtime_ratio == pytest.approx(1.011)
+    assert run.finalize_fraction == pytest.approx(0.111)
+    assert run.output_bytes_ratio == pytest.approx(1.011)
+    assert provenance["source_commit"] == PROMOTION_SOURCE_COMMIT
+    assert all(
+        len(value) == 64
+        for key, value in provenance.items()
+        if key.endswith("_sha256")
+    )
+
+    history_path = tmp_path / "production_history.json"
+    append_production_run_history(history_path, run, provenance)
+    assert load_production_run_history(history_path) == (run,)
+    with pytest.raises(AssertionError, match="duplicate production run ID"):
+        append_production_run_history(history_path, run, provenance)
+
+
+def test_production_run_rejects_partial_comparator_mutation_evidence(tmp_path):
+    artifacts = _promotion_artifacts(tmp_path)
+    comparator = artifacts[-1]
+    report = json.loads(comparator.read_text(encoding="utf-8"))
+    partial = "test_nonfinite_kind_and_sign_mutations_are_rejected"
+    report["tests"][partial] = {
+        "status": "passed",
+        "expected_node_count": 3,
+        "nodeids": [f"statistics.py::{partial}[0]"],
+    }
+    _write_promotion_json(comparator, report)
+
+    with pytest.raises(AssertionError, match="lack passing rejection evidence"):
+        _derive_promotion_run(artifacts)
+
+
+def test_production_run_rejects_failed_comparator_pytest_session(tmp_path):
+    artifacts = _promotion_artifacts(tmp_path)
+    comparator = artifacts[-1]
+    report = json.loads(comparator.read_text(encoding="utf-8"))
+    report["pytest_exit_status"] = 1
+    _write_promotion_json(comparator, report)
+
+    with pytest.raises(AssertionError, match="pytest_exit_status must be 0"):
+        _derive_promotion_run(artifacts)
+
+
+def test_production_run_rejects_unproven_matrix_environment(tmp_path):
+    artifacts = _promotion_artifacts(tmp_path)
+    matrix_evidence = artifacts[-2]
+    report = json.loads(matrix_evidence[0].read_text(encoding="utf-8"))
+    first = next(iter(report["cases"].values()))
+    first["metadata"]["rank0_output_owner"] = False
+    _write_promotion_json(matrix_evidence[0], report)
+
+    with pytest.raises(AssertionError, match="does not prove environment"):
+        _derive_promotion_run(artifacts)
+
+
+def test_production_run_rejects_below_minimum_contract_evidence(tmp_path):
+    artifacts = _promotion_artifacts(tmp_path)
+    contracts = artifacts[1]
+    evidence = artifacts[2]
+    report = json.loads(evidence.read_text(encoding="utf-8"))
+    e4_contract = next(
+        contract_id
+        for contract_id, contract in contracts.items()
+        if contract.status == "supported" and contract.minimum_evidence == "E4"
+    )
+    record = next(
+        item
+        for item in report["cases"]["complete_contract_gate"]["records"]
+        if item["contract_id"] == e4_contract
+    )
+    record["evidence_level"] = "E3"
+    _write_promotion_json(evidence, report)
+
+    with pytest.raises(AssertionError, match="insufficient evidence"):
+        _derive_promotion_run(artifacts)
+
+
+def test_production_run_rejects_nonfinite_performance_evidence(tmp_path):
+    artifacts = _promotion_artifacts(tmp_path)
+    matrix_evidence = artifacts[-2]
+    report = json.loads(matrix_evidence[0].read_text(encoding="utf-8"))
+    first = next(iter(report["cases"].values()))
+    first["metadata"]["performance"]["runtime_ratio"] = float("nan")
+    _write_promotion_json(matrix_evidence[0], report)
+
+    with pytest.raises(AssertionError, match="finite performance evidence"):
+        _derive_promotion_run(artifacts)
+
+
+def test_matrix_evidence_merge_rejects_stale_and_conflicting_runs(tmp_path):
+    artifacts = _promotion_artifacts(tmp_path)
+    matrix_evidence = artifacts[-2]
+    stale = json.loads(matrix_evidence[0].read_text(encoding="utf-8"))
+    stale["run_id"] = "stale-run"
+    _write_promotion_json(matrix_evidence[0], stale)
+    with pytest.raises(AssertionError, match="run_id mismatch"):
+        merge_matrix_evidence(matrix_evidence, PROMOTION_RUN_ID)
+
+    stale["run_id"] = PROMOTION_RUN_ID
+    duplicate_case_id = next(iter(stale["cases"]))
+    other = json.loads(matrix_evidence[1].read_text(encoding="utf-8"))
+    other["cases"][duplicate_case_id] = {
+        "metadata": {"backend": "wrong"},
+        "records": [],
+    }
+    _write_promotion_json(matrix_evidence[0], stale)
+    _write_promotion_json(matrix_evidence[1], other)
+    with pytest.raises(AssertionError, match="conflicting matrix evidence"):
+        merge_matrix_evidence(matrix_evidence, PROMOTION_RUN_ID)
+
+
+def test_history_loader_rejects_unattested_handwritten_run(tmp_path):
+    history = tmp_path / "production_history.json"
+    _write_promotion_json(
+        history,
+        {
+            "schema_version": 1,
+            "runs": [
+                {
+                    "run_id": PROMOTION_RUN_ID,
+                    "passed": True,
+                    "retry_count": 0,
+                    "runtime_ratio": 1.0,
+                    "finalize_fraction": 0.1,
+                    "output_bytes_ratio": 1.0,
+                    "comparator_mutations_rejected": True,
+                }
+            ],
+        },
+    )
+
+    with pytest.raises(AssertionError, match="source_commit"):
+        load_production_run_history(history)

@@ -114,6 +114,8 @@ jobs:
     timeout-minutes: 360
     env:
       SPONGE_BUNDLED_IO_AB_RUN_ROOT: ${{ github.workspace }}/outputs/ab-production
+      SPONGE_BUNDLED_IO_AB_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+      SPONGE_BUNDLED_IO_AB_COMPARATOR_EVIDENCE: ${{ github.workspace }}/outputs/ab-production/ab_comparator_evidence.json
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
@@ -164,6 +166,7 @@ jobs:
     timeout-minutes: 360
     env:
       SPONGE_BUNDLED_IO_AB_RUN_ROOT: ${{ github.workspace }}/outputs/ab-mpi
+      SPONGE_BUNDLED_IO_AB_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
