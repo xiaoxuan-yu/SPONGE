@@ -25,6 +25,7 @@ def _synthetic_evidence_level(assertion_id: str) -> str:
     if assertion_id in {
         "restart_continuation_equivalence",
         "restart_dynamic_continuation_equivalence",
+        "restart_protocol_full_continuation_equivalence",
     }:
         return "E4"
     if assertion_id == "stable_failure_semantics":

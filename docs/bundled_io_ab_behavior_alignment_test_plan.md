@@ -604,7 +604,46 @@ Acceptance:
 - The three contracts emit E4 evidence from the same executed case, and
   registry, manifest, real CPU A/B, related CTest, Ruff, and diff checks pass.
 
-## 22. Artifacts and Temporary-Space Policy
+## 22. PR 19: Protocol/Full Metadynamics Continuation Gate
+
+Close the protocol and full restart-load policies together with the
+metadynamics input contract, using one deterministic checkpoint and three
+same-semantic continuations.
+
+- Generate a two-atom periodic NVT producer with a distance collective
+  variable, one-dimensional well-tempered metadynamics, and a three-element
+  Nose-Hoover chain. Require multiple finite, non-zero hills and a finite
+  potential snapshot in the H5 restart.
+- Treat the H5 restart event as the checkpoint boundary. Project its stored
+  hill and potential text into the legacy branch instead of copying the
+  producer's terminal sidecar, because the terminal sidecar contains the next
+  hill written after that restart event.
+- Fork the checkpoint into: a pure legacy structural/NHC/metadynamics text
+  continuation; a `protocol` continuation that loads H5 structural and
+  metadynamics state while retaining only the legacy NHC dynamic state; and a
+  `full` continuation that loads structural, NHC dynamic, and metadynamics
+  state entirely from H5.
+- Compare every mdout column; particle position, velocity, force, and box;
+  NHC coordinate/velocity trajectories and final state; metadynamics
+  `meta/rbias/rct` streams; final hill histories; observable-only output; and
+  final restart/integrator state.
+- Apply existing deterministic numeric tolerances only at legacy text
+  precision boundaries. Reject missing/non-finite/trivial bias, a different
+  hill count, a route that mixes owners, or any schedule/shape mismatch.
+
+Acceptance:
+
+- All three continuations use the same producer checkpoint and yield finite,
+  non-zero metadynamics work with equivalent particle, thermostat, bias, and
+  restart behavior.
+- The `protocol` branch proves that only protocol state is added beyond the H5
+  structural baseline; the `full` branch contains no legacy restart binding.
+- `input.restart_load.protocol`, `input.restart_load.full`, and
+  `input.bias.metadynamics` emit E4 evidence from the executed case.
+- Registry, manifest, real CPU A/B, related CTest, Ruff, and diff checks pass,
+  followed by exactly one PR-scoped commit.
+
+## 23. Artifacts and Temporary-Space Policy
 
 - Use `SPONGE_BUNDLED_IO_AB_RUN_ROOT` for all heavy runs.
 - Put production artifacts on the workspace filesystem rather than `/tmp`.
@@ -614,7 +653,7 @@ Acceptance:
 - Record artifact byte counts and enforce a configurable per-case quota.
 - Cleanup must only remove directories created by the current gate run.
 
-## 23. PR Completion Log
+## 24. PR Completion Log
 
 Append one row immediately after completing and committing each PR.
 
@@ -640,3 +679,4 @@ Append one row immediately after completing and committing each PR.
 | PR 16: Virtual-atom plural alias behavior gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; `ctest --test-dir build-dev-cpu-h5-2 --output-on-failure -R 'test_topology_native_h5_reader|test_h5_input_fixture_equivalence'`; real `normal_virtual_atoms_plural_alias` CPU A/B; Ruff; clang-format; `git diff --check` | 89 contract/manifest/comparator tests, both H5 input contract tests, and the focused real A/B pass. The legacy branch resolves only `virtual_atoms_in_file`; the bundled branch contains the exact native payload with neither key nor sidecars. Both paths match the boundary-crossing coordinate `9.75`, non-zero PM, complete force, and mdout behavior. Registry coverage advances to 53 supported, 21 deferred, and 1 unsupported contract. |
 | PR 17: Restart-absent same-bootstrap rerun gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; `ctest --test-dir build-dev-cpu-h5-2 --output-on-failure -R 'test_(restart_h5_reader\|h5_input_validation\|h5_restart_load_runtime_closure)$'`; real `rerun_restart_absent_same_bootstrap_vds_off` CPU A/B; Ruff; `git diff --check` | 90 contract/manifest/comparator tests, two related CTest passes (runtime closure skipped by its build guard), and the real two-frame A/B pass. Both branches use byte-identical coordinate/velocity bootstrap files, the bundled branch has no restart binding or payload, and all mdout columns, frame selection, trajectory, and observable semantics pass E3 comparison. Registry coverage advances to 54 supported, 20 deferred, and 1 unsupported contract. |
 | PR 18: NHC dynamic restart continuation gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; `ctest --test-dir build-dev-cpu-h5-2 --output-on-failure -R 'test_(restart_h5_reader\|h5_restart_load_runtime_closure\|module_h5_mappings_with_mock_backend)$'`; real `normal_nhc_dynamic_restart_continuation` CPU A/B; Ruff; `git diff --check` | 91 contract/manifest/comparator tests, two related CTest passes (runtime closure skipped by its build guard), and the real E4 A/B pass. One producer emits non-zero three-chain state through legacy and H5 restart routes, then a text-restart continuation and `dynamic` H5 continuation compare all mdout columns, particle position/velocity/force/box, NHC trajectories, observable output, and final restart state. Registry coverage advances to 57 supported, 17 deferred, and 1 unsupported contract. |
+| PR 19: Protocol/full metadynamics continuation gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; `ctest --test-dir build-dev-cpu-h5-2 --output-on-failure -R 'test_(restart_h5_reader\|h5_restart_load_runtime_closure\|module_h5_mappings_with_mock_backend)$'`; real `normal_meta_protocol_full_restart_continuation` CPU A/B; Ruff; `git diff --check` | 92 contract/manifest/comparator tests, two related CTest passes (runtime closure skipped by its build guard), and the real E4 A/B pass. One producer checkpoint with three non-zero hills forks into pure legacy, H5 `protocol` plus legacy NHC, and H5 `full` routes. All mdout columns, particle/NHC/metadynamics streams, final hill/potential state, observable output, and restart state agree within existing text-precision tolerances. Registry coverage advances to 60 supported, 14 deferred, and 1 unsupported contract. |

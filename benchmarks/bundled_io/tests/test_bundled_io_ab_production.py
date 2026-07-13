@@ -201,6 +201,8 @@ RESTART_COMPARE_DATASETS = (
 
 NHC_RESTART_DATASET = "/parameters/restart/thermostat/nose_hoover_chain"
 NHC_OBSERVABLE_ROOT = "/observables/all/thermostat/nose_hoover_chain"
+META_RESTART_ROOT = "/parameters/restart/bias/meta/meta"
+META_OBSERVABLE_ROOT = "/observables/all/metadynamics"
 
 TRAJECTORY_REL = Path("output") / "ab.spg.h5md"
 OBSERVABLE_REL = Path("output") / "ab.obs.spg.h5md"
@@ -387,6 +389,22 @@ def _cases_for_profile() -> list[AbCase]:
                 "output.restart.dynamic_continuation",
             ),
             assertion_ids=("restart_dynamic_continuation_equivalence",),
+        ),
+        AbCase(
+            name="normal_meta_protocol_full_restart_continuation",
+            fixture_case="focused_metadynamics_two_atom",
+            legacy_subdir="generated_legacy",
+            bundled_subdir="generated_bundled",
+            mode="protocol_full_continuation",
+            vds=False,
+            statistical_md=False,
+            restart_load_policy="protocol/full",
+            contract_ids=(
+                "input.restart_load.protocol",
+                "input.restart_load.full",
+                "input.bias.metadynamics",
+            ),
+            assertion_ids=("restart_protocol_full_continuation_equivalence",),
         ),
         AbCase(
             name="normal_sits_ff19sb_cmap_peptide",
@@ -1148,6 +1166,9 @@ def test_legacy_and_bundled_ab_behavior(case: AbCase):
     if case.mode == "dynamic_continuation":
         _run_nhc_dynamic_restart_case(case, contracts)
         return
+    if case.mode == "protocol_full_continuation":
+        _run_meta_protocol_full_restart_case(case, contracts)
+        return
     if case.mode == "chunk_boundary":
         _run_chunk_boundary_case(case, contracts)
         return
@@ -1805,6 +1826,650 @@ def _compare_nhc_dynamic_continuations(
                 files["bundled"]["restart"], NHC_RESTART_DATASET
             )
         ),
+    }
+
+
+def _run_meta_protocol_full_restart_case(case: AbCase, contracts) -> None:
+    case_root = _output_root() / case.name
+    producer_dir, legacy_template, bundled_template = (
+        _prepare_meta_protocol_full_setup(case_root / "producer_setup")
+    )
+    producer_metrics = _run_sponge(producer_dir, "mdin.spg.toml")
+    producer_state = _validate_meta_producer_state(case, producer_dir)
+
+    continuation_dirs, projection = _prepare_meta_continuations(
+        producer_dir,
+        legacy_template,
+        bundled_template,
+        case_root / "continuations",
+    )
+    continuation_metrics = {
+        branch: _run_sponge(directory, "mdin.spg.toml")
+        for branch, directory in continuation_dirs.items()
+    }
+    routes = _validate_meta_continuation_routes(producer_dir, continuation_dirs)
+    comparison = _compare_meta_continuations(case, continuation_dirs)
+    assertion = AssertionEvidence(
+        assertion_id="restart_protocol_full_continuation_equivalence",
+        evidence_level="E4",
+        details={
+            "method": "one_checkpoint_forked_to_legacy_protocol_and_full",
+            "producer": producer_state,
+            "legacy_projection": projection,
+            "routes": routes,
+            "continuation": comparison,
+        },
+    )
+    evidence = build_case_evidence(contracts, case, (assertion,))
+    metrics = {
+        "profile": PROFILE,
+        "case": case.name,
+        "contract_ids": list(case.contract_ids),
+        "assertion_ids": list(case.assertion_ids),
+        "evidence": [record.as_dict() for record in evidence],
+        "restart_load_policy": case.restart_load_policy,
+        "producer_metrics": producer_metrics,
+        "continuation_metrics": continuation_metrics,
+        "comparison": assertion.details,
+    }
+    metrics_path = case_root / "ab_metrics.json"
+    metrics_path.write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+    update_evidence_report(
+        _output_root() / "ab_evidence.json",
+        contracts,
+        case,
+        evidence,
+        {
+            "profile": PROFILE,
+            "restart_load_policy": case.restart_load_policy,
+            "producer_count": 1,
+            "continuation_branches": ["legacy", "protocol", "full"],
+            "sponge_executable": str(_sponge_executable()),
+            "metrics_path": str(metrics_path),
+        },
+        EVIDENCE_RUN_ID,
+    )
+    print(f"\nBundled I/O A/B metadynamics restart metrics: {metrics_path}")
+
+
+def _prepare_meta_protocol_full_setup(
+    setup_root: Path,
+) -> tuple[Path, Path, Path]:
+    source = setup_root / "source"
+    producer = setup_root / "producer"
+    legacy_template = setup_root / "legacy_template"
+    converted = setup_root / "converted"
+    bundled_template = setup_root / "bundled_template"
+    if setup_root.exists():
+        shutil.rmtree(setup_root)
+    source.mkdir(parents=True)
+    _write_meta_source_inputs(source)
+    _write_meta_producer_mdin(source)
+    shutil.copytree(source, producer)
+    shutil.copytree(source, legacy_template)
+    _convert_legacy_case(source, converted)
+    shutil.copytree(converted / "bundle", bundled_template)
+    return producer, legacy_template, bundled_template
+
+
+def _write_meta_source_inputs(case_dir: Path) -> None:
+    files = {
+        "mass.txt": "2\n12.0\n12.0\n",
+        "charge.txt": "2\n0.0\n0.0\n",
+        "coordinate.txt": (
+            "2 0.0\n0.0 0.0 0.0\n1.5 0.0 0.0\n20.0 20.0 20.0\n90.0 90.0 90.0\n"
+        ),
+        "velocity.txt": "2\n0.15 0.0 0.0\n-0.15 0.0 0.0\n",
+        "cv.txt": (
+            "distance\n"
+            "{\n"
+            "    CV_type = distance\n"
+            "    atom = 0 1\n"
+            "}\n"
+            "meta\n"
+            "{\n"
+            "    Ndim = 1\n"
+            "    CV = distance\n"
+            "    CV_minimal = 0.5\n"
+            "    CV_maximum = 3.0\n"
+            "    CV_period = 0\n"
+            "    CV_grid = 50\n"
+            "    CV_sigma = 0.1\n"
+            "    height = 0.2\n"
+            "    potential_update_interval = 1\n"
+            "    welltemp_factor = 20\n"
+            "}\n"
+            "print\n"
+            "{\n"
+            "    CV = distance\n"
+            "}\n"
+        ),
+    }
+    for name, content in files.items():
+        (case_dir / name).write_text(content, encoding="utf-8")
+
+
+def _write_meta_producer_mdin(case_dir: Path) -> None:
+    (case_dir / "output").mkdir(parents=True, exist_ok=True)
+    lines = [
+        'md_name = "bundled io ab metadynamics producer"',
+        'mode = "nvt"',
+        "pbc = true",
+        "step_limit = 3",
+        "dt = 0.001",
+        "cutoff = 10.0",
+        'mass_in_file = "mass.txt"',
+        'charge_in_file = "charge.txt"',
+        'coordinate_in_file = "coordinate.txt"',
+        'velocity_in_file = "velocity.txt"',
+        'cv_in_file = "cv.txt"',
+        'thermostat = "nose_hoover_chain"',
+        "thermostat_tau = 0.2",
+        "target_temperature = 300.0",
+        "print_zeroth_frame = 1",
+        "write_mdout_interval = 1",
+        "write_information_interval = 1",
+        "write_trajectory_interval = 1",
+        "write_restart_file_interval = 1",
+        'mdout = "mdout.txt"',
+        'mdinfo = "mdinfo.txt"',
+        'rst = "output/legacy_restart"',
+        f'output_h5_restart_path = "{RESTART_REL.as_posix()}"',
+        "",
+        "[nose_hoover_chain]",
+        "length = 3",
+        'restart_output = "output/legacy_nhc_restart.txt"',
+    ]
+    (case_dir / "mdin.spg.toml").write_text(
+        "\n".join(lines) + "\n", encoding="utf-8"
+    )
+
+
+def _h5_scalar_text(path: Path, dataset: str) -> str:
+    with h5py.File(path, "r") as h5:
+        if dataset not in h5:
+            raise AssertionError(f"H5 text state is missing: {path}:{dataset}")
+        value = h5[dataset].asstr()[()]
+    if not isinstance(value, str) or not value:
+        raise AssertionError(f"H5 text state is empty: {path}:{dataset}")
+    return value
+
+
+def _meta_hill_values(text: str, label: str) -> list[float]:
+    values = []
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        row = [float(value) for value in line.split()]
+        if len(row) != 2 or not all(math.isfinite(value) for value in row):
+            raise AssertionError(f"{label} has an invalid hill row: {line}")
+        values.extend(row)
+    if len(values) < 4 or max(abs(value) for value in values[1::2]) <= 0.0:
+        raise AssertionError(f"{label} has no non-trivial hill state")
+    return values
+
+
+def _numeric_text_values(text: str, label: str) -> list[float]:
+    values = [
+        float(value)
+        for value in re.findall(
+            r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?", text
+        )
+    ]
+    if not values or not all(map(math.isfinite, values)):
+        raise AssertionError(f"{label} has no finite numeric state")
+    return values
+
+
+def _validate_meta_producer_state(
+    case: AbCase, producer_dir: Path
+) -> dict[str, object]:
+    restart_path = producer_dir / RESTART_REL
+    hills = _h5_scalar_text(restart_path, f"{META_RESTART_ROOT}/hills")
+    hill_values = _meta_hill_values(hills, f"{case.name} producer H5 hills")
+    legacy_hills = (producer_dir / "myhill.log").read_text(encoding="utf-8")
+    if not legacy_hills.startswith(hills):
+        raise AssertionError("producer H5 hills are not a legacy hill prefix")
+    potential = _h5_scalar_text(
+        restart_path, f"{META_RESTART_ROOT}/potential_export"
+    )
+    potential_values = _numeric_text_values(
+        potential, f"{case.name} producer metadynamics potential"
+    )
+    if (
+        len(potential_values) % 4 != 0
+        or max(abs(value) for value in potential_values[1::4]) <= 0.1
+    ):
+        raise AssertionError("producer metadynamics potential is trivial")
+    nhc = _validate_nhc_producer_state(case, producer_dir)
+    return {
+        "producer_count": 1,
+        "hill_count": len(hill_values) // 2,
+        "maximum_abs_hill_height": max(abs(v) for v in hill_values[1::2]),
+        "potential_value_count": len(potential_values),
+        "h5_checkpoint_precedes_terminal_legacy_hill": len(
+            _meta_hill_values(legacy_hills, "producer legacy hills")
+        )
+        > len(hill_values),
+        "nhc": nhc,
+    }
+
+
+def _prepare_meta_continuations(
+    producer_dir: Path,
+    legacy_template: Path,
+    bundled_template: Path,
+    continuation_root: Path,
+) -> tuple[dict[str, Path], dict[str, object]]:
+    checkpoint = producer_dir / RESTART_REL
+    hills = _h5_scalar_text(checkpoint, f"{META_RESTART_ROOT}/hills")
+    potential = _h5_scalar_text(
+        checkpoint, f"{META_RESTART_ROOT}/potential_export"
+    )
+    directories = {}
+    for branch in ("legacy", "protocol", "full"):
+        destination = continuation_root / branch
+        if destination.exists():
+            shutil.rmtree(destination)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        source = legacy_template if branch == "legacy" else bundled_template
+        shutil.copytree(source, destination)
+        (destination / "output").mkdir(parents=True, exist_ok=True)
+        if branch == "legacy":
+            for name in (
+                "legacy_restart_coordinate.txt",
+                "legacy_restart_velocity.txt",
+                "legacy_nhc_restart.txt",
+            ):
+                shutil.copy2(producer_dir / "output" / name, destination / name)
+            (destination / "myhill.log").write_text(hills, encoding="utf-8")
+            (destination / "Meta_Potential.txt").write_text(
+                potential, encoding="utf-8"
+            )
+        else:
+            shutil.copy2(checkpoint, destination / "output/producer.spgr.h5")
+            if branch == "protocol":
+                shutil.copy2(
+                    producer_dir / "output/legacy_nhc_restart.txt",
+                    destination / "legacy_nhc_restart.txt",
+                )
+        _write_meta_continuation_mdin(destination, branch)
+        directories[branch] = destination
+    return directories, {
+        "source": "producer H5 restart protocol text state",
+        "hill_count": len(_meta_hill_values(hills, "projected hills")) // 2,
+        "potential_bytes": len(potential.encode("utf-8")),
+    }
+
+
+def _write_meta_continuation_mdin(case_dir: Path, branch: str) -> None:
+    if branch not in {"legacy", "protocol", "full"}:
+        raise AssertionError(
+            f"unknown metadynamics continuation branch: {branch}"
+        )
+    if branch == "legacy":
+        input_lines = [
+            'mass_in_file = "mass.txt"',
+            'charge_in_file = "charge.txt"',
+            'coordinate_in_file = "legacy_restart_coordinate.txt"',
+            'velocity_in_file = "legacy_restart_velocity.txt"',
+            'cv_in_file = "cv.txt"',
+        ]
+    else:
+        input_lines = [
+            'input_h5_topology_path = "topology.spgt.h5"',
+            'input_h5_protocol_path = "protocol.spgp.h5"',
+            'input_h5_restart_path = "output/producer.spgr.h5"',
+            f'input_h5_restart_load = "{branch}"',
+        ]
+    nhc_lines = (
+        ['restart_input = "legacy_nhc_restart.txt"']
+        if branch in {"legacy", "protocol"}
+        else []
+    )
+    lines = [
+        f'md_name = "bundled io ab meta {branch} continuation"',
+        'mode = "nvt"',
+        "pbc = true",
+        "step_limit = 2",
+        "dt = 0.001",
+        "cutoff = 10.0",
+        *input_lines,
+        'thermostat = "nose_hoover_chain"',
+        "thermostat_tau = 0.2",
+        "target_temperature = 300.0",
+        "print_zeroth_frame = 1",
+        "write_mdout_interval = 1",
+        "write_information_interval = 1",
+        "write_trajectory_interval = 1",
+        "write_restart_file_interval = 1",
+        'mdout = "mdout.txt"',
+        'mdinfo = "mdinfo.txt"',
+        'crd = "output/continuation.crd"',
+        'box = "output/continuation.box"',
+        'vel = "output/continuation.vel"',
+        'frc = "output/continuation.frc"',
+        'rst = "output/continuation_restart"',
+        f'output_h5_trajectory_path = "{TRAJECTORY_REL.as_posix()}"',
+        "output_h5_trajectory_vds = false",
+        "output_h5_trajectory_chunk_size = 2",
+        f'output_h5_observable_path = "{OBSERVABLE_REL.as_posix()}"',
+        f'output_h5_restart_path = "{RESTART_REL.as_posix()}"',
+        "",
+        "[nose_hoover_chain]",
+        "length = 3",
+        *nhc_lines,
+        'restart_output = "output/continuation_nhc_restart.txt"',
+        'crd = "output/continuation_nhc.crd"',
+        'vel = "output/continuation_nhc.vel"',
+    ]
+    (case_dir / "mdin.spg.toml").write_text(
+        "\n".join(lines) + "\n", encoding="utf-8"
+    )
+
+
+def _validate_meta_continuation_routes(
+    producer_dir: Path, continuation_dirs: dict[str, Path]
+) -> dict[str, object]:
+    texts = {
+        branch: (directory / "mdin.spg.toml").read_text(encoding="utf-8")
+        for branch, directory in continuation_dirs.items()
+    }
+    h5_keys = {
+        "input_h5_topology_path",
+        "input_h5_protocol_path",
+        "input_h5_restart_path",
+        "input_h5_restart_load",
+    }
+    legacy_keys = {
+        "coordinate_in_file",
+        "velocity_in_file",
+        "cv_in_file",
+        "restart_input",
+    }
+    if any(_has_key_line(texts["legacy"], key) for key in h5_keys):
+        raise AssertionError("legacy meta continuation retained an H5 route")
+    if not all(_has_key_line(texts["legacy"], key) for key in legacy_keys):
+        raise AssertionError("legacy meta continuation route is incomplete")
+    for branch in ("protocol", "full"):
+        if not all(_has_key_line(texts[branch], key) for key in h5_keys):
+            raise AssertionError(
+                f"{branch} H5 continuation route is incomplete"
+            )
+        if f'input_h5_restart_load = "{branch}"' not in texts[branch]:
+            raise AssertionError(f"{branch} selected the wrong H5 load policy")
+        if any(
+            _has_key_line(texts[branch], key)
+            for key in {"coordinate_in_file", "velocity_in_file", "cv_in_file"}
+        ):
+            raise AssertionError(
+                f"{branch} retained legacy structural/protocol input"
+            )
+    if not _has_key_line(texts["protocol"], "restart_input"):
+        raise AssertionError(
+            "protocol route lacks its legacy NHC dynamic state"
+        )
+    if _has_key_line(texts["full"], "restart_input"):
+        raise AssertionError("full route retained a legacy NHC dynamic state")
+    checkpoint = (producer_dir / RESTART_REL).read_bytes()
+    for branch in ("protocol", "full"):
+        if (
+            continuation_dirs[branch] / "output/producer.spgr.h5"
+        ).read_bytes() != checkpoint:
+            raise AssertionError(
+                f"{branch} did not use the producer checkpoint"
+            )
+        if not (continuation_dirs[branch] / "myhill.log").exists():
+            raise AssertionError(
+                f"{branch} did not materialize metadynamics hills"
+            )
+    return {
+        "legacy": sorted(legacy_keys),
+        "protocol": sorted(h5_keys | {"restart_input"}),
+        "full": sorted(h5_keys),
+        "same_producer_checkpoint": True,
+        "protocol_dynamic_owner": "legacy NHC text",
+        "full_dynamic_owner": "H5 NHC state",
+    }
+
+
+def _compare_meta_continuations(
+    case: AbCase, continuation_dirs: dict[str, Path]
+) -> dict[str, object]:
+    mdout = {
+        branch: _read_mdout(directory / "mdout.txt")
+        for branch, directory in continuation_dirs.items()
+    }
+    columns = _require_matching_mdout_columns(
+        mdout["legacy"], mdout["protocol"], f"{case.name} protocol"
+    )
+    _require_matching_mdout_columns(
+        mdout["legacy"], mdout["full"], f"{case.name} full"
+    )
+    for branch in ("protocol", "full"):
+        for column in columns:
+            relative_tolerance, absolute_tolerance = _deterministic_tolerance(
+                column
+            )
+            _assert_numeric_sequences_close(
+                f"{case.name} {branch} mdout {column}",
+                [row[column] for row in mdout["legacy"]["rows"]],
+                [row[column] for row in mdout[branch]["rows"]],
+                relative_tolerance=relative_tolerance,
+                absolute_tolerance=absolute_tolerance,
+            )
+    for name in ("meta", "rbias"):
+        values = [row[name] for row in mdout["legacy"]["rows"]]
+        if (
+            not all(math.isfinite(value) for value in values)
+            or max(abs(value) for value in values) <= 0.1
+        ):
+            raise AssertionError(f"{case.name} has trivial {name} behavior")
+
+    files = {
+        branch: _output_h5_files(case, directory)
+        for branch, directory in continuation_dirs.items()
+    }
+    semantic_datasets = {
+        "trajectory": (
+            "/particles/all/step",
+            "/particles/all/time",
+            "/particles/all/position/value",
+            "/particles/all/velocity/value",
+            "/particles/all/force/value",
+            "/particles/all/box/edges/value",
+            f"{NHC_OBSERVABLE_ROOT}/coordinate/step",
+            f"{NHC_OBSERVABLE_ROOT}/coordinate/time",
+            f"{NHC_OBSERVABLE_ROOT}/coordinate/value",
+            f"{NHC_OBSERVABLE_ROOT}/velocity/value",
+            f"{META_OBSERVABLE_ROOT}/meta/step",
+            f"{META_OBSERVABLE_ROOT}/meta/time",
+            f"{META_OBSERVABLE_ROOT}/meta/value",
+            f"{META_OBSERVABLE_ROOT}/rbias/value",
+            f"{META_OBSERVABLE_ROOT}/rct/value",
+        ),
+        "observable": (
+            "/observables/all/step",
+            "/observables/all/time",
+            "/observables/all/meta/value",
+            "/observables/all/rbias/value",
+            "/observables/all/rct/value",
+            "/observables/all/distance/value",
+            f"{NHC_OBSERVABLE_ROOT}/coordinate/value",
+            f"{NHC_OBSERVABLE_ROOT}/velocity/value",
+            f"{META_OBSERVABLE_ROOT}/meta/value",
+            f"{META_OBSERVABLE_ROOT}/rbias/value",
+            f"{META_OBSERVABLE_ROOT}/rct/value",
+        ),
+        "restart": (
+            "/particles/all/position/value",
+            "/particles/all/velocity/value",
+            "/particles/all/box/edges/value",
+            NHC_RESTART_DATASET,
+        ),
+    }
+    for branch in ("protocol", "full"):
+        for family, datasets in semantic_datasets.items():
+            left_path = files["legacy"][family]
+            right_path = files[branch][family]
+            for dataset in datasets:
+                left = _h5_numeric_values(left_path, dataset)
+                right = _h5_numeric_values(right_path, dataset)
+                _assert_matching_numeric_shape(
+                    f"{case.name} {branch} {family}:{dataset}",
+                    left_path,
+                    right_path,
+                    dataset,
+                    left,
+                    right,
+                )
+                if dataset == NHC_RESTART_DATASET:
+                    tolerance = (1.0e-6, 6.0e-7)
+                else:
+                    tolerance = _deterministic_tolerance(
+                        dataset.replace("coordinate", "position")
+                    )
+                _assert_numeric_sequences_close(
+                    f"{case.name} {branch} {family}:{dataset}",
+                    left,
+                    right,
+                    relative_tolerance=tolerance[0],
+                    absolute_tolerance=tolerance[1],
+                )
+
+    legacy_hills = _meta_hill_values(
+        (continuation_dirs["legacy"] / "myhill.log").read_text(
+            encoding="utf-8"
+        ),
+        f"{case.name} legacy final hills",
+    )
+    legacy_restart_hills = _meta_hill_values(
+        _h5_scalar_text(
+            files["legacy"]["restart"], f"{META_RESTART_ROOT}/hills"
+        ),
+        f"{case.name} legacy restart hills",
+    )
+    legacy_potential = _numeric_text_values(
+        (continuation_dirs["legacy"] / "Meta_Potential.txt").read_text(
+            encoding="utf-8"
+        ),
+        f"{case.name} legacy final potential",
+    )
+    legacy_restart_potential = _numeric_text_values(
+        _h5_scalar_text(
+            files["legacy"]["restart"],
+            f"{META_RESTART_ROOT}/potential_export",
+        ),
+        f"{case.name} legacy restart potential",
+    )
+    final_hill_counts = {}
+    for branch, directory in continuation_dirs.items():
+        branch_hills = _meta_hill_values(
+            (directory / "myhill.log").read_text(encoding="utf-8"),
+            f"{case.name} {branch} final hills",
+        )
+        _assert_numeric_sequences_close(
+            f"{case.name} {branch} final hill history",
+            legacy_hills,
+            branch_hills,
+            relative_tolerance=1.0e-6,
+            absolute_tolerance=1.0e-7,
+        )
+        restart_hills = _meta_hill_values(
+            _h5_scalar_text(
+                files[branch]["restart"], f"{META_RESTART_ROOT}/hills"
+            ),
+            f"{case.name} {branch} restart hills",
+        )
+        _assert_numeric_sequences_close(
+            f"{case.name} {branch} restart hill history",
+            legacy_restart_hills,
+            restart_hills,
+            relative_tolerance=1.0e-6,
+            absolute_tolerance=1.0e-7,
+        )
+        branch_potential = _numeric_text_values(
+            (directory / "Meta_Potential.txt").read_text(encoding="utf-8"),
+            f"{case.name} {branch} final potential",
+        )
+        _assert_numeric_sequences_close(
+            f"{case.name} {branch} final potential",
+            legacy_potential,
+            branch_potential,
+            relative_tolerance=1.0e-6,
+            absolute_tolerance=1.0e-7,
+        )
+        branch_restart_potential = _numeric_text_values(
+            _h5_scalar_text(
+                files[branch]["restart"],
+                f"{META_RESTART_ROOT}/potential_export",
+            ),
+            f"{case.name} {branch} restart potential",
+        )
+        _assert_numeric_sequences_close(
+            f"{case.name} {branch} restart potential",
+            legacy_restart_potential,
+            branch_restart_potential,
+            relative_tolerance=1.0e-6,
+            absolute_tolerance=1.0e-7,
+        )
+        final_hill_counts[branch] = {
+            "sidecar": len(branch_hills) // 2,
+            "restart": len(restart_hills) // 2,
+        }
+        _validate_observable_output(
+            case.name, files[branch]["observable"], directory / "mdout.txt"
+        )
+        _validate_restart_output(case.name, files[branch]["restart"])
+        _assert_nhc_text_matches_h5(
+            f"{case.name} {branch} NHC coordinate text/H5",
+            directory / "output/continuation_nhc.crd",
+            files[branch]["trajectory"],
+            f"{NHC_OBSERVABLE_ROOT}/coordinate/value",
+            3,
+        )
+        _assert_nhc_text_matches_h5(
+            f"{case.name} {branch} NHC velocity text/H5",
+            directory / "output/continuation_nhc.vel",
+            files[branch]["trajectory"],
+            f"{NHC_OBSERVABLE_ROOT}/velocity/value",
+            3,
+        )
+        restart_pairs = _read_nhc_restart_pairs(
+            directory / "output/continuation_nhc_restart.txt", 3
+        )
+        _assert_numeric_sequences_close(
+            f"{case.name} {branch} NHC restart text/H5",
+            restart_pairs,
+            _h5_numeric_values(files[branch]["restart"], NHC_RESTART_DATASET),
+            relative_tolerance=1.0e-6,
+            absolute_tolerance=6.0e-7,
+        )
+
+    for key in ("mode", "step", "time"):
+        dataset = f"/parameters/restart/integrator_state/{key}"
+        expected = _h5_string_values(files["legacy"]["restart"], dataset)
+        for branch in ("protocol", "full"):
+            actual = _h5_string_values(files[branch]["restart"], dataset)
+            if actual != expected:
+                raise AssertionError(
+                    f"{case.name} {branch} integrator {key} differs: "
+                    f"legacy={expected}, bundled={actual}"
+                )
+    return {
+        "mdout_rows": len(mdout["legacy"]["rows"]),
+        "mdout_columns": columns,
+        "maximum_abs_meta": max(
+            abs(row["meta"]) for row in mdout["legacy"]["rows"]
+        ),
+        "maximum_abs_rbias": max(
+            abs(row["rbias"]) for row in mdout["legacy"]["rows"]
+        ),
+        "semantic_h5_datasets": {
+            family: list(datasets)
+            for family, datasets in semantic_datasets.items()
+        },
+        "final_hill_counts": final_hill_counts,
     }
 
 
@@ -4801,7 +5466,11 @@ def _output_h5_files(case: AbCase, root: Path) -> dict[str, Path]:
         "trajectory": root / TRAJECTORY_REL,
         "observable": root / OBSERVABLE_REL,
     }
-    if case.mode in {"normal", "dynamic_continuation"}:
+    if case.mode in {
+        "normal",
+        "dynamic_continuation",
+        "protocol_full_continuation",
+    }:
         files["restart"] = root / RESTART_REL
     return files
 

@@ -245,6 +245,7 @@ def test_ab_production_harness_has_executable_contract_coverage():
     assert {case.name for case in cases} == {
         "normal_core_h5_output",
         "normal_nhc_dynamic_restart_continuation",
+        "normal_meta_protocol_full_restart_continuation",
         "normal_sits_ff19sb_cmap_peptide",
         "normal_edip_nonzero",
         "normal_custom_pair_nonzero",
@@ -320,6 +321,35 @@ def test_nhc_dynamic_restart_uses_one_checkpoint_and_e4_continuation():
         contracts["output.restart.dynamic_continuation"].minimum_evidence
         == "E4"
     )
+
+
+def test_meta_protocol_full_restart_uses_one_checkpoint_and_e4_continuation():
+    contracts = load_contract_registry()
+    case = next(
+        case
+        for case in _cases_for_profile()
+        if case.name == "normal_meta_protocol_full_restart_continuation"
+    )
+    expected_contracts = {
+        "input.restart_load.protocol",
+        "input.restart_load.full",
+        "input.bias.metadynamics",
+    }
+
+    assert case.mode == "protocol_full_continuation"
+    assert case.restart_load_policy == "protocol/full"
+    assert case.statistical_md is False
+    assert set(case.contract_ids) == expected_contracts
+    assert case.assertion_ids == (
+        "restart_protocol_full_continuation_equivalence",
+    )
+    for contract_id in expected_contracts:
+        contract = contracts[contract_id]
+        assert contract.status == "supported"
+        assert contract.case_ids == (case.name,)
+        assert contract.assertion_ids == case.assertion_ids
+    assert contracts["input.restart_load.protocol"].minimum_evidence == "E4"
+    assert contracts["input.restart_load.full"].minimum_evidence == "E4"
 
 
 def test_vds_chunk_boundary_cases_cover_required_frame_transitions():
@@ -910,6 +940,9 @@ def test_input_semantic_contract_inventory_is_explicit_and_evidence_gated():
     contracts = load_contract_registry()
     specialized_semantic_assertions = {
         "input.bias.nhc": "restart_dynamic_continuation_equivalence",
+        "input.bias.metadynamics": (
+            "restart_protocol_full_continuation_equivalence"
+        ),
     }
     runtime_spec_ids = {
         spec.contract_id
