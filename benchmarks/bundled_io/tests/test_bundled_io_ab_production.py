@@ -52,6 +52,7 @@ SITS_FF19SB_CMAP_FIXTURE = "sits_ff19sb_cmap_peptide"
 FOCUSED_CORE_TOPOLOGY_FIXTURE = "focused_core_topology_two_atom"
 FOCUSED_EDIP_FIXTURE = "focused_edip_two_atom"
 FOCUSED_SW_SIDECAR_FIXTURE = "focused_sw_sidecar_three_atom"
+FOCUSED_SW_TYPED_FIXTURE = "focused_sw_typed_three_atom"
 FOCUSED_TERSOFF_SIDECAR_FIXTURE = "focused_tersoff_sidecar_three_atom"
 FOCUSED_CUSTOM_PAIR_FIXTURE = "focused_custom_pair_two_atom"
 FOCUSED_EXCLUSIONS_FIXTURE = "focused_exclusions_three_atom"
@@ -257,6 +258,9 @@ INPUT_SEMANTIC_SPECS_BY_CASE = {
     ),
     "normal_sw_sidecar_pair_three_body": (
         InputSemanticSpec("input.manybody.sw.sidecar", ("SW",), 1.0e-6),
+    ),
+    "normal_sw_typed_pair_three_body": (
+        InputSemanticSpec("input.manybody.sw", ("SW",), 1.0e-6),
     ),
     "normal_tersoff_sidecar_angular": (
         InputSemanticSpec(
@@ -619,6 +623,28 @@ def _cases_for_profile() -> list[AbCase]:
             contract_ids=(
                 "output.legacy.mdout",
                 "input.manybody.sw.sidecar",
+            ),
+            assertion_ids=(
+                "mdout_deterministic_equivalence",
+                "input_semantic_equivalence",
+            ),
+            normal_step_limit=1,
+            normal_interval=1,
+            normal_dt=0.0,
+            input_behavior_only=True,
+        ),
+        AbCase(
+            name="normal_sw_typed_pair_three_body",
+            fixture_case=FOCUSED_SW_TYPED_FIXTURE,
+            legacy_subdir="generated_legacy",
+            bundled_subdir="generated_bundled",
+            mode="normal",
+            vds=False,
+            statistical_md=False,
+            restart_load_policy="structural",
+            contract_ids=(
+                "output.legacy.mdout",
+                "input.manybody.sw",
             ),
             assertion_ids=(
                 "mdout_deterministic_equivalence",
@@ -3361,6 +3387,8 @@ def _prepare_case_pair(
             return _prepare_focused_edip_pair(case_root)
         if case.fixture_case == FOCUSED_SW_SIDECAR_FIXTURE:
             return _prepare_focused_sw_sidecar_pair(case_root)
+        if case.fixture_case == FOCUSED_SW_TYPED_FIXTURE:
+            return _prepare_focused_sw_typed_pair(case_root)
         if case.fixture_case == FOCUSED_TERSOFF_SIDECAR_FIXTURE:
             return _prepare_focused_tersoff_sidecar_pair(case_root)
         if case.fixture_case == FOCUSED_CUSTOM_PAIR_FIXTURE:
@@ -3914,6 +3942,52 @@ def _prepare_focused_sw_sidecar_pair(case_root: Path) -> tuple[Path, Path]:
     return legacy_dir, bundled_dir
 
 
+def _prepare_focused_sw_typed_pair(case_root: Path) -> tuple[Path, Path]:
+    legacy_dir, bundled_dir = _prepare_focused_sw_sidecar_pair(case_root)
+    topology_path = bundled_dir / "topology.spgt.h5"
+    sidecar_root = "/parameters/sponge/files/legacy_sidecars"
+    with h5py.File(topology_path, "r+") as topology:
+        if sidecar_root not in topology:
+            raise AssertionError(
+                "focused SW conversion did not emit the source sidecar"
+            )
+        del topology[sidecar_root]
+        sw = topology.require_group("/manybody/sw")
+        sw.create_dataset("atom_type_count", data=1, dtype="i4")
+        sw.create_dataset("atom_type", data=[0, 0, 0], dtype="i4")
+        pair = sw.require_group("pair")
+        pair.create_dataset("type", data=[[0, 0]], dtype="i4")
+        pair.create_dataset(
+            "parameters",
+            data=[
+                [
+                    7.917,
+                    0.767446,
+                    27.2658,
+                    4.0,
+                    0.0,
+                    1.527956,
+                    1.2,
+                    2.663951,
+                ]
+            ],
+            dtype="f4",
+        )
+        triple = sw.require_group("triple")
+        triple.create_dataset("type", data=[[0, 0, 0]], dtype="i4")
+        triple.create_dataset(
+            "parameters",
+            data=[[32.5, 27.2658, -0.333333333333]],
+            dtype="f4",
+        )
+
+    sidecars = bundled_dir / "legacy_sidecars"
+    if sidecars.exists():
+        shutil.rmtree(sidecars)
+    _validate_focused_sw_typed_routes(legacy_dir, bundled_dir)
+    return legacy_dir, bundled_dir
+
+
 def _write_focused_sw_sidecar_input(case_dir: Path) -> None:
     case_dir.mkdir(parents=True, exist_ok=True)
     (case_dir / "mass.txt").write_text(
@@ -3990,6 +4064,60 @@ def _validate_focused_sw_sidecar_routes(
         raise AssertionError("focused SW bundled sidecar payload is missing")
     if (bundled_dir / "legacy_sidecars" / "mass_in_file").exists():
         raise AssertionError("focused SW bundled branch retained mass sidecar")
+
+
+def _validate_focused_sw_typed_routes(
+    legacy_dir: Path, bundled_dir: Path
+) -> None:
+    legacy_mdin = (legacy_dir / "mdin.spg.toml").read_text(encoding="utf-8")
+    bundled_mdin = (bundled_dir / "mdin.bundled.spg.toml").read_text(
+        encoding="utf-8"
+    )
+    if not _has_key_line(legacy_mdin, "SW_in_file"):
+        raise AssertionError("focused typed SW legacy branch lost SW_in_file")
+    if _has_key_line(bundled_mdin, "SW_in_file"):
+        raise AssertionError("focused typed SW bundle retained SW_in_file")
+    if (bundled_dir / "legacy_sidecars").exists():
+        raise AssertionError("focused typed SW bundle retained sidecars")
+
+    topology_path = bundled_dir / "topology.spgt.h5"
+    sidecar_root = "/parameters/sponge/files/legacy_sidecars"
+    with h5py.File(topology_path, "r") as topology:
+        if sidecar_root in topology:
+            raise AssertionError(
+                "focused typed SW topology retained a sidecar table"
+            )
+        atom_type_count = int(topology["/manybody/sw/atom_type_count"][()])
+        atom_type = topology["/manybody/sw/atom_type"][...].tolist()
+        pair_type = topology["/manybody/sw/pair/type"][...].tolist()
+        pair_parameters = topology["/manybody/sw/pair/parameters"][...].tolist()
+        triple_type = topology["/manybody/sw/triple/type"][...].tolist()
+        triple_parameters = topology["/manybody/sw/triple/parameters"][
+            ...
+        ].tolist()
+    if atom_type_count != 1 or atom_type != [0, 0, 0]:
+        raise AssertionError(
+            "focused typed SW atom-type payload changed: "
+            f"count={atom_type_count}, values={atom_type}"
+        )
+    if pair_type != [[0, 0]] or len(pair_parameters) != 1:
+        raise AssertionError("focused typed SW pair payload changed")
+    if triple_type != [[0, 0, 0]] or len(triple_parameters) != 1:
+        raise AssertionError("focused typed SW triple payload changed")
+    _assert_numeric_sequences_close(
+        "focused typed SW pair parameters",
+        (7.917, 0.767446, 27.2658, 4.0, 0.0, 1.527956, 1.2, 2.663951),
+        pair_parameters[0],
+        relative_tolerance=1.0e-7,
+        absolute_tolerance=1.0e-7,
+    )
+    _assert_numeric_sequences_close(
+        "focused typed SW triple parameters",
+        (32.5, 27.2658, -0.333333333333),
+        triple_parameters[0],
+        relative_tolerance=1.0e-7,
+        absolute_tolerance=1.0e-7,
+    )
 
 
 def _prepare_focused_tersoff_sidecar_pair(
@@ -6993,7 +7121,10 @@ def _compare_input_semantics(
                 replica_result["oracle"] = _compare_focused_tersoff_angular(
                     case, run
                 )
-            elif spec.contract_id == "input.manybody.sw.sidecar":
+            elif spec.contract_id in {
+                "input.manybody.sw",
+                "input.manybody.sw.sidecar",
+            }:
                 replica_result["oracle"] = _compare_focused_sw_pair_three_body(
                     case, run
                 )
@@ -7389,11 +7520,124 @@ def _compare_focused_sw_pair_three_body(
     cross_branch_force = _assert_nontrivial_equivalent_forces(
         f"{case.name} SW force", forces["legacy"], forces["bundled"]
     )
-    return {
-        "route": "isolated_h5_SW_in_file_sidecar",
+    result = {
+        "route": (
+            "typed_h5_manybody_sw"
+            if case.fixture_case == FOCUSED_SW_TYPED_FIXTURE
+            else "isolated_h5_SW_in_file_sidecar"
+        ),
         "branches": branch_results,
         "cross_branch_force": cross_branch_force,
     }
+    if case.fixture_case == FOCUSED_SW_TYPED_FIXTURE:
+        materialized = run.bundled_dir / ".sponge_h5_native_manybody" / "sw.txt"
+        if not materialized.exists() or materialized.stat().st_size == 0:
+            raise AssertionError(
+                f"{case.name} did not materialize bundled SW native payload"
+            )
+        result["bundled_materialized_path"] = str(
+            materialized.relative_to(run.bundled_dir)
+        )
+        result["lambda_zero_control"] = _run_sw_typed_lambda_zero_control(
+            case, run, forces["bundled"]
+        )
+    return result
+
+
+def _run_sw_typed_lambda_zero_control(
+    case: AbCase, run: AbRun, correct_forces: Sequence[float]
+) -> dict[str, object]:
+    control_dir = run.bundled_dir.parent / "bundled_sw_lambda_zero"
+    if control_dir.exists():
+        shutil.rmtree(control_dir)
+    shutil.copytree(run.bundled_dir, control_dir)
+    for path in (
+        control_dir / "output",
+        control_dir / ".sponge_h5_native_manybody",
+    ):
+        if path.exists():
+            shutil.rmtree(path)
+    (control_dir / "output").mkdir()
+    for file_name in ("mdout.txt", "mdinfo.txt", "run.stdout", "run.stderr"):
+        path = control_dir / file_name
+        if path.exists():
+            path.unlink()
+
+    topology_path = control_dir / "topology.spgt.h5"
+    with h5py.File(topology_path, "r+") as topology:
+        triple_parameters = topology["/manybody/sw/triple/parameters"]
+        if triple_parameters.shape != (1, 3):
+            raise AssertionError(
+                f"{case.name} typed SW control lost triple payload shape"
+            )
+        if not math.isclose(
+            float(triple_parameters[0, 0]),
+            32.5,
+            rel_tol=0.0,
+            abs_tol=1.0e-6,
+        ):
+            raise AssertionError(
+                f"{case.name} typed SW control lost canonical lambda"
+            )
+        triple_parameters[0, 0] = 0.0
+
+    outcome = _run_sponge_process(control_dir, _mdin_name(control_dir))
+    if outcome.returncode != 0:
+        raise AssertionError(
+            f"{case.name} lambda=0 control failed with code "
+            f"{outcome.returncode}\n{outcome.stdout}\n{outcome.stderr}"
+        )
+    rows = _read_mdout(control_dir / "mdout.txt")["rows"]
+    if len(rows) != 1:
+        raise AssertionError(
+            f"{case.name} lambda=0 control expected one mdout row"
+        )
+    pair_only_energy = rows[0].get("SW", math.nan)
+    if not math.isclose(pair_only_energy, 158.79, rel_tol=0.0, abs_tol=1.0e-6):
+        raise AssertionError(
+            f"{case.name} lambda=0 pair-only energy changed: {pair_only_energy}"
+        )
+    pair_only_forces = _read_native_float32_file(
+        control_dir / "output" / "legacy.frc"
+    )
+    expected_pair_only_force = (
+        -340.4832,
+        -340.4832,
+        0.0,
+        343.52106,
+        -3.037885,
+        0.0,
+        -3.037885,
+        343.52106,
+        0.0,
+    )
+    relative_tolerance, absolute_tolerance = _deterministic_tolerance("force")
+    _assert_numeric_sequences_close(
+        f"{case.name} lambda=0 pair-only force",
+        expected_pair_only_force,
+        pair_only_forces,
+        relative_tolerance=relative_tolerance,
+        absolute_tolerance=absolute_tolerance,
+    )
+    maximum_force_delta = max(
+        abs(full - pair_only)
+        for full, pair_only in zip(
+            correct_forces, pair_only_forces, strict=True
+        )
+    )
+    if maximum_force_delta <= 1.0:
+        raise AssertionError(
+            f"{case.name} typed lambda payload did not change SW force"
+        )
+    result = {
+        "typed_lambda": 0.0,
+        "pair_only_energy": pair_only_energy,
+        "maximum_abs_force": max(abs(value) for value in pair_only_forces),
+        "maximum_force_delta": maximum_force_delta,
+        "exit_code": outcome.returncode,
+    }
+    shutil.rmtree(control_dir)
+    return result
 
 
 def _assert_sw_pair_three_body_oracle(

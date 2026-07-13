@@ -1,5 +1,300 @@
 ﻿#include "sw.h"
 
+#include <filesystem>
+#include <fstream>
+#include <highfive/highfive.hpp>
+#include <iomanip>
+#include <map>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+namespace
+{
+template <typename T>
+hid_t Native_H5_Type();
+
+template <>
+hid_t Native_H5_Type<int>()
+{
+    return H5T_NATIVE_INT;
+}
+
+template <>
+hid_t Native_H5_Type<float>()
+{
+    return H5T_NATIVE_FLOAT;
+}
+
+template <typename T>
+std::vector<T> Read_H5_Array(HighFive::File* file,
+                             const std::string& dataset_path,
+                             std::size_t expected_rank,
+                             std::size_t expected_columns,
+                             const std::string& label)
+{
+    HighFive::DataSet dataset = file->getDataSet(dataset_path);
+    const auto dimensions = dataset.getSpace().getDimensions();
+    if (dimensions.size() != expected_rank ||
+        (expected_rank == 2 && dimensions[1] != expected_columns))
+    {
+        std::ostringstream message;
+        message << label << " dataset " << dataset_path << " must have rank "
+                << expected_rank;
+        if (expected_rank == 2)
+        {
+            message << " and " << expected_columns << " columns";
+        }
+        throw std::runtime_error(message.str());
+    }
+    std::size_t value_count = 1;
+    for (const std::size_t dimension : dimensions)
+    {
+        value_count *= dimension;
+    }
+    std::vector<T> values(value_count);
+    if (H5Dread(dataset.getId(), Native_H5_Type<T>(), H5S_ALL, H5S_ALL,
+                H5P_DEFAULT, values.data()) < 0)
+    {
+        throw std::runtime_error("failed to read " + label + " dataset " +
+                                 dataset_path);
+    }
+    return values;
+}
+
+std::string SW_Number_String(float value)
+{
+    std::ostringstream out;
+    out << std::setprecision(9) << value;
+    return out.str();
+}
+
+void Materialize_H5_SW_Input(CONTROLLER* controller, const char* module_name)
+{
+    constexpr const char* input_key = "input_h5_topology_path";
+    constexpr const char* sw_root = "/manybody/sw";
+    if (strcmp(module_name, "SW") != 0 ||
+        controller->Command_Exist(module_name, "in_file") ||
+        !controller->Command_Exist(input_key))
+    {
+        return;
+    }
+
+    try
+    {
+        HighFive::File file(controller->Command(input_key),
+                            HighFive::File::ReadOnly);
+        if (!file.exist(sw_root))
+        {
+            return;
+        }
+
+        int atom_type_count = 0;
+        file.getDataSet(std::string(sw_root) + "/atom_type_count")
+            .read(atom_type_count);
+        if (atom_type_count <= 0)
+        {
+            throw std::runtime_error(
+                "/manybody/sw/atom_type_count must be positive");
+        }
+        const auto atom_type = Read_H5_Array<int>(
+            &file, std::string(sw_root) + "/atom_type", 1, 0, "SW atom type");
+        const auto pair_type = Read_H5_Array<int>(
+            &file, std::string(sw_root) + "/pair/type", 2, 2, "SW pair type");
+        const auto pair_parameter = Read_H5_Array<float>(
+            &file, std::string(sw_root) + "/pair/parameters", 2, 8,
+            "SW pair parameters");
+        const auto triple_type =
+            Read_H5_Array<int>(&file, std::string(sw_root) + "/triple/type", 2,
+                               3, "SW triple type");
+        const auto triple_parameter = Read_H5_Array<float>(
+            &file, std::string(sw_root) + "/triple/parameters", 2, 3,
+            "SW triple parameters");
+        if (atom_type.empty())
+        {
+            throw std::runtime_error(
+                "/manybody/sw/atom_type must not be empty");
+        }
+        for (const int type : atom_type)
+        {
+            if (type < 0 || type >= atom_type_count)
+            {
+                throw std::runtime_error(
+                    "/manybody/sw/atom_type contains an out-of-range type");
+            }
+        }
+
+        const std::size_t pair_row_count = pair_type.size() / 2;
+        if (pair_parameter.size() / 8 != pair_row_count)
+        {
+            throw std::runtime_error(
+                "/manybody/sw pair type/parameter row count mismatch");
+        }
+        const std::size_t full_pair_count =
+            static_cast<std::size_t>(atom_type_count) * atom_type_count;
+        const std::size_t triangular_pair_count =
+            static_cast<std::size_t>(atom_type_count) * (atom_type_count + 1) /
+            2;
+        if (pair_row_count != full_pair_count &&
+            pair_row_count != triangular_pair_count)
+        {
+            throw std::runtime_error(
+                "/manybody/sw pair row count must be atom_type_count^2 or "
+                "triangular");
+        }
+        std::map<std::pair<int, int>, std::vector<float>> pair_rows;
+        for (std::size_t row = 0; row < pair_row_count; ++row)
+        {
+            const int a = pair_type[2 * row];
+            const int b = pair_type[2 * row + 1];
+            if (a < 0 || a >= atom_type_count || b < 0 || b >= atom_type_count)
+            {
+                throw std::runtime_error(
+                    "/manybody/sw/pair/type contains an out-of-range type");
+            }
+            if (pair_rows.count({a, b}) != 0)
+            {
+                throw std::runtime_error(
+                    "/manybody/sw/pair/type contains a duplicate row");
+            }
+            const std::vector<float> parameters(
+                pair_parameter.begin() + 8 * row,
+                pair_parameter.begin() + 8 * row + 8);
+            pair_rows[{a, b}] = parameters;
+            if (pair_row_count == triangular_pair_count)
+            {
+                pair_rows[{b, a}] = parameters;
+            }
+        }
+
+        const std::size_t triple_row_count = triple_type.size() / 3;
+        const std::size_t full_triple_count =
+            full_pair_count * static_cast<std::size_t>(atom_type_count);
+        if (triple_parameter.size() / 3 != triple_row_count ||
+            triple_row_count != full_triple_count)
+        {
+            throw std::runtime_error(
+                "/manybody/sw triple payload must contain atom_type_count^3 "
+                "matching rows");
+        }
+        std::vector<float> canonical_triples(full_triple_count * 3);
+        std::vector<bool> triple_recorded(full_triple_count, false);
+        for (std::size_t row = 0; row < triple_row_count; ++row)
+        {
+            const int a = triple_type[3 * row];
+            const int b = triple_type[3 * row + 1];
+            const int c = triple_type[3 * row + 2];
+            if (a < 0 || a >= atom_type_count || b < 0 ||
+                b >= atom_type_count || c < 0 || c >= atom_type_count)
+            {
+                throw std::runtime_error(
+                    "/manybody/sw/triple/type contains an out-of-range type");
+            }
+            const std::size_t index =
+                static_cast<std::size_t>(a) * atom_type_count *
+                    atom_type_count +
+                static_cast<std::size_t>(b) * atom_type_count + c;
+            if (triple_recorded[index])
+            {
+                throw std::runtime_error(
+                    "/manybody/sw/triple/type contains a duplicate row");
+            }
+            triple_recorded[index] = true;
+            for (std::size_t parameter = 0; parameter < 3; ++parameter)
+            {
+                canonical_triples[3 * index + parameter] =
+                    triple_parameter[3 * row + parameter];
+            }
+        }
+
+        const auto output_path =
+            std::filesystem::absolute(".sponge_h5_native_manybody/sw.txt")
+                .lexically_normal();
+        std::filesystem::create_directories(output_path.parent_path());
+        std::ofstream out(output_path);
+        if (!out)
+        {
+            throw std::runtime_error("failed to create materialized SW input " +
+                                     output_path.string());
+        }
+        out << atom_type.size() << ' ' << atom_type_count << "\n# two-body\n";
+        for (int a = 0; a < atom_type_count; ++a)
+        {
+            for (int b = 0; b < atom_type_count; ++b)
+            {
+                const auto found = pair_rows.find({a, b});
+                if (found == pair_rows.end())
+                {
+                    throw std::runtime_error(
+                        "missing /manybody/sw pair parameters for type " +
+                        std::to_string(a) + "," + std::to_string(b));
+                }
+                out << a << ' ' << b;
+                for (const float value : found->second)
+                {
+                    out << ' ' << SW_Number_String(value);
+                }
+                out << '\n';
+            }
+        }
+        out << "# three-body\n";
+        for (int a = 0; a < atom_type_count; ++a)
+        {
+            for (int b = 0; b < atom_type_count; ++b)
+            {
+                for (int c = 0; c < atom_type_count; ++c)
+                {
+                    const std::size_t index =
+                        static_cast<std::size_t>(a) * atom_type_count *
+                            atom_type_count +
+                        static_cast<std::size_t>(b) * atom_type_count + c;
+                    if (!triple_recorded[index])
+                    {
+                        throw std::runtime_error(
+                            "missing /manybody/sw triple parameters for type " +
+                            std::to_string(a) + "," + std::to_string(b) + "," +
+                            std::to_string(c));
+                    }
+                    out << a << ' ' << b << ' ' << c;
+                    for (std::size_t parameter = 0; parameter < 3; ++parameter)
+                    {
+                        out << ' '
+                            << SW_Number_String(
+                                   canonical_triples[3 * index + parameter]);
+                    }
+                    out << '\n';
+                }
+            }
+        }
+        out << "# atom types\n";
+        for (const int type : atom_type)
+        {
+            out << type << '\n';
+        }
+        out.close();
+        if (!out)
+        {
+            throw std::runtime_error("failed to write materialized SW input " +
+                                     output_path.string());
+        }
+        const std::string command_name = std::string(module_name) + "_in_file";
+        controller->Set_Command(command_name.c_str(),
+                                output_path.string().c_str(), 0);
+    }
+    catch (const std::exception& error)
+    {
+        const std::string message =
+            std::string(
+                "Reason:\n\tfailed to materialize typed SW input from ") +
+            sw_root + ": " + error.what() + "\n";
+        controller->Throw_SPONGE_Error(spongeErrorBadFileFormat,
+                                       "Materialize_H5_SW_Input",
+                                       message.c_str());
+    }
+}
+}  // namespace
+
 void STILLINGER_WEBER_INFORMATION::Initial(CONTROLLER* controller,
                                            const char* module_name,
                                            bool* need_full_nl_flag)
@@ -12,6 +307,7 @@ void STILLINGER_WEBER_INFORMATION::Initial(CONTROLLER* controller,
     {
         strcpy(this->module_name, module_name);
     }
+    Materialize_H5_SW_Input(controller, this->module_name);
     if (!controller->Command_Exist(this->module_name, "in_file"))
     {
         controller->printf("STILLINGER WEBER FORCE IS NOT INITIALIZED\n\n");

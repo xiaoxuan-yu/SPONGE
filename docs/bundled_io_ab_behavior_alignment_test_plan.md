@@ -1033,7 +1033,41 @@ Acceptance:
   SPONGE rebuild, Ruff, clang-format, and diff checks pass, followed by exactly
   one PR-scoped commit.
 
-## 34. Artifacts and Temporary-Space Policy
+## 34. PR 37: Typed SW Pair/Three-Body Behavior Gate
+
+Close `input.manybody.sw` with a same-semantic typed/legacy A/B gate rather
+than treating successful SW initialization as behavioral evidence.
+
+- The legacy branch consumes the canonical `SW_in_file`; the bundled branch
+  contains only `/manybody/sw` atom-type, pair, and triple datasets, with no SW
+  command, H5 sidecar table, or sidecar directory.
+- Materialize the typed payload into the existing SW parser so both routes
+  share the established validation and force kernel. Validate dataset ranks,
+  type ranges, duplicate/missing parameter rows, and complete pair/triple
+  parameter coverage before runtime initialization.
+- Compare the complete one-step mdout and nine-value force payload. Require
+  both branches to produce `SW=194.50` with maximum absolute force
+  `404.27862548828125`.
+- Mutate only the typed triple lambda from `32.5` to `0`. Require the control
+  to produce `SW=158.79`, maximum absolute force `343.52105712890625`, and a
+  force delta greater than `1`, proving that the typed three-body parameters
+  reach the runtime consumer.
+
+Acceptance:
+
+- The typed bundled route materializes
+  `.sponge_h5_native_manybody/sw.txt`; no legacy SW route survives in its
+  command file or H5 sidecar metadata.
+- The typed and legacy branches match the complete deterministic mdout and
+  force behavior, while the lambda-zero counterfactual changes both energy and
+  force as expected.
+- The existing SW sidecar pair/three-body gate still passes, demonstrating
+  that native typed materialization does not override the sidecar route.
+- Registry, manifest, real CPU A/B, full smoke, related native-reader CTests,
+  SPONGE rebuild, Ruff, clang-format, and diff checks pass, followed by exactly
+  one PR-scoped commit.
+
+## 35. Artifacts and Temporary-Space Policy
 
 - Use `SPONGE_BUNDLED_IO_AB_RUN_ROOT` for all heavy runs.
 - Put production artifacts on the workspace filesystem rather than `/tmp`.
@@ -1043,7 +1077,7 @@ Acceptance:
 - Record artifact byte counts and enforce a configurable per-case quota.
 - Cleanup must only remove directories created by the current gate run.
 
-## 35. PR Completion Log
+## 36. PR Completion Log
 
 Append one row immediately after completing and committing each PR.
 
@@ -1087,3 +1121,4 @@ Append one row immediately after completing and committing each PR.
 | PR 34: Complete H5 metadata failure semantics | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract` (130 tests); 90-test production manifest; four real `failure_h5_topology_*` CPU process gates; three supported-schema real controls; three metadata/input CTests; SPONGE rebuild; Ruff; clang-format; `git diff --check` | Atom-count, mass-shape, mass-dtype, and unknown-schema mutations now share one complete F1 contract. Schema versions `0`, `1`, and `xponge.legacy_to_bundle.v1` each start successfully, while `unsupported.topology.v999` exits 238 with `spongeErrorValueErrorCommand` and route-specific diagnostics. The partial metadata registry record is removed; coverage remains 73 supported, advances to 9 deferred, and retains 1 unsupported contract. |
 | PR 35: Subsystem-division energy-partition behavior gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract` (130 tests); 90-test production manifest; real `normal_lj_soft_core_nonzero` and `normal_subsystem_division_partition` CPU A/B plus all-intra legacy/bundled controls; two native topology reader CTests; SPONGE rebuild; Ruff; clang-format; `git diff --check` | The legacy `[0,1]` sidecar and pure typed bundled dataset both produce `LJ_soft_inter=-0.06`, `LJ_soft_intra=0.00`, and the same complete force. Same-semantic `[0,0]` controls move the full `-0.06` to the intra observable while preserving total soft-core energy and force, proving mask consumption without changing dynamics. Registry coverage advances to 74 supported, 8 deferred, and 1 unsupported contract. |
 | PR 36: Typed residue runtime-behavior gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract` (131 tests); 91-test production manifest; real typed PBC and COM-virial CPU A/B plus both sidecar residue regressions; two native topology reader CTests; SPONGE rebuild; Ruff; clang-format; `git diff --check` | Pure typed `/atoms/residue_index=[0,0,1,1]` and `/residues/atom_offset=[0,2,4]` materialize into the native `[2,2]` runtime partition without a topology sidecar. They match legacy at `bond=2.0`, the whole-molecule PBC fingerprint `(19,21,25,28)`, `restrain=2.0`, `pressure=0.04`, and `Pxx=0.11`. A typed `[1,3]` control preserves the complete force and energy while changing pressure/Pxx to `-11.53/-34.60`; inconsistent typed datasets and legacy/typed ownership conflicts are rejected. Registry coverage advances to 75 supported, 7 deferred, and 1 unsupported contract. |
+| PR 37: Typed SW pair/three-body behavior gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; real `normal_sw_typed_pair_three_body` and `normal_sw_sidecar_pair_three_body` CPU A/B cases; related native topology CTests; SPONGE rebuild; Ruff; clang-format; `git diff --check` | Pure typed `/manybody/sw` with no SW command or sidecars matches the legacy pair/three-body route at `SW=194.50` and maximum force `404.27862548828125`. A typed lambda-zero control changes energy to `158.79` and maximum force to `343.52105712890625`, proving that the typed three-body payload reaches the force kernel. Registry coverage advances to 76 supported, 6 deferred, and 1 unsupported contract. |

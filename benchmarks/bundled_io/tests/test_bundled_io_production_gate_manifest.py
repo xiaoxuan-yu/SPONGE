@@ -53,6 +53,7 @@ from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
     FOCUSED_STEERING_CV_SIDECAR_FIXTURE,
     FOCUSED_SUBSYSTEM_DIVISION_FIXTURE,
     FOCUSED_SW_SIDECAR_FIXTURE,
+    FOCUSED_SW_TYPED_FIXTURE,
     FOCUSED_TERSOFF_SIDECAR_FIXTURE,
     FOCUSED_VIRTUAL_ATOMS_ALIAS_FIXTURE,
     FOCUSED_VIRTUAL_ATOMS_ALL_TYPES_FIXTURE,
@@ -280,6 +281,7 @@ def test_ab_production_harness_has_executable_contract_coverage():
         "normal_sits_ff19sb_cmap_peptide",
         "normal_edip_nonzero",
         "normal_sw_sidecar_pair_three_body",
+        "normal_sw_typed_pair_three_body",
         "normal_tersoff_sidecar_angular",
         "normal_custom_pair_nonzero",
         "normal_exclusions_coulomb_oracle",
@@ -894,10 +896,32 @@ def test_focused_sw_case_requires_sidecar_pair_and_three_body_behavior():
     assert sidecar.status == "supported"
     assert sidecar.case_ids == (case.name,)
     assert sidecar.assertion_ids == ("input_semantic_equivalence",)
+
+
+def test_focused_typed_sw_case_requires_pair_three_body_payload_response():
+    contracts = load_contract_registry()
+    case = next(
+        case
+        for case in _cases_for_profile()
+        if case.name == "normal_sw_typed_pair_three_body"
+    )
+    spec = INPUT_SEMANTIC_SPECS_BY_CASE[case.name]
+
+    assert case.fixture_case == FOCUSED_SW_TYPED_FIXTURE
+    assert case.fixture_case == "focused_sw_typed_three_atom"
+    assert case.statistical_md is False
+    assert case.normal_step_limit == 1
+    assert case.normal_dt == 0.0
+    assert case.input_behavior_only is True
+    assert case.contract_ids == (
+        "output.legacy.mdout",
+        "input.manybody.sw",
+    )
+    assert spec == (InputSemanticSpec("input.manybody.sw", ("SW",), 1.0e-6),)
     native = contracts["input.manybody.sw"]
-    assert native.status == "deferred"
-    assert "does not materialize" in native.reason
-    assert "tracked separately" in native.reason
+    assert native.status == "supported"
+    assert native.case_ids == (case.name,)
+    assert native.assertion_ids == ("input_semantic_equivalence",)
 
 
 def test_focused_sw_gate_rejects_pair_only_energy_and_force_mutations():
