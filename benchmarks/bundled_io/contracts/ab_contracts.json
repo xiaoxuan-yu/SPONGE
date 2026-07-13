@@ -142,7 +142,7 @@
       "legacy_surface": "legacy restart structural state",
       "bundled_surface": "output_h5_restart_path",
       "case_ids": ["normal_core_h5_output", "normal_sits_ff19sb_cmap_peptide"],
-      "assertion_ids": ["h5_statistical_equivalence"],
+      "assertion_ids": ["h5_statistical_equivalence", "restart_structural_coexistence"],
       "inventory_refs": ["h5_output_keys:output_h5_restart_path"]
     },
     {
@@ -153,7 +153,7 @@
       "minimum_evidence": "E3",
       "legacy_surface": "legacy trajectory semantics",
       "bundled_surface": "single-file H5 trajectory",
-      "case_ids": ["normal_core_h5_output", "normal_sits_ff19sb_cmap_peptide", "rerun_full_contract_pure_vds_off", "rerun_full_contract_sidecar_vds_off"],
+      "case_ids": ["normal_core_h5_output", "rerun_full_contract_pure_vds_off", "rerun_full_contract_sidecar_vds_off"],
       "assertion_ids": ["h5_statistical_equivalence", "h5_rerun_semantic_equivalence"]
     },
     {
@@ -164,8 +164,8 @@
       "minimum_evidence": "E3",
       "legacy_surface": "legacy trajectory semantics",
       "bundled_surface": "VDS wrapper and shards",
-      "case_ids": ["rerun_full_contract_pure_vds_on", "rerun_full_contract_sidecar_vds_on"],
-      "assertion_ids": ["h5_rerun_semantic_equivalence"],
+      "case_ids": ["normal_sits_ff19sb_cmap_peptide", "rerun_full_contract_pure_vds_on", "rerun_full_contract_sidecar_vds_on"],
+      "assertion_ids": ["h5_statistical_equivalence", "h5_rerun_semantic_equivalence"],
       "inventory_refs": ["h5_output_keys:output_h5_trajectory_vds"]
     },
     {
@@ -393,92 +393,97 @@
       "contract_id": "output.legacy.mdinfo",
       "direction": "output",
       "component": "legacy_output_route",
-      "status": "deferred",
+      "status": "supported",
       "minimum_evidence": "E3",
       "legacy_surface": "mdinfo",
       "bundled_surface": "explicit mdinfo beside H5 output",
-      "case_ids": [],
-      "assertion_ids": [],
-      "inventory_refs": ["legacy_output_keys:mdinfo"],
-      "reason": "Structured mdinfo comparison is pending."
+      "case_ids": ["normal_core_h5_output", "normal_sits_ff19sb_cmap_peptide"],
+      "assertion_ids": ["mdinfo_structured_equivalence"],
+      "inventory_refs": ["legacy_output_keys:mdinfo"]
     },
     {
       "contract_id": "output.legacy.crd",
       "direction": "output",
       "component": "legacy_output_route",
-      "status": "deferred",
+      "status": "supported",
       "minimum_evidence": "E3",
       "legacy_surface": "crd",
       "bundled_surface": "/particles/all/position/value",
-      "case_ids": [],
-      "assertion_ids": [],
-      "inventory_refs": ["legacy_output_keys:crd"],
-      "reason": "Explicit legacy/H5 coexistence comparison is pending."
+      "case_ids": ["normal_core_h5_output", "normal_sits_ff19sb_cmap_peptide"],
+      "assertion_ids": ["particle_legacy_coexistence"],
+      "inventory_refs": ["legacy_output_keys:crd"]
     },
     {
       "contract_id": "output.legacy.box",
       "direction": "output",
       "component": "legacy_output_route",
-      "status": "deferred",
+      "status": "supported",
       "minimum_evidence": "E3",
       "legacy_surface": "box",
       "bundled_surface": "/particles/all/box/edges/value",
-      "case_ids": [],
-      "assertion_ids": [],
-      "inventory_refs": ["legacy_output_keys:box"],
-      "reason": "Explicit legacy/H5 coexistence comparison is pending."
+      "case_ids": ["normal_core_h5_output", "normal_sits_ff19sb_cmap_peptide"],
+      "assertion_ids": ["particle_legacy_coexistence"],
+      "inventory_refs": ["legacy_output_keys:box"]
     },
     {
       "contract_id": "output.legacy.velocity",
       "direction": "output",
       "component": "legacy_output_route",
-      "status": "deferred",
+      "status": "supported",
       "minimum_evidence": "E3",
       "legacy_surface": "vel",
       "bundled_surface": "/particles/all/velocity/value",
-      "case_ids": [],
-      "assertion_ids": [],
-      "inventory_refs": ["legacy_output_keys:vel"],
-      "reason": "Trajectory velocity A/B comparison is pending."
+      "case_ids": ["normal_core_h5_output", "normal_sits_ff19sb_cmap_peptide"],
+      "assertion_ids": ["particle_legacy_coexistence"],
+      "inventory_refs": ["legacy_output_keys:vel"]
     },
     {
       "contract_id": "output.legacy.force",
       "direction": "output",
       "component": "legacy_output_route",
-      "status": "deferred",
+      "status": "supported",
       "minimum_evidence": "E3",
       "legacy_surface": "frc",
       "bundled_surface": "/particles/all/force/value",
-      "case_ids": [],
-      "assertion_ids": [],
-      "inventory_refs": ["legacy_output_keys:frc"],
-      "reason": "Trajectory force A/B comparison is pending."
+      "case_ids": ["normal_core_h5_output", "normal_sits_ff19sb_cmap_peptide"],
+      "assertion_ids": ["particle_legacy_coexistence"],
+      "inventory_refs": ["legacy_output_keys:frc"]
     },
     {
       "contract_id": "output.legacy.restart",
       "direction": "output",
       "component": "legacy_output_route",
-      "status": "deferred",
+      "status": "supported",
       "minimum_evidence": "E4",
       "legacy_surface": "rst",
       "bundled_surface": "output_h5_restart_path",
-      "case_ids": [],
-      "assertion_ids": [],
-      "inventory_refs": ["legacy_output_keys:rst"],
-      "reason": "Restart output-to-input continuation comparison is pending."
+      "case_ids": ["normal_core_h5_output", "normal_sits_ff19sb_cmap_peptide"],
+      "assertion_ids": ["restart_continuation_equivalence"],
+      "inventory_refs": ["legacy_output_keys:rst"]
     },
     {
       "contract_id": "output.legacy.qc_scf_output",
       "direction": "output",
       "component": "legacy_output_route",
-      "status": "deferred",
+      "status": "supported",
       "minimum_evidence": "E3",
       "legacy_surface": "qc_scf_output",
       "bundled_surface": "/parameters/sponge/qc/scf_output",
+      "case_ids": ["rerun_full_contract_pure_vds_off", "rerun_full_contract_pure_vds_on", "rerun_full_contract_sidecar_vds_off", "rerun_full_contract_sidecar_vds_on"],
+      "assertion_ids": ["qc_scf_exact_equivalence"],
+      "inventory_refs": ["legacy_output_keys:qc_scf_output"]
+    },
+    {
+      "contract_id": "output.restart.dynamic_continuation",
+      "direction": "output",
+      "component": "restart",
+      "status": "deferred",
+      "minimum_evidence": "E4",
+      "legacy_surface": "legacy RNG, thermostat, barostat, and NHC restart state",
+      "bundled_surface": "output_h5_restart_path dynamic state",
       "case_ids": [],
       "assertion_ids": [],
-      "inventory_refs": ["legacy_output_keys:qc_scf_output"],
-      "reason": "Normalized SCF text comparison is pending."
+      "reason": "Dynamic-state output-to-input continuation A/B is pending."
     },
     {
       "contract_id": "input.rerun.start",

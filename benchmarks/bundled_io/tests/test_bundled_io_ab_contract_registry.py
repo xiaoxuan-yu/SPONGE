@@ -19,6 +19,14 @@ from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
 )
 
 
+def _synthetic_evidence_level(assertion_id: str) -> str:
+    if assertion_id == "full_contract_input_inventory":
+        return "E0"
+    if assertion_id == "restart_continuation_equivalence":
+        return "E4"
+    return "E3"
+
+
 def test_real_registry_and_case_matrix_are_symmetric():
     contracts = load_contract_registry()
     summary = validate_contract_registry(contracts, _cases_for_profile())
@@ -91,7 +99,7 @@ def test_evidence_report_merges_cases_and_recomputes_coverage(tmp_path):
         assertions = [
             AssertionEvidence(
                 assertion_id=assertion_id,
-                evidence_level="E3",
+                evidence_level=_synthetic_evidence_level(assertion_id),
                 details={"method": "unit_test"},
             )
             for assertion_id in case.assertion_ids
@@ -141,11 +149,7 @@ def test_complete_report_requires_and_accepts_every_supported_contract(
         assertions = [
             AssertionEvidence(
                 assertion_id=assertion_id,
-                evidence_level=(
-                    "E0"
-                    if assertion_id == "full_contract_input_inventory"
-                    else "E3"
-                ),
+                evidence_level=_synthetic_evidence_level(assertion_id),
                 details={"method": "complete_report_unit_test"},
             )
             for assertion_id in case.assertion_ids

@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import statistics
+import struct
 import subprocess
 import sys
 import tempfile
@@ -175,6 +176,8 @@ H5_COMPARE_DATASETS = (
     "/particles/all/step",
     "/particles/all/time",
     "/particles/all/position/value",
+    "/particles/all/velocity/value",
+    "/particles/all/force/value",
     "/particles/all/box/edges/value",
 )
 
@@ -237,6 +240,12 @@ def _cases_for_profile() -> list[AbCase]:
             contract_ids=(
                 "runtime.normal_md",
                 "output.legacy.mdout",
+                "output.legacy.mdinfo",
+                "output.legacy.crd",
+                "output.legacy.box",
+                "output.legacy.velocity",
+                "output.legacy.force",
+                "output.legacy.restart",
                 "output.trajectory",
                 "output.observable",
                 "output.restart",
@@ -244,7 +253,11 @@ def _cases_for_profile() -> list[AbCase]:
             ),
             assertion_ids=(
                 "mdout_statistical_equivalence",
+                "mdinfo_structured_equivalence",
                 "h5_statistical_equivalence",
+                "particle_legacy_coexistence",
+                "restart_structural_coexistence",
+                "restart_continuation_equivalence",
             ),
         ),
         AbCase(
@@ -253,24 +266,34 @@ def _cases_for_profile() -> list[AbCase]:
             legacy_subdir="generated_legacy",
             bundled_subdir="generated_bundled",
             mode="normal",
-            vds=False,
+            vds=True,
             statistical_md=True,
             restart_load_policy="structural",
             contract_ids=(
                 "runtime.normal_md",
                 "output.legacy.mdout",
+                "output.legacy.mdinfo",
+                "output.legacy.crd",
+                "output.legacy.box",
+                "output.legacy.velocity",
+                "output.legacy.force",
+                "output.legacy.restart",
                 "output.trajectory",
                 "output.observable",
                 "output.restart",
-                "output.trajectory.vds_off",
+                "output.trajectory.vds_on",
                 "input.topology.cmap",
                 "input.protocol.sits",
                 "system.ff19sb_ace_ala_nme",
             ),
             assertion_ids=(
                 "mdout_statistical_equivalence",
+                "mdinfo_structured_equivalence",
                 "h5_statistical_equivalence",
                 "cmap_runtime_equivalence",
+                "particle_legacy_coexistence",
+                "restart_structural_coexistence",
+                "restart_continuation_equivalence",
             ),
         ),
         AbCase(
@@ -285,6 +308,7 @@ def _cases_for_profile() -> list[AbCase]:
             contract_ids=(
                 "runtime.rerun",
                 "output.legacy.mdout",
+                "output.legacy.qc_scf_output",
                 "output.trajectory",
                 "output.observable",
                 "output.trajectory.vds_off",
@@ -297,6 +321,7 @@ def _cases_for_profile() -> list[AbCase]:
             assertion_ids=(
                 "full_contract_input_inventory",
                 "mdout_deterministic_equivalence",
+                "qc_scf_exact_equivalence",
                 "h5_rerun_semantic_equivalence",
                 "cmap_runtime_equivalence",
             ),
@@ -313,6 +338,7 @@ def _cases_for_profile() -> list[AbCase]:
             contract_ids=(
                 "runtime.rerun",
                 "output.legacy.mdout",
+                "output.legacy.qc_scf_output",
                 "output.trajectory",
                 "output.observable",
                 "output.trajectory.vds_on",
@@ -325,6 +351,7 @@ def _cases_for_profile() -> list[AbCase]:
             assertion_ids=(
                 "full_contract_input_inventory",
                 "mdout_deterministic_equivalence",
+                "qc_scf_exact_equivalence",
                 "h5_rerun_semantic_equivalence",
                 "cmap_runtime_equivalence",
             ),
@@ -341,6 +368,7 @@ def _cases_for_profile() -> list[AbCase]:
             contract_ids=(
                 "runtime.rerun",
                 "output.legacy.mdout",
+                "output.legacy.qc_scf_output",
                 "output.trajectory",
                 "output.observable",
                 "output.trajectory.vds_off",
@@ -353,6 +381,7 @@ def _cases_for_profile() -> list[AbCase]:
             assertion_ids=(
                 "full_contract_input_inventory",
                 "mdout_deterministic_equivalence",
+                "qc_scf_exact_equivalence",
                 "h5_rerun_semantic_equivalence",
                 "cmap_runtime_equivalence",
             ),
@@ -369,6 +398,7 @@ def _cases_for_profile() -> list[AbCase]:
             contract_ids=(
                 "runtime.rerun",
                 "output.legacy.mdout",
+                "output.legacy.qc_scf_output",
                 "output.trajectory",
                 "output.observable",
                 "output.trajectory.vds_on",
@@ -381,6 +411,7 @@ def _cases_for_profile() -> list[AbCase]:
             assertion_ids=(
                 "full_contract_input_inventory",
                 "mdout_deterministic_equivalence",
+                "qc_scf_exact_equivalence",
                 "h5_rerun_semantic_equivalence",
                 "cmap_runtime_equivalence",
             ),
@@ -863,6 +894,11 @@ def _prepare_mdin(
         "input_h5_restart_load",
         "mdout",
         "mdinfo",
+        "crd",
+        "box",
+        "vel",
+        "frc",
+        "rst",
     }
     if case.statistical_md:
         remove_keys.update(
@@ -892,6 +928,11 @@ def _prepare_mdin(
             f"write_mdout_interval = {interval}",
             f"write_trajectory_interval = {interval}",
             f"write_restart_file_interval = {step_limit}",
+            'crd = "output/legacy.crd"',
+            'box = "output/legacy.box"',
+            'vel = "output/legacy.vel"',
+            'frc = "output/legacy.frc"',
+            'rst = "output/legacy_restart"',
         ]
     else:
         frame_limit = limits["rerun_frame_limit"]
@@ -1114,6 +1155,47 @@ def _compare_outputs(
         "mdout": mdout_comparison,
         "h5": h5_comparison,
     }
+    if "output.legacy.mdinfo" in case.contract_ids:
+        mdinfo_comparison = _compare_mdinfo_structured(case, runs)
+        comparison["mdinfo"] = mdinfo_comparison
+        evidence.append(
+            AssertionEvidence(
+                assertion_id="mdinfo_structured_equivalence",
+                evidence_level="E3",
+                details=mdinfo_comparison,
+            )
+        )
+    if case.mode == "normal":
+        restart_continuation = _compare_restart_continuation(case, runs[0])
+        comparison["restart_continuation"] = restart_continuation
+        evidence.extend(
+            (
+                AssertionEvidence(
+                    assertion_id="particle_legacy_coexistence",
+                    evidence_level="E3",
+                    details={
+                        "routes": ["crd", "box", "vel", "frc"],
+                        "branches": ["legacy", "bundled"],
+                        "same_run_h5_payload_comparison": True,
+                        "cross_branch_assertion": "h5_statistical_equivalence",
+                    },
+                ),
+                AssertionEvidence(
+                    assertion_id="restart_structural_coexistence",
+                    evidence_level="E3",
+                    details={
+                        "routes": ["rst", "output_h5_restart_path"],
+                        "branches": ["legacy", "bundled"],
+                        "comparison": "position_velocity_box_step_time",
+                    },
+                ),
+                AssertionEvidence(
+                    assertion_id="restart_continuation_equivalence",
+                    evidence_level="E4",
+                    details=restart_continuation,
+                ),
+            )
+        )
     if "input.full_contract.inventory" in case.contract_ids:
         inventory = _validate_full_contract_input(case, runs[0].bundled_dir)
         comparison["full_contract_input_inventory"] = inventory
@@ -1144,7 +1226,227 @@ def _compare_outputs(
                 },
             )
         )
+    if "output.legacy.qc_scf_output" in case.contract_ids:
+        qc_scf = _compare_qc_scf_output(case, runs)
+        comparison["qc_scf_output"] = qc_scf
+        evidence.append(
+            AssertionEvidence(
+                assertion_id="qc_scf_exact_equivalence",
+                evidence_level="E3",
+                details=qc_scf,
+            )
+        )
     return comparison, tuple(evidence)
+
+
+def _normalize_line_endings(text: str) -> str:
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _compare_qc_scf_output(
+    case: AbCase, runs: Sequence[AbRun]
+) -> dict[str, object]:
+    dataset = "/parameters/sponge/qc/scf_output"
+    for run in runs:
+        legacy_text = _normalize_line_endings(
+            (run.legacy_dir / "qc_scf.txt").read_text(encoding="utf-8")
+        )
+        bundled_text = _normalize_line_endings(
+            (run.bundled_dir / "qc_scf.txt").read_text(encoding="utf-8")
+        )
+        if not legacy_text or not bundled_text:
+            raise AssertionError(
+                f"{case.name} replica {run.replica_index} QC SCF output is empty"
+            )
+        if legacy_text != bundled_text:
+            raise AssertionError(
+                f"{case.name} replica {run.replica_index} QC SCF text differs"
+            )
+        for name, path in _output_h5_files(case, run.bundled_dir).items():
+            if name == "restart":
+                continue
+            h5_values = _h5_string_values(path, dataset)
+            if (
+                len(h5_values) != 1
+                or _normalize_line_endings(h5_values[0]) != bundled_text
+            ):
+                raise AssertionError(
+                    f"{case.name} replica {run.replica_index} {name} QC SCF "
+                    "dataset differs from explicit legacy output"
+                )
+    return {
+        "method": "normalized_line_endings_then_exact",
+        "dataset": dataset,
+        "replicas": len(runs),
+    }
+
+
+MDINFO_CONTRACT_KEYS = {
+    "mode",
+    "skin",
+    "cutoff",
+    "dt",
+    "atom_numbers",
+    "target temperature",
+    "friction coefficient",
+    "random seed",
+    "residue_numbers",
+    "fftx",
+    "ffty",
+    "fftz",
+    "beta",
+}
+
+
+def _parse_mdinfo_key_values(path: Path) -> dict[str, list[str]]:
+    parsed = {key: [] for key in MDINFO_CONTRACT_KEYS}
+    pattern = re.compile(
+        r"^\s*([A-Za-z][A-Za-z0-9 _-]*?)"
+        r"(?:\s+(?:is|set to)\s+|\s*:\s*)(.+?)\s*$"
+    )
+    for line in path.read_text(encoding="utf-8").splitlines():
+        match = pattern.match(line)
+        if match is None:
+            continue
+        key = " ".join(match.group(1).lower().split())
+        if key in parsed:
+            value = " ".join(match.group(2).split())
+            if value not in parsed[key]:
+                parsed[key].append(value)
+    missing = sorted(key for key, values in parsed.items() if not values)
+    if missing:
+        raise AssertionError(
+            f"mdinfo is missing structured keys {missing}: {path}"
+        )
+    return parsed
+
+
+def _compare_mdinfo_structured(
+    case: AbCase, runs: Sequence[AbRun]
+) -> dict[str, object]:
+    for run in runs:
+        legacy = _parse_mdinfo_key_values(run.legacy_dir / "mdinfo.txt")
+        bundled = _parse_mdinfo_key_values(run.bundled_dir / "mdinfo.txt")
+        if legacy != bundled:
+            differing = sorted(
+                key
+                for key in MDINFO_CONTRACT_KEYS
+                if legacy[key] != bundled[key]
+            )
+            raise AssertionError(
+                f"{case.name} replica {run.replica_index} structured mdinfo "
+                f"differs for keys: {differing}"
+            )
+    return {
+        "method": "structured_key_value",
+        "keys": sorted(MDINFO_CONTRACT_KEYS),
+        "replicas": len(runs),
+    }
+
+
+def _compare_restart_continuation(
+    case: AbCase, run: AbRun
+) -> dict[str, object]:
+    continuations = {}
+    step_limit = 2
+    for branch, source_dir, source_mdin in (
+        ("legacy", run.legacy_dir, "mdin.spg.toml"),
+        ("h5", run.bundled_dir, "mdin.bundled.spg.toml"),
+    ):
+        destination = source_dir.parent / f"continuation_{branch}"
+        if destination.exists():
+            shutil.rmtree(destination)
+        shutil.copytree(source_dir, destination)
+        if branch == "h5":
+            shutil.copy2(run.legacy_dir / RESTART_REL, destination / RESTART_REL)
+        mdin_path = destination / source_mdin
+        text = _remove_key_lines(
+            mdin_path.read_text(encoding="utf-8"),
+            {
+                "mode",
+                "thermostat",
+                "thermostat_seed",
+                "thermostat_tau",
+                "target_temperature",
+                "step_limit",
+                "print_zeroth_frame",
+                "write_mdout_interval",
+                "write_trajectory_interval",
+                "write_restart_file_interval",
+                "coordinate_in_file",
+                "velocity_in_file",
+                "input_h5_restart_path",
+                "input_h5_restart_load",
+                "output_h5_trajectory_path",
+                "output_h5_restart_path",
+                "output_h5_observable_path",
+                "mdout",
+                "mdinfo",
+                "crd",
+                "box",
+                "vel",
+                "frc",
+                "rst",
+            },
+        )
+        additions = [
+            'mode = "nve"',
+            f"step_limit = {step_limit}",
+            "print_zeroth_frame = 1",
+            "write_mdout_interval = 1",
+            "write_trajectory_interval = 0",
+            "write_restart_file_interval = 0",
+            'mdout = "continuation.mdout"',
+            'mdinfo = "continuation.mdinfo"',
+        ]
+        if branch == "legacy":
+            additions.extend(
+                (
+                    'coordinate_in_file = "output/legacy_restart_coordinate.txt"',
+                    'velocity_in_file = "output/legacy_restart_velocity.txt"',
+                )
+            )
+        else:
+            additions.extend(
+                (
+                    'input_h5_restart_path = "output/ab.spgr.h5"',
+                    'input_h5_restart_load = "structural"',
+                )
+            )
+        mdin_path.write_text(
+            text.rstrip() + "\n" + "\n".join(additions) + "\n",
+            encoding="utf-8",
+        )
+        _run_sponge(destination, source_mdin)
+        continuations[branch] = _read_mdout(destination / "continuation.mdout")
+
+    columns = _require_matching_mdout_columns(
+        continuations["legacy"],
+        continuations["h5"],
+        f"{case.name} restart continuation",
+    )
+    legacy_rows = continuations["legacy"]["rows"]
+    h5_rows = continuations["h5"]["rows"]
+    if len(legacy_rows) != len(h5_rows):
+        raise AssertionError(
+            f"{case.name} restart continuation row count differs"
+        )
+    for column in columns:
+        relative_tolerance, absolute_tolerance = _deterministic_tolerance(
+            column
+        )
+        _assert_numeric_sequences_close(
+            f"{case.name} restart continuation {column}",
+            [row[column] for row in legacy_rows],
+            [row[column] for row in h5_rows],
+            relative_tolerance=relative_tolerance,
+            absolute_tolerance=absolute_tolerance,
+        )
+    return {
+        "method": "legacy_and_h5_restart_two_step_nve_continuation",
+        "rows": len(legacy_rows),
+        "columns": columns,
+    }
 
 
 def _compare_cmap_materialization(
@@ -1570,13 +1872,23 @@ def _validate_branch_output_contract(
             "bytes": _file_size(path),
         }
 
-    _validate_trajectory_output(case.name, files["trajectory"])
+    _validate_trajectory_output(case, files["trajectory"])
+    if case.mode == "normal":
+        summary["particle_legacy_coexistence"] = (
+            _validate_particle_legacy_coexistence(case, case_dir, files)
+        )
     observable_summary = _validate_observable_output(
         case.name, files["observable"], case_dir / "mdout.txt"
     )
     summary["observable"].update(observable_summary)
     if "restart" in files:
         _validate_restart_output(case.name, files["restart"])
+        if case.mode == "normal":
+            summary["restart_legacy_coexistence"] = (
+                _validate_restart_legacy_coexistence(
+                    case, case_dir, files["restart"]
+                )
+            )
     if case.vds and _vds_shard_count(files["trajectory"]) <= 0:
         raise AssertionError(
             f"{case.name} VDS run did not create trajectory shards"
@@ -1584,12 +1896,205 @@ def _validate_branch_output_contract(
     return summary
 
 
-def _validate_trajectory_output(case_name: str, path: Path) -> None:
+def _read_native_float32_file(path: Path) -> list[float]:
+    payload = path.read_bytes()
+    if not payload or len(payload) % 4 != 0:
+        raise AssertionError(
+            f"legacy float32 output must be non-empty and 4-byte aligned: {path}"
+        )
+    return [value[0] for value in struct.iter_unpack("=f", payload)]
+
+
+def _read_legacy_restart_state(case_dir: Path) -> dict[str, object]:
+    coordinate_path = case_dir / "output/legacy_restart_coordinate.txt"
+    velocity_path = case_dir / "output/legacy_restart_velocity.txt"
+    coordinate_lines = coordinate_path.read_text(encoding="utf-8").splitlines()
+    velocity_lines = velocity_path.read_text(encoding="utf-8").splitlines()
+    coordinate_header = coordinate_lines[0].split()
+    velocity_header = velocity_lines[0].split()
+    if coordinate_header != velocity_header or len(coordinate_header) != 3:
+        raise AssertionError(
+            "legacy restart coordinate/velocity headers differ"
+        )
+    atom_count = int(coordinate_header[0])
+    if (
+        len(coordinate_lines) != atom_count + 2
+        or len(velocity_lines) != atom_count + 1
+    ):
+        raise AssertionError(
+            "legacy restart row count does not match atom count"
+        )
+    positions = [
+        float(value)
+        for line in coordinate_lines[1 : atom_count + 1]
+        for value in line.split()
+    ]
+    velocities = [
+        float(value)
+        for line in velocity_lines[1 : atom_count + 1]
+        for value in line.split()
+    ]
+    box_fields = [float(value) for value in coordinate_lines[-1].split()]
+    if len(box_fields) != 6:
+        raise AssertionError("legacy restart box row must have six values")
+    box = [
+        box_fields[0],
+        0.0,
+        0.0,
+        0.0,
+        box_fields[1],
+        0.0,
+        0.0,
+        0.0,
+        box_fields[2],
+    ]
+    return {
+        "atom_count": atom_count,
+        "time": float(coordinate_header[1]),
+        "step": int(coordinate_header[2]),
+        "position": positions,
+        "velocity": velocities,
+        "box": box,
+    }
+
+
+def _validate_restart_legacy_coexistence(
+    case: AbCase, case_dir: Path, restart_path: Path
+) -> dict[str, object]:
+    legacy = _read_legacy_restart_state(case_dir)
+    comparisons = {
+        "position": "/particles/all/position/value",
+        "velocity": "/particles/all/velocity/value",
+        "box": "/particles/all/box/edges/value",
+    }
+    for quantity, dataset in comparisons.items():
+        relative_tolerance, absolute_tolerance = _deterministic_tolerance(
+            quantity
+        )
+        absolute_tolerance = max(absolute_tolerance, 5.0e-5)
+        _assert_numeric_sequences_close(
+            f"{case.name} legacy/H5 restart {quantity}",
+            legacy[quantity],
+            _h5_numeric_values(restart_path, dataset),
+            relative_tolerance=relative_tolerance,
+            absolute_tolerance=absolute_tolerance,
+        )
+    steps = _h5_numeric_values(restart_path, "/particles/all/step")
+    times = _h5_numeric_values(restart_path, "/particles/all/time")
+    if steps != [legacy["step"]] or times != [legacy["time"]]:
+        raise AssertionError(f"{case.name} legacy/H5 restart schedule differs")
+    keys = _h5_string_values(
+        restart_path, "/parameters/sponge/files/legacy_sidecars/key"
+    )
+    paths = _h5_string_values(
+        restart_path, "/parameters/sponge/files/legacy_sidecars/path"
+    )
+    if dict(zip(keys, paths)).get("rst") != "output/legacy_restart":
+        raise AssertionError(f"{case.name} restart provenance is missing rst")
+    return {
+        "method": "parsed_structural_state",
+        "atom_count": legacy["atom_count"],
+        "step": legacy["step"],
+        "time": legacy["time"],
+    }
+
+
+def _validate_particle_legacy_coexistence(
+    case: AbCase, case_dir: Path, files: dict[str, Path]
+) -> dict[str, object]:
+    trajectory = files["trajectory"]
+    provenance_keys = _h5_string_values(
+        trajectory, "/parameters/sponge/files/legacy_sidecars/key"
+    )
+    provenance_paths = _h5_string_values(
+        trajectory, "/parameters/sponge/files/legacy_sidecars/path"
+    )
+    provenance = dict(zip(provenance_keys, provenance_paths))
+    compared = {}
+    for route, relative_path, dataset in (
+        ("crd", "output/legacy.crd", "/particles/all/position/value"),
+        ("vel", "output/legacy.vel", "/particles/all/velocity/value"),
+        ("frc", "output/legacy.frc", "/particles/all/force/value"),
+    ):
+        if provenance.get(route) != relative_path:
+            raise AssertionError(
+                f"{case.name} {route} provenance mismatch: {provenance.get(route)!r}"
+            )
+        legacy_values = _read_native_float32_file(case_dir / relative_path)
+        h5_values = _h5_numeric_values(trajectory, dataset)
+        if route == "frc" and len(legacy_values) != len(h5_values):
+            shape = _h5_dataset_shape(trajectory, dataset)
+            frame_width = math.prod(shape[1:])
+            h5_steps = _h5_numeric_values(trajectory, "/particles/all/step")
+            raise AssertionError(
+                f"{case.name} legacy/H5 force schedule mismatch: "
+                f"legacy_frames={len(legacy_values) // frame_width}, "
+                f"h5_frames={len(h5_values) // frame_width}, "
+                f"h5_first_step={h5_steps[0]}, h5_last_step={h5_steps[-1]}"
+            )
+        relative_tolerance, absolute_tolerance = _deterministic_tolerance(
+            dataset
+        )
+        _assert_numeric_sequences_close(
+            f"{case.name} legacy {route} coexistence",
+            legacy_values,
+            h5_values,
+            relative_tolerance=relative_tolerance,
+            absolute_tolerance=absolute_tolerance,
+        )
+        compared[route] = {
+            "value_count": len(legacy_values),
+            "h5_dataset": dataset,
+            "provenance_path": relative_path,
+        }
+    box_relative_path = "output/legacy.box"
+    if provenance.get("box") != box_relative_path:
+        raise AssertionError(
+            f"{case.name} box provenance mismatch: {provenance.get('box')!r}"
+        )
+    legacy_box_values = []
+    for line in (
+        (case_dir / box_relative_path).read_text(encoding="utf-8").splitlines()
+    ):
+        fields = [float(field) for field in line.split()]
+        if len(fields) != 6:
+            raise AssertionError(
+                f"{case.name} legacy box row must have 6 values"
+            )
+        legacy_box_values.extend(
+            (fields[0], 0.0, 0.0, 0.0, fields[1], 0.0, 0.0, 0.0, fields[2])
+        )
+    h5_box_values = _h5_numeric_values(
+        trajectory, "/particles/all/box/edges/value"
+    )
+    relative_tolerance, absolute_tolerance = _deterministic_tolerance("box")
+    _assert_numeric_sequences_close(
+        f"{case.name} legacy box coexistence",
+        legacy_box_values,
+        h5_box_values,
+        relative_tolerance=relative_tolerance,
+        absolute_tolerance=absolute_tolerance,
+    )
+    compared["box"] = {
+        "value_count": len(legacy_box_values),
+        "h5_dataset": "/particles/all/box/edges/value",
+        "provenance_path": box_relative_path,
+    }
+    return compared
+
+
+def _validate_trajectory_output(case: AbCase, path: Path) -> None:
     paths = _h5_paths(path)
-    missing = sorted(set(H5_COMPARE_DATASETS) - paths)
+    required = set(H5_COMPARE_DATASETS)
+    if case.mode != "normal":
+        required -= {
+            "/particles/all/velocity/value",
+            "/particles/all/force/value",
+        }
+    missing = sorted(required - paths)
     if missing:
         raise AssertionError(
-            f"{case_name} trajectory output is missing required datasets: {missing}"
+            f"{case.name} trajectory output is missing required datasets: {missing}"
         )
     steps = _h5_numeric_values(path, "/particles/all/step")
     times = _h5_numeric_values(path, "/particles/all/time")
@@ -1598,12 +2103,12 @@ def _validate_trajectory_output(case_name: str, path: Path) -> None:
     )
     if not steps or len(steps) != len(times):
         raise AssertionError(
-            f"{case_name} trajectory timeline is empty or inconsistent: "
+            f"{case.name} trajectory timeline is empty or inconsistent: "
             f"steps={len(steps)}, times={len(times)}"
         )
     if not frame_counts or int(frame_counts[-1]) != len(steps):
         raise AssertionError(
-            f"{case_name} trajectory completion frame count does not match "
+            f"{case.name} trajectory completion frame count does not match "
             f"timeline: completion={frame_counts}, frames={len(steps)}"
         )
     for dataset in (
@@ -1613,9 +2118,20 @@ def _validate_trajectory_output(case_name: str, path: Path) -> None:
         shape = _h5_dataset_shape(path, dataset)
         if not shape or shape[0] != len(steps):
             raise AssertionError(
-                f"{case_name} trajectory {dataset} frame shape mismatch: "
+                f"{case.name} trajectory {dataset} frame shape mismatch: "
                 f"shape={shape}, frames={len(steps)}"
             )
+    if case.mode == "normal":
+        for dataset in (
+            "/particles/all/velocity/value",
+            "/particles/all/force/value",
+        ):
+            shape = _h5_dataset_shape(path, dataset)
+            if not shape or shape[0] != len(steps):
+                raise AssertionError(
+                    f"{case.name} trajectory {dataset} frame shape mismatch: "
+                    f"shape={shape}, frames={len(steps)}"
+                )
 
 
 def _validate_restart_output(case_name: str, path: Path) -> None:

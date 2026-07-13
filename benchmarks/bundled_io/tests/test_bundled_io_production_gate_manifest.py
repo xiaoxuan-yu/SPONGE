@@ -14,14 +14,30 @@ from benchmarks.bundled_io.ab_contracts import (
     validate_implementation_inventory,
 )
 from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
+    MDINFO_CONTRACT_KEYS,
     PROFILE_LIMITS,
     _cases_for_profile,
+    _parse_mdinfo_key_values,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 PIXI_TOML = REPO_ROOT / "pixi.toml"
 H5_BUNDLE_RUNNER = REPO_ROOT / "tests" / "h5_bundle" / "run_h5_bundle_tests.sh"
 AUDIT_DOC = REPO_ROOT / "docs" / "sponge_h5_bundle_unit_test_audit_matrix.md"
+VDS_WRITER_TEST = (
+    REPO_ROOT
+    / "tests"
+    / "h5_bundle"
+    / "test_vds_trajectory_writer_with_mock_backend.cpp"
+)
+OUTPUT_PLAN_TEST = REPO_ROOT / "tests/h5_bundle/test_h5_output_plan.cpp"
+WRITER_TEST = (
+    REPO_ROOT / "tests/h5_bundle/test_h5md_writers_with_mock_backend.cpp"
+)
+MODULE_TEST = (
+    REPO_ROOT / "tests/h5_bundle/test_module_h5_mappings_with_mock_backend.cpp"
+)
+HIGHFIVE_TEST = REPO_ROOT / "tests/h5_bundle/test_highfive_backend_io.cpp"
 
 
 def _dev_tasks() -> dict[str, object]:
@@ -209,3 +225,89 @@ def test_h5_bundle_runner_defaults_to_current_pixi_build_dir():
     assert 'elif [[ -n "${PIXI_ENVIRONMENT_NAME:-}" ]]' in source
     assert 'BUILD_DIR="${ROOT_DIR}/build-${PIXI_ENVIRONMENT_NAME}"' in source
     assert 'BUILD_DIR="${ROOT_DIR}/build-h5-tests"' in source
+
+
+def test_output_behavior_cases_cover_particle_fields_and_both_vds_modes():
+    contracts = load_contract_registry()
+    cases = {case.name: case for case in _cases_for_profile()}
+
+    assert cases["normal_core_h5_output"].vds is False
+    assert cases["normal_sits_ff19sb_cmap_peptide"].vds is True
+    for case_name in (
+        "normal_core_h5_output",
+        "normal_sits_ff19sb_cmap_peptide",
+    ):
+        case = cases[case_name]
+        assert {
+            "output.legacy.crd",
+            "output.legacy.box",
+            "output.legacy.velocity",
+            "output.legacy.force",
+        } <= set(case.contract_ids)
+        assert "particle_legacy_coexistence" in case.assertion_ids
+
+    for contract_id in (
+        "output.legacy.crd",
+        "output.legacy.box",
+        "output.legacy.velocity",
+        "output.legacy.force",
+    ):
+        assert contracts[contract_id].status == "supported"
+        assert contracts[contract_id].minimum_evidence == "E3"
+
+
+def test_mdinfo_parser_uses_declared_structured_keys(tmp_path):
+    mdinfo = tmp_path / "mdinfo.txt"
+    mdinfo.write_text(
+        "Working Directory: /dynamic/path\n"
+        + "\n".join(f"{key} is value for {key}" for key in MDINFO_CONTRACT_KEYS)
+        + "\nStart Wall Time: dynamic\n",
+        encoding="utf-8",
+    )
+
+    parsed = _parse_mdinfo_key_values(mdinfo)
+
+    assert set(parsed) == MDINFO_CONTRACT_KEYS
+    assert all(len(values) == 1 for values in parsed.values())
+
+
+def test_vds_chunk_boundary_gate_enumerates_all_required_edges():
+    source = VDS_WRITER_TEST.read_text(encoding="utf-8")
+
+    assert "Test_Vds_Chunk_Boundary_Frame_Counts" in source
+    for boundary in ("{1, {1}}", "{2, {2}}", "{3, {2, 1}}", "{5, {2, 2, 1}}"):
+        assert boundary in source
+
+
+def test_output_behavior_closure_keeps_family_module_restart_and_repair_gates():
+    required_functions = {
+        OUTPUT_PLAN_TEST: {
+            "Test_H5_Output_Path_Keys_Enable_Only_Their_Bundle",
+            "Test_All_H5_Output_Bundles_Can_Be_Enabled_Together",
+            "Test_Legacy_Output_Plan_All_Keys",
+            "Test_Resolve_Legacy_Output_Plan_Matrix",
+        },
+        WRITER_TEST: {
+            "Test_Trajectory_Optional_Velocity_And_Force_Paths",
+            "Test_Observable_Only_Writer",
+            "Test_Restart_Module_State_And_Legacy_Provenance",
+            "Test_Legacy_Provenance_On_Trajectory_And_Observable",
+        },
+        MODULE_TEST: {
+            "Test_Nhc_And_Sits_Mappings",
+            "Test_Metadynamics_And_Diagnostics",
+            "Test_Qc_And_Reaxff_Mappings",
+        },
+        HIGHFIVE_TEST: {
+            "Test_Trajectory_Optional_Particle_Fields_With_Real_Backend",
+            "Test_Restart_Writer_With_Real_Backend",
+            "Test_Module_Metad_And_Reaxff_With_Real_Backend",
+            "Test_Vds_Complete_Prefix_Repair_With_Real_Backend",
+        },
+    }
+    for path, functions in required_functions.items():
+        source = path.read_text(encoding="utf-8")
+        for function in functions:
+            assert function in source, (
+                f"{path.name} no longer covers {function}"
+            )
