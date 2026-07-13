@@ -30,6 +30,7 @@ REQUIRED_INPUT_SEMANTIC_CONTRACTS = frozenset(
         "input.topology.virtual_atoms_pbc",
         "input.manybody.eam",
         "input.manybody.sw",
+        "input.manybody.sw.sidecar",
         "input.manybody.edip",
         "input.manybody.tersoff",
         "input.manybody.reaxff",

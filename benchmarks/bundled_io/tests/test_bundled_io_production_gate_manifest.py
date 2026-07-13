@@ -42,6 +42,7 @@ from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
     FOCUSED_GB_HYBRID_FIXTURE,
     FOCUSED_IMPROPER_NATIVE_FIXTURE,
     FOCUSED_LJ_SOFT_CORE_FIXTURE,
+    FOCUSED_SW_SIDECAR_FIXTURE,
     FOCUSED_VIRTUAL_ATOMS_ALIAS_FIXTURE,
     FOCUSED_VIRTUAL_ATOMS_ALL_TYPES_FIXTURE,
     FOCUSED_VIRTUAL_ATOMS_PBC_FIXTURE,
@@ -53,6 +54,7 @@ from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
     _assert_exclusion_coulomb_oracle,
     _assert_gb_force_oracle,
     _assert_nontrivial_equivalent_forces,
+    _assert_sw_pair_three_body_oracle,
     _assert_virtual_atom_oracle,
     _cases_for_profile,
     _expected_rerun_frame_indices,
@@ -255,6 +257,7 @@ def test_ab_production_harness_has_executable_contract_coverage():
         "normal_meta_protocol_full_restart_continuation",
         "normal_sits_ff19sb_cmap_peptide",
         "normal_edip_nonzero",
+        "normal_sw_sidecar_pair_three_body",
         "normal_custom_pair_nonzero",
         "normal_exclusions_coulomb_oracle",
         "normal_gb_hybrid_nonzero",
@@ -681,6 +684,78 @@ def test_focused_edip_case_requires_pure_h5_nonzero_energy_and_force():
     assert contracts["input.manybody.edip"].assertion_ids == (
         "input_semantic_equivalence",
     )
+
+
+def test_focused_sw_case_requires_sidecar_pair_and_three_body_behavior():
+    contracts = load_contract_registry()
+    case = next(
+        case
+        for case in _cases_for_profile()
+        if case.name == "normal_sw_sidecar_pair_three_body"
+    )
+    spec = INPUT_SEMANTIC_SPECS_BY_CASE[case.name]
+
+    assert case.fixture_case == FOCUSED_SW_SIDECAR_FIXTURE
+    assert case.statistical_md is False
+    assert case.normal_step_limit == 1
+    assert case.normal_dt == 0.0
+    assert case.input_behavior_only is True
+    assert case.contract_ids == (
+        "output.legacy.mdout",
+        "input.manybody.sw.sidecar",
+    )
+    assert spec == (
+        InputSemanticSpec(
+            "input.manybody.sw.sidecar", ("SW",), 1.0e-6
+        ),
+    )
+    sidecar = contracts["input.manybody.sw.sidecar"]
+    assert sidecar.status == "supported"
+    assert sidecar.case_ids == (case.name,)
+    assert sidecar.assertion_ids == ("input_semantic_equivalence",)
+    native = contracts["input.manybody.sw"]
+    assert native.status == "deferred"
+    assert "does not materialize" in native.reason
+    assert "tracked separately" in native.reason
+
+
+def test_focused_sw_gate_rejects_pair_only_energy_and_force_mutations():
+    full_force = (
+        -352.62115,
+        -352.62115,
+        0.0,
+        404.2786,
+        -51.657455,
+        0.0,
+        -51.657455,
+        404.2786,
+        0.0,
+    )
+    pair_only_force = (
+        -340.4832,
+        -340.4832,
+        0.0,
+        343.52106,
+        -3.037885,
+        0.0,
+        -3.037885,
+        343.52106,
+        0.0,
+    )
+    result = _assert_sw_pair_three_body_oracle(
+        "SW", [{"SW": 194.50}], full_force
+    )
+    assert result["three_body_energy_contribution"] == pytest.approx(35.71)
+    assert result["maximum_force_delta_from_pair_only"] > 60.0
+
+    with pytest.raises(AssertionError, match="pair\\+three-body SW energy"):
+        _assert_sw_pair_three_body_oracle(
+            "SW lambda=0", [{"SW": 158.79}], pair_only_force
+        )
+    with pytest.raises(AssertionError, match="pair\\+three-body SW force"):
+        _assert_sw_pair_three_body_oracle(
+            "SW pair-only force", [{"SW": 194.50}], pair_only_force
+        )
 
 
 def test_focused_custom_pair_case_requires_pure_h5_nonzero_energy_and_force():
