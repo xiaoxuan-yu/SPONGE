@@ -612,13 +612,13 @@
       "contract_id": "input.topology.gb",
       "direction": "input",
       "component": "implicit_solvent",
-      "status": "deferred",
+      "status": "supported",
       "minimum_evidence": "E3",
       "legacy_surface": "gb_in_file",
       "bundled_surface": "pure native /forcefield/gb without sidecars",
-      "case_ids": [],
-      "assertion_ids": [],
-      "reason": "The native reader populates GB state, but main only calls GB initialization when gb_in_file exists. The executable native-state plus sidecar-activation route is tracked separately."
+      "case_ids": ["normal_gb_native_nonzero"],
+      "assertion_ids": ["input_semantic_equivalence"],
+      "reason": ""
     },
     {
       "contract_id": "input.topology.gb.hybrid_activation",

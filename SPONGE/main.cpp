@@ -170,7 +170,8 @@ void Main_Initial(int argc, char* argv[])
     {
         LJ_NOPBC.Initial(&controller, md_info.nb.cutoff);
         CF_NOPBC.Initial(&controller, md_info.atom_numbers, md_info.nb.cutoff);
-        if (controller.Command_Exist("gb", "in_file"))
+        if (controller.Command_Exist("gb", "in_file") ||
+            !Xponge::system.generalized_born.radius.empty())
         {
             gb.Initial(&controller, md_info.nb.cutoff);
         }

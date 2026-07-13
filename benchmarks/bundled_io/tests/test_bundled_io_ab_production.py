@@ -57,6 +57,7 @@ FOCUSED_EXCLUSIONS_FIXTURE = "focused_exclusions_three_atom"
 FOCUSED_RESIDUE_SIDECAR_FIXTURE = "focused_residue_sidecar_pbc_four_atom"
 FOCUSED_RESIDUE_COM_RES_FIXTURE = "focused_residue_sidecar_com_res_four_atom"
 FOCUSED_GB_HYBRID_FIXTURE = "focused_gb_hybrid_two_atom"
+FOCUSED_GB_NATIVE_FIXTURE = "focused_gb_native_two_atom"
 FOCUSED_IMPROPER_NATIVE_FIXTURE = "focused_improper_native_four_atom"
 FOCUSED_LJ_SOFT_CORE_FIXTURE = "focused_lj_soft_core_two_atom"
 FOCUSED_VIRTUAL_ATOMS_ALL_TYPES_FIXTURE = "focused_virtual_atoms_all_types"
@@ -270,6 +271,9 @@ INPUT_SEMANTIC_SPECS_BY_CASE = {
         InputSemanticSpec(
             "input.topology.gb.hybrid_activation", ("gb",), 1.0e-6
         ),
+    ),
+    "normal_gb_native_nonzero": (
+        InputSemanticSpec("input.topology.gb", ("gb",), 1.0e-6),
     ),
     "normal_improper_native_nonzero": (
         InputSemanticSpec(
@@ -686,6 +690,28 @@ def _cases_for_profile() -> list[AbCase]:
             contract_ids=(
                 "output.legacy.mdout",
                 "input.topology.gb.hybrid_activation",
+            ),
+            assertion_ids=(
+                "mdout_deterministic_equivalence",
+                "input_semantic_equivalence",
+            ),
+            normal_step_limit=1,
+            normal_interval=1,
+            normal_dt=0.0,
+            input_behavior_only=True,
+        ),
+        AbCase(
+            name="normal_gb_native_nonzero",
+            fixture_case=FOCUSED_GB_NATIVE_FIXTURE,
+            legacy_subdir="generated_legacy",
+            bundled_subdir="generated_bundled",
+            mode="normal",
+            vds=False,
+            statistical_md=False,
+            restart_load_policy="structural",
+            contract_ids=(
+                "output.legacy.mdout",
+                "input.topology.gb",
             ),
             assertion_ids=(
                 "mdout_deterministic_equivalence",
@@ -3196,6 +3222,8 @@ def _prepare_case_pair(
             return _prepare_focused_residue_com_res_pair(case_root)
         if case.fixture_case == FOCUSED_GB_HYBRID_FIXTURE:
             return _prepare_focused_gb_hybrid_pair(case_root)
+        if case.fixture_case == FOCUSED_GB_NATIVE_FIXTURE:
+            return _prepare_focused_gb_native_pair(case_root)
         if case.fixture_case == FOCUSED_IMPROPER_NATIVE_FIXTURE:
             return _prepare_focused_improper_native_pair(case_root)
         if case.fixture_case == FOCUSED_LJ_SOFT_CORE_FIXTURE:
@@ -4482,7 +4510,7 @@ def _prepare_focused_gb_hybrid_pair(case_root: Path) -> tuple[Path, Path]:
     for path in (legacy_source, legacy_dir, converted_dir, bundled_dir):
         if path.exists():
             shutil.rmtree(path)
-    _write_focused_gb_hybrid_input(legacy_source)
+    _write_focused_gb_input(legacy_source)
     shutil.copytree(legacy_source, legacy_dir)
     _convert_legacy_case(legacy_source, converted_dir)
     shutil.copytree(converted_dir / "bundle", bundled_dir)
@@ -4507,7 +4535,7 @@ def _prepare_focused_gb_hybrid_pair(case_root: Path) -> tuple[Path, Path]:
     return legacy_dir, bundled_dir
 
 
-def _write_focused_gb_hybrid_input(case_dir: Path) -> None:
+def _write_focused_gb_input(case_dir: Path) -> None:
     case_dir.mkdir(parents=True, exist_ok=True)
     (case_dir / "mass.txt").write_text("2\n12.0\n12.0\n", encoding="utf-8")
     (case_dir / "charge.txt").write_text("2\n1.0\n-1.0\n", encoding="utf-8")
@@ -4593,6 +4621,71 @@ def _validate_focused_gb_hybrid_routes(
     bundled_payload = (bundled_dir / expected_path).read_bytes()
     if legacy_payload != bundled_payload:
         raise AssertionError("focused GB sidecar payload differs from legacy")
+
+
+def _prepare_focused_gb_native_pair(case_root: Path) -> tuple[Path, Path]:
+    legacy_source = case_root / "focused_gb_native_source"
+    legacy_dir = case_root / "legacy"
+    converted_dir = case_root / "converted_focused_gb_native_bundle"
+    bundled_dir = case_root / "bundled"
+    for path in (legacy_source, legacy_dir, converted_dir, bundled_dir):
+        if path.exists():
+            shutil.rmtree(path)
+    _write_focused_gb_input(legacy_source)
+    shutil.copytree(legacy_source, legacy_dir)
+    _convert_legacy_case(legacy_source, converted_dir)
+    shutil.copytree(converted_dir / "bundle", bundled_dir)
+
+    topology_path = bundled_dir / "topology.spgt.h5"
+    sidecar_root = "/parameters/sponge/files/legacy_sidecars"
+    with h5py.File(topology_path, "r+") as topology:
+        if sidecar_root in topology:
+            del topology[sidecar_root]
+    sidecar_dir = bundled_dir / "legacy_sidecars"
+    if sidecar_dir.exists():
+        shutil.rmtree(sidecar_dir)
+
+    _validate_focused_gb_native_routes(legacy_dir, bundled_dir)
+    return legacy_dir, bundled_dir
+
+
+def _validate_focused_gb_native_routes(
+    legacy_dir: Path, bundled_dir: Path
+) -> None:
+    legacy_mdin = (legacy_dir / "mdin.spg.toml").read_text(encoding="utf-8")
+    bundled_mdin = (bundled_dir / "mdin.bundled.spg.toml").read_text(
+        encoding="utf-8"
+    )
+    if not _has_key_line(legacy_mdin, "gb_in_file"):
+        raise AssertionError("focused native GB legacy route lost gb_in_file")
+    if _has_key_line(bundled_mdin, "gb_in_file"):
+        raise AssertionError(
+            "focused native GB bundled mdin retained gb_in_file"
+        )
+
+    topology_path = bundled_dir / "topology.spgt.h5"
+    topology_paths = _h5_paths(topology_path)
+    if "/forcefield/gb/params" not in topology_paths:
+        raise AssertionError("focused native GB topology lost typed parameters")
+    if any(
+        path.startswith("/parameters/sponge/files/legacy_sidecars")
+        for path in topology_paths
+    ):
+        raise AssertionError(
+            "focused native GB topology retained sidecar bindings"
+        )
+    if (bundled_dir / "legacy_sidecars").exists():
+        raise AssertionError("focused native GB bundle retained sidecar files")
+
+    with h5py.File(topology_path, "r") as topology:
+        params = topology["/forcefield/gb/params"][...].tolist()
+    if len(params) != 2 or any(
+        len(row) != 2
+        or not math.isclose(row[0], 1.5, rel_tol=0.0, abs_tol=1.0e-7)
+        or not math.isclose(row[1], 0.8, rel_tol=0.0, abs_tol=1.0e-7)
+        for row in params
+    ):
+        raise AssertionError(f"focused native GB parameters changed: {params}")
 
 
 def _prepare_focused_improper_native_pair(
@@ -6418,7 +6511,10 @@ def _compare_input_semantics(
                     replica_result["oracle"] = (
                         _compare_focused_residue_com_res_virial(case, run)
                     )
-            elif spec.contract_id == "input.topology.gb.hybrid_activation":
+            elif spec.contract_id in {
+                "input.topology.gb",
+                "input.topology.gb.hybrid_activation",
+            }:
                 replica_result["force"] = _compare_focused_gb_forces(case, run)
             elif spec.contract_id == "input.topology.improper.native_runtime":
                 replica_result["force"] = _compare_focused_improper_forces(
@@ -7275,26 +7371,48 @@ def _compare_focused_gb_forces(case: AbCase, run: AbRun) -> dict[str, object]:
         ("legacy", run.legacy_dir),
         ("bundled", run.bundled_dir),
     ):
+        rows = _read_mdout(directory / "mdout.txt")["rows"]
         branch_forces = _read_native_float32_file(
             directory / "output" / "legacy.frc"
         )
         branches[branch] = _assert_gb_force_oracle(
-            f"{case.name} {branch}", branch_forces
+            f"{case.name} {branch}", rows, branch_forces
         )
         forces[branch] = branch_forces
     cross_branch = _assert_nontrivial_equivalent_forces(
         f"{case.name} GB force", forces["legacy"], forces["bundled"]
     )
     return {
-        "route": "native_gb_state_plus_h5_sidecar_activation",
+        "route": (
+            "pure_native_gb_state"
+            if case.name == "normal_gb_native_nonzero"
+            else "native_gb_state_plus_h5_sidecar_activation"
+        ),
         "branches": branches,
         "cross_branch_force": cross_branch,
     }
 
 
 def _assert_gb_force_oracle(
-    label: str, forces: Sequence[float]
+    label: str,
+    rows: Sequence[dict[str, float]],
+    forces: Sequence[float],
 ) -> dict[str, object]:
+    if len(rows) != 1:
+        raise AssertionError(f"{label} expected one mdout row, got {len(rows)}")
+    row = rows[0]
+    for observable, expected_value in (
+        ("Coulomb", -0.50),
+        ("gb", -0.25),
+        ("potential", -0.75),
+    ):
+        actual = row.get(observable, math.nan)
+        if not math.isclose(
+            actual, expected_value, rel_tol=0.0, abs_tol=1.0e-6
+        ):
+            raise AssertionError(
+                f"{label} {observable} oracle mismatch: {actual}"
+            )
     expected = (
         0.10313021,
         0.0,
@@ -7321,6 +7439,9 @@ def _assert_gb_force_oracle(
     ):
         raise AssertionError(f"{label} retained the Coulomb-only force")
     return {
+        "Coulomb": row["Coulomb"],
+        "gb": row["gb"],
+        "potential": row["potential"],
         "maximum_abs_force": maximum_abs_force,
         "coulomb_only_maximum": coulomb_only_maximum,
         "gb_force_contribution_required": True,

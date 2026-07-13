@@ -868,7 +868,33 @@ Acceptance:
 - Registry, manifest, real CPU A/B, Ruff, clang-format, and diff checks pass,
   followed by exactly one PR-scoped commit.
 
-## 29. Artifacts and Temporary-Space Policy
+## 29. PR 32: Pure Native GB Behavior Gate
+
+Close the remaining pure typed generalized-Born input contract without using a
+legacy activation sidecar.
+
+- Retain PR 23's native-state plus `gb_in_file` sidecar-activation case as a
+  separate compatibility route.
+- Add a second deterministic two-atom case whose bundled branch contains
+  `/forcefield/gb/params` but no `gb_in_file` command, H5 sidecar table, or
+  `legacy_sidecars` directory. The legacy branch continues to consume the same
+  radii and scale factors through `gb_in_file`.
+- Initialize GB in non-periodic mode when either the legacy command exists or
+  `Xponge::system.generalized_born` already contains native parameters.
+- Require complete mdout equality, `Coulomb=-0.50`, `gb=-0.25`,
+  `potential=-0.75`, and the complete six-value force oracle with maximum
+  magnitude `0.10313020646572113`. Reject zero GB output and the Coulomb-only
+  force fingerprint.
+
+Acceptance:
+
+- Both the pure typed and hybrid GB cases pass real CPU legacy/bundled A/B.
+- The pure typed route cannot satisfy the gate through a retained text binding
+  or sidecar payload.
+- Registry, manifest, related native-reader CTest, full smoke, Ruff,
+  clang-format, and diff checks pass, followed by exactly one PR-scoped commit.
+
+## 30. Artifacts and Temporary-Space Policy
 
 - Use `SPONGE_BUNDLED_IO_AB_RUN_ROOT` for all heavy runs.
 - Put production artifacts on the workspace filesystem rather than `/tmp`.
@@ -878,7 +904,7 @@ Acceptance:
 - Record artifact byte counts and enforce a configurable per-case quota.
 - Cleanup must only remove directories created by the current gate run.
 
-## 30. PR Completion Log
+## 31. PR Completion Log
 
 Append one row immediately after completing and committing each PR.
 
@@ -917,3 +943,4 @@ Append one row immediately after completing and committing each PR.
 | PR 29: VDS complete-prefix repair behavior gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; real `normal_vds_complete_prefix_noop` CPU A/B; `SPONGE_H5_ENABLE_RUNTIME_SMOKE=1 ctest --test-dir build-dev-cpu-h5-2 --output-on-failure -R '^test_h5_vds_terminal_resume_smoke$'`; Ruff; `git diff --check` | Legacy-input and bundled-input production routes each retain five deterministic frames in two complete shards with `repair_status=not_applied` and zero repaired shards. The same gate runs a real HighFive helper that injects terminal-shard finalize failure and verifies one-shard complete-prefix repair with rewritten completion metadata. Five metadata mutations are rejected. Cross-process reopen/append remains unsupported. Registry coverage advances to 71 supported, 11 deferred, and 1 unsupported contract. |
 | PR 30: Residue topology-sidecar runtime behavior gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; real `normal_residue_sidecar_pbc_mapping` CPU A/B; Ruff; `git diff --check` | An isolated H5 `residue_in_file` topology-sidecar route matches the legacy `[2,2]` residue partition through runtime domain state, non-zero `bond=2.0`, the complete 12-value force payload with maximum magnitude `4.0`, and the cross-PBC whole-molecule position fingerprint `(19,21,25,28)`. Partition and mapping mutations are rejected. Typed `/atoms/residue_index` remains deferred because it is not materialized into `Xponge::system.residues`. Registry coverage advances to 72 supported, 11 deferred, and 1 unsupported contract. |
 | PR 31: Residue membership/COM-virial follow-up gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract` (119 tests); 79-test production manifest; real `normal_residue_sidecar_pbc_mapping` and `normal_residue_sidecar_com_res_virial` CPU A/B; SPONGE rebuild; Ruff; clang-format; `git diff --check` | PR 30's residue-count, runtime-partition, force, and whole-molecule PBC mapping gate remains active. The second isolated `[2,2]` residue-sidecar case drives `com_res` restraint virial behavior with equivalent `bond=2.0`, `restrain=2.0`, `pressure=0.04`, `Pxx=0.11`, and 12-value force output. A same-count `[1,3]` control preserves energy and force but changes pressure/Pxx to `-11.53/-34.60`, proving membership-sensitive consumption. CPU atom-to-group maps now own their storage instead of aliasing freed host buffers. Typed residue input remains deferred. Registry coverage stays at 72 supported, 11 deferred, and 1 unsupported contract. |
+| PR 32: Pure native GB behavior gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract` (120 tests); 80-test production manifest; real `normal_gb_native_nonzero` and `normal_gb_hybrid_nonzero` CPU A/B; two native topology reader CTests; SPONGE rebuild; Ruff; changed-line clang-format; `git diff --check` | The pure bundled branch consumes `/forcefield/gb/params` with no `gb_in_file`, sidecar table, or sidecar files. Both routes match `Coulomb=-0.50`, `gb=-0.25`, `potential=-0.75`, the complete six-value force oracle, and all mdout columns. Non-periodic GB initialization now recognizes preloaded native state while preserving the hybrid activation route. Registry coverage advances to 73 supported, 10 deferred, and 1 unsupported contract. |

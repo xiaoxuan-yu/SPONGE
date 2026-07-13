@@ -40,6 +40,7 @@ from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
     FOCUSED_EDIP_FIXTURE,
     FOCUSED_EXCLUSIONS_FIXTURE,
     FOCUSED_GB_HYBRID_FIXTURE,
+    FOCUSED_GB_NATIVE_FIXTURE,
     FOCUSED_IMPROPER_NATIVE_FIXTURE,
     FOCUSED_LJ_SOFT_CORE_FIXTURE,
     FOCUSED_RESIDUE_COM_RES_FIXTURE,
@@ -276,6 +277,7 @@ def test_ab_production_harness_has_executable_contract_coverage():
         "normal_residue_sidecar_pbc_mapping",
         "normal_residue_sidecar_com_res_virial",
         "normal_gb_hybrid_nonzero",
+        "normal_gb_native_nonzero",
         "normal_improper_native_nonzero",
         "normal_lj_soft_core_nonzero",
         "normal_virtual_atoms_all_types",
@@ -1158,12 +1160,32 @@ def test_focused_gb_case_requires_native_state_and_sidecar_activation_behavior()
     assert hybrid.status == "supported"
     assert hybrid.case_ids == (case.name,)
     assert hybrid.assertion_ids == ("input_semantic_equivalence",)
-    native = contracts["input.topology.gb"]
-    assert native.status == "deferred"
-    assert (
-        "only calls GB initialization when gb_in_file exists" in native.reason
+
+
+def test_focused_gb_native_case_requires_pure_typed_nonzero_behavior():
+    contracts = load_contract_registry()
+    case = next(
+        case
+        for case in _cases_for_profile()
+        if case.name == "normal_gb_native_nonzero"
     )
-    assert "tracked separately" in native.reason
+    spec = INPUT_SEMANTIC_SPECS_BY_CASE[case.name]
+
+    assert case.fixture_case == FOCUSED_GB_NATIVE_FIXTURE
+    assert case.statistical_md is False
+    assert case.normal_step_limit == 1
+    assert case.normal_dt == 0.0
+    assert case.input_behavior_only is True
+    assert case.contract_ids == (
+        "output.legacy.mdout",
+        "input.topology.gb",
+    )
+    assert spec == (InputSemanticSpec("input.topology.gb", ("gb",), 1.0e-6),)
+    native = contracts["input.topology.gb"]
+    assert native.status == "supported"
+    assert native.case_ids == (case.name,)
+    assert native.assertion_ids == ("input_semantic_equivalence",)
+    assert native.reason == ""
 
 
 def test_focused_gb_gate_rejects_activation_only_or_coulomb_only_behavior():
@@ -1180,7 +1202,15 @@ def test_focused_gb_gate_rejects_activation_only_or_coulomb_only_behavior():
         )
     with pytest.raises(AssertionError, match=r"GB\+Coulomb force oracle"):
         _assert_gb_force_oracle(
-            "GB mutation", (0.25, 0.0, 0.0, -0.25, 0.0, 0.0)
+            "GB mutation",
+            [{"Coulomb": -0.50, "gb": -0.25, "potential": -0.75}],
+            (0.25, 0.0, 0.0, -0.25, 0.0, 0.0),
+        )
+    with pytest.raises(AssertionError, match="gb oracle mismatch"):
+        _assert_gb_force_oracle(
+            "GB mutation",
+            [{"Coulomb": -0.50, "gb": 0.0, "potential": -0.50}],
+            (0.10313021, 0.0, 0.0, -0.10313021, 0.0, 0.0),
         )
 
 
