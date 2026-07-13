@@ -50,6 +50,8 @@ FIXTURE_ROOT = REPO_ROOT / "tests" / "h5_bundle" / "fixtures" / "input_matrix"
 XPONGE_DEV_ROOT = REPO_ROOT.parent / "XPONGE"
 SITS_FF19SB_CMAP_FIXTURE = "sits_ff19sb_cmap_peptide"
 FOCUSED_CORE_TOPOLOGY_FIXTURE = "focused_core_topology_two_atom"
+FOCUSED_NB14_SCALED_FIXTURE = "focused_nb14_scaled_two_atom"
+FOCUSED_NB14_EXTRA_FIXTURE = "focused_nb14_extra_two_atom"
 FOCUSED_EDIP_FIXTURE = "focused_edip_two_atom"
 FOCUSED_SW_SIDECAR_FIXTURE = "focused_sw_sidecar_three_atom"
 FOCUSED_SW_TYPED_FIXTURE = "focused_sw_typed_three_atom"
@@ -254,6 +256,16 @@ INPUT_SEMANTIC_SPECS_BY_CASE = {
         InputSemanticSpec("input.topology.charge", ("Coulomb",), 1.0e-6),
         InputSemanticSpec("input.topology.lj", ("LJ",), 1.0e-6),
     ),
+    "normal_nb14_scaled_nonzero": (
+        InputSemanticSpec(
+            "input.topology.nb14", ("nb14_LJ", "nb14_EE"), 1.0e-6
+        ),
+    ),
+    "normal_nb14_extra_nonzero": (
+        InputSemanticSpec(
+            "input.topology.nb14_extra", ("nb14_LJ", "nb14_EE"), 1.0e-6
+        ),
+    ),
     "normal_sits_ff19sb_cmap_peptide": (
         InputSemanticSpec("input.topology.cmap", ("cmap",), 1.0e-6),
     ),
@@ -388,7 +400,9 @@ INPUT_SEMANTIC_SPECS_BY_CASE = {
 }
 
 RERUN_INPUT_SEMANTIC_SPECS = (
-    InputSemanticSpec("input.topology.nb14", ("nb14_LJ", "nb14_EE"), 1.0e-6),
+    InputSemanticSpec(
+        "input.topology.nb14_extra", ("nb14_LJ", "nb14_EE"), 1.0e-6
+    ),
     InputSemanticSpec("input.topology.bond", ("bond",), 1.0e-6),
     InputSemanticSpec("input.topology.angle", ("angle",), 1.0e-6),
     InputSemanticSpec("input.topology.urey_bradley", ("urey_bradley",), 1.0e-6),
@@ -534,6 +548,50 @@ def _cases_for_profile() -> list[AbCase]:
                 "input.topology.mass",
                 "input.topology.charge",
                 "input.topology.lj",
+            ),
+            assertion_ids=(
+                "mdout_deterministic_equivalence",
+                "input_semantic_equivalence",
+            ),
+            normal_step_limit=1,
+            normal_interval=1,
+            normal_dt=0.0,
+            input_behavior_only=True,
+        ),
+        AbCase(
+            name="normal_nb14_scaled_nonzero",
+            fixture_case=FOCUSED_NB14_SCALED_FIXTURE,
+            legacy_subdir="generated_legacy",
+            bundled_subdir="generated_bundled",
+            mode="normal",
+            vds=False,
+            statistical_md=False,
+            restart_load_policy="structural",
+            contract_ids=(
+                "output.legacy.mdout",
+                "input.topology.nb14",
+            ),
+            assertion_ids=(
+                "mdout_deterministic_equivalence",
+                "input_semantic_equivalence",
+            ),
+            normal_step_limit=1,
+            normal_interval=1,
+            normal_dt=0.0,
+            input_behavior_only=True,
+        ),
+        AbCase(
+            name="normal_nb14_extra_nonzero",
+            fixture_case=FOCUSED_NB14_EXTRA_FIXTURE,
+            legacy_subdir="generated_legacy",
+            bundled_subdir="generated_bundled",
+            mode="normal",
+            vds=False,
+            statistical_md=False,
+            restart_load_policy="structural",
+            contract_ids=(
+                "output.legacy.mdout",
+                "input.topology.nb14_extra",
             ),
             assertion_ids=(
                 "mdout_deterministic_equivalence",
@@ -1244,7 +1302,7 @@ def _cases_for_profile() -> list[AbCase]:
                 "input.full_contract.pure_native",
                 "input.restart_load.structural",
                 "input.manybody.reaxff",
-                "input.topology.nb14",
+                "input.topology.nb14_extra",
                 "input.topology.bond",
                 "input.topology.angle",
                 "input.topology.urey_bradley",
@@ -1282,7 +1340,7 @@ def _cases_for_profile() -> list[AbCase]:
                 "input.full_contract.pure_native",
                 "input.restart_load.structural",
                 "input.manybody.reaxff",
-                "input.topology.nb14",
+                "input.topology.nb14_extra",
                 "input.topology.bond",
                 "input.topology.angle",
                 "input.topology.urey_bradley",
@@ -1320,7 +1378,7 @@ def _cases_for_profile() -> list[AbCase]:
                 "input.full_contract.sidecar",
                 "input.restart_load.structural",
                 "input.manybody.reaxff",
-                "input.topology.nb14",
+                "input.topology.nb14_extra",
                 "input.topology.bond",
                 "input.topology.angle",
                 "input.topology.urey_bradley",
@@ -1358,7 +1416,7 @@ def _cases_for_profile() -> list[AbCase]:
                 "input.full_contract.sidecar",
                 "input.restart_load.structural",
                 "input.manybody.reaxff",
-                "input.topology.nb14",
+                "input.topology.nb14_extra",
                 "input.topology.bond",
                 "input.topology.angle",
                 "input.topology.urey_bradley",
@@ -1688,6 +1746,10 @@ def _failure_cases() -> list[AbCase]:
         **shared,
         "contract_ids": ("failure.h5_metadata",),
     }
+    nb14_metadata_shared = {
+        **metadata_shared,
+        "bundled_subdir": "bundled_input/bundle",
+    }
     restart_owner_shared = {
         key: value
         for key, value in shared.items()
@@ -1847,6 +1909,29 @@ def _failure_cases() -> list[AbCase]:
                 "unsupported.topology.v999",
             ),
             **metadata_shared,
+        ),
+        AbCase(
+            name="failure_h5_nb14_dual_root",
+            failure_mutation="h5_nb14_dual_root",
+            failure_branches=("bundled",),
+            expected_error_category="spongeErrorBadFileFormat",
+            expected_diagnostic_tokens=(
+                "Materialize_H5_Native_NB14_Extra",
+                "cannot define both /forcefield/nb14 and "
+                "/forcefield/nb14_extra",
+            ),
+            **nb14_metadata_shared,
+        ),
+        AbCase(
+            name="failure_h5_nb14_extra_param_shape",
+            failure_mutation="h5_nb14_extra_param_shape",
+            failure_branches=("bundled",),
+            expected_error_category="spongeErrorBadFileFormat",
+            expected_diagnostic_tokens=(
+                "Materialize_H5_Native_NB14_Extra",
+                "/forcefield/nb14_extra/params must have shape [n,3]",
+            ),
+            **nb14_metadata_shared,
         ),
         AbCase(
             name="failure_restart_dynamic_without_owner",
@@ -3598,6 +3683,10 @@ def _prepare_case_pair(
     if case.mode in {"normal", "chunk_boundary"}:
         if case.fixture_case == FOCUSED_CORE_TOPOLOGY_FIXTURE:
             return _prepare_focused_core_topology_pair(case_root)
+        if case.fixture_case == FOCUSED_NB14_SCALED_FIXTURE:
+            return _prepare_focused_nb14_pair(case_root, "nb14_in_file")
+        if case.fixture_case == FOCUSED_NB14_EXTRA_FIXTURE:
+            return _prepare_focused_nb14_pair(case_root, "nb14_extra_in_file")
         if case.fixture_case == SITS_FF19SB_CMAP_FIXTURE:
             return _prepare_sits_ff19sb_cmap_pair(case_root, replica_seed)
         if case.fixture_case == FOCUSED_SITS_NK_TYPED_RESTART_FIXTURE:
@@ -3670,12 +3759,46 @@ def _prepare_case_pair(
         _prepare_unrestricted_qc_inputs(legacy_dir, bundled_dir)
     if "input.qc.type" in case.contract_ids:
         _prepare_pure_typed_qc_input(bundled_dir)
+    _prepare_full_contract_nb14_owner(case, bundled_dir)
     _validate_full_contract_input(case, bundled_dir)
     if "input.restart_load.absent" in case.contract_ids:
         _prepare_restart_absent_inputs(legacy_dir, bundled_dir)
         _validate_restart_absent_routes(legacy_dir, bundled_dir)
     _prepare_rerun_trajectory_variant(case, bundled_dir)
     return legacy_dir, bundled_dir
+
+
+def _prepare_full_contract_nb14_owner(case: AbCase, bundled_dir: Path) -> None:
+    if case.fixture_case != "full_contract_rerun":
+        return
+    topology_path = bundled_dir / "topology.spgt.h5"
+    sidecar_root = "/parameters/sponge/files/legacy_sidecars"
+    typed_root = "/forcefield/nb14_extra"
+    with h5py.File(topology_path, "r+") as topology:
+        typed_owner = typed_root in topology
+        sidecar_owner = False
+        if sidecar_root in topology:
+            sidecar_keys = topology[f"{sidecar_root}/key"].asstr()[...]
+            sidecar_owner = "nb14_extra_in_file" in sidecar_keys
+
+        if "input.full_contract.pure_native" in case.contract_ids:
+            if not typed_owner or sidecar_owner:
+                raise AssertionError(
+                    f"{case.name} pure full-contract fixture requires only "
+                    "the typed nb14_extra owner"
+                )
+            return
+        if (
+            "input.full_contract.sidecar" not in case.contract_ids
+            and not sidecar_owner
+        ):
+            return
+        if not typed_owner or not sidecar_owner:
+            raise AssertionError(
+                f"{case.name} sidecar source fixture must contain both NB14 "
+                "representations before owner selection"
+            )
+        del topology[typed_root]
 
 
 def _prepare_unrestricted_qc_inputs(
@@ -4029,6 +4152,123 @@ def _prepare_focused_core_topology_pair(
         shutil.rmtree(legacy_sidecars)
     _validate_focused_core_topology_routes(legacy_dir, bundled_dir)
     return legacy_dir, bundled_dir
+
+
+def _prepare_focused_nb14_pair(
+    case_root: Path, legacy_key: str
+) -> tuple[Path, Path]:
+    if legacy_key not in {"nb14_in_file", "nb14_extra_in_file"}:
+        raise AssertionError(f"unsupported focused NB14 key: {legacy_key}")
+    suffix = "scaled" if legacy_key == "nb14_in_file" else "extra"
+    legacy_source = case_root / f"focused_nb14_{suffix}_source"
+    legacy_dir = case_root / "legacy"
+    converted_dir = case_root / f"converted_focused_nb14_{suffix}_bundle"
+    bundled_dir = case_root / "bundled"
+    for path in (legacy_source, legacy_dir, converted_dir, bundled_dir):
+        if path.exists():
+            shutil.rmtree(path)
+    _write_focused_nb14_input(legacy_source, legacy_key)
+    shutil.copytree(legacy_source, legacy_dir)
+    _convert_legacy_case(legacy_source, converted_dir)
+    shutil.copytree(converted_dir / "bundle", bundled_dir)
+
+    topology_path = bundled_dir / "topology.spgt.h5"
+    with h5py.File(topology_path, "r+") as topology:
+        sidecar_table = "/parameters/sponge/files/legacy_sidecars"
+        if sidecar_table in topology:
+            del topology[sidecar_table]
+    legacy_sidecars = bundled_dir / "legacy_sidecars"
+    if legacy_sidecars.exists():
+        shutil.rmtree(legacy_sidecars)
+    _validate_focused_nb14_routes(legacy_dir, bundled_dir, legacy_key)
+    return legacy_dir, bundled_dir
+
+
+def _write_focused_nb14_input(case_dir: Path, legacy_key: str) -> None:
+    case_dir.mkdir(parents=True, exist_ok=True)
+    (case_dir / "mass.txt").write_text("2\n12.0\n12.0\n", encoding="utf-8")
+    (case_dir / "charge.txt").write_text("2\n1.0\n-1.0\n", encoding="utf-8")
+    (case_dir / "coordinate.txt").write_text(
+        "2 0.0\n0.0 0.0 0.0\n2.0 0.0 0.0\n1000.0 1000.0 1000.0\n90.0 90.0 90.0\n",
+        encoding="utf-8",
+    )
+    (case_dir / "velocity.txt").write_text(
+        "2\n0.0 0.0 0.0\n0.0 0.0 0.0\n", encoding="utf-8"
+    )
+    if legacy_key == "nb14_in_file":
+        lj_payload = "2 1\n2048.0\n128.0\n0\n0\n"
+        nb14_name = "nb14.txt"
+        nb14_payload = "1\n0 1 0.5 0.5\n"
+    else:
+        lj_payload = "2 1\n4096.0\n128.0\n0\n0\n"
+        nb14_name = "nb14_extra.txt"
+        nb14_payload = "1\n0 1 1.0 2.0 0.5\n"
+    (case_dir / "lj.txt").write_text(lj_payload, encoding="utf-8")
+    (case_dir / nb14_name).write_text(nb14_payload, encoding="utf-8")
+    (case_dir / "mdin.spg.toml").write_text(
+        'md_name = "bundled io ab focused NB14"\n'
+        'mode = "nve"\n'
+        "pbc = false\n"
+        "step_limit = 1\n"
+        "dt = 0.0\n"
+        "cutoff = 8.0\n"
+        'mass_in_file = "mass.txt"\n'
+        'charge_in_file = "charge.txt"\n'
+        'coordinate_in_file = "coordinate.txt"\n'
+        'velocity_in_file = "velocity.txt"\n'
+        'LJ_in_file = "lj.txt"\n'
+        f'{legacy_key} = "{nb14_name}"\n'
+        "force_whole_output = true\n"
+        "print_zeroth_frame = 0\n"
+        "write_mdout_interval = 1\n"
+        "write_information_interval = 1\n",
+        encoding="utf-8",
+    )
+
+
+def _validate_focused_nb14_routes(
+    legacy_dir: Path, bundled_dir: Path, legacy_key: str
+) -> None:
+    legacy_mdin = (legacy_dir / "mdin.spg.toml").read_text(encoding="utf-8")
+    bundled_mdin = (bundled_dir / "mdin.bundled.spg.toml").read_text(
+        encoding="utf-8"
+    )
+    if not _has_key_line(legacy_mdin, legacy_key):
+        raise AssertionError(f"focused NB14 legacy route lost {legacy_key}")
+    if _has_key_line(bundled_mdin, legacy_key):
+        raise AssertionError(
+            f"focused NB14 bundled route retained {legacy_key}"
+        )
+    if (bundled_dir / "legacy_sidecars").exists():
+        raise AssertionError("focused NB14 bundled route retained sidecars")
+
+    root = (
+        "/forcefield/nb14"
+        if legacy_key == "nb14_in_file"
+        else "/forcefield/nb14_extra"
+    )
+    other_root = (
+        "/forcefield/nb14_extra"
+        if root == "/forcefield/nb14"
+        else "/forcefield/nb14"
+    )
+    topology_path = bundled_dir / "topology.spgt.h5"
+    with h5py.File(topology_path, "r") as topology:
+        if other_root in topology:
+            raise AssertionError(
+                f"focused NB14 retained alternate root {other_root}"
+            )
+        atoms = topology[f"{root}/atoms"][...].tolist()
+        params = topology[f"{root}/params"][...].tolist()
+        if "/parameters/sponge/files/legacy_sidecars" in topology:
+            raise AssertionError("focused NB14 topology retained sidecar table")
+    if atoms != [[0, 1]]:
+        raise AssertionError(f"focused NB14 atoms changed: {atoms}")
+    expected_params = (
+        [[0.5, 0.5]] if legacy_key == "nb14_in_file" else [[1.0, 2.0, 0.5]]
+    )
+    if params != expected_params:
+        raise AssertionError(f"focused NB14 params changed: {params}")
 
 
 def _write_focused_core_topology_input(case_dir: Path) -> None:
@@ -7576,6 +7816,8 @@ def _mutate_failure_mdin(case: AbCase, mdin_path: Path, branch: str) -> None:
         "h5_topology_mass_shape",
         "h5_topology_mass_dtype",
         "h5_topology_schema_version",
+        "h5_nb14_dual_root",
+        "h5_nb14_extra_param_shape",
         "restart_dynamic_without_owner",
         "restart_protocol_without_owner",
         "restart_full_without_owner",
@@ -7603,6 +7845,8 @@ def _mutate_failure_h5(case: AbCase, case_dir: Path, branch: str) -> None:
         "h5_topology_mass_shape",
         "h5_topology_mass_dtype",
         "h5_topology_schema_version",
+        "h5_nb14_dual_root",
+        "h5_nb14_extra_param_shape",
     }
     if (
         mutation not in sidecar_mutations | metadata_mutations
@@ -7623,6 +7867,21 @@ def _mutate_failure_h5(case: AbCase, case_dir: Path, branch: str) -> None:
                     topology,
                     "/schema/version",
                     "unsupported.topology.v999",
+                )
+                return
+            if mutation == "h5_nb14_dual_root":
+                canonical = topology.create_group("/forcefield/nb14")
+                canonical.create_dataset("atoms", data=[[0, 1]], dtype="i4")
+                canonical.create_dataset(
+                    "params", data=[[12.0, 6.0, 0.5]], dtype="f4"
+                )
+                return
+            if mutation == "h5_nb14_extra_param_shape":
+                del topology["/forcefield/nb14_extra/params"]
+                topology.create_dataset(
+                    "/forcefield/nb14_extra/params",
+                    data=[[1.0, 0.5]],
+                    dtype="f4",
                 )
                 return
             del topology["/atoms/mass"]
@@ -7943,6 +8202,11 @@ def _compare_outputs(
                 },
             )
         )
+    if {
+        "input.topology.nb14",
+        "input.topology.nb14_extra",
+    }.intersection(case.contract_ids):
+        comparison["nb14"] = _assert_nb14_oracle(case, runs[0])
     if "constraint_geometry_equivalence" in case.assertion_ids:
         constraint = _compare_focused_constraint_projection(case, runs[0])
         comparison["constraint"] = constraint
@@ -8049,6 +8313,125 @@ def _compare_sits_inactive_configuration(run: AbRun) -> dict[str, object]:
         "mode_present": False,
         "module_initialized": False,
         "materialization": "exact_legacy_text",
+    }
+
+
+def _assert_nb14_oracle(case: AbCase, run: AbRun) -> dict[str, object]:
+    expected_by_case = {
+        "normal_nb14_scaled_nonzero": {
+            "nb14_LJ": -0.75,
+            "nb14_EE": -0.25,
+            "force": (4.875, 0.0, 0.0, -4.875, 0.0, 0.0),
+        },
+        "normal_nb14_extra_nonzero": {
+            "nb14_LJ": -0.03,
+            "nb14_EE": -0.25,
+            "force": (
+                0.46728515625,
+                0.0,
+                0.0,
+                -0.46728515625,
+                0.0,
+                0.0,
+            ),
+        },
+    }
+    expected = expected_by_case.get(case.name)
+    if expected is None:
+        return {"full_contract": "covered_by_input_semantic_equivalence"}
+
+    for branch, case_dir in (
+        ("legacy", run.legacy_dir),
+        ("bundled", run.bundled_dir),
+    ):
+        mdout = _read_mdout(case_dir / "mdout.txt")
+        if len(mdout["rows"]) != 1:
+            raise AssertionError(
+                f"{case.name} {branch} NB14 oracle expected one mdout row"
+            )
+        row = mdout["rows"][0]
+        for column in ("nb14_LJ", "nb14_EE"):
+            _assert_numeric_sequences_close(
+                f"{case.name} {branch} {column} oracle",
+                (expected[column],),
+                (row[column],),
+                relative_tolerance=0.0,
+                absolute_tolerance=1.0e-7,
+            )
+        force = _read_native_float32_file(case_dir / "output" / "legacy.frc")
+        _assert_numeric_sequences_close(
+            f"{case.name} {branch} force oracle",
+            expected["force"],
+            force,
+            relative_tolerance=0.0,
+            absolute_tolerance=1.0e-7,
+        )
+
+    control_dir = run.bundled_dir.parent / "bundled_nb14_zero_lj_control"
+    if control_dir.exists():
+        shutil.rmtree(control_dir)
+    shutil.copytree(run.bundled_dir, control_dir)
+    for path in (
+        control_dir / "output",
+        control_dir / ".sponge_h5_native_manybody",
+    ):
+        if path.exists():
+            shutil.rmtree(path)
+    (control_dir / "output").mkdir(parents=True)
+    for file_name in ("mdout.txt", "mdinfo.txt", "run.stdout", "run.stderr"):
+        path = control_dir / file_name
+        if path.exists():
+            path.unlink()
+
+    root = (
+        "/forcefield/nb14"
+        if case.name == "normal_nb14_scaled_nonzero"
+        else "/forcefield/nb14_extra"
+    )
+    with h5py.File(control_dir / "topology.spgt.h5", "r+") as topology:
+        topology[f"{root}/params"][0, 0] = 0.0
+        if root.endswith("nb14_extra"):
+            topology[f"{root}/params"][0, 1] = 0.0
+
+    outcome = _run_sponge_process(control_dir, _mdin_name(control_dir))
+    if outcome.returncode != 0:
+        raise AssertionError(
+            f"{case.name} zero-LJ control failed with code {outcome.returncode}\n"
+            f"{outcome.stdout}\n{outcome.stderr}"
+        )
+    control_rows = _read_mdout(control_dir / "mdout.txt")["rows"]
+    if len(control_rows) != 1:
+        raise AssertionError(f"{case.name} zero-LJ control expected one row")
+    _assert_numeric_sequences_close(
+        f"{case.name} zero-LJ energy",
+        (0.0, expected["nb14_EE"]),
+        (control_rows[0]["nb14_LJ"], control_rows[0]["nb14_EE"]),
+        relative_tolerance=0.0,
+        absolute_tolerance=1.0e-7,
+    )
+    control_force = _read_native_float32_file(
+        control_dir / "output" / "legacy.frc"
+    )
+    maximum_force_delta = max(
+        abs(baseline - control)
+        for baseline, control in zip(
+            expected["force"], control_force, strict=True
+        )
+    )
+    if maximum_force_delta <= 1.0e-2:
+        raise AssertionError(
+            f"{case.name} typed NB14 LJ parameters did not change force"
+        )
+    shutil.rmtree(control_dir)
+    return {
+        "nb14_LJ": expected["nb14_LJ"],
+        "nb14_EE": expected["nb14_EE"],
+        "force": list(expected["force"]),
+        "zero_lj_control": {
+            "nb14_LJ": control_rows[0]["nb14_LJ"],
+            "nb14_EE": control_rows[0]["nb14_EE"],
+            "maximum_force_delta": maximum_force_delta,
+        },
     }
 
 
@@ -11686,6 +12069,25 @@ def _validate_full_contract_input(
         if sidecar_root in topology:
             sidecar_keys = topology[f"{sidecar_root}/key"].asstr()[...]
             sidecar_owner = "residue_in_file" in sidecar_keys
+        typed_nb14_owner = all(
+            path in topology
+            for path in (
+                "/forcefield/nb14_extra/atoms",
+                "/forcefield/nb14_extra/params",
+            )
+        )
+        partial_typed_nb14_owner = any(
+            path in topology
+            for path in (
+                "/forcefield/nb14_extra/atoms",
+                "/forcefield/nb14_extra/params",
+            )
+        )
+        sidecar_nb14_owner = (
+            sidecar_root in topology
+            and "nb14_extra_in_file"
+            in topology[f"{sidecar_root}/key"].asstr()[...]
+        )
     if partial_typed_owner and not typed_owner:
         raise AssertionError(
             f"{case.name} full-contract input has an incomplete typed residue "
@@ -11695,6 +12097,17 @@ def _validate_full_contract_input(
         owner_count = int(typed_owner) + int(sidecar_owner)
         raise AssertionError(
             f"{case.name} full-contract input requires exactly one residue "
+            f"owner, found {owner_count}"
+        )
+    if partial_typed_nb14_owner and not typed_nb14_owner:
+        raise AssertionError(
+            f"{case.name} full-contract input has an incomplete typed "
+            "nb14_extra owner"
+        )
+    if typed_nb14_owner == sidecar_nb14_owner:
+        owner_count = int(typed_nb14_owner) + int(sidecar_nb14_owner)
+        raise AssertionError(
+            f"{case.name} full-contract input requires exactly one NB14 "
             f"owner, found {owner_count}"
         )
 

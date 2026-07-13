@@ -213,7 +213,6 @@
         "topology_sidecar_keys:angle_in_file",
         "topology_sidecar_keys:dihedral_in_file",
         "topology_sidecar_keys:LJ_in_file",
-        "topology_sidecar_keys:nb14_extra_in_file",
         "topology_sidecar_keys:urey_bradley_in_file",
         "topology_sidecar_keys:LJ_soft_core_in_file",
         "topology_sidecar_keys:subsys_division_in_file",
@@ -340,7 +339,9 @@
         "failure_h5_topology_atom_count_mismatch",
         "failure_h5_topology_mass_shape",
         "failure_h5_topology_mass_dtype",
-        "failure_h5_topology_schema_version"
+        "failure_h5_topology_schema_version",
+        "failure_h5_nb14_dual_root",
+        "failure_h5_nb14_extra_param_shape"
       ],
       "assertion_ids": ["stable_failure_semantics"],
       "reason": ""
@@ -941,9 +942,21 @@
       "minimum_evidence": "E3",
       "legacy_surface": "nb14_in_file",
       "bundled_surface": "/forcefield/nb14",
-      "case_ids": ["rerun_full_contract_pure_vds_off", "rerun_full_contract_pure_vds_on", "rerun_full_contract_sidecar_vds_off", "rerun_full_contract_sidecar_vds_on"],
+      "case_ids": ["normal_nb14_scaled_nonzero"],
       "assertion_ids": ["input_semantic_equivalence"],
       "inventory_refs": ["topology_sidecar_keys:nb14_in_file"]
+    },
+    {
+      "contract_id": "input.topology.nb14_extra",
+      "direction": "input",
+      "component": "nb14",
+      "status": "supported",
+      "minimum_evidence": "E3",
+      "legacy_surface": "nb14_extra_in_file",
+      "bundled_surface": "/forcefield/nb14_extra",
+      "case_ids": ["normal_nb14_extra_nonzero", "rerun_full_contract_pure_vds_off", "rerun_full_contract_pure_vds_on", "rerun_full_contract_sidecar_vds_off", "rerun_full_contract_sidecar_vds_on"],
+      "assertion_ids": ["input_semantic_equivalence"],
+      "inventory_refs": ["topology_sidecar_keys:nb14_extra_in_file"]
     },
     {
       "contract_id": "input.topology.virtual_atoms_alias",

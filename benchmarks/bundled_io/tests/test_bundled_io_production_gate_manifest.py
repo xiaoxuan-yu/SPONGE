@@ -49,6 +49,8 @@ from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
     FOCUSED_IMPROPER_CONVERTED_CANONICAL_FIXTURE,
     FOCUSED_IMPROPER_NATIVE_FIXTURE,
     FOCUSED_LJ_SOFT_CORE_FIXTURE,
+    FOCUSED_NB14_EXTRA_FIXTURE,
+    FOCUSED_NB14_SCALED_FIXTURE,
     FOCUSED_RESIDUE_COM_RES_FIXTURE,
     FOCUSED_RESIDUE_SIDECAR_FIXTURE,
     FOCUSED_RESIDUE_TYPED_COM_RES_FIXTURE,
@@ -289,6 +291,8 @@ def test_ab_production_harness_has_executable_contract_coverage():
     assert {case.name for case in cases} == {
         "normal_core_h5_output",
         "normal_core_topology_payload_sensitivity",
+        "normal_nb14_scaled_nonzero",
+        "normal_nb14_extra_nonzero",
         "normal_nhc_dynamic_restart_continuation",
         "normal_meta_protocol_full_restart_continuation",
         "normal_sits_ff19sb_cmap_peptide",
@@ -354,6 +358,8 @@ def test_ab_production_harness_has_executable_contract_coverage():
         "failure_h5_topology_mass_shape",
         "failure_h5_topology_mass_dtype",
         "failure_h5_topology_schema_version",
+        "failure_h5_nb14_dual_root",
+        "failure_h5_nb14_extra_param_shape",
         "failure_restart_dynamic_without_owner",
         "failure_restart_protocol_without_owner",
         "failure_restart_full_without_owner",
@@ -681,6 +687,8 @@ def test_failure_matrix_requires_exit_category_and_stable_tokens():
         "h5_topology_mass_shape",
         "h5_topology_mass_dtype",
         "h5_topology_schema_version",
+        "h5_nb14_dual_root",
+        "h5_nb14_extra_param_shape",
         "restart_dynamic_without_owner",
         "restart_protocol_without_owner",
         "restart_full_without_owner",
@@ -722,6 +730,8 @@ def test_failure_matrix_requires_exit_category_and_stable_tokens():
         "h5_topology_mass_shape": "spongeErrorBadFileFormat",
         "h5_topology_mass_dtype": "spongeErrorBadFileFormat",
         "h5_topology_schema_version": "spongeErrorValueErrorCommand",
+        "h5_nb14_dual_root": "spongeErrorBadFileFormat",
+        "h5_nb14_extra_param_shape": "spongeErrorBadFileFormat",
     }
     assert all(case.failure_branches == ("bundled",) for case in metadata_cases)
     contracts = load_contract_registry()
@@ -1291,6 +1301,49 @@ def test_focused_core_topology_case_requires_payload_sensitive_consumers():
         assert contract.status == "supported"
         assert case.name in contract.case_ids
         assert contract.assertion_ids == ("input_semantic_equivalence",)
+
+
+def test_nb14_scaled_and_extra_surfaces_have_independent_behavior_cases():
+    contracts = load_contract_registry()
+    cases = {case.name: case for case in _cases_for_profile()}
+    expected = {
+        "normal_nb14_scaled_nonzero": (
+            FOCUSED_NB14_SCALED_FIXTURE,
+            "input.topology.nb14",
+        ),
+        "normal_nb14_extra_nonzero": (
+            FOCUSED_NB14_EXTRA_FIXTURE,
+            "input.topology.nb14_extra",
+        ),
+    }
+    for case_name, (fixture, contract_id) in expected.items():
+        case = cases[case_name]
+        assert case.fixture_case == fixture
+        assert case.statistical_md is False
+        assert case.normal_step_limit == 1
+        assert case.normal_dt == 0.0
+        assert case.input_behavior_only is True
+        assert case.contract_ids == ("output.legacy.mdout", contract_id)
+        assert INPUT_SEMANTIC_SPECS_BY_CASE[case_name] == (
+            InputSemanticSpec(contract_id, ("nb14_LJ", "nb14_EE"), 1.0e-6),
+        )
+        contract = contracts[contract_id]
+        assert contract.status == "supported"
+        assert case_name in contract.case_ids
+        assert contract.assertion_ids == ("input_semantic_equivalence",)
+
+    scaled = contracts["input.topology.nb14"]
+    extra = contracts["input.topology.nb14_extra"]
+    assert scaled.legacy_surface == "nb14_in_file"
+    assert scaled.bundled_surface == "/forcefield/nb14"
+    assert scaled.inventory_refs == ("topology_sidecar_keys:nb14_in_file",)
+    assert extra.legacy_surface == "nb14_extra_in_file"
+    assert extra.bundled_surface == "/forcefield/nb14_extra"
+    assert extra.inventory_refs == ("topology_sidecar_keys:nb14_extra_in_file",)
+    assert any(
+        spec.contract_id == "input.topology.nb14_extra"
+        for spec in RERUN_INPUT_SEMANTIC_SPECS
+    )
 
 
 @pytest.mark.parametrize(

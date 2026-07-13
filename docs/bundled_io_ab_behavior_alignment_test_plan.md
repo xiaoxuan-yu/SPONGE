@@ -1439,7 +1439,49 @@ Acceptance:
   Ruff, formatting, clang-format, and diff checks pass, followed by one
   PR-scoped commit.
 
-## 46. Artifacts and Temporary-Space Policy
+## 46. PR 49: Canonical and Extra NB14 Behavior Contracts
+
+Separate the two legacy NB14 surfaces and consume both corresponding typed H5
+representations with their distinct parameter semantics.
+
+- Keep `nb14_in_file` mapped to `/forcefield/nb14`: two-column parameters are
+  LJ and Coulomb scale factors and require typed LJ atom/pair data.
+- Enumerate `nb14_extra_in_file` independently at
+  `/forcefield/nb14_extra`: three-column parameters are raw A, B, and Coulomb
+  scale values, so runtime materialization applies the legacy `12`/`6`
+  derivative multipliers before NB14 initialization.
+- Reject simultaneous canonical and extra typed roots, partial atoms/params,
+  and two-column `nb14_extra` payloads. Preserve the existing three-column
+  canonical materialized-A/B representation for compatibility.
+- Keep the pre-existing untracked native topology reader outside this PR.
+  Consume `nb14_extra` through a small independently owned H5 helper and one
+  tracked `Xponge::System::Load_Inputs` integration point, so the commit does
+  not absorb unrelated H5 foundation work.
+- Add independent two-atom pure typed A/B cases. Require exact non-zero NB14
+  LJ/electrostatic energy and complete six-value force fingerprints, then zero
+  only the typed LJ parameter(s) and require zero NB14 LJ energy, unchanged
+  electrostatic energy, and a non-trivial force response.
+
+Acceptance:
+
+- Canonical scaled input matches at `nb14_LJ=-0.75`, `nb14_EE=-0.25`, and
+  maximum force `4.875`; its zero-LJ control changes force by `1.5`.
+- Extra input matches at `nb14_LJ=-0.03`, `nb14_EE=-0.25`, and maximum force
+  `0.46728515625`; its zero-LJ control changes force by `0.09228515625`.
+- The pure full-contract branch now emits matching `nb14_LJ`/`nb14_EE`
+  columns and advances to independent EAM/restraint/soft-wall gaps; the
+  sidecar full-contract VDS-off/on regressions remain green. Both fixture
+  routes assert exactly one NB14 owner.
+- Real process failure gates reject dual canonical/extra roots and two-column
+  extra parameters with stable bad-file-format categories and diagnostics;
+  the complete 21-case failure sweep remains green.
+- Registry coverage advances to 83 supported contracts with no deferred
+  contracts and one explicitly unsupported contract.
+- SPONGE rebuild, native topology reader CTest, 142-test smoke, Ruff,
+  formatting, clang-format, and diff checks pass, followed by one PR-scoped
+  commit.
+
+## 47. Artifacts and Temporary-Space Policy
 
 - Use `SPONGE_BUNDLED_IO_AB_RUN_ROOT` for all heavy runs.
 - Put production artifacts on the workspace filesystem rather than `/tmp`.
@@ -1449,7 +1491,7 @@ Acceptance:
 - Record artifact byte counts and enforce a configurable per-case quota.
 - Cleanup must only remove directories created by the current gate run.
 
-## 47. PR Completion Log
+## 48. PR Completion Log
 
 Append one row immediately after completing and committing each PR.
 
@@ -1505,3 +1547,4 @@ Append one row immediately after completing and committing each PR.
 | PR 46: Portable GPU MPI device mapping | Complete | This commit | shared/explicit/rank-1 device-map mutation test; real four-replica CUDA+MPI rank-2 NPT+SETTLE statistical A/B; 139-test smoke; Ruff; `git diff --check` | GPU rank-2 defaults to a portable single-GPU shared map and accepts an explicit per-rank multi-GPU map. The real case passes complete mdout and all three H5 families with `mpi_rank_count=2` and rank-0-only output ownership. |
 | PR 47: Production-fixture residue ownership repair | Complete | This commit | four focused residue CPU A/B cases; full-contract sidecar VDS-off/on; 24-case sidecar QC/rerun/failure sweep; CMAP VDS invariant; 140-test smoke; H5 manifest and fixture-equivalence CTests; Ruff; format; `git diff --check` | Full-contract bundles now have exactly one typed residue owner, while focused sidecar cases explicitly replace typed state with one bundle-local sidecar owner. The stale startup conflict is closed across compatibility paths. Independent typed-SITS and rerun boundary behavior failures remain visible for subsequent alignment PRs. |
 | PR 48: Inactive typed SITS configuration semantics | Complete | This commit | focused active and inactive typed SITS CPU A/B; full-contract pure-native progression check; SPONGE rebuild; 141-test smoke; Ruff; format; clang-format; `git diff --check` | Typed SITS config without `mode` now preserves the valid legacy inactive state: exact text is materialized, no SITS columns appear, and complete mdout is equal. The existing production-mode case remains non-trivial. Full-contract pure-native execution advances to independent NB14/EAM/restraint/soft-wall consumption gaps. |
+| PR 49: Canonical and extra NB14 behavior contracts | Complete | This commit | canonical/extra focused CPU A/B plus zero-LJ controls; pure full-contract VDS-off/on progression; sidecar full-contract VDS-off/on; dual-root and extra-shape process failures; 21-case failure sweep; native topology reader and fixture-equivalence CTests; SPONGE rebuild; 142-test smoke; Ruff; format; clang-format; `git diff --check` | The registry now distinguishes `nb14_in_file` scaling from raw `nb14_extra_in_file` A/B semantics. A small independently owned H5 helper preserves the untracked topology-reader boundary. Both pure typed routes match exact non-zero energies and complete force fingerprints, parameter-zero controls change force, and full-contract fixtures enforce exactly one NB14 owner. Pure full-contract NB14 columns are restored; EAM/restraint/soft-wall remain visible. |

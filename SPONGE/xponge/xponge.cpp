@@ -10,6 +10,7 @@
 #include "load/amber.hpp"
 #include "load/gromacs.hpp"
 #include "load/native.hpp"
+#include "load/native/nb14_extra_h5.hpp"
 #include "utils/h5md/topology_h5_reader.hpp"
 
 namespace
@@ -55,6 +56,66 @@ void Validate_H5_Topology_Schema_Version(CONTROLLER* controller)
             spongeErrorValueErrorCommand,
             "Xponge::Validate_H5_Topology_Schema_Version", message.c_str());
     }
+}
+
+void Materialize_H5_Native_NB14_Extra(CONTROLLER* controller,
+                                      Xponge::System* system)
+{
+    constexpr const char* input_key = "input_h5_topology_path";
+    if (!controller->Command_Exist(input_key))
+    {
+        return;
+    }
+
+    int atom_count = 0;
+    if (!system->atoms.mass.empty())
+    {
+        atom_count = static_cast<int>(system->atoms.mass.size());
+    }
+    else if (!system->atoms.charge.empty())
+    {
+        atom_count = static_cast<int>(system->atoms.charge.size());
+    }
+    else if (!system->atoms.coordinate.empty())
+    {
+        atom_count = static_cast<int>(system->atoms.coordinate.size() / 3);
+    }
+
+    SpongeH5MD::NativeNB14ExtraH5Reader reader;
+    if (!reader.Open(controller->Command(input_key)))
+    {
+        controller->Throw_SPONGE_Error(spongeErrorBadFileFormat,
+                                       "Materialize_H5_Native_NB14_Extra",
+                                       reader.Last_Error().c_str());
+    }
+    SpongeH5MD::NativeNB14ExtraState state;
+    if (!reader.Read(atom_count, &state))
+    {
+        controller->Throw_SPONGE_Error(spongeErrorBadFileFormat,
+                                       "Materialize_H5_Native_NB14_Extra",
+                                       reader.Last_Error().c_str());
+    }
+    if (!state.present)
+    {
+        return;
+    }
+    if (controller->Command_Exist("nb14_in_file") ||
+        controller->Command_Exist("nb14_extra_in_file"))
+    {
+        controller->Throw_SPONGE_Error(
+            spongeErrorConflictingCommand, "Materialize_H5_Native_NB14_Extra",
+            "Reason:\n\tinput.h5.topology provides native nb14_extra "
+            "parameters, but nb14_in_file or nb14_extra_in_file is also set. "
+            "Native H5 topology data and legacy text topology input cannot "
+            "both own nb14 parameters\n");
+    }
+
+    Xponge::NB14& nb14 = system->classical_force_field.nb14;
+    nb14.atom_a = state.atom_a;
+    nb14.atom_b = state.atom_b;
+    nb14.A = state.A;
+    nb14.B = state.B;
+    nb14.cf_scale_factor = state.cf_scale_factor;
 }
 
 std::vector<int> Read_H5_Residue_Atom_Numbers(CONTROLLER* controller,
@@ -294,6 +355,7 @@ void Xponge::System::Load_Inputs(CONTROLLER* controller)
     else
     {
         Load_Native_Inputs(this, controller);
+        Materialize_H5_Native_NB14_Extra(controller, this);
         const auto residue_atom_numbers =
             Read_H5_Residue_Atom_Numbers(controller, this->atoms.mass.size());
         if (!residue_atom_numbers.empty())
