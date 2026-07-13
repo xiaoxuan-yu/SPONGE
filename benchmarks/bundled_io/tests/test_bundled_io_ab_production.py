@@ -49,6 +49,7 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 FIXTURE_ROOT = REPO_ROOT / "tests" / "h5_bundle" / "fixtures" / "input_matrix"
 XPONGE_DEV_ROOT = REPO_ROOT.parent / "XPONGE"
 SITS_FF19SB_CMAP_FIXTURE = "sits_ff19sb_cmap_peptide"
+FOCUSED_CORE_TOPOLOGY_FIXTURE = "focused_core_topology_two_atom"
 FOCUSED_EDIP_FIXTURE = "focused_edip_two_atom"
 FOCUSED_SW_SIDECAR_FIXTURE = "focused_sw_sidecar_three_atom"
 FOCUSED_TERSOFF_SIDECAR_FIXTURE = "focused_tersoff_sidecar_three_atom"
@@ -225,6 +226,11 @@ INPUT_SEMANTIC_SPECS_BY_CASE = {
         InputSemanticSpec(
             "input.topology.lj", ("LJ_short", "LJ_long", "LJ"), 1.0e-6
         ),
+    ),
+    "normal_core_topology_payload_sensitivity": (
+        InputSemanticSpec("input.topology.mass", ("temperature",), 1.0e-6),
+        InputSemanticSpec("input.topology.charge", ("Coulomb",), 1.0e-6),
+        InputSemanticSpec("input.topology.lj", ("LJ",), 1.0e-6),
     ),
     "normal_sits_ff19sb_cmap_peptide": (
         InputSemanticSpec("input.topology.cmap", ("cmap",), 1.0e-6),
@@ -434,6 +440,30 @@ def _cases_for_profile() -> list[AbCase]:
                 "restart_continuation_equivalence",
                 "input_semantic_equivalence",
             ),
+        ),
+        AbCase(
+            name="normal_core_topology_payload_sensitivity",
+            fixture_case=FOCUSED_CORE_TOPOLOGY_FIXTURE,
+            legacy_subdir="generated_legacy",
+            bundled_subdir="generated_bundled",
+            mode="normal",
+            vds=False,
+            statistical_md=False,
+            restart_load_policy="structural",
+            contract_ids=(
+                "output.legacy.mdout",
+                "input.topology.mass",
+                "input.topology.charge",
+                "input.topology.lj",
+            ),
+            assertion_ids=(
+                "mdout_deterministic_equivalence",
+                "input_semantic_equivalence",
+            ),
+            normal_step_limit=1,
+            normal_interval=1,
+            normal_dt=0.0,
+            input_behavior_only=True,
         ),
         AbCase(
             name="normal_nhc_dynamic_restart_continuation",
@@ -3202,6 +3232,8 @@ def _prepare_case_pair(
     case: AbCase, case_root: Path, replica_seed: int
 ) -> tuple[Path, Path]:
     if case.mode in {"normal", "chunk_boundary"}:
+        if case.fixture_case == FOCUSED_CORE_TOPOLOGY_FIXTURE:
+            return _prepare_focused_core_topology_pair(case_root)
         if case.fixture_case == SITS_FF19SB_CMAP_FIXTURE:
             return _prepare_sits_ff19sb_cmap_pair(case_root, replica_seed)
         if case.fixture_case == FOCUSED_SITS_NK_TYPED_RESTART_FIXTURE:
@@ -3498,6 +3530,124 @@ def _prepare_sits_ff19sb_cmap_pair(
     _convert_legacy_case(legacy_source, converted_dir)
     shutil.copytree(converted_dir / "bundle", bundled_dir)
     return legacy_dir, bundled_dir
+
+
+def _prepare_focused_core_topology_pair(
+    case_root: Path,
+) -> tuple[Path, Path]:
+    legacy_source = case_root / "focused_core_topology_source"
+    legacy_dir = case_root / "legacy"
+    converted_dir = case_root / "converted_focused_core_topology_bundle"
+    bundled_dir = case_root / "bundled"
+    for path in (legacy_source, legacy_dir, converted_dir, bundled_dir):
+        if path.exists():
+            shutil.rmtree(path)
+    _write_focused_core_topology_input(legacy_source)
+    shutil.copytree(legacy_source, legacy_dir)
+    _convert_legacy_case(legacy_source, converted_dir)
+    shutil.copytree(converted_dir / "bundle", bundled_dir)
+
+    topology_path = bundled_dir / "topology.spgt.h5"
+    with h5py.File(topology_path, "r+") as topology:
+        sidecar_table = "/parameters/sponge/files/legacy_sidecars"
+        if sidecar_table in topology:
+            del topology[sidecar_table]
+    legacy_sidecars = bundled_dir / "legacy_sidecars"
+    if legacy_sidecars.exists():
+        shutil.rmtree(legacy_sidecars)
+    _validate_focused_core_topology_routes(legacy_dir, bundled_dir)
+    return legacy_dir, bundled_dir
+
+
+def _write_focused_core_topology_input(case_dir: Path) -> None:
+    case_dir.mkdir(parents=True, exist_ok=True)
+    (case_dir / "mass.txt").write_text("2\n1.0\n4.0\n", encoding="utf-8")
+    (case_dir / "charge.txt").write_text("2\n1.0\n-1.0\n", encoding="utf-8")
+    (case_dir / "coordinate.txt").write_text(
+        "2 0.0\n1.0 0.0 0.0\n3.0 0.0 0.0\n1000.0 1000.0 1000.0\n90.0 90.0 90.0\n",
+        encoding="utf-8",
+    )
+    (case_dir / "velocity.txt").write_text(
+        "2\n0.25 0.0 0.0\n-0.25 0.0 0.0\n", encoding="utf-8"
+    )
+    (case_dir / "lj.txt").write_text("2 1\n1.0\n1.0\n0\n0\n", encoding="utf-8")
+    (case_dir / "mdin.spg.toml").write_text(
+        'md_name = "bundled io ab focused core topology"\n'
+        'mode = "nve"\n'
+        "pbc = false\n"
+        "step_limit = 1\n"
+        "dt = 0.0\n"
+        "cutoff = 8.0\n"
+        'mass_in_file = "mass.txt"\n'
+        'charge_in_file = "charge.txt"\n'
+        'coordinate_in_file = "coordinate.txt"\n'
+        'velocity_in_file = "velocity.txt"\n'
+        'LJ_in_file = "lj.txt"\n'
+        "force_whole_output = true\n"
+        "print_zeroth_frame = 0\n"
+        "write_mdout_interval = 1\n"
+        "write_information_interval = 1\n",
+        encoding="utf-8",
+    )
+
+
+def _validate_focused_core_topology_routes(
+    legacy_dir: Path, bundled_dir: Path
+) -> None:
+    legacy_mdin = (legacy_dir / "mdin.spg.toml").read_text(encoding="utf-8")
+    bundled_mdin = (bundled_dir / "mdin.bundled.spg.toml").read_text(
+        encoding="utf-8"
+    )
+    for key in ("mass_in_file", "charge_in_file", "LJ_in_file"):
+        if not _has_key_line(legacy_mdin, key):
+            raise AssertionError(f"focused core legacy route is missing {key}")
+        if _has_key_line(bundled_mdin, key):
+            raise AssertionError(f"focused core bundled mdin retained {key}")
+    if (bundled_dir / "legacy_sidecars").exists():
+        raise AssertionError("focused core bundle retained legacy sidecars")
+
+    topology_path = bundled_dir / "topology.spgt.h5"
+    topology_paths = _h5_paths(topology_path)
+    required = {
+        "/atoms/mass",
+        "/atoms/charge",
+        "/forcefield/lj/type",
+        "/forcefield/lj/pair_A_12",
+        "/forcefield/lj/pair_B_6",
+    }
+    missing = sorted(required - topology_paths)
+    if missing:
+        raise AssertionError(
+            f"focused core topology is missing typed datasets: {missing}"
+        )
+    if "/parameters/sponge/files/legacy_sidecars" in topology_paths:
+        raise AssertionError("focused core topology retained a sidecar table")
+    with h5py.File(topology_path, "r") as topology:
+        masses = topology["/atoms/mass"][...].tolist()
+        charges = topology["/atoms/charge"][...].tolist()
+        lj_types = topology["/forcefield/lj/type"][...].tolist()
+        pair_a = topology["/forcefield/lj/pair_A_12"][...].tolist()
+        pair_b = topology["/forcefield/lj/pair_B_6"][...].tolist()
+    _assert_numeric_sequences_close(
+        "focused core typed masses",
+        (1.0, 4.0),
+        masses,
+        relative_tolerance=0.0,
+        absolute_tolerance=1.0e-7,
+    )
+    _assert_numeric_sequences_close(
+        "focused core typed charges",
+        (1.0, -1.0),
+        charges,
+        relative_tolerance=0.0,
+        absolute_tolerance=1.0e-7,
+    )
+    if lj_types != [0, 0]:
+        raise AssertionError(f"focused core LJ types changed: {lj_types}")
+    if len(pair_a) != 1 or len(pair_b) != 1:
+        raise AssertionError("focused core LJ pair payload changed shape")
+    if pair_a[0] <= 0.0 or pair_b[0] <= 0.0:
+        raise AssertionError("focused core LJ pair payload is trivial")
 
 
 def _prepare_focused_edip_pair(case_root: Path) -> tuple[Path, Path]:
@@ -6482,7 +6632,13 @@ def _compare_input_semantics(
                 spec,
                 deterministic=not case.statistical_md,
             )
-            if spec.contract_id == "input.manybody.tersoff.sidecar":
+            if case.name == "normal_core_topology_payload_sensitivity":
+                replica_result["oracle"] = (
+                    _compare_focused_core_topology_sensitivity(
+                        case, run, spec.contract_id
+                    )
+                )
+            elif spec.contract_id == "input.manybody.tersoff.sidecar":
                 replica_result["oracle"] = _compare_focused_tersoff_angular(
                     case, run
                 )
@@ -6991,6 +7147,151 @@ def _compare_focused_custom_pair_forces(
         str(path.relative_to(run.bundled_dir)) for path in materialized
     ]
     return result
+
+
+def _compare_focused_core_topology_sensitivity(
+    case: AbCase, run: AbRun, contract_id: str
+) -> dict[str, object]:
+    controls = {
+        "input.topology.mass": {
+            "datasets": {"/atoms/mass": (2.0, 8.0)},
+            "observable": "temperature",
+            "minimum_delta": 1.0e-2,
+            "force_changes": False,
+        },
+        "input.topology.charge": {
+            "datasets": {"/atoms/charge": (0.0, 0.0)},
+            "observable": "Coulomb",
+            "minimum_delta": 1.0e-2,
+            "force_changes": True,
+        },
+        "input.topology.lj": {
+            "datasets": {
+                "/forcefield/lj/pair_A_12": (0.0,),
+                "/forcefield/lj/pair_B_6": (0.0,),
+            },
+            "observable": "LJ",
+            "minimum_delta": 1.0e-3,
+            "force_changes": True,
+        },
+    }
+    if contract_id not in controls:
+        raise AssertionError(
+            f"{case.name} has no payload control for {contract_id}"
+        )
+    control = controls[contract_id]
+    suffix = contract_id.rsplit(".", 1)[-1]
+    control_dir = run.bundled_dir.parent / f"bundled_{suffix}_payload_control"
+    if control_dir.exists():
+        shutil.rmtree(control_dir)
+    shutil.copytree(run.bundled_dir, control_dir)
+    output_dir = control_dir / "output"
+    if output_dir.exists():
+        shutil.rmtree(output_dir)
+    output_dir.mkdir(parents=True)
+    for file_name in ("mdout.txt", "mdinfo.txt", "run.stdout", "run.stderr"):
+        path = control_dir / file_name
+        if path.exists():
+            path.unlink()
+
+    topology_path = control_dir / "topology.spgt.h5"
+    with h5py.File(topology_path, "r+") as topology:
+        for dataset_path, values in control["datasets"].items():
+            if dataset_path not in topology:
+                raise AssertionError(
+                    f"{case.name} control is missing {dataset_path}"
+                )
+            topology[dataset_path][...] = values
+
+    outcome = _run_sponge_process(control_dir, _mdin_name(control_dir))
+    if outcome.returncode != 0:
+        raise AssertionError(
+            f"{case.name} {contract_id} payload control failed with "
+            f"code {outcome.returncode}\n{outcome.stdout}\n{outcome.stderr}"
+        )
+    correct_rows = _read_mdout(run.bundled_dir / "mdout.txt")["rows"]
+    control_rows = _read_mdout(control_dir / "mdout.txt")["rows"]
+    if len(correct_rows) != 1 or len(control_rows) != 1:
+        raise AssertionError(
+            f"{case.name} {contract_id} control expected one mdout row"
+        )
+    observable = control["observable"]
+    correct_value = correct_rows[0].get(observable, math.nan)
+    control_value = control_rows[0].get(observable, math.nan)
+    correct_force = _read_native_float32_file(
+        run.bundled_dir / "output" / "legacy.frc"
+    )
+    control_force = _read_native_float32_file(
+        control_dir / "output" / "legacy.frc"
+    )
+    response = _assert_core_topology_payload_response(
+        f"{case.name} {contract_id}",
+        observable,
+        correct_value,
+        control_value,
+        minimum_observable_delta=float(control["minimum_delta"]),
+        correct_force=correct_force,
+        control_force=control_force,
+        force_must_change=bool(control["force_changes"]),
+    )
+
+    result = {
+        "contract_id": contract_id,
+        "typed_datasets": sorted(control["datasets"]),
+        "observable": observable,
+        "correct_value": correct_value,
+        "control_value": control_value,
+        "force_changes": control["force_changes"],
+        "exit_code": outcome.returncode,
+        **response,
+    }
+    shutil.rmtree(control_dir)
+    return result
+
+
+def _assert_core_topology_payload_response(
+    label: str,
+    observable: str,
+    correct_value: float,
+    control_value: float,
+    *,
+    minimum_observable_delta: float,
+    correct_force: Sequence[float],
+    control_force: Sequence[float],
+    force_must_change: bool,
+) -> dict[str, float]:
+    if not math.isfinite(correct_value) or not math.isfinite(control_value):
+        raise AssertionError(
+            f"{label} has no finite {observable} payload fingerprint"
+        )
+    if abs(correct_value) <= 1.0e-8:
+        raise AssertionError(f"{label} correct {observable} is trivial")
+    observable_delta = abs(correct_value - control_value)
+    if observable_delta <= minimum_observable_delta:
+        raise AssertionError(
+            f"{label} payload did not change {observable}: "
+            f"correct={correct_value}, control={control_value}"
+        )
+    if len(correct_force) != 6 or len(control_force) != 6:
+        raise AssertionError(f"{label} force control has wrong shape")
+    if not all(
+        math.isfinite(value) for value in (*correct_force, *control_force)
+    ):
+        raise AssertionError(f"{label} force control is non-finite")
+    force_delta = max(
+        abs(correct - mutated)
+        for correct, mutated in zip(correct_force, control_force, strict=True)
+    )
+    if force_must_change and force_delta <= 1.0e-4:
+        raise AssertionError(f"{label} payload did not change force")
+    if not force_must_change and force_delta > 1.0e-6:
+        raise AssertionError(
+            f"{label} mass-only control unexpectedly changed force"
+        )
+    return {
+        "observable_delta": observable_delta,
+        "force_delta": force_delta,
+    }
 
 
 def _compare_focused_exclusions_oracle(

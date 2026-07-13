@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from dataclasses import replace
 from pathlib import Path
 
@@ -36,6 +37,7 @@ from benchmarks.bundled_io.tests.test_bundled_io_ab_execution_matrix import (
 )
 from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
     FOCUSED_CONSTRAINT_SIDECAR_FIXTURE,
+    FOCUSED_CORE_TOPOLOGY_FIXTURE,
     FOCUSED_CUSTOM_PAIR_FIXTURE,
     FOCUSED_EDIP_FIXTURE,
     FOCUSED_EXCLUSIONS_FIXTURE,
@@ -58,6 +60,7 @@ from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
     RERUN_INPUT_SEMANTIC_SPECS,
     _assert_complete_prefix_noop_layout,
     _assert_constraint_projection_oracle,
+    _assert_core_topology_payload_response,
     _assert_exclusion_coulomb_oracle,
     _assert_gb_force_oracle,
     _assert_nontrivial_equivalent_forces,
@@ -266,6 +269,7 @@ def test_ab_production_harness_has_executable_contract_coverage():
     }
     assert {case.name for case in cases} == {
         "normal_core_h5_output",
+        "normal_core_topology_payload_sensitivity",
         "normal_nhc_dynamic_restart_continuation",
         "normal_meta_protocol_full_restart_continuation",
         "normal_sits_ff19sb_cmap_peptide",
@@ -1131,6 +1135,76 @@ def test_focused_residue_case_requires_com_res_membership_behavior():
     typed = contracts["input.topology.residue"]
     assert typed.status == "deferred"
     assert "not materialized" in typed.reason
+
+
+def test_focused_core_topology_case_requires_payload_sensitive_consumers():
+    contracts = load_contract_registry()
+    case = next(
+        case
+        for case in _cases_for_profile()
+        if case.name == "normal_core_topology_payload_sensitivity"
+    )
+
+    assert case.fixture_case == FOCUSED_CORE_TOPOLOGY_FIXTURE
+    assert case.statistical_md is False
+    assert case.normal_step_limit == 1
+    assert case.normal_dt == 0.0
+    assert case.input_behavior_only is True
+    assert case.contract_ids == (
+        "output.legacy.mdout",
+        "input.topology.mass",
+        "input.topology.charge",
+        "input.topology.lj",
+    )
+    assert INPUT_SEMANTIC_SPECS_BY_CASE[case.name] == (
+        InputSemanticSpec("input.topology.mass", ("temperature",), 1.0e-6),
+        InputSemanticSpec("input.topology.charge", ("Coulomb",), 1.0e-6),
+        InputSemanticSpec("input.topology.lj", ("LJ",), 1.0e-6),
+    )
+    for contract_id in case.contract_ids[1:]:
+        contract = contracts[contract_id]
+        assert contract.status == "supported"
+        assert case.name in contract.case_ids
+        assert contract.assertion_ids == ("input_semantic_equivalence",)
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"correct_value": math.nan}, "has no finite temperature"),
+        ({"correct_value": 0.0}, "correct temperature is trivial"),
+        ({"control_value": 26.205}, "payload did not change temperature"),
+        ({"control_force": (0.0,) * 3}, "force control has wrong shape"),
+        (
+            {"control_force": (math.nan, 0.0, 0.0, 0.0, 0.0, 0.0)},
+            "force control is non-finite",
+        ),
+        (
+            {"force_must_change": True},
+            "payload did not change force",
+        ),
+        (
+            {"control_force": (1.0, 0.0, 0.0, -1.0, 0.0, 0.0)},
+            "mass-only control unexpectedly changed force",
+        ),
+    ],
+)
+def test_core_topology_payload_oracle_rejects_insensitive_or_invalid_response(
+    kwargs, message
+):
+    arguments = {
+        "label": "core topology",
+        "observable": "temperature",
+        "correct_value": 26.21,
+        "control_value": 52.42,
+        "minimum_observable_delta": 1.0e-2,
+        "correct_force": (0.0,) * 6,
+        "control_force": (0.0,) * 6,
+        "force_must_change": False,
+    }
+    arguments.update(kwargs)
+    with pytest.raises(AssertionError, match=message):
+        _assert_core_topology_payload_response(**arguments)
 
 
 def test_focused_gb_case_requires_native_state_and_sidecar_activation_behavior():

@@ -894,7 +894,40 @@ Acceptance:
 - Registry, manifest, related native-reader CTest, full smoke, Ruff,
   clang-format, and diff checks pass, followed by exactly one PR-scoped commit.
 
-## 30. Artifacts and Temporary-Space Policy
+## 30. PR 33: Core Topology Payload-Sensitivity Gate
+
+Replace the existing shared statistical evidence for mass, charge, and
+Lennard-Jones input with an additional deterministic, payload-specific behavior
+gate.
+
+- Use one two-atom NVE fixture with `dt=0`, no PBC, explicit non-zero velocity,
+  charge, and LJ interactions. The legacy branch reads `mass_in_file`,
+  `charge_in_file`, and `LJ_in_file`; the bundled branch contains only typed
+  `/atoms/mass`, `/atoms/charge`, and `/forcefield/lj` datasets, with no topology
+  sidecar table or `legacy_sidecars` directory.
+- Require complete one-frame mdout and force equivalence between the two routes.
+- Run three independent bundled controls which mutate only one typed owner:
+  doubling both masses changes temperature from `26.21` to `52.42` while force
+  remains unchanged; zeroing charge changes Coulomb energy from `-0.50` to zero
+  and changes force; zeroing both LJ pair arrays changes LJ energy from `-0.02`
+  to zero and changes force.
+- Make non-periodic LJ initialization consume the same materialized
+  `Xponge::system.classical_force_field.lj` state as periodic LJ, while retaining
+  named-module legacy loading.
+
+Acceptance:
+
+- The real CPU A/B and all three payload controls pass with finite, non-trivial
+  module-owned responses.
+- Manifest mutation tests reject trivial correct values, unchanged observables,
+  missing required force changes, unexpected mass-only force changes, and
+  non-finite force payloads.
+- The original statistical TIP3P evidence remains active as a broader regression.
+- Registry, full manifest and smoke suites, SPONGE rebuild, related native-reader
+  CTests, Ruff, clang-format, and diff checks pass, followed by exactly one
+  PR-scoped commit.
+
+## 31. Artifacts and Temporary-Space Policy
 
 - Use `SPONGE_BUNDLED_IO_AB_RUN_ROOT` for all heavy runs.
 - Put production artifacts on the workspace filesystem rather than `/tmp`.
@@ -904,7 +937,7 @@ Acceptance:
 - Record artifact byte counts and enforce a configurable per-case quota.
 - Cleanup must only remove directories created by the current gate run.
 
-## 31. PR Completion Log
+## 32. PR Completion Log
 
 Append one row immediately after completing and committing each PR.
 
@@ -944,3 +977,4 @@ Append one row immediately after completing and committing each PR.
 | PR 30: Residue topology-sidecar runtime behavior gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; real `normal_residue_sidecar_pbc_mapping` CPU A/B; Ruff; `git diff --check` | An isolated H5 `residue_in_file` topology-sidecar route matches the legacy `[2,2]` residue partition through runtime domain state, non-zero `bond=2.0`, the complete 12-value force payload with maximum magnitude `4.0`, and the cross-PBC whole-molecule position fingerprint `(19,21,25,28)`. Partition and mapping mutations are rejected. Typed `/atoms/residue_index` remains deferred because it is not materialized into `Xponge::system.residues`. Registry coverage advances to 72 supported, 11 deferred, and 1 unsupported contract. |
 | PR 31: Residue membership/COM-virial follow-up gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract` (119 tests); 79-test production manifest; real `normal_residue_sidecar_pbc_mapping` and `normal_residue_sidecar_com_res_virial` CPU A/B; SPONGE rebuild; Ruff; clang-format; `git diff --check` | PR 30's residue-count, runtime-partition, force, and whole-molecule PBC mapping gate remains active. The second isolated `[2,2]` residue-sidecar case drives `com_res` restraint virial behavior with equivalent `bond=2.0`, `restrain=2.0`, `pressure=0.04`, `Pxx=0.11`, and 12-value force output. A same-count `[1,3]` control preserves energy and force but changes pressure/Pxx to `-11.53/-34.60`, proving membership-sensitive consumption. CPU atom-to-group maps now own their storage instead of aliasing freed host buffers. Typed residue input remains deferred. Registry coverage stays at 72 supported, 11 deferred, and 1 unsupported contract. |
 | PR 32: Pure native GB behavior gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract` (120 tests); 80-test production manifest; real `normal_gb_native_nonzero` and `normal_gb_hybrid_nonzero` CPU A/B; two native topology reader CTests; SPONGE rebuild; Ruff; changed-line clang-format; `git diff --check` | The pure bundled branch consumes `/forcefield/gb/params` with no `gb_in_file`, sidecar table, or sidecar files. Both routes match `Coulomb=-0.50`, `gb=-0.25`, `potential=-0.75`, the complete six-value force oracle, and all mdout columns. Non-periodic GB initialization now recognizes preloaded native state while preserving the hybrid activation route. Registry coverage advances to 73 supported, 10 deferred, and 1 unsupported contract. |
+| PR 33: Core topology payload-sensitivity gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract` (128 tests); 88-test production manifest; real `normal_core_topology_payload_sensitivity` CPU A/B plus three typed-payload controls; two native topology reader CTests; SPONGE rebuild; Ruff; clang-format; `git diff --check` | Pure typed mass, charge, and LJ routes contain no topology sidecars and match legacy across the complete one-frame mdout and force payload. Independent controls produce temperature `26.21 -> 52.42` with unchanged force, Coulomb `-0.50 -> 0` with maximum force delta `0.25`, and LJ `-0.02 -> 0` with maximum force delta `0.04541015625`, proving each payload reaches its consumer. The broader `normal_core_h5_output` case remains active and still reports its pre-existing legacy/H5 force schedule mismatch (`51` versus `50` frames), which is not weakened by this input gate. Registry coverage remains 73 supported, 10 deferred, and 1 unsupported contract. |

@@ -406,7 +406,10 @@
       "minimum_evidence": "E3",
       "legacy_surface": "mass_in_file",
       "bundled_surface": "/atoms/mass",
-      "case_ids": ["normal_core_h5_output"],
+      "case_ids": [
+        "normal_core_h5_output",
+        "normal_core_topology_payload_sensitivity"
+      ],
       "assertion_ids": ["input_semantic_equivalence"]
     },
     {
@@ -417,7 +420,10 @@
       "minimum_evidence": "E3",
       "legacy_surface": "charge_in_file",
       "bundled_surface": "/atoms/charge",
-      "case_ids": ["normal_core_h5_output"],
+      "case_ids": [
+        "normal_core_h5_output",
+        "normal_core_topology_payload_sensitivity"
+      ],
       "assertion_ids": ["input_semantic_equivalence"]
     },
     {
@@ -428,7 +434,10 @@
       "minimum_evidence": "E3",
       "legacy_surface": "LJ_in_file",
       "bundled_surface": "/forcefield/lj",
-      "case_ids": ["normal_core_h5_output"],
+      "case_ids": [
+        "normal_core_h5_output",
+        "normal_core_topology_payload_sensitivity"
+      ],
       "assertion_ids": ["input_semantic_equivalence"]
     },
     {
