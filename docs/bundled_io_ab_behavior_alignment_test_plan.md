@@ -570,7 +570,41 @@ Acceptance:
 - All three E3 assertions pass in a real CPU run.
 - Registry, manifest, restart/input CTest, Ruff, smoke, and diff checks pass.
 
-## 21. Artifacts and Temporary-Space Policy
+## 21. PR 18: NHC Dynamic Restart Continuation Gate
+
+Close the dynamic restart input, NHC-owned state, and dynamic restart output
+contracts with one deterministic producer checkpoint rather than two
+independently evolved branches.
+
+- Run one NVT Nose-Hoover-chain producer with chain length three and write the
+  particle structural state plus NHC state through both legacy text and H5
+  restart routes at the same restart event.
+- Require the producer NHC state to be finite and non-zero, and compare the
+  legacy and H5 structural/NHC payloads before either continuation starts.
+- Fork that single checkpoint into a legacy continuation that binds coordinate,
+  velocity, and NHC text restart files and a bundled continuation that binds
+  H5 topology/protocol plus `input_h5_restart_load = "dynamic"`.
+- Continue both deterministic NHC runs for two steps with identical integrator,
+  thermostat, topology, and output settings.
+- Compare every mdout column, particle position/velocity/force/box streams, NHC
+  coordinate/velocity trajectories, observable-only output, final structural
+  restart, final NHC restart, and integrator mode/step/time state.
+- Compare legacy NHC trajectory/restart text against the H5 module datasets in
+  each branch; account only for the legacy `%f` representation boundary and do
+  not relax the existing position or velocity tolerances.
+
+Acceptance:
+
+- The producer state and continued NHC state are non-trivial.
+- The bundled mdin contains no legacy coordinate, velocity, or NHC restart
+  binding; the legacy mdin contains no H5 binding.
+- Any NHC component swap, particle-state mismatch, mdout mismatch, schedule
+  mismatch, missing output family, or output-to-input continuation mismatch
+  fails the gate.
+- The three contracts emit E4 evidence from the same executed case, and
+  registry, manifest, real CPU A/B, related CTest, Ruff, and diff checks pass.
+
+## 22. Artifacts and Temporary-Space Policy
 
 - Use `SPONGE_BUNDLED_IO_AB_RUN_ROOT` for all heavy runs.
 - Put production artifacts on the workspace filesystem rather than `/tmp`.
@@ -580,7 +614,7 @@ Acceptance:
 - Record artifact byte counts and enforce a configurable per-case quota.
 - Cleanup must only remove directories created by the current gate run.
 
-## 22. PR Completion Log
+## 23. PR Completion Log
 
 Append one row immediately after completing and committing each PR.
 
@@ -605,3 +639,4 @@ Append one row immediately after completing and committing each PR.
 | PR 15: Focused native virtual-atom behavior gates | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; `ctest --test-dir build-dev-cpu-h5-2 --output-on-failure -R 'test_topology_native_h5_reader|test_h5_input_fixture_equivalence'`; real `normal_virtual_atoms_all_types` and `normal_virtual_atoms_pbc_boundary` CPU A/B; Ruff; clang-format; `git diff --check` | 88 contract/manifest/comparator tests, both H5 input contract tests, and both focused real A/B cases pass. The all-types gate covers exact type 0/1/2/3 ragged payloads, layered type 2-to-3 reconstruction, 24-value coordinate oracles, non-zero PM, and complete force parity; the PBC gate distinguishes `9.75` from the incorrect non-periodic `7.25`. It exposed and fixed the type 3 host/device copy source and the missing global first-frame coordinate refresh. Registry coverage advances to 52 supported, 22 deferred, and 1 unsupported contract. |
 | PR 16: Virtual-atom plural alias behavior gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; `ctest --test-dir build-dev-cpu-h5-2 --output-on-failure -R 'test_topology_native_h5_reader|test_h5_input_fixture_equivalence'`; real `normal_virtual_atoms_plural_alias` CPU A/B; Ruff; clang-format; `git diff --check` | 89 contract/manifest/comparator tests, both H5 input contract tests, and the focused real A/B pass. The legacy branch resolves only `virtual_atoms_in_file`; the bundled branch contains the exact native payload with neither key nor sidecars. Both paths match the boundary-crossing coordinate `9.75`, non-zero PM, complete force, and mdout behavior. Registry coverage advances to 53 supported, 21 deferred, and 1 unsupported contract. |
 | PR 17: Restart-absent same-bootstrap rerun gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; `ctest --test-dir build-dev-cpu-h5-2 --output-on-failure -R 'test_(restart_h5_reader\|h5_input_validation\|h5_restart_load_runtime_closure)$'`; real `rerun_restart_absent_same_bootstrap_vds_off` CPU A/B; Ruff; `git diff --check` | 90 contract/manifest/comparator tests, two related CTest passes (runtime closure skipped by its build guard), and the real two-frame A/B pass. Both branches use byte-identical coordinate/velocity bootstrap files, the bundled branch has no restart binding or payload, and all mdout columns, frame selection, trajectory, and observable semantics pass E3 comparison. Registry coverage advances to 54 supported, 20 deferred, and 1 unsupported contract. |
+| PR 18: NHC dynamic restart continuation gate | Complete | This commit | `pixi run -e dev-cpu smoke-bundled-io-contract`; `ctest --test-dir build-dev-cpu-h5-2 --output-on-failure -R 'test_(restart_h5_reader\|h5_restart_load_runtime_closure\|module_h5_mappings_with_mock_backend)$'`; real `normal_nhc_dynamic_restart_continuation` CPU A/B; Ruff; `git diff --check` | 91 contract/manifest/comparator tests, two related CTest passes (runtime closure skipped by its build guard), and the real E4 A/B pass. One producer emits non-zero three-chain state through legacy and H5 restart routes, then a text-restart continuation and `dynamic` H5 continuation compare all mdout columns, particle position/velocity/force/box, NHC trajectories, observable output, and final restart state. Registry coverage advances to 57 supported, 17 deferred, and 1 unsupported contract. |

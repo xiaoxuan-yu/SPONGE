@@ -22,7 +22,10 @@ from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
 def _synthetic_evidence_level(assertion_id: str) -> str:
     if assertion_id == "full_contract_input_inventory":
         return "E0"
-    if assertion_id == "restart_continuation_equivalence":
+    if assertion_id in {
+        "restart_continuation_equivalence",
+        "restart_dynamic_continuation_equivalence",
+    }:
         return "E4"
     if assertion_id == "stable_failure_semantics":
         return "F1"

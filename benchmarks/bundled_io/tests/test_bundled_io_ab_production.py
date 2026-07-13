@@ -199,6 +199,9 @@ RESTART_COMPARE_DATASETS = (
     "/particles/all/box/edges/value",
 )
 
+NHC_RESTART_DATASET = "/parameters/restart/thermostat/nose_hoover_chain"
+NHC_OBSERVABLE_ROOT = "/observables/all/thermostat/nose_hoover_chain"
+
 TRAJECTORY_REL = Path("output") / "ab.spg.h5md"
 OBSERVABLE_REL = Path("output") / "ab.obs.spg.h5md"
 RESTART_REL = Path("output") / "ab.spgr.h5"
@@ -368,6 +371,22 @@ def _cases_for_profile() -> list[AbCase]:
                 "restart_continuation_equivalence",
                 "input_semantic_equivalence",
             ),
+        ),
+        AbCase(
+            name="normal_nhc_dynamic_restart_continuation",
+            fixture_case="tip3p_validation_generated",
+            legacy_subdir="generated_legacy",
+            bundled_subdir="generated_bundled",
+            mode="dynamic_continuation",
+            vds=False,
+            statistical_md=False,
+            restart_load_policy="dynamic",
+            contract_ids=(
+                "input.restart_load.dynamic",
+                "input.bias.nhc",
+                "output.restart.dynamic_continuation",
+            ),
+            assertion_ids=("restart_dynamic_continuation_equivalence",),
         ),
         AbCase(
             name="normal_sits_ff19sb_cmap_peptide",
@@ -1126,6 +1145,9 @@ def test_legacy_and_bundled_ab_behavior(case: AbCase):
     if case.failure_mutation is not None:
         _run_failure_case(case, contracts)
         return
+    if case.mode == "dynamic_continuation":
+        _run_nhc_dynamic_restart_case(case, contracts)
+        return
     if case.mode == "chunk_boundary":
         _run_chunk_boundary_case(case, contracts)
         return
@@ -1328,6 +1350,462 @@ def _run_failure_case(case: AbCase, contracts) -> None:
         EVIDENCE_RUN_ID,
     )
     print(f"\nBundled I/O A/B failure metrics: {metrics_path}")
+
+
+def _run_nhc_dynamic_restart_case(case: AbCase, contracts) -> None:
+    case_root = _output_root() / case.name
+    producer_dir, bundled_template = _prepare_normal_tip3p_pair(
+        case_root / "producer_setup", 20260709
+    )
+    _write_nhc_producer_mdin(producer_dir)
+    producer_metrics = _run_sponge(producer_dir, "mdin.spg.toml")
+    producer_state = _validate_nhc_producer_state(case, producer_dir)
+
+    continuation_root = case_root / "continuations"
+    continuation_dirs = {}
+    continuation_metrics = {}
+    for branch in ("legacy", "bundled"):
+        destination = continuation_root / branch
+        if destination.exists():
+            shutil.rmtree(destination)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        source = producer_dir if branch == "legacy" else bundled_template
+        shutil.copytree(source, destination)
+        (destination / "output").mkdir(parents=True, exist_ok=True)
+        shutil.copy2(
+            producer_dir / RESTART_REL,
+            destination / "output/producer.spgr.h5",
+        )
+        _write_nhc_continuation_mdin(destination, branch)
+        continuation_dirs[branch] = destination
+        continuation_metrics[branch] = _run_sponge(destination, "mdin.spg.toml")
+
+    route_evidence = _validate_nhc_continuation_routes(continuation_dirs)
+    comparison = _compare_nhc_dynamic_continuations(case, continuation_dirs)
+    assertion = AssertionEvidence(
+        assertion_id="restart_dynamic_continuation_equivalence",
+        evidence_level="E4",
+        details={
+            "method": "one_checkpoint_forked_to_legacy_and_h5_dynamic_load",
+            "producer": producer_state,
+            "routes": route_evidence,
+            "continuation": comparison,
+        },
+    )
+    evidence = build_case_evidence(contracts, case, (assertion,))
+    metrics = {
+        "profile": PROFILE,
+        "case": case.name,
+        "contract_ids": list(case.contract_ids),
+        "assertion_ids": list(case.assertion_ids),
+        "evidence": [record.as_dict() for record in evidence],
+        "restart_load_policy": case.restart_load_policy,
+        "producer_metrics": producer_metrics,
+        "continuation_metrics": continuation_metrics,
+        "comparison": assertion.details,
+    }
+    metrics_path = case_root / "ab_metrics.json"
+    metrics_path.write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+    update_evidence_report(
+        _output_root() / "ab_evidence.json",
+        contracts,
+        case,
+        evidence,
+        {
+            "profile": PROFILE,
+            "restart_load_policy": case.restart_load_policy,
+            "producer_count": 1,
+            "continuation_branches": ["legacy", "bundled"],
+            "sponge_executable": str(_sponge_executable()),
+            "metrics_path": str(metrics_path),
+        },
+        EVIDENCE_RUN_ID,
+    )
+    print(f"\nBundled I/O A/B NHC restart metrics: {metrics_path}")
+
+
+def _write_nhc_producer_mdin(case_dir: Path) -> None:
+    (case_dir / "output").mkdir(parents=True, exist_ok=True)
+    lines = [
+        'md_name = "bundled io ab nhc restart producer"',
+        'mode = "nvt"',
+        "step_limit = 10",
+        "dt = 0.002",
+        "cutoff = 8.0",
+        'thermostat = "nose_hoover_chain"',
+        "thermostat_tau = 0.2",
+        "target_temperature = 300.0",
+        'default_in_file_prefix = "tip3p"',
+        'velocity_in_file = "initial_velocity.txt"',
+        'constrain_mode = "SETTLE"',
+        "print_zeroth_frame = 1",
+        "write_mdout_interval = 1",
+        "write_information_interval = 1",
+        "write_trajectory_interval = 1",
+        "write_restart_file_interval = 1",
+        'mdout = "mdout.txt"',
+        'mdinfo = "mdinfo.txt"',
+        'rst = "output/legacy_restart"',
+        f'output_h5_trajectory_path = "{TRAJECTORY_REL.as_posix()}"',
+        "output_h5_trajectory_vds = false",
+        "output_h5_trajectory_chunk_size = 4",
+        f'output_h5_observable_path = "{OBSERVABLE_REL.as_posix()}"',
+        f'output_h5_restart_path = "{RESTART_REL.as_posix()}"',
+        "",
+        "[nose_hoover_chain]",
+        "length = 3",
+        'restart_output = "output/legacy_nhc_restart.txt"',
+        'crd = "output/producer_nhc.crd"',
+        'vel = "output/producer_nhc.vel"',
+    ]
+    (case_dir / "mdin.spg.toml").write_text(
+        "\n".join(lines) + "\n", encoding="utf-8"
+    )
+
+
+def _write_nhc_continuation_mdin(case_dir: Path, branch: str) -> None:
+    if branch not in {"legacy", "bundled"}:
+        raise AssertionError(f"unknown NHC continuation branch: {branch}")
+    restart_inputs = (
+        [
+            'coordinate_in_file = "output/legacy_restart_coordinate.txt"',
+            'velocity_in_file = "output/legacy_restart_velocity.txt"',
+        ]
+        if branch == "legacy"
+        else [
+            'input_h5_topology_path = "topology.spgt.h5"',
+            'input_h5_protocol_path = "protocol.spgp.h5"',
+            'input_h5_restart_path = "output/producer.spgr.h5"',
+            'input_h5_restart_load = "dynamic"',
+        ]
+    )
+    topology_inputs = (
+        ['default_in_file_prefix = "tip3p"'] if branch == "legacy" else []
+    )
+    nhc_restart_input = (
+        ['restart_input = "output/legacy_nhc_restart.txt"']
+        if branch == "legacy"
+        else []
+    )
+    lines = [
+        f'md_name = "bundled io ab nhc {branch} continuation"',
+        'mode = "nvt"',
+        "step_limit = 2",
+        "dt = 0.002",
+        "cutoff = 8.0",
+        'thermostat = "nose_hoover_chain"',
+        "thermostat_tau = 0.2",
+        "target_temperature = 300.0",
+        *topology_inputs,
+        'constrain_mode = "SETTLE"',
+        *restart_inputs,
+        "print_zeroth_frame = 1",
+        "write_mdout_interval = 1",
+        "write_information_interval = 1",
+        "write_trajectory_interval = 1",
+        "write_restart_file_interval = 1",
+        'mdout = "mdout.txt"',
+        'mdinfo = "mdinfo.txt"',
+        'crd = "output/continuation.crd"',
+        'box = "output/continuation.box"',
+        'vel = "output/continuation.vel"',
+        'frc = "output/continuation.frc"',
+        'rst = "output/continuation_restart"',
+        f'output_h5_trajectory_path = "{TRAJECTORY_REL.as_posix()}"',
+        "output_h5_trajectory_vds = false",
+        "output_h5_trajectory_chunk_size = 4",
+        f'output_h5_observable_path = "{OBSERVABLE_REL.as_posix()}"',
+        f'output_h5_restart_path = "{RESTART_REL.as_posix()}"',
+        "",
+        "[nose_hoover_chain]",
+        "length = 3",
+        *nhc_restart_input,
+        'restart_output = "output/continuation_nhc_restart.txt"',
+        'crd = "output/continuation_nhc.crd"',
+        'vel = "output/continuation_nhc.vel"',
+    ]
+    (case_dir / "mdin.spg.toml").write_text(
+        "\n".join(lines) + "\n", encoding="utf-8"
+    )
+
+
+def _read_nhc_text_rows(path: Path, chain_length: int) -> list[list[float]]:
+    rows = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        values = [float(value) for value in line.split()]
+        if len(values) != chain_length:
+            raise AssertionError(
+                f"NHC row width differs from chain length in {path}: {values}"
+            )
+        rows.append(values)
+    if not rows:
+        raise AssertionError(f"NHC text output is empty: {path}")
+    return rows
+
+
+def _read_nhc_restart_pairs(path: Path, chain_length: int) -> list[float]:
+    rows = _read_nhc_text_rows(path, 2)
+    if len(rows) != chain_length:
+        raise AssertionError(
+            f"NHC restart row count differs from chain length: {path}"
+        )
+    return [value for row in rows for value in row]
+
+
+def _assert_nhc_text_matches_h5(
+    label: str,
+    text_path: Path,
+    h5_path: Path,
+    dataset: str,
+    chain_length: int,
+) -> dict[str, object]:
+    rows = _read_nhc_text_rows(text_path, chain_length)
+    text_values = [value for row in rows for value in row]
+    h5_values = _h5_numeric_values(h5_path, dataset)
+    _assert_numeric_sequences_close(
+        label,
+        text_values,
+        h5_values,
+        relative_tolerance=1.0e-6,
+        absolute_tolerance=6.0e-7,
+    )
+    return {"frame_count": len(rows), "value_count": len(text_values)}
+
+
+def _validate_nhc_producer_state(
+    case: AbCase, producer_dir: Path
+) -> dict[str, object]:
+    restart_path = producer_dir / RESTART_REL
+    nhc_text_path = producer_dir / "output/legacy_nhc_restart.txt"
+    pairs = _read_nhc_restart_pairs(nhc_text_path, 3)
+    h5_pairs = _h5_numeric_values(restart_path, NHC_RESTART_DATASET)
+    _assert_numeric_sequences_close(
+        f"{case.name} producer legacy/H5 NHC restart",
+        pairs,
+        h5_pairs,
+        relative_tolerance=1.0e-6,
+        absolute_tolerance=6.0e-7,
+    )
+    maximum_abs_state = max(abs(value) for value in h5_pairs)
+    if maximum_abs_state <= 1.0e-8:
+        raise AssertionError(f"{case.name} producer NHC restart is trivial")
+    structural = _validate_restart_legacy_coexistence(
+        case, producer_dir, restart_path
+    )
+    mode = _h5_string_values(
+        restart_path, "/parameters/restart/integrator_state/mode"
+    )
+    if mode != ["nvt"]:
+        raise AssertionError(
+            f"{case.name} producer restart mode is not NVT: {mode}"
+        )
+    return {
+        "producer_count": 1,
+        "chain_length": 3,
+        "maximum_abs_nhc_state": maximum_abs_state,
+        "legacy_h5_nhc_tolerance": 6.0e-7,
+        "structural_state": structural,
+    }
+
+
+def _validate_nhc_continuation_routes(
+    continuation_dirs: dict[str, Path],
+) -> dict[str, object]:
+    legacy_text = (continuation_dirs["legacy"] / "mdin.spg.toml").read_text(
+        encoding="utf-8"
+    )
+    bundled_text = (continuation_dirs["bundled"] / "mdin.spg.toml").read_text(
+        encoding="utf-8"
+    )
+    legacy_required = {
+        "coordinate_in_file",
+        "velocity_in_file",
+        "restart_input",
+    }
+    bundled_required = {
+        "input_h5_topology_path",
+        "input_h5_protocol_path",
+        "input_h5_restart_path",
+        "input_h5_restart_load",
+    }
+    if not all(_has_key_line(legacy_text, key) for key in legacy_required):
+        raise AssertionError(
+            "legacy NHC continuation restart route is incomplete"
+        )
+    if any(_has_key_line(legacy_text, key) for key in bundled_required):
+        raise AssertionError(
+            "legacy NHC continuation retained an H5 restart route"
+        )
+    if not all(_has_key_line(bundled_text, key) for key in bundled_required):
+        raise AssertionError(
+            "bundled NHC continuation restart route is incomplete"
+        )
+    if any(_has_key_line(bundled_text, key) for key in legacy_required):
+        raise AssertionError(
+            "bundled NHC continuation retained a legacy restart route"
+        )
+    return {
+        "legacy": sorted(legacy_required),
+        "bundled": sorted(bundled_required),
+        "same_producer_checkpoint": True,
+    }
+
+
+def _compare_nhc_dynamic_continuations(
+    case: AbCase, continuation_dirs: dict[str, Path]
+) -> dict[str, object]:
+    legacy_dir = continuation_dirs["legacy"]
+    bundled_dir = continuation_dirs["bundled"]
+    mdout = {
+        branch: _read_mdout(directory / "mdout.txt")
+        for branch, directory in continuation_dirs.items()
+    }
+    columns = _require_matching_mdout_columns(
+        mdout["legacy"], mdout["bundled"], f"{case.name} continuation"
+    )
+    for column in columns:
+        relative_tolerance, absolute_tolerance = _deterministic_tolerance(
+            column
+        )
+        _assert_numeric_sequences_close(
+            f"{case.name} continuation mdout {column}",
+            [row[column] for row in mdout["legacy"]["rows"]],
+            [row[column] for row in mdout["bundled"]["rows"]],
+            relative_tolerance=relative_tolerance,
+            absolute_tolerance=absolute_tolerance,
+        )
+
+    semantic_datasets = {
+        "trajectory": (
+            "/particles/all/step",
+            "/particles/all/time",
+            "/particles/all/position/value",
+            "/particles/all/velocity/value",
+            "/particles/all/force/value",
+            "/particles/all/box/edges/value",
+            f"{NHC_OBSERVABLE_ROOT}/step",
+            f"{NHC_OBSERVABLE_ROOT}/time",
+            f"{NHC_OBSERVABLE_ROOT}/coordinate/value",
+            f"{NHC_OBSERVABLE_ROOT}/velocity/value",
+        ),
+        "restart": (
+            "/particles/all/step",
+            "/particles/all/time",
+            "/particles/all/position/value",
+            "/particles/all/velocity/value",
+            "/particles/all/box/edges/value",
+            NHC_RESTART_DATASET,
+        ),
+    }
+    files = {
+        "legacy": _output_h5_files(case, legacy_dir),
+        "bundled": _output_h5_files(case, bundled_dir),
+    }
+    compared = {}
+    for family, datasets in semantic_datasets.items():
+        left_path = files["legacy"][family]
+        right_path = files["bundled"][family]
+        for dataset in datasets:
+            left_values = _h5_numeric_values(left_path, dataset)
+            right_values = _h5_numeric_values(right_path, dataset)
+            _assert_matching_numeric_shape(
+                f"{case.name} {family}:{dataset}",
+                left_path,
+                right_path,
+                dataset,
+                left_values,
+                right_values,
+            )
+            if dataset == NHC_RESTART_DATASET:
+                for offset, quantity in ((0, "position"), (1, "velocity")):
+                    relative_tolerance, absolute_tolerance = (
+                        _deterministic_tolerance(quantity)
+                    )
+                    _assert_numeric_sequences_close(
+                        f"{case.name} {family}:{dataset} {quantity}",
+                        left_values[offset::2],
+                        right_values[offset::2],
+                        relative_tolerance=relative_tolerance,
+                        absolute_tolerance=absolute_tolerance,
+                    )
+                continue
+            tolerance_label = dataset.replace("coordinate", "position")
+            relative_tolerance, absolute_tolerance = _deterministic_tolerance(
+                tolerance_label
+            )
+            _assert_numeric_sequences_close(
+                f"{case.name} {family}:{dataset}",
+                left_values,
+                right_values,
+                relative_tolerance=relative_tolerance,
+                absolute_tolerance=absolute_tolerance,
+            )
+        compared[family] = list(datasets)
+
+    branch_text_h5 = {}
+    for branch, directory in continuation_dirs.items():
+        trajectory_path = files[branch]["trajectory"]
+        restart_path = files[branch]["restart"]
+        _validate_observable_output(
+            case.name,
+            files[branch]["observable"],
+            directory / "mdout.txt",
+        )
+        _validate_restart_output(case.name, restart_path)
+        coordinate = _assert_nhc_text_matches_h5(
+            f"{case.name} {branch} NHC coordinate text/H5",
+            directory / "output/continuation_nhc.crd",
+            trajectory_path,
+            f"{NHC_OBSERVABLE_ROOT}/coordinate/value",
+            3,
+        )
+        velocity = _assert_nhc_text_matches_h5(
+            f"{case.name} {branch} NHC velocity text/H5",
+            directory / "output/continuation_nhc.vel",
+            trajectory_path,
+            f"{NHC_OBSERVABLE_ROOT}/velocity/value",
+            3,
+        )
+        restart_pairs = _read_nhc_restart_pairs(
+            directory / "output/continuation_nhc_restart.txt", 3
+        )
+        _assert_numeric_sequences_close(
+            f"{case.name} {branch} NHC restart text/H5",
+            restart_pairs,
+            _h5_numeric_values(restart_path, NHC_RESTART_DATASET),
+            relative_tolerance=1.0e-6,
+            absolute_tolerance=6.0e-7,
+        )
+        branch_text_h5[branch] = {
+            "coordinate": coordinate,
+            "velocity": velocity,
+            "restart_pair_count": len(restart_pairs) // 2,
+        }
+
+    for key in ("mode", "step", "time"):
+        dataset = f"/parameters/restart/integrator_state/{key}"
+        left = _h5_string_values(files["legacy"]["restart"], dataset)
+        right = _h5_string_values(files["bundled"]["restart"], dataset)
+        if left != right:
+            raise AssertionError(
+                f"{case.name} continuation integrator state differs for {key}: "
+                f"legacy={left}, bundled={right}"
+            )
+
+    return {
+        "mdout_rows": len(mdout["legacy"]["rows"]),
+        "mdout_columns": columns,
+        "semantic_h5_datasets": compared,
+        "legacy_output_matches_h5": branch_text_h5,
+        "nontrivial_nhc_state": max(
+            abs(value)
+            for value in _h5_numeric_values(
+                files["bundled"]["restart"], NHC_RESTART_DATASET
+            )
+        ),
+    }
 
 
 def _run_chunk_boundary_case(case: AbCase, contracts) -> None:
@@ -4323,7 +4801,7 @@ def _output_h5_files(case: AbCase, root: Path) -> dict[str, Path]:
         "trajectory": root / TRAJECTORY_REL,
         "observable": root / OBSERVABLE_REL,
     }
-    if case.mode == "normal":
+    if case.mode in {"normal", "dynamic_continuation"}:
         files["restart"] = root / RESTART_REL
     return files
 
