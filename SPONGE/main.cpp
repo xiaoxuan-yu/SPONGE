@@ -708,8 +708,7 @@ void Materialize_H5_Protocol_Restart_Sidecars()
             "Materialize_H5_Protocol_Restart_Sidecars",
             input_plan.error_message.c_str());
     }
-    if (!input_plan.restart.binding.enabled ||
-        !Requests_H5_Protocol_State(input_plan.restart.load_policy))
+    if (!input_plan.restart.binding.enabled)
     {
         return;
     }
@@ -742,6 +741,8 @@ void Materialize_H5_Protocol_Restart_Sidecars()
     }
 
     const auto allowed_keys = SpongeH5MD::H5_Protocol_Sidecar_Command_Keys();
+    const bool requests_protocol_state =
+        Requests_H5_Protocol_State(input_plan.restart.load_policy);
     for (const auto& sidecar : sidecars)
     {
         if (!SpongeH5MD::Command_Key_Allowed(allowed_keys, sidecar.key))
@@ -753,6 +754,11 @@ void Materialize_H5_Protocol_Restart_Sidecars()
             controller.Throw_SPONGE_Error(
                 spongeErrorValueErrorCommand,
                 "Materialize_H5_Protocol_Restart_Sidecars", message.c_str());
+        }
+        if (!requests_protocol_state &&
+            sidecar.key != "restrain_coordinate_in_file")
+        {
+            continue;
         }
         controller.original_commands[sidecar.key] = sidecar.path;
         controller.commands[sidecar.key] = sidecar.path;

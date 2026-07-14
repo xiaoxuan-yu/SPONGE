@@ -321,10 +321,13 @@ def test_ab_production_harness_has_executable_contract_coverage():
         "normal_meta_protocol_full_restart_continuation",
         "normal_sits_ff19sb_cmap_peptide",
         "normal_edip_nonzero",
+        "normal_reaxff_payload_sensitivity",
         "normal_eam_funcfl_nonzero",
         "normal_eam_setfl_nonzero",
         "normal_positional_restraint_typed_nonzero",
+        "normal_positional_restraint_sidecar_nonzero",
         "normal_soft_wall_typed_nonzero",
+        "normal_soft_wall_sidecar_nonzero",
         "normal_cv_restraint_typed_nonzero",
         "normal_cv_restraint_sidecar_nonzero",
         "normal_sw_sidecar_pair_three_body",
@@ -568,6 +571,44 @@ def test_bonded_and_listed_contracts_have_independent_payload_cases():
         assert case_name in contract.case_ids
         assert contract.minimum_evidence == "E3"
         assert "input_semantic_equivalence" in contract.assertion_ids
+
+
+def test_remaining_function_contracts_have_independent_payload_cases():
+    contracts = load_contract_registry()
+    cases = {case.name: case for case in _cases_for_profile()}
+    expected = {
+        "input.protocol.positional_restraint.sidecar": (
+            "normal_positional_restraint_sidecar_nonzero"
+        ),
+        "input.protocol.soft_wall.sidecar": "normal_soft_wall_sidecar_nonzero",
+        "input.protocol.cv": "normal_steering_cv_typed_nonzero",
+        "input.qc.energy": "rerun_qc_type_typed_unrestricted_vds_off",
+        "input.manybody.reaxff": "normal_reaxff_payload_sensitivity",
+        "input.manybody.edip": "normal_edip_nonzero",
+    }
+    for contract_id, case_name in expected.items():
+        case = cases[case_name]
+        contract = contracts[contract_id]
+        assert case.statistical_md is False
+        assert contract_id in case.contract_ids
+        assert case_name in contract.case_ids
+        assert contract.minimum_evidence == "E3"
+        assert "input_semantic_equivalence" in contract.assertion_ids
+
+    functional_full_contract_only = {
+        contract_id
+        for contract_id, contract in contracts.items()
+        if contract.status == "supported"
+        and contract.direction == "input"
+        and contract.component
+        not in {"full_contract_fixture", "legacy_sidecar_bridge"}
+        and contract.case_ids
+        and all(
+            case_id.startswith("rerun_full_contract_")
+            for case_id in contract.case_ids
+        )
+    }
+    assert functional_full_contract_only == set()
 
 
 def test_meta_protocol_full_restart_uses_one_checkpoint_and_e4_continuation():
@@ -2329,9 +2370,11 @@ def test_focused_typed_steering_case_requires_cv_config_behavior():
     assert case.contract_ids == (
         "output.legacy.mdout",
         "input.protocol.steering",
+        "input.protocol.cv",
     )
     assert spec == (
         InputSemanticSpec("input.protocol.steering", ("steer_cv",), 1.0e-6),
+        InputSemanticSpec("input.protocol.cv", ("steer_cv",), 1.0e-6),
     )
     typed = contracts["input.protocol.steering"]
     assert typed.status == "supported"
@@ -2670,6 +2713,7 @@ def test_typed_qc_type_case_requires_type_sensitive_runtime_behavior():
         "input.qc.spin_square",
         "input.qc.scf_text",
         "input.qc.type",
+        "input.qc.energy",
     )
     assert spec == InputSemanticSpec("input.qc.type", ("QC", "QC_S_sq"), 1.0e-4)
     contract = contracts["input.qc.type"]

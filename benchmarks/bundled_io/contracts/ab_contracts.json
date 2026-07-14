@@ -607,7 +607,7 @@
       "minimum_evidence": "E3",
       "legacy_surface": "restrain_atom_id, restrain_weight_in_file, and restrain_coordinate_in_file",
       "bundled_surface": "protocol/restart legacy sidecar tables for positional restraint",
-      "case_ids": ["rerun_full_contract_sidecar_vds_off", "rerun_full_contract_sidecar_vds_on"],
+      "case_ids": ["normal_positional_restraint_sidecar_nonzero", "rerun_full_contract_sidecar_vds_off", "rerun_full_contract_sidecar_vds_on"],
       "assertion_ids": ["input_semantic_equivalence"]
     },
     {
@@ -640,7 +640,7 @@
       "minimum_evidence": "E3",
       "legacy_surface": "soft_walls_in_file",
       "bundled_surface": "protocol legacy sidecar table: soft_walls_in_file",
-      "case_ids": ["rerun_full_contract_sidecar_vds_off", "rerun_full_contract_sidecar_vds_on"],
+      "case_ids": ["normal_soft_wall_sidecar_nonzero", "rerun_full_contract_sidecar_vds_off", "rerun_full_contract_sidecar_vds_on"],
       "assertion_ids": ["input_semantic_equivalence"]
     },
     {
@@ -662,7 +662,7 @@
       "minimum_evidence": "E3",
       "legacy_surface": "cv_in_file",
       "bundled_surface": "/cv",
-      "case_ids": ["rerun_full_contract_pure_vds_off", "rerun_full_contract_pure_vds_on", "rerun_full_contract_sidecar_vds_off", "rerun_full_contract_sidecar_vds_on"],
+      "case_ids": ["normal_steering_cv_typed_nonzero", "rerun_full_contract_pure_vds_off", "rerun_full_contract_pure_vds_on", "rerun_full_contract_sidecar_vds_off", "rerun_full_contract_sidecar_vds_on"],
       "assertion_ids": ["input_semantic_equivalence"]
     },
     {
@@ -673,7 +673,7 @@
       "minimum_evidence": "E3",
       "legacy_surface": "qc_type_in_file and QC runtime",
       "bundled_surface": "/qc/type",
-      "case_ids": ["rerun_full_contract_pure_vds_off", "rerun_full_contract_pure_vds_on", "rerun_full_contract_sidecar_vds_off", "rerun_full_contract_sidecar_vds_on"],
+      "case_ids": ["rerun_qc_type_typed_unrestricted_vds_off", "rerun_full_contract_pure_vds_off", "rerun_full_contract_pure_vds_on", "rerun_full_contract_sidecar_vds_off", "rerun_full_contract_sidecar_vds_on"],
       "assertion_ids": ["input_semantic_equivalence"]
     },
     {
@@ -1004,7 +1004,7 @@
       "minimum_evidence": "E3",
       "legacy_surface": "REAXFF_in_file and REAXFF_type_in_file",
       "bundled_surface": "/manybody/reaxff",
-      "case_ids": ["rerun_full_contract_pure_vds_off", "rerun_full_contract_pure_vds_on", "rerun_full_contract_sidecar_vds_off", "rerun_full_contract_sidecar_vds_on"],
+      "case_ids": ["normal_reaxff_payload_sensitivity", "rerun_full_contract_pure_vds_off", "rerun_full_contract_pure_vds_on", "rerun_full_contract_sidecar_vds_off", "rerun_full_contract_sidecar_vds_on"],
       "assertion_ids": ["input_semantic_equivalence"],
       "inventory_refs": [
         "topology_sidecar_keys:REAXFF_in_file",
