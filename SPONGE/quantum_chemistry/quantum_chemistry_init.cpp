@@ -531,6 +531,7 @@ bool QUANTUM_CHEMISTRY::Parsing_Arguments(CONTROLLER* controller,
     if (controller->Command_Exist("qc_scf_output"))
     {
         const char* fname = controller->Command("qc_scf_output");
+        strcpy(scf_output_file_name, fname);
         Open_File_Safely(&scf_output_file, fname, "w");
     }
 

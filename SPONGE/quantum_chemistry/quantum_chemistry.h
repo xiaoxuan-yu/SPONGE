@@ -39,6 +39,7 @@ struct QUANTUM_CHEMISTRY
 
     float scf_energy = 0.0f;
     FILE* scf_output_file = NULL;
+    char scf_output_file_name[CHAR_LENGTH_MAX] = "";
 
     // 本地原子映射
     std::vector<int> atom_local;

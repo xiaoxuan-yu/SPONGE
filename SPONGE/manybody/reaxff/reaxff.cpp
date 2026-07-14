@@ -21,6 +21,10 @@ void REAXFF::Initial(CONTROLLER* controller, int atom_numbers, float cutoff,
     angle.Initial(controller, atom_numbers, "REAXFF");
     torsion.Initial(controller, atom_numbers, "REAXFF");
     hb.Initial(controller, atom_numbers, "REAXFF");
+    if (bond.is_initialized && vdw.is_initialized && eeq.is_initialized)
+    {
+        controller->Step_Print_Initial("REAXFF", "%14.7e");
+    }
 
     Wire_Shared_State();
     is_initialized = 1;

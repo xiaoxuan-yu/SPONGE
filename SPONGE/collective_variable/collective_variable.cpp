@@ -185,25 +185,10 @@ void Materialize_H5_CV_Config(CONTROLLER* controller)
         {
             return;
         }
-        if (has_restraint != has_restraint_cv)
-        {
-            throw std::runtime_error(
-                "typed CV restraint requires both /restraint/config and "
-                "/restraint/cv/config");
-        }
         const bool has_legacy_cv = controller->Command_Exist("cv_in_file");
         const bool has_legacy_restraint =
             controller->Command_Exist("restrain_in_file") ||
             controller->Command_Exist("restrain_cv_in_file");
-        if (has_restraint && (has_legacy_cv || has_legacy_restraint))
-        {
-            controller->Throw_SPONGE_Error(
-                spongeErrorConflictingCommand, "Materialize_H5_CV_Config",
-                "Reason:\n\tinput.h5.protocol provides a typed CV restraint, "
-                "but cv_in_file, restrain_in_file, or restrain_cv_in_file is "
-                "also set. Native H5 and legacy text input cannot both own "
-                "CV-restraint state\n");
-        }
         if (has_legacy_cv || has_legacy_restraint)
         {
             return;

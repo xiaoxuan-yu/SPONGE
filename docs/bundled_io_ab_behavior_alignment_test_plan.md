@@ -1605,10 +1605,11 @@ Close the final deferred input contract by making the historical
   accepted; conflicting definitions fail instead of silently selecting one
   owner.
 - Read `/cv/config`, `/restraint/config`, and `/restraint/cv/config` through one
-  structured validator. Require the two typed restraint roots together,
-  validate scalar count/vector offsets/key/value structure, reject duplicates,
-  merge identical shared CV definitions, and materialize one canonical
-  `cv_in_file` for the established runtime parser.
+  structured validator. Treat `/restraint/config` and
+  `/restraint/cv/config` as independent historical input surfaces, validate
+  each present root's scalar count/vector offsets/key/value structure, reject
+  duplicates, merge identical shared CV definitions, and materialize one
+  canonical `cv_in_file` for the established runtime parser.
 - Add independent two-atom typed and H5-sidecar A/B cases. Both must exercise
   the real legacy restraint keys, emit an exact non-zero `restrain_cv` energy
   and complete force fingerprint, then zero only their own weight payload and
@@ -1616,8 +1617,10 @@ Close the final deferred input contract by making the historical
 - Make pure and sidecar full-contract fixtures select exactly one composite
   CV-restraint owner. Include the non-zero module column in the formal rerun
   input-semantic evidence under both VDS modes.
-- Add process-level failures for typed/legacy dual ownership, a partial typed
-  owner, inconsistent key offsets, and conflicting shared CV definitions.
+- Add process-level failures for typed/legacy dual ownership, inconsistent key
+  offsets, and conflicting shared CV definitions. A single valid typed
+  restraint root remains a supported input, matching the corresponding legacy
+  surface.
 
 Acceptance:
 
@@ -1628,7 +1631,7 @@ Acceptance:
 - Pure and sidecar full-contract VDS-off/on match every mdout column, complete
   rerun trajectory, and observable output while exercising
   `restrain_cv=12.06` in both frames.
-- All four new validation mutations exit through stable
+- All three ownership/structure/definition mutations exit through stable
   conflict/bad-file-format diagnostics, and the complete 33-case failure sweep
   remains green.
 - Registry coverage reaches 87 supported contracts, zero deferred contracts,
@@ -1708,7 +1711,43 @@ Acceptance:
 - Contract smoke, focused manifest tests, Ruff, formatting, and diff checks
   pass, followed by one PR-scoped commit.
 
-## 53. Artifacts and Temporary-Space Policy
+## 53. PR 56: Track Bundled I/O Implementation Baseline
+
+Put the implementation, schemas, fixtures, tests, examples, and documentation
+that the A/B gates exercise under version control so clean-source provenance
+can name an actual bundled I/O commit.
+
+- Track the audited baseline scope: 36 modified tracked files and 94 previously
+  untracked implementation/test assets. Exclude `.codegraph`, build outputs,
+  and all `.tmp-*` evidence directories.
+- Make aggregate CMake targets build every executable selected by their CTest
+  labels, and order staged VDS execution after both mock and real backend
+  dependencies are available.
+- Keep legacy `rst` classified as an output, distinguish H5 path bindings from
+  the rerun particle-stream selector, and align static matrix expectations with
+  the generated full-contract fixtures.
+- Preserve independent typed CV restraint roots and let injected H5 legacy
+  sidecars retain ownership after the pre-injection conflict validator has
+  accepted the input plan. Repair restart-smoke `mdinfo` rewriting so it does
+  not create duplicate TOML keys.
+- Record opt-in runtime results separately from compile/file-level coverage.
+  Passing registry and CTest labels does not imply production promotion or full
+  bundled/legacy behavioral equivalence.
+
+Acceptance:
+
+- A fresh CPU build completes the `SPONGE` target and the staged contract,
+  coverage, matrix, mock-backend, VDS, backend-I/O, rerun, and default smoke
+  labels without failures; opt-in runtime skips are reported explicitly.
+- The opt-in normal input/output A/B matrix and VDS terminal/resume smoke pass.
+  The EDIP non-triviality gate and dynamic NHC restart-load closure remain
+  explicit failing evidence to be fixed in later behavior-alignment PRs.
+- The 152-test bundled I/O contract smoke, schema examples, Ruff, lockfile,
+  formatting, and diff checks pass.
+- Stage only the audited baseline paths and create exactly one PR-scoped commit
+  authored by `Xiaoxuan Yu <xiaoxuan_yu@pku.edu.cn>`.
+
+## 54. Artifacts and Temporary-Space Policy
 
 - Use `SPONGE_BUNDLED_IO_AB_RUN_ROOT` for all heavy runs.
 - Put production artifacts on the workspace filesystem rather than `/tmp`.
@@ -1718,7 +1757,7 @@ Acceptance:
 - Record artifact byte counts and enforce a configurable per-case quota.
 - Cleanup must only remove directories created by the current gate run.
 
-## 54. PR Completion Log
+## 55. PR Completion Log
 
 Append one row immediately after completing and committing each PR.
 
@@ -1781,3 +1820,4 @@ Append one row immediately after completing and committing each PR.
 | PR 53: Typed and sidecar CV-restraint behavior contracts | Complete | This commit | focused typed/sidecar CV-restraint CPU A/B plus weight-zero and reordered-definition controls; pure and sidecar full-contract VDS-off/on E3 gates; dual-owner, partial-owner, offset, and definition-conflict process failures; 33-case failure sweep; fixture-equivalence CTest; SPONGE rebuild; 142-test smoke; Ruff; format; clang-format; `git diff --check` | The CV controller now merges all three legacy configuration surfaces, while typed protocol roots pass one structured, conflict-aware materializer. Focused routes match `restrain_cv=1.0` and force `(4,0,0,-4,0,0)`; full-contract routes exercise `restrain_cv=12.06`. Registry coverage reaches 87 supported, zero deferred, and one unsupported contract. |
 | PR 54: Attested production promotion evidence | Complete | This commit | eight derived-evidence positive/negative guards; real 24-test comparator mutation hook; 150-test contract smoke; workflow YAML parse; execution-matrix CLI; Ruff; format; `git diff --check` | Production history is now derived from same-run contract, split CPU/GPU/MPI matrix, and comparator artifacts. Scheduled CPU jobs share one run ID and upload the comparator report. History records conservative scenario performance, source commit, and three SHA-256 provenance values; stale/conflicting IDs, incomplete evidence, failed mutation sessions, non-finite metrics, duplicates, and unattested handwritten rows fail. Promotion remains shadow pending three complete retry-free runs and cross-process VDS closure. |
 | PR 55: Clean source provenance gate | Complete | This commit | clean/mismatched/modified/untracked temporary-Git guards; real dirty-tree CLI rejection; 152-test contract smoke; Ruff; format; `git diff --check` | Production derivation now requires exact `HEAD`, an empty porcelain status including untracked files, and persisted `source_tree_state=clean`. The current worktree is correctly rejected before artifact loading, so its available RTX 4090 cannot be used to claim a commit-qualified PR 7c streak until the bundled I/O source baseline is tracked. |
+| PR 56: Track bundled I/O implementation baseline | Complete | This commit | fresh CPU `SPONGE` build; staged H5 bundle CTest labels; opt-in runtime smoke audit; 152-test contract smoke; schema examples; Ruff; `pixi lock --check`; `git diff --check` | The audited bundled I/O implementation, schemas, fixtures, examples, and tests are now tracked. Static/file-level gates pass; opt-in normal A/B and VDS terminal/resume pass. EDIP remains all-trivial in the manybody gate and dynamic NHC restart-load exits after initialization, so full behavioral equivalence and PR 7c promotion remain unproven. |

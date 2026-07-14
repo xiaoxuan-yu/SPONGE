@@ -1,5 +1,6 @@
 ﻿#include "SITS.h"
 
+#include "../utils/h5md/input_assembler.hpp"
 #include "sits_h5_input.hpp"
 
 template <bool need_force, bool need_energy, bool need_virial,
@@ -1214,6 +1215,10 @@ void CLASSIC_SITS_INFORMATION::SITS_Write_Nk_Norm()
 #endif
     deviceMemcpy(nk_record_cpu, Nk, sizeof(float) * k_numbers,
                  deviceMemcpyDeviceToHost);
+    h5_nk_pending = 1;
+    h5_nk_step = sits_controller->is_initialized
+                     ? sits_controller->classic_sits.record_count
+                     : 0;
     if (nk_traj_file != NULL)
     {
         fwrite(nk_record_cpu, sizeof(float), k_numbers, nk_traj_file);
@@ -1409,6 +1414,51 @@ void SITS_INFORMATION::Memory_Allocate()
     Device_Malloc_Safely((void**)&atom_sys_mark, sizeof(int) * atom_numbers);
     Device_Malloc_Safely((void**)&atom_sys_mark_local,
                          sizeof(int) * atom_numbers);
+}
+
+bool SITS_INFORMATION::Apply_H5_Restart_State(
+    const SpongeH5MD::RestartProtocolState& state, std::string* error_message)
+{
+    auto fail = [error_message](const std::string& message)
+    {
+        if (error_message != NULL)
+        {
+            *error_message = message;
+        }
+        return false;
+    };
+
+    if (!is_initialized || !classic_sits.is_initialized)
+    {
+        return fail("SITS module is not initialized");
+    }
+
+    std::vector<float> nk_values;
+    if (!SpongeH5MD::Extract_Sits_Nk_Protocol_State(state, module_name,
+                                                    classic_sits.k_numbers,
+                                                    &nk_values, error_message))
+    {
+        return false;
+    }
+
+    std::vector<float> log_nk_values(nk_values.size());
+    std::vector<float> log_nk_inverse_values(nk_values.size());
+    for (std::size_t i = 0; i < nk_values.size(); ++i)
+    {
+        classic_sits.nk_record_cpu[i] = nk_values[i];
+        log_nk_values[i] = logf(nk_values[i]);
+        log_nk_inverse_values[i] = -log_nk_values[i];
+    }
+
+    deviceMemcpy(classic_sits.Nk, nk_values.data(),
+                 sizeof(float) * nk_values.size(), deviceMemcpyHostToDevice);
+    deviceMemcpy(classic_sits.log_nk, log_nk_values.data(),
+                 sizeof(float) * log_nk_values.size(),
+                 deviceMemcpyHostToDevice);
+    deviceMemcpy(classic_sits.log_nk_inverse, log_nk_inverse_values.data(),
+                 sizeof(float) * log_nk_inverse_values.size(),
+                 deviceMemcpyHostToDevice);
+    return true;
 }
 
 void SITS_INFORMATION::Reset_Force_Energy(int* md_need_potential)

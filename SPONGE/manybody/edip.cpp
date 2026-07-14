@@ -180,7 +180,7 @@ void EDIP_INFORMATION::Initial(CONTROLLER* controller, const char* module_name,
     is_initialized = true;
     if (!is_controller_printf_initialized)
     {
-        controller->Step_Print_Initial(this->module_name, "%.2f");
+        controller->Step_Print_Initial(this->module_name, "%14.7e");
         is_controller_printf_initialized = true;
     }
     controller->printf("END INITIALIZING EDIP FORCE\n\n");

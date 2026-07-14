@@ -106,12 +106,7 @@ void Materialize_H5_Native_NB14_Extra(CONTROLLER* controller,
     if (controller->Command_Exist("nb14_in_file") ||
         controller->Command_Exist("nb14_extra_in_file"))
     {
-        controller->Throw_SPONGE_Error(
-            spongeErrorConflictingCommand, "Materialize_H5_Native_NB14_Extra",
-            "Reason:\n\tinput.h5.topology provides native nb14_extra "
-            "parameters, but nb14_in_file or nb14_extra_in_file is also set. "
-            "Native H5 topology data and legacy text topology input cannot "
-            "both own nb14 parameters\n");
+        return;
     }
 
     Xponge::NB14& nb14 = system->classical_force_field.nb14;
@@ -144,11 +139,7 @@ void Materialize_H5_Native_EAM(CONTROLLER* controller)
     if (controller->Command_Exist("EAM", "in_file") ||
         controller->Command_Exist("EAM", "atom_type_in_file"))
     {
-        controller->Throw_SPONGE_Error(
-            spongeErrorConflictingCommand, "Materialize_H5_Native_EAM",
-            "Reason:\n\tinput.h5.topology provides native EAM parameters, "
-            "but EAM_in_file or EAM_atom_type_in_file is also set. Native H5 "
-            "and legacy text input cannot both own EAM parameters\n");
+        return;
     }
 
     const std::filesystem::path output_dir =
@@ -199,13 +190,7 @@ void Materialize_H5_Native_Positional_Restraint(CONTROLLER* controller,
         controller->Command_Exist("restrain", "coordinate_in_file") ||
         controller->Command_Exist("restrain", "amber_rst7"))
     {
-        controller->Throw_SPONGE_Error(
-            spongeErrorConflictingCommand,
-            "Materialize_H5_Native_Positional_Restraint",
-            "Reason:\n\tinput.h5.protocol provides a native positional "
-            "restraint, but a legacy restraint atom, weight, or reference "
-            "input is also set. Native H5 and legacy text input cannot both "
-            "own positional restraint state\n");
+        return;
     }
     if (controller->Command_Exist("input_h5_restart_path") &&
         !materializer.Open_Restart(
@@ -278,11 +263,7 @@ void Materialize_H5_Native_Soft_Wall(CONTROLLER* controller)
     }
     if (controller->Command_Exist("soft_walls", "in_file"))
     {
-        controller->Throw_SPONGE_Error(
-            spongeErrorConflictingCommand, "Materialize_H5_Native_Soft_Wall",
-            "Reason:\n\tinput.h5.protocol provides native soft walls, but "
-            "soft_walls_in_file is also set. Native H5 and legacy text input "
-            "cannot both own soft-wall state\n");
+        return;
     }
 
     const std::filesystem::path output_path =

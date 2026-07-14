@@ -1,10 +1,210 @@
 ﻿#pragma once
 
+#include <cctype>
+#include <chrono>
+#include <cstdlib>
+#include <fstream>
+#include <map>
+#include <sstream>
+#include <string>
+#include <vector>
+
+#include "utils/h5md/h5_legacy_sidecar_contract.hpp"
+#include "utils/h5md/h5_structural_state.hpp"
+#include "utils/h5md/highfive_backend.hpp"
+#include "utils/h5md/output_route_helpers.hpp"
+
+namespace
+{
+std::string Sanitize_H5MD_Name_For_Output(const std::string& name)
+{
+    return SpongeH5OutputRoute::Sanitize_Output_Name(name);
+}
+
+std::vector<std::string> Make_Unique_H5MD_Output_Names(
+    const std::vector<std::string>& names)
+{
+    return SpongeH5OutputRoute::Make_Unique_Output_Names(names);
+}
+
+bool Parse_H5MD_Output_Double(const std::string& text, double* value)
+{
+    return SpongeH5OutputRoute::Parse_Output_Double(text, value);
+}
+
+void Fill_H5MD_Box_Edges(const MD_INFORMATION* md_info, float box_edges[9])
+{
+    if (md_info->pbc.pbc)
+    {
+        box_edges[0] = md_info->pbc.cell.a11;
+        box_edges[1] = 0.0f;
+        box_edges[2] = 0.0f;
+        box_edges[3] = md_info->pbc.cell.a21;
+        box_edges[4] = md_info->pbc.cell.a22;
+        box_edges[5] = 0.0f;
+        box_edges[6] = md_info->pbc.cell.a31;
+        box_edges[7] = md_info->pbc.cell.a32;
+        box_edges[8] = md_info->pbc.cell.a33;
+    }
+    else
+    {
+        box_edges[0] = md_info->sys.box_length.x;
+        box_edges[1] = 0.0f;
+        box_edges[2] = 0.0f;
+        box_edges[3] = 0.0f;
+        box_edges[4] = md_info->sys.box_length.y;
+        box_edges[5] = 0.0f;
+        box_edges[6] = 0.0f;
+        box_edges[7] = 0.0f;
+        box_edges[8] = md_info->sys.box_length.z;
+    }
+}
+
+bool Read_H5MD_Text_File_If_Present(const char* file_name, std::string* text)
+{
+    return SpongeH5OutputRoute::Read_Text_File_If_Present(file_name, text);
+}
+
+bool Write_H5_Restart_Text_File_If_Present(SpongeH5MD::RestartH5Writer* writer,
+                                           const char* module_name,
+                                           const char* component,
+                                           const char* file_name)
+{
+    if (writer == NULL || module_name == NULL || component == NULL)
+    {
+        return true;
+    }
+    std::string text;
+    if (!Read_H5MD_Text_File_If_Present(file_name, &text))
+    {
+        return true;
+    }
+    return writer->Write_Metad_State_Text(module_name, component, text);
+}
+
+bool Write_H5_Restart_Protocol_Sidecars_If_Present(
+    CONTROLLER* controller, SpongeH5MD::RestartH5Writer* writer)
+{
+    if (controller == NULL || writer == NULL)
+    {
+        return true;
+    }
+    for (const auto& key : SpongeH5MD::H5_Protocol_Sidecar_Command_Keys())
+    {
+        if (!controller->Command_Exist(key.c_str()))
+        {
+            continue;
+        }
+        std::string text;
+        if (!Read_H5MD_Text_File_If_Present(controller->Command(key.c_str()),
+                                            &text))
+        {
+            continue;
+        }
+        if (!writer->Write_Protocol_Sidecar_Text(key, text))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+
+bool Write_H5_Restart_Dynamic_State_If_Present(
+    SpongeH5MD::RestartH5Writer* writer,
+    const SpongeH5MD::RestartDynamicState* state)
+{
+    if (writer == NULL || state == NULL)
+    {
+        return true;
+    }
+    for (const auto& item : state->rng_state_text)
+    {
+        if (!writer->Write_Rng_State_Text(item.first, item.second))
+        {
+            return false;
+        }
+    }
+    for (const auto& item : state->integrator_state_text)
+    {
+        if (!writer->Write_Integrator_State_Text(item.first, item.second))
+        {
+            return false;
+        }
+    }
+    for (const auto& module : state->thermostat_text_states)
+    {
+        for (const auto& item : module.second)
+        {
+            if (!writer->Write_Thermostat_State_Text(module.first, item.first,
+                                                     item.second))
+            {
+                return false;
+            }
+        }
+    }
+    for (const auto& module : state->thermostat_float_states)
+    {
+        for (const auto& item : module.second)
+        {
+            if (!writer->Write_Thermostat_State_Float(module.first, item.first,
+                                                      item.second.data(),
+                                                      item.second.size()))
+            {
+                return false;
+            }
+        }
+    }
+    for (const auto& module : state->barostat_text_states)
+    {
+        for (const auto& item : module.second)
+        {
+            if (!writer->Write_Barostat_State_Text(module.first, item.first,
+                                                   item.second))
+            {
+                return false;
+            }
+        }
+    }
+    for (const auto& module : state->barostat_float_states)
+    {
+        for (const auto& item : module.second)
+        {
+            if (!writer->Write_Barostat_State_Float(module.first, item.first,
+                                                    item.second.data(),
+                                                    item.second.size()))
+            {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+bool Is_H5MD_Reaxff_Output_Key(const std::string& name)
+{
+    return SpongeH5OutputRoute::Is_Reaxff_Output_Key(name);
+}
+
+bool H5MD_Output_Key_Exists(const CONTROLLER* controller, const char* name)
+{
+    if (controller == NULL || name == NULL) return false;
+    return SpongeH5OutputRoute::Output_Key_Exists(controller->outputs_key,
+                                                  name);
+}
+
+double H5MD_Elapsed_Seconds(const std::chrono::steady_clock::time_point start)
+{
+    const auto stop = std::chrono::steady_clock::now();
+    return std::chrono::duration<double>(stop - start).count();
+}
+}  // namespace
+
 void MD_INFORMATION::trajectory_output::Initial(CONTROLLER* controller,
                                                 MD_INFORMATION* md_info)
 {
     this->md_info = md_info;
     current_crd_synchronized_step = -1;
+    h5_output_plan = SpongeH5OutputPlan::Resolve_Output_Plan(controller);
 
     print_virial = false;
     if (controller->Command_Exist("print_pressure"))
@@ -104,6 +304,13 @@ void MD_INFORMATION::trajectory_output::Initial(CONTROLLER* controller,
     {
         print_zeroth_frame = true;
         write_trajectory_interval = 0;
+        if (controller->Command_Exist("write_trajectory_interval"))
+        {
+            controller->Check_Int("write_trajectory_interval",
+                                  "MD_INFORMATION::trajectory_output::Initial");
+            write_trajectory_interval =
+                atoi(controller->Command("write_trajectory_interval"));
+        }
         write_mdout_interval = 1;
         write_restart_file_interval = 0;
         if (controller->Command_Exist(FRC_TRAJ_COMMAND))
@@ -115,20 +322,1020 @@ void MD_INFORMATION::trajectory_output::Initial(CONTROLLER* controller,
                                         sizeof(VECTOR) * md_info->atom_numbers);
         }
     }
-    if (write_trajectory_interval != 0)
+    if (write_trajectory_interval != 0 &&
+        h5_output_plan.legacy.Enabled(TRAJ_COMMAND))
     {
         crd_traj = controller->Get_Output_File(true, TRAJ_COMMAND, ".dat",
                                                TRAJ_DEFAULT_FILENAME);
-        controller->Set_File_Buffer(crd_traj,
-                                    sizeof(VECTOR) * md_info->atom_numbers);
+        if (crd_traj != NULL)
+        {
+            controller->Set_File_Buffer(crd_traj,
+                                        sizeof(VECTOR) * md_info->atom_numbers);
+        }
+    }
+    if (write_trajectory_interval != 0 &&
+        h5_output_plan.legacy.Enabled(BOX_TRAJ_COMMAND))
+    {
         box_traj = controller->Get_Output_File(false, BOX_TRAJ_COMMAND, ".box",
                                                BOX_TRAJ_DEFAULT_FILENAME);
         char line[256];
         sprintf(line, "%9.3f %9.3f %9.3f %9.5f %9.5f %9.5f\n",
                 md_info->sys.box_length.x, md_info->sys.box_length.y,
                 md_info->sys.box_length.z, 90.0f, 90.0f, 90.0f);
-        controller->Set_File_Buffer(box_traj, sizeof(char) * strlen(line));
+        if (box_traj != NULL)
+        {
+            controller->Set_File_Buffer(box_traj, sizeof(char) * strlen(line));
+        }
     }
+}
+
+void MD_INFORMATION::trajectory_output::Initial_H5_Trajectory(
+    CONTROLLER* controller)
+{
+    h5_output_plan = SpongeH5OutputPlan::Resolve_Output_Plan(controller);
+    if (!h5_output_plan.trajectory.enabled)
+    {
+        return;
+    }
+    if (CONTROLLER::MPI_rank != 0)
+    {
+        return;
+    }
+    h5_trajectory_velocity_enabled = is_vel_traj != 0;
+    h5_trajectory_force_enabled = is_frc_traj != 0;
+    h5_observable_names =
+        Make_Unique_H5MD_Output_Names(controller->outputs_key);
+    if (h5_output_plan.trajectory.vds)
+    {
+        h5_vds_backend_factory.reset(new SpongeH5MD::HighFiveBackendFactory());
+        h5_vds_trajectory_writer.reset(new SpongeH5MD::VdsTrajectoryH5Writer(
+            h5_vds_backend_factory.get()));
+        if (!h5_vds_trajectory_writer->Open(h5_output_plan, "0"))
+        {
+            controller->Throw_SPONGE_Error(
+                spongeErrorValueErrorCommand,
+                "MD_INFORMATION::trajectory_output::Initial_H5_Trajectory",
+                h5_vds_trajectory_writer->Last_Error().c_str());
+        }
+        if (!h5_vds_trajectory_writer->Define_Particle_Datasets(
+                md_info->atom_numbers, h5_trajectory_velocity_enabled,
+                h5_trajectory_force_enabled))
+        {
+            controller->Throw_SPONGE_Error(
+                spongeErrorValueErrorCommand,
+                "MD_INFORMATION::trajectory_output::Initial_H5_Trajectory",
+                h5_vds_trajectory_writer->Last_Error().c_str());
+        }
+        if (!h5_vds_trajectory_writer->Define_Observable_Stream(
+                h5_observable_names, controller->outputs_key))
+        {
+            controller->Throw_SPONGE_Error(
+                spongeErrorValueErrorCommand,
+                "MD_INFORMATION::trajectory_output::Initial_H5_Trajectory",
+                h5_vds_trajectory_writer->Last_Error().c_str());
+        }
+        h5_trajectory_vds_enabled = true;
+        h5_trajectory_enabled = true;
+        Write_H5_Legacy_Sidecar_Provenance(
+            controller, h5_vds_trajectory_writer.get(),
+            "MD_INFORMATION::trajectory_output::Initial_H5_Trajectory");
+        return;
+    }
+    h5_trajectory_backend.reset(new SpongeH5MD::HighFiveBackend());
+    h5_trajectory_writer.reset(
+        new SpongeH5MD::TrajectoryH5Writer(h5_trajectory_backend.get()));
+    if (!h5_trajectory_writer->Open_Single_File(h5_output_plan, "0"))
+    {
+        controller->Throw_SPONGE_Error(
+            spongeErrorValueErrorCommand,
+            "MD_INFORMATION::trajectory_output::Initial_H5_Trajectory",
+            h5_trajectory_writer->Last_Error().c_str());
+    }
+    if (!h5_trajectory_writer->Define_Particle_Datasets(
+            md_info->atom_numbers, h5_trajectory_velocity_enabled,
+            h5_trajectory_force_enabled))
+    {
+        controller->Throw_SPONGE_Error(
+            spongeErrorValueErrorCommand,
+            "MD_INFORMATION::trajectory_output::Initial_H5_Trajectory",
+            h5_trajectory_writer->Last_Error().c_str());
+    }
+    if (!h5_trajectory_writer->Define_Observable_Stream(
+            h5_observable_names, controller->outputs_key))
+    {
+        controller->Throw_SPONGE_Error(
+            spongeErrorValueErrorCommand,
+            "MD_INFORMATION::trajectory_output::Initial_H5_Trajectory",
+            h5_trajectory_writer->Last_Error().c_str());
+    }
+    h5_trajectory_enabled = true;
+    Write_H5_Legacy_Sidecar_Provenance(
+        controller, h5_trajectory_writer.get(),
+        "MD_INFORMATION::trajectory_output::Initial_H5_Trajectory");
+}
+
+void MD_INFORMATION::trajectory_output::Initial_H5_Observable(
+    CONTROLLER* controller)
+{
+    if (!h5_output_plan.trajectory.enabled &&
+        !h5_output_plan.observable.enabled)
+    {
+        h5_output_plan = SpongeH5OutputPlan::Resolve_Output_Plan(controller);
+    }
+    if (!h5_output_plan.observable.enabled)
+    {
+        return;
+    }
+    if (CONTROLLER::MPI_rank != 0)
+    {
+        return;
+    }
+    h5_observable_backend.reset(new SpongeH5MD::HighFiveBackend());
+    h5_observable_writer.reset(
+        new SpongeH5MD::ObservableH5Writer(h5_observable_backend.get()));
+    if (!h5_observable_writer->Open(h5_output_plan, "0"))
+    {
+        controller->Throw_SPONGE_Error(
+            spongeErrorValueErrorCommand,
+            "MD_INFORMATION::trajectory_output::Initial_H5_Observable",
+            h5_observable_writer->Last_Error().c_str());
+    }
+    h5_observable_only_names =
+        Make_Unique_H5MD_Output_Names(controller->outputs_key);
+    if (!h5_observable_writer->Define_Observable_Stream(
+            h5_observable_only_names, controller->outputs_key))
+    {
+        controller->Throw_SPONGE_Error(
+            spongeErrorValueErrorCommand,
+            "MD_INFORMATION::trajectory_output::Initial_H5_Observable",
+            h5_observable_writer->Last_Error().c_str());
+    }
+    h5_observable_enabled = true;
+    Write_H5_Legacy_Sidecar_Provenance(
+        controller, h5_observable_writer.get(),
+        "MD_INFORMATION::trajectory_output::Initial_H5_Observable");
+}
+
+void MD_INFORMATION::trajectory_output::Initial_H5_Restart(
+    CONTROLLER* controller)
+{
+    if (!h5_output_plan.trajectory.enabled &&
+        !h5_output_plan.observable.enabled && !h5_output_plan.restart.enabled)
+    {
+        h5_output_plan = SpongeH5OutputPlan::Resolve_Output_Plan(controller);
+    }
+    h5_restart_enabled = h5_output_plan.restart.enabled;
+}
+
+void MD_INFORMATION::trajectory_output::Write_H5_Legacy_Sidecar_Provenance(
+    CONTROLLER* controller, SpongeH5MD::TrajectoryH5Writer* writer,
+    const char* context)
+{
+    if (writer == NULL) return;
+    std::vector<std::string> keys;
+    std::vector<std::string> paths;
+    SpongeH5OutputPlan::Collect_Explicit_Legacy_Sidecars(h5_output_plan.legacy,
+                                                         &keys, &paths);
+    if (keys.empty()) return;
+    if (!writer->Write_Legacy_Sidecar_Paths(keys, paths))
+    {
+        controller->Throw_SPONGE_Error(spongeErrorValueErrorCommand, context,
+                                       writer->Last_Error().c_str());
+    }
+}
+
+void MD_INFORMATION::trajectory_output::Write_H5_Legacy_Sidecar_Provenance(
+    CONTROLLER* controller, SpongeH5MD::VdsTrajectoryH5Writer* writer,
+    const char* context)
+{
+    if (writer == NULL) return;
+    std::vector<std::string> keys;
+    std::vector<std::string> paths;
+    SpongeH5OutputPlan::Collect_Explicit_Legacy_Sidecars(h5_output_plan.legacy,
+                                                         &keys, &paths);
+    if (keys.empty()) return;
+    if (!writer->Write_Legacy_Sidecar_Paths(keys, paths))
+    {
+        controller->Throw_SPONGE_Error(spongeErrorValueErrorCommand, context,
+                                       writer->Last_Error().c_str());
+    }
+}
+
+void MD_INFORMATION::trajectory_output::Write_H5_Legacy_Sidecar_Provenance(
+    CONTROLLER* controller, SpongeH5MD::ObservableH5Writer* writer,
+    const char* context)
+{
+    if (writer == NULL) return;
+    std::vector<std::string> keys;
+    std::vector<std::string> paths;
+    SpongeH5OutputPlan::Collect_Explicit_Legacy_Sidecars(h5_output_plan.legacy,
+                                                         &keys, &paths);
+    if (keys.empty()) return;
+    if (!writer->Write_Legacy_Sidecar_Paths(keys, paths))
+    {
+        controller->Throw_SPONGE_Error(spongeErrorValueErrorCommand, context,
+                                       writer->Last_Error().c_str());
+    }
+}
+
+void MD_INFORMATION::trajectory_output::Write_H5_Legacy_Sidecar_Provenance(
+    CONTROLLER* controller, SpongeH5MD::RestartH5Writer* writer,
+    const char* context)
+{
+    if (writer == NULL) return;
+    std::vector<std::string> keys;
+    std::vector<std::string> paths;
+    SpongeH5OutputPlan::Collect_Explicit_Legacy_Sidecars(h5_output_plan.legacy,
+                                                         &keys, &paths);
+    if (keys.empty()) return;
+    if (!writer->Write_Legacy_Sidecar_Paths(keys, paths))
+    {
+        controller->Throw_SPONGE_Error(spongeErrorValueErrorCommand, context,
+                                       writer->Last_Error().c_str());
+    }
+}
+
+void MD_INFORMATION::trajectory_output::Initial_H5_Nose_Hoover_Chain(
+    CONTROLLER* controller, std::size_t chain_length)
+{
+    if (chain_length == 0 || CONTROLLER::MPI_rank != 0)
+    {
+        return;
+    }
+    h5_nhc_chain_length = chain_length;
+    bool enabled = false;
+    if (h5_trajectory_enabled)
+    {
+        bool ok =
+            h5_trajectory_vds_enabled
+                ? h5_vds_trajectory_writer
+                      ->Ensure_Nose_Hoover_Chain_Observables(chain_length)
+                : h5_trajectory_writer->Ensure_Nose_Hoover_Chain_Observables(
+                      chain_length);
+        if (!ok)
+        {
+            const std::string error =
+                h5_trajectory_vds_enabled
+                    ? h5_vds_trajectory_writer->Last_Error()
+                    : h5_trajectory_writer->Last_Error();
+            controller->Throw_SPONGE_Error(spongeErrorValueErrorCommand,
+                                           "MD_INFORMATION::trajectory_output::"
+                                           "Initial_H5_Nose_Hoover_Chain",
+                                           error.c_str());
+        }
+        enabled = true;
+    }
+    if (h5_observable_enabled)
+    {
+        if (!h5_observable_writer->Ensure_Nose_Hoover_Chain_Observables(
+                chain_length))
+        {
+            controller->Throw_SPONGE_Error(
+                spongeErrorValueErrorCommand,
+                "MD_INFORMATION::trajectory_output::Initial_H5_Nose_Hoover_"
+                "Chain",
+                h5_observable_writer->Last_Error().c_str());
+        }
+        enabled = true;
+    }
+    h5_nhc_observable_enabled = enabled;
+}
+
+void MD_INFORMATION::trajectory_output::Initial_H5_Sits_Nk(
+    CONTROLLER* controller, const char* module_name, std::size_t k_count)
+{
+    if (module_name == NULL || k_count == 0 || CONTROLLER::MPI_rank != 0)
+    {
+        return;
+    }
+    h5_sits_module_name = module_name;
+    h5_sits_k_count = k_count;
+    bool enabled = false;
+    if (h5_trajectory_enabled)
+    {
+        bool ok = h5_trajectory_vds_enabled
+                      ? h5_vds_trajectory_writer->Ensure_Sits_Nk_Observable(
+                            h5_sits_module_name, h5_sits_k_count)
+                      : h5_trajectory_writer->Ensure_Sits_Nk_Observable(
+                            h5_sits_module_name, h5_sits_k_count);
+        if (!ok)
+        {
+            const std::string error =
+                h5_trajectory_vds_enabled
+                    ? h5_vds_trajectory_writer->Last_Error()
+                    : h5_trajectory_writer->Last_Error();
+            controller->Throw_SPONGE_Error(
+                spongeErrorValueErrorCommand,
+                "MD_INFORMATION::trajectory_output::Initial_H5_Sits_Nk",
+                error.c_str());
+        }
+        enabled = true;
+    }
+    if (h5_observable_enabled)
+    {
+        if (!h5_observable_writer->Ensure_Sits_Nk_Observable(
+                h5_sits_module_name, h5_sits_k_count))
+        {
+            controller->Throw_SPONGE_Error(
+                spongeErrorValueErrorCommand,
+                "MD_INFORMATION::trajectory_output::Initial_H5_Sits_Nk",
+                h5_observable_writer->Last_Error().c_str());
+        }
+        enabled = true;
+    }
+    h5_sits_nk_enabled = enabled;
+}
+
+void MD_INFORMATION::trajectory_output::Initial_H5_Metadynamics(
+    CONTROLLER* controller, int is_initialized)
+{
+    if (!is_initialized || CONTROLLER::MPI_rank != 0)
+    {
+        return;
+    }
+    bool enabled = false;
+    if (h5_trajectory_enabled)
+    {
+        bool ok = h5_trajectory_vds_enabled
+                      ? h5_vds_trajectory_writer->Ensure_Metadynamics_Scalars()
+                      : h5_trajectory_writer->Ensure_Metadynamics_Scalars();
+        if (!ok)
+        {
+            const std::string error =
+                h5_trajectory_vds_enabled
+                    ? h5_vds_trajectory_writer->Last_Error()
+                    : h5_trajectory_writer->Last_Error();
+            controller->Throw_SPONGE_Error(
+                spongeErrorValueErrorCommand,
+                "MD_INFORMATION::trajectory_output::Initial_H5_Metadynamics",
+                error.c_str());
+        }
+        enabled = true;
+    }
+    if (h5_observable_enabled)
+    {
+        if (!h5_observable_writer->Ensure_Metadynamics_Scalars())
+        {
+            controller->Throw_SPONGE_Error(
+                spongeErrorValueErrorCommand,
+                "MD_INFORMATION::trajectory_output::Initial_H5_Metadynamics",
+                h5_observable_writer->Last_Error().c_str());
+        }
+        enabled = true;
+    }
+    h5_metadynamics_scalar_enabled = enabled;
+}
+
+void MD_INFORMATION::trajectory_output::Initial_H5_Qc(CONTROLLER* controller,
+                                                      int is_initialized)
+{
+    if (!is_initialized || CONTROLLER::MPI_rank != 0)
+    {
+        return;
+    }
+    if (!H5MD_Output_Key_Exists(controller, "QC"))
+    {
+        return;
+    }
+    h5_qc_spin_square_enabled = H5MD_Output_Key_Exists(controller, "QC_S_sq");
+    bool enabled = false;
+    if (h5_trajectory_enabled)
+    {
+        bool ok = h5_trajectory_vds_enabled
+                      ? h5_vds_trajectory_writer->Ensure_Qc_Observables(
+                            h5_qc_spin_square_enabled)
+                      : h5_trajectory_writer->Ensure_Qc_Observables(
+                            h5_qc_spin_square_enabled);
+        if (!ok)
+        {
+            const std::string error =
+                h5_trajectory_vds_enabled
+                    ? h5_vds_trajectory_writer->Last_Error()
+                    : h5_trajectory_writer->Last_Error();
+            controller->Throw_SPONGE_Error(
+                spongeErrorValueErrorCommand,
+                "MD_INFORMATION::trajectory_output::Initial_H5_Qc",
+                error.c_str());
+        }
+        enabled = true;
+    }
+    if (h5_observable_enabled)
+    {
+        if (!h5_observable_writer->Ensure_Qc_Observables(
+                h5_qc_spin_square_enabled))
+        {
+            controller->Throw_SPONGE_Error(
+                spongeErrorValueErrorCommand,
+                "MD_INFORMATION::trajectory_output::Initial_H5_Qc",
+                h5_observable_writer->Last_Error().c_str());
+        }
+        enabled = true;
+    }
+    h5_qc_scalar_enabled = enabled;
+}
+
+void MD_INFORMATION::trajectory_output::Initial_H5_Reaxff(
+    CONTROLLER* controller, int is_initialized)
+{
+    if (!is_initialized || CONTROLLER::MPI_rank != 0)
+    {
+        return;
+    }
+    h5_reaxff_terms.clear();
+    for (const std::string& key : controller->outputs_key)
+    {
+        if (Is_H5MD_Reaxff_Output_Key(key))
+        {
+            h5_reaxff_terms.push_back(key);
+        }
+    }
+    if (h5_reaxff_terms.empty())
+    {
+        return;
+    }
+    bool enabled = false;
+    if (h5_trajectory_enabled)
+    {
+        bool ok = h5_trajectory_vds_enabled
+                      ? h5_vds_trajectory_writer->Ensure_Reaxff_Energy_Terms(
+                            h5_reaxff_terms)
+                      : h5_trajectory_writer->Ensure_Reaxff_Energy_Terms(
+                            h5_reaxff_terms);
+        if (!ok)
+        {
+            const std::string error =
+                h5_trajectory_vds_enabled
+                    ? h5_vds_trajectory_writer->Last_Error()
+                    : h5_trajectory_writer->Last_Error();
+            controller->Throw_SPONGE_Error(
+                spongeErrorValueErrorCommand,
+                "MD_INFORMATION::trajectory_output::Initial_H5_Reaxff",
+                error.c_str());
+        }
+        enabled = true;
+    }
+    if (h5_observable_enabled)
+    {
+        if (!h5_observable_writer->Ensure_Reaxff_Energy_Terms(h5_reaxff_terms))
+        {
+            controller->Throw_SPONGE_Error(
+                spongeErrorValueErrorCommand,
+                "MD_INFORMATION::trajectory_output::Initial_H5_Reaxff",
+                h5_observable_writer->Last_Error().c_str());
+        }
+        enabled = true;
+    }
+    h5_reaxff_enabled = enabled;
+}
+
+void MD_INFORMATION::trajectory_output::Append_H5_Observable_Frame(
+    CONTROLLER* controller)
+{
+    if (!h5_trajectory_enabled || CONTROLLER::MPI_rank != 0) return;
+    std::map<std::string, double> values;
+    for (std::size_t i = 0; i < h5_observable_names.size(); ++i)
+    {
+        const std::string& original_name = controller->outputs_key[i];
+        double value = 0.0;
+        if (!Parse_H5MD_Output_Double(
+                controller->outputs_content[original_name], &value))
+        {
+            const std::string error =
+                "cannot convert mdout value to H5 observable: " + original_name;
+            controller->Throw_SPONGE_Error(
+                spongeErrorValueErrorCommand,
+                "MD_INFORMATION::trajectory_output::Append_H5_Observable_Frame",
+                error.c_str());
+        }
+        values[h5_observable_names[i]] = value;
+    }
+    if (h5_trajectory_vds_enabled)
+    {
+        if (h5_vds_trajectory_writer->Total_Trajectory_Frame_Count() == 0)
+        {
+            return;
+        }
+        if (!h5_vds_trajectory_writer->Append_Observable_Frame(
+                md_info->sys.steps, md_info->sys.Get_Current_Time(false),
+                values))
+        {
+            controller->Throw_SPONGE_Error(
+                spongeErrorValueErrorCommand,
+                "MD_INFORMATION::trajectory_output::Append_H5_Observable_Frame",
+                h5_vds_trajectory_writer->Last_Error().c_str());
+        }
+        return;
+    }
+    if (!h5_trajectory_writer->Append_Observable_Frame(
+            md_info->sys.steps, md_info->sys.Get_Current_Time(false), values))
+    {
+        controller->Throw_SPONGE_Error(
+            spongeErrorValueErrorCommand,
+            "MD_INFORMATION::trajectory_output::Append_H5_Observable_Frame",
+            h5_trajectory_writer->Last_Error().c_str());
+    }
+}
+
+void MD_INFORMATION::trajectory_output::Append_H5_Observable_Only_Frame(
+    CONTROLLER* controller)
+{
+    if (!h5_observable_enabled || CONTROLLER::MPI_rank != 0) return;
+    std::map<std::string, double> values;
+    for (std::size_t i = 0; i < h5_observable_only_names.size(); ++i)
+    {
+        const std::string& original_name = controller->outputs_key[i];
+        double value = 0.0;
+        if (!Parse_H5MD_Output_Double(
+                controller->outputs_content[original_name], &value))
+        {
+            const std::string error =
+                "cannot convert mdout value to observable-only H5: " +
+                original_name;
+            controller->Throw_SPONGE_Error(spongeErrorValueErrorCommand,
+                                           "MD_INFORMATION::trajectory_output::"
+                                           "Append_H5_Observable_Only_Frame",
+                                           error.c_str());
+        }
+        values[h5_observable_only_names[i]] = value;
+    }
+    if (!h5_observable_writer->Append_Observable_Frame(
+            md_info->sys.steps, md_info->sys.Get_Current_Time(false), values))
+    {
+        controller->Throw_SPONGE_Error(
+            spongeErrorValueErrorCommand,
+            "MD_INFORMATION::trajectory_output::Append_H5_Observable_Only_"
+            "Frame",
+            h5_observable_writer->Last_Error().c_str());
+    }
+}
+
+void MD_INFORMATION::trajectory_output::Append_H5_Nose_Hoover_Chain_Frame(
+    CONTROLLER* controller, const float* coordinates, const float* velocities,
+    std::size_t chain_length)
+{
+    if (!h5_nhc_observable_enabled || CONTROLLER::MPI_rank != 0) return;
+    if (coordinates == NULL || velocities == NULL ||
+        chain_length != h5_nhc_chain_length)
+    {
+        controller->Throw_SPONGE_Error(
+            spongeErrorValueErrorCommand,
+            "MD_INFORMATION::trajectory_output::Append_H5_Nose_Hoover_Chain_"
+            "Frame",
+            "invalid Nose-Hoover chain state for H5 output");
+    }
+    if (h5_trajectory_enabled)
+    {
+        bool ok =
+            h5_trajectory_vds_enabled
+                ? h5_vds_trajectory_writer->Append_Nose_Hoover_Chain_Frame(
+                      md_info->sys.steps + 1,
+                      md_info->sys.Get_Current_Time(false), coordinates,
+                      velocities, chain_length)
+                : h5_trajectory_writer->Append_Nose_Hoover_Chain_Frame(
+                      md_info->sys.steps + 1,
+                      md_info->sys.Get_Current_Time(false), coordinates,
+                      velocities, chain_length);
+        if (!ok)
+        {
+            const std::string error =
+                h5_trajectory_vds_enabled
+                    ? h5_vds_trajectory_writer->Last_Error()
+                    : h5_trajectory_writer->Last_Error();
+            controller->Throw_SPONGE_Error(spongeErrorValueErrorCommand,
+                                           "MD_INFORMATION::trajectory_output::"
+                                           "Append_H5_Nose_Hoover_Chain_Frame",
+                                           error.c_str());
+        }
+    }
+    if (h5_observable_enabled)
+    {
+        if (!h5_observable_writer->Append_Nose_Hoover_Chain_Frame(
+                md_info->sys.steps + 1, md_info->sys.Get_Current_Time(false),
+                coordinates, velocities, chain_length))
+        {
+            controller->Throw_SPONGE_Error(
+                spongeErrorValueErrorCommand,
+                "MD_INFORMATION::trajectory_output::Append_H5_Nose_Hoover_"
+                "Chain_Frame",
+                h5_observable_writer->Last_Error().c_str());
+        }
+    }
+}
+
+void MD_INFORMATION::trajectory_output::Append_H5_Sits_Nk_Frame(
+    CONTROLLER* controller, const char* module_name, const float* values,
+    std::size_t k_count)
+{
+    if (!h5_sits_nk_enabled || CONTROLLER::MPI_rank != 0) return;
+    if (module_name == NULL || values == NULL ||
+        module_name != h5_sits_module_name || k_count != h5_sits_k_count)
+    {
+        controller->Throw_SPONGE_Error(
+            spongeErrorValueErrorCommand,
+            "MD_INFORMATION::trajectory_output::Append_H5_Sits_Nk_Frame",
+            "invalid SITS nk state for H5 output");
+    }
+    if (h5_trajectory_enabled)
+    {
+        bool ok =
+            h5_trajectory_vds_enabled
+                ? (h5_vds_trajectory_writer->Total_Trajectory_Frame_Count() == 0
+                       ? true
+                       : h5_vds_trajectory_writer->Append_Sits_Nk_Frame(
+                             md_info->sys.steps,
+                             md_info->sys.Get_Current_Time(false),
+                             h5_sits_module_name, values, k_count))
+                : h5_trajectory_writer->Append_Sits_Nk_Frame(
+                      md_info->sys.steps, md_info->sys.Get_Current_Time(false),
+                      h5_sits_module_name, values, k_count);
+        if (!ok)
+        {
+            const std::string error =
+                h5_trajectory_vds_enabled
+                    ? h5_vds_trajectory_writer->Last_Error()
+                    : h5_trajectory_writer->Last_Error();
+            controller->Throw_SPONGE_Error(
+                spongeErrorValueErrorCommand,
+                "MD_INFORMATION::trajectory_output::Append_H5_Sits_Nk_Frame",
+                error.c_str());
+        }
+    }
+    if (h5_observable_enabled)
+    {
+        if (!h5_observable_writer->Append_Sits_Nk_Frame(
+                md_info->sys.steps, md_info->sys.Get_Current_Time(false),
+                h5_sits_module_name, values, k_count))
+        {
+            controller->Throw_SPONGE_Error(
+                spongeErrorValueErrorCommand,
+                "MD_INFORMATION::trajectory_output::Append_H5_Sits_Nk_Frame",
+                h5_observable_writer->Last_Error().c_str());
+        }
+    }
+}
+
+void MD_INFORMATION::trajectory_output::Append_H5_Reaxff_Frame(
+    CONTROLLER* controller)
+{
+    if (!h5_reaxff_enabled || CONTROLLER::MPI_rank != 0) return;
+    std::map<std::string, double> values;
+    for (const std::string& term : h5_reaxff_terms)
+    {
+        double value = 0.0;
+        if (!Parse_H5MD_Output_Double(controller->outputs_content[term],
+                                      &value))
+        {
+            const std::string error =
+                "cannot convert ReaxFF mdout value to H5 observable: " + term;
+            controller->Throw_SPONGE_Error(
+                spongeErrorValueErrorCommand,
+                "MD_INFORMATION::trajectory_output::Append_H5_Reaxff_Frame",
+                error.c_str());
+        }
+        values[term] = value;
+    }
+    if (h5_trajectory_enabled)
+    {
+        bool ok =
+            h5_trajectory_vds_enabled
+                ? (h5_vds_trajectory_writer->Total_Trajectory_Frame_Count() == 0
+                       ? true
+                       : h5_vds_trajectory_writer->Append_Reaxff_Frame(
+                             md_info->sys.steps,
+                             md_info->sys.Get_Current_Time(false), values))
+                : h5_trajectory_writer->Append_Reaxff_Frame(
+                      md_info->sys.steps, md_info->sys.Get_Current_Time(false),
+                      values);
+        if (!ok)
+        {
+            const std::string error =
+                h5_trajectory_vds_enabled
+                    ? h5_vds_trajectory_writer->Last_Error()
+                    : h5_trajectory_writer->Last_Error();
+            controller->Throw_SPONGE_Error(
+                spongeErrorValueErrorCommand,
+                "MD_INFORMATION::trajectory_output::Append_H5_Reaxff_Frame",
+                error.c_str());
+        }
+    }
+    if (h5_observable_enabled)
+    {
+        if (!h5_observable_writer->Append_Reaxff_Frame(
+                md_info->sys.steps, md_info->sys.Get_Current_Time(false),
+                values))
+        {
+            controller->Throw_SPONGE_Error(
+                spongeErrorValueErrorCommand,
+                "MD_INFORMATION::trajectory_output::Append_H5_Reaxff_Frame",
+                h5_observable_writer->Last_Error().c_str());
+        }
+    }
+}
+
+void MD_INFORMATION::trajectory_output::Append_H5_Qc_Frame(
+    CONTROLLER* controller)
+{
+    if (!h5_qc_scalar_enabled || CONTROLLER::MPI_rank != 0) return;
+    double energy = 0.0;
+    if (!Parse_H5MD_Output_Double(controller->outputs_content["QC"], &energy))
+    {
+        controller->Throw_SPONGE_Error(
+            spongeErrorValueErrorCommand,
+            "MD_INFORMATION::trajectory_output::Append_H5_Qc_Frame",
+            "cannot convert QC mdout value to H5 observable");
+    }
+    double spin_square = 0.0;
+    const double* spin_square_ptr = NULL;
+    if (h5_qc_spin_square_enabled)
+    {
+        if (!Parse_H5MD_Output_Double(controller->outputs_content["QC_S_sq"],
+                                      &spin_square))
+        {
+            controller->Throw_SPONGE_Error(
+                spongeErrorValueErrorCommand,
+                "MD_INFORMATION::trajectory_output::Append_H5_Qc_Frame",
+                "cannot convert QC_S_sq mdout value to H5 observable");
+        }
+        spin_square_ptr = &spin_square;
+    }
+    if (h5_trajectory_enabled)
+    {
+        bool ok =
+            h5_trajectory_vds_enabled
+                ? (h5_vds_trajectory_writer->Total_Trajectory_Frame_Count() == 0
+                       ? true
+                       : h5_vds_trajectory_writer->Append_Qc_Frame(
+                             md_info->sys.steps,
+                             md_info->sys.Get_Current_Time(false), energy,
+                             spin_square_ptr))
+                : h5_trajectory_writer->Append_Qc_Frame(
+                      md_info->sys.steps, md_info->sys.Get_Current_Time(false),
+                      energy, spin_square_ptr);
+        if (!ok)
+        {
+            const std::string error =
+                h5_trajectory_vds_enabled
+                    ? h5_vds_trajectory_writer->Last_Error()
+                    : h5_trajectory_writer->Last_Error();
+            controller->Throw_SPONGE_Error(
+                spongeErrorValueErrorCommand,
+                "MD_INFORMATION::trajectory_output::Append_H5_Qc_Frame",
+                error.c_str());
+        }
+    }
+    if (h5_observable_enabled)
+    {
+        if (!h5_observable_writer->Append_Qc_Frame(
+                md_info->sys.steps, md_info->sys.Get_Current_Time(false),
+                energy, spin_square_ptr))
+        {
+            controller->Throw_SPONGE_Error(
+                spongeErrorValueErrorCommand,
+                "MD_INFORMATION::trajectory_output::Append_H5_Qc_Frame",
+                h5_observable_writer->Last_Error().c_str());
+        }
+    }
+}
+
+void MD_INFORMATION::trajectory_output::Append_H5_Metadynamics_Scalar_Frame(
+    CONTROLLER* controller, double meta, double rbias, double rct)
+{
+    if (!h5_metadynamics_scalar_enabled || CONTROLLER::MPI_rank != 0) return;
+    if (h5_trajectory_enabled)
+    {
+        bool ok =
+            h5_trajectory_vds_enabled
+                ? (h5_vds_trajectory_writer->Total_Trajectory_Frame_Count() == 0
+                       ? true
+                       : h5_vds_trajectory_writer
+                             ->Append_Metadynamics_Scalar_Frame(
+                                 md_info->sys.steps,
+                                 md_info->sys.Get_Current_Time(false), meta,
+                                 rbias, rct))
+                : h5_trajectory_writer->Append_Metadynamics_Scalar_Frame(
+                      md_info->sys.steps, md_info->sys.Get_Current_Time(false),
+                      meta, rbias, rct);
+        if (!ok)
+        {
+            const std::string error =
+                h5_trajectory_vds_enabled
+                    ? h5_vds_trajectory_writer->Last_Error()
+                    : h5_trajectory_writer->Last_Error();
+            controller->Throw_SPONGE_Error(
+                spongeErrorValueErrorCommand,
+                "MD_INFORMATION::trajectory_output::Append_H5_Metadynamics_"
+                "Scalar_Frame",
+                error.c_str());
+        }
+    }
+    if (h5_observable_enabled)
+    {
+        if (!h5_observable_writer->Append_Metadynamics_Scalar_Frame(
+                md_info->sys.steps, md_info->sys.Get_Current_Time(false), meta,
+                rbias, rct))
+        {
+            controller->Throw_SPONGE_Error(
+                spongeErrorValueErrorCommand,
+                "MD_INFORMATION::trajectory_output::Append_H5_Metadynamics_"
+                "Scalar_Frame",
+                h5_observable_writer->Last_Error().c_str());
+        }
+    }
+}
+
+void MD_INFORMATION::trajectory_output::Write_H5_Metadynamics_Diagnostic_File(
+    CONTROLLER* controller, const char* module_name, const char* component,
+    const char* file_name)
+{
+    if ((!h5_trajectory_enabled && !h5_observable_enabled) ||
+        CONTROLLER::MPI_rank != 0)
+    {
+        return;
+    }
+    if (module_name == NULL || component == NULL)
+    {
+        return;
+    }
+    std::string text;
+    if (!Read_H5MD_Text_File_If_Present(file_name, &text))
+    {
+        return;
+    }
+    if (h5_trajectory_enabled)
+    {
+        bool ok = h5_trajectory_vds_enabled
+                      ? h5_vds_trajectory_writer->Write_Metadynamics_Diagnostic(
+                            module_name, component, text)
+                      : h5_trajectory_writer->Write_Metadynamics_Diagnostic(
+                            module_name, component, text);
+        if (!ok)
+        {
+            const std::string error =
+                h5_trajectory_vds_enabled
+                    ? h5_vds_trajectory_writer->Last_Error()
+                    : h5_trajectory_writer->Last_Error();
+            controller->Throw_SPONGE_Error(
+                spongeErrorValueErrorCommand,
+                "MD_INFORMATION::trajectory_output::Write_H5_Metadynamics_"
+                "Diagnostic_File",
+                error.c_str());
+        }
+    }
+    if (h5_observable_enabled)
+    {
+        if (!h5_observable_writer->Write_Metadynamics_Diagnostic(
+                module_name, component, text))
+        {
+            controller->Throw_SPONGE_Error(
+                spongeErrorValueErrorCommand,
+                "MD_INFORMATION::trajectory_output::Write_H5_Metadynamics_"
+                "Diagnostic_File",
+                h5_observable_writer->Last_Error().c_str());
+        }
+    }
+}
+
+void MD_INFORMATION::trajectory_output::Write_H5_Qc_Scf_Output_File(
+    CONTROLLER* controller, const char* file_name)
+{
+    if ((!h5_trajectory_enabled && !h5_observable_enabled) ||
+        CONTROLLER::MPI_rank != 0)
+    {
+        return;
+    }
+    std::string text;
+    if (!Read_H5MD_Text_File_If_Present(file_name, &text))
+    {
+        return;
+    }
+    if (h5_trajectory_enabled)
+    {
+        bool ok = h5_trajectory_vds_enabled
+                      ? h5_vds_trajectory_writer->Write_Qc_Scf_Output(text)
+                      : h5_trajectory_writer->Write_Qc_Scf_Output(text);
+        if (!ok)
+        {
+            const std::string error =
+                h5_trajectory_vds_enabled
+                    ? h5_vds_trajectory_writer->Last_Error()
+                    : h5_trajectory_writer->Last_Error();
+            controller->Throw_SPONGE_Error(spongeErrorValueErrorCommand,
+                                           "MD_INFORMATION::trajectory_output::"
+                                           "Write_H5_Qc_Scf_Output_File",
+                                           error.c_str());
+        }
+    }
+    if (h5_observable_enabled)
+    {
+        if (!h5_observable_writer->Write_Qc_Scf_Output(text))
+        {
+            controller->Throw_SPONGE_Error(
+                spongeErrorValueErrorCommand,
+                "MD_INFORMATION::trajectory_output::Write_H5_Qc_Scf_Output_"
+                "File",
+                h5_observable_writer->Last_Error().c_str());
+        }
+    }
+}
+
+void MD_INFORMATION::trajectory_output::Append_H5_Trajectory_Frame(
+    CONTROLLER* controller)
+{
+    if (!h5_trajectory_enabled || CONTROLLER::MPI_rank != 0) return;
+    float box_edges[9];
+    Fill_H5MD_Box_Edges(md_info, box_edges);
+    const float* velocity =
+        h5_trajectory_velocity_enabled ? &md_info->velocity[0].x : NULL;
+    const float* force = NULL;
+    if (h5_trajectory_force_enabled)
+    {
+        deviceMemcpy(md_info->force, md_info->frc,
+                     sizeof(VECTOR) * md_info->atom_numbers,
+                     deviceMemcpyDeviceToHost);
+        force = &md_info->force[0].x;
+    }
+    if (h5_trajectory_vds_enabled)
+    {
+        if (!h5_vds_trajectory_writer->Append_Particle_Frame(
+                md_info->sys.steps + 1, md_info->sys.Get_Current_Time(false),
+                &md_info->coordinate[0].x, box_edges, velocity, force))
+        {
+            controller->Throw_SPONGE_Error(
+                spongeErrorValueErrorCommand,
+                "MD_INFORMATION::trajectory_output::Append_H5_Trajectory_Frame",
+                h5_vds_trajectory_writer->Last_Error().c_str());
+        }
+        return;
+    }
+    if (!h5_trajectory_writer->Append_Particle_Frame(
+            md_info->sys.steps + 1, md_info->sys.Get_Current_Time(false),
+            &md_info->coordinate[0].x, box_edges, velocity, force))
+    {
+        controller->Throw_SPONGE_Error(
+            spongeErrorValueErrorCommand,
+            "MD_INFORMATION::trajectory_output::Append_H5_Trajectory_Frame",
+            h5_trajectory_writer->Last_Error().c_str());
+    }
+}
+
+void MD_INFORMATION::trajectory_output::Finalize_H5_Trajectory(
+    CONTROLLER* controller)
+{
+    if (!h5_trajectory_enabled || CONTROLLER::MPI_rank != 0) return;
+    if (h5_trajectory_vds_enabled)
+    {
+        const auto finalize_start = std::chrono::steady_clock::now();
+        const bool finalized =
+            h5_output_plan.trajectory.allow_complete_prefix_repair
+                ? h5_vds_trajectory_writer->Finalize_With_Repair()
+                : h5_vds_trajectory_writer->Finalize();
+        h5_trajectory_finalize_elapsed_s +=
+            H5MD_Elapsed_Seconds(finalize_start);
+        if (!finalized)
+        {
+            controller->Throw_SPONGE_Error(
+                spongeErrorValueErrorCommand,
+                "MD_INFORMATION::trajectory_output::Finalize_H5_Trajectory",
+                h5_vds_trajectory_writer->Last_Error().c_str());
+        }
+        h5_vds_trajectory_writer.reset();
+        h5_vds_backend_factory.reset();
+        h5_trajectory_vds_enabled = false;
+        h5_trajectory_enabled = false;
+        return;
+    }
+    const auto finalize_start = std::chrono::steady_clock::now();
+    if (!h5_trajectory_writer->Finalize())
+    {
+        h5_trajectory_finalize_elapsed_s +=
+            H5MD_Elapsed_Seconds(finalize_start);
+        controller->Throw_SPONGE_Error(
+            spongeErrorValueErrorCommand,
+            "MD_INFORMATION::trajectory_output::Finalize_H5_Trajectory",
+            h5_trajectory_writer->Last_Error().c_str());
+    }
+    h5_trajectory_finalize_elapsed_s += H5MD_Elapsed_Seconds(finalize_start);
+    h5_trajectory_writer->Close();
+    h5_trajectory_enabled = false;
+}
+
+void MD_INFORMATION::trajectory_output::Finalize_H5_Observable(
+    CONTROLLER* controller)
+{
+    if (!h5_observable_enabled || CONTROLLER::MPI_rank != 0) return;
+    const auto finalize_start = std::chrono::steady_clock::now();
+    if (!h5_observable_writer->Finalize())
+    {
+        h5_observable_finalize_elapsed_s +=
+            H5MD_Elapsed_Seconds(finalize_start);
+        controller->Throw_SPONGE_Error(
+            spongeErrorValueErrorCommand,
+            "MD_INFORMATION::trajectory_output::Finalize_H5_Observable",
+            h5_observable_writer->Last_Error().c_str());
+    }
+    h5_observable_finalize_elapsed_s += H5MD_Elapsed_Seconds(finalize_start);
+    h5_observable_writer->Close();
+    h5_observable_enabled = false;
 }
 
 void MD_INFORMATION::trajectory_output::Append_Crd_Traj_File(FILE* fp)
@@ -140,8 +1347,11 @@ void MD_INFORMATION::trajectory_output::Append_Crd_Traj_File(FILE* fp)
         {
             fp = crd_traj;
         }
-        fwrite(&md_info->coordinate[0].x, sizeof(VECTOR), md_info->atom_numbers,
-               fp);
+        if (fp != NULL)
+        {
+            fwrite(&md_info->coordinate[0].x, sizeof(VECTOR),
+                   md_info->atom_numbers, fp);
+        }
     }
 }
 
@@ -194,11 +1404,146 @@ void MD_INFORMATION::trajectory_output::Append_Box_Traj_File(FILE* fp)
         {
             fp = box_traj;
         }
-        fprintf(fp, "%9.6f %9.6f %9.6f %9.5f %9.5f %9.5f\n",
-                md_info->sys.box_length.x, md_info->sys.box_length.y,
-                md_info->sys.box_length.z, md_info->sys.box_angle.x,
-                md_info->sys.box_angle.y, md_info->sys.box_angle.z);
+        if (fp != NULL)
+        {
+            fprintf(fp, "%9.6f %9.6f %9.6f %9.5f %9.5f %9.5f\n",
+                    md_info->sys.box_length.x, md_info->sys.box_length.y,
+                    md_info->sys.box_length.z, md_info->sys.box_angle.x,
+                    md_info->sys.box_angle.y, md_info->sys.box_angle.z);
+        }
     }
+}
+
+bool MD_INFORMATION::trajectory_output::Should_Write_Legacy_Restart(
+    CONTROLLER* controller)
+{
+    return SpongeH5OutputContract::Legacy_Sidecar_Enabled(controller,
+                                                          RESTART_COMMAND);
+}
+
+void MD_INFORMATION::trajectory_output::Export_H5_Restart_File(
+    CONTROLLER* controller, const float* nhc_coordinates,
+    const float* nhc_velocities, std::size_t nhc_chain_length,
+    const char* sits_module_name, const float* sits_nk_values,
+    std::size_t sits_k_count, const char* metad_module_name,
+    const char* metad_hills_file_name, const char* metad_history_file_name,
+    const char* metad_edge_file_name, const char* metad_potential_file_name,
+    const char* metad_direct_file_name,
+    const SpongeH5MD::RestartDynamicState* dynamic_state)
+{
+    if (!h5_restart_enabled || !md_info->is_initialized || CONTROLLER::MPI_rank)
+    {
+        return;
+    }
+    md_info->Crd_Vel_Device_To_Host();
+    float box_edges[9];
+    Fill_H5MD_Box_Edges(md_info, box_edges);
+    SpongeH5MD::HighFiveBackend backend;
+    SpongeH5MD::RestartH5Writer writer(&backend);
+    if (!writer.Open(h5_output_plan, "0"))
+    {
+        controller->Throw_SPONGE_Error(
+            spongeErrorValueErrorCommand,
+            "MD_INFORMATION::trajectory_output::Export_H5_Restart_File",
+            writer.Last_Error().c_str());
+    }
+    Write_H5_Legacy_Sidecar_Provenance(
+        controller, &writer,
+        "MD_INFORMATION::trajectory_output::Export_H5_Restart_File");
+    if (!writer.Define_Structural_State(md_info->atom_numbers, true))
+    {
+        controller->Throw_SPONGE_Error(
+            spongeErrorValueErrorCommand,
+            "MD_INFORMATION::trajectory_output::Export_H5_Restart_File",
+            writer.Last_Error().c_str());
+    }
+    if (!writer.Write_Structural_State(
+            md_info->sys.steps, md_info->sys.Get_Current_Time(),
+            &md_info->coordinate[0].x, box_edges, &md_info->velocity[0].x))
+    {
+        controller->Throw_SPONGE_Error(
+            spongeErrorValueErrorCommand,
+            "MD_INFORMATION::trajectory_output::Export_H5_Restart_File",
+            writer.Last_Error().c_str());
+    }
+    if (nhc_coordinates != NULL && nhc_velocities != NULL &&
+        nhc_chain_length != 0)
+    {
+        std::vector<float> nhc_pairs(nhc_chain_length * 2);
+        for (std::size_t i = 0; i < nhc_chain_length; ++i)
+        {
+            nhc_pairs[2 * i] = nhc_coordinates[i];
+            nhc_pairs[2 * i + 1] = nhc_velocities[i];
+        }
+        if (!writer.Write_Nose_Hoover_Chain_State(nhc_pairs.data(),
+                                                  nhc_chain_length))
+        {
+            controller->Throw_SPONGE_Error(
+                spongeErrorValueErrorCommand,
+                "MD_INFORMATION::trajectory_output::Export_H5_Restart_File",
+                writer.Last_Error().c_str());
+        }
+    }
+    if (!Write_H5_Restart_Dynamic_State_If_Present(&writer, dynamic_state))
+    {
+        controller->Throw_SPONGE_Error(
+            spongeErrorValueErrorCommand,
+            "MD_INFORMATION::trajectory_output::Export_H5_Restart_File",
+            writer.Last_Error().c_str());
+    }
+    if (sits_module_name != NULL && sits_nk_values != NULL && sits_k_count != 0)
+    {
+        if (!writer.Write_Sits_State(sits_module_name, "nk", sits_nk_values,
+                                     sits_k_count))
+        {
+            controller->Throw_SPONGE_Error(
+                spongeErrorValueErrorCommand,
+                "MD_INFORMATION::trajectory_output::Export_H5_Restart_File",
+                writer.Last_Error().c_str());
+        }
+    }
+    if (!Write_H5_Restart_Protocol_Sidecars_If_Present(controller, &writer))
+    {
+        controller->Throw_SPONGE_Error(
+            spongeErrorValueErrorCommand,
+            "MD_INFORMATION::trajectory_output::Export_H5_Restart_File",
+            writer.Last_Error().c_str());
+    }
+    if (metad_module_name != NULL)
+    {
+        const bool ok =
+            Write_H5_Restart_Text_File_If_Present(
+                &writer, metad_module_name, "hills", metad_hills_file_name) &&
+            Write_H5_Restart_Text_File_If_Present(&writer, metad_module_name,
+                                                  "history",
+                                                  metad_history_file_name) &&
+            Write_H5_Restart_Text_File_If_Present(
+                &writer, metad_module_name, "edge", metad_edge_file_name) &&
+            Write_H5_Restart_Text_File_If_Present(&writer, metad_module_name,
+                                                  "potential_export",
+                                                  metad_potential_file_name) &&
+            Write_H5_Restart_Text_File_If_Present(&writer, metad_module_name,
+                                                  "direct_export",
+                                                  metad_direct_file_name);
+        if (!ok)
+        {
+            controller->Throw_SPONGE_Error(
+                spongeErrorValueErrorCommand,
+                "MD_INFORMATION::trajectory_output::Export_H5_Restart_File",
+                writer.Last_Error().c_str());
+        }
+    }
+    const auto finalize_start = std::chrono::steady_clock::now();
+    if (!writer.Finalize())
+    {
+        h5_restart_finalize_elapsed_s += H5MD_Elapsed_Seconds(finalize_start);
+        controller->Throw_SPONGE_Error(
+            spongeErrorValueErrorCommand,
+            "MD_INFORMATION::trajectory_output::Export_H5_Restart_File",
+            writer.Last_Error().c_str());
+    }
+    h5_restart_finalize_elapsed_s += H5MD_Elapsed_Seconds(finalize_start);
+    writer.Close();
 }
 
 void MD_INFORMATION::trajectory_output::Export_Restart_File(

@@ -101,7 +101,7 @@ orthogonal boxes only.
 [barostat]
 mode = "monte_carlo_barostat"
 
-[monte_carlo_barostat]
+[barostat.monte_carlo]
 initial_ratio = 0.001
 update_interval = 100
 check_interval = 10
@@ -109,6 +109,10 @@ accept_rate_low = 30
 accept_rate_high = 40
 couple_dimension = "XYZ"
 ```
+
+`[barostat.monte_carlo]` is a TOML alias group for existing
+`monte_carlo_barostat_*` runtime commands. The legacy top-level
+`[monte_carlo_barostat]` table remains accepted for compatibility.
 
 ### Parameters
 

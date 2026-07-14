@@ -12,8 +12,93 @@ struct trajectory_output
     int write_restart_file_interval = 1000;  // restart文件重新创建的所隔步数
     FILE* crd_traj = NULL;
     FILE* box_traj = NULL;
+    SpongeH5OutputPlan::ResolvedOutputPlan h5_output_plan;
+    std::unique_ptr<SpongeH5MD::WriterBackend> h5_trajectory_backend;
+    std::unique_ptr<SpongeH5MD::TrajectoryH5Writer> h5_trajectory_writer;
+    std::unique_ptr<SpongeH5MD::WriterBackendFactory> h5_vds_backend_factory;
+    std::unique_ptr<SpongeH5MD::VdsTrajectoryH5Writer> h5_vds_trajectory_writer;
+    bool h5_trajectory_enabled = false;
+    bool h5_trajectory_vds_enabled = false;
+    bool h5_trajectory_velocity_enabled = false;
+    bool h5_trajectory_force_enabled = false;
+    std::vector<std::string> h5_observable_names;
+    std::unique_ptr<SpongeH5MD::WriterBackend> h5_observable_backend;
+    std::unique_ptr<SpongeH5MD::ObservableH5Writer> h5_observable_writer;
+    bool h5_observable_enabled = false;
+    std::vector<std::string> h5_observable_only_names;
+    bool h5_restart_enabled = false;
+    bool h5_nhc_observable_enabled = false;
+    std::size_t h5_nhc_chain_length = 0;
+    bool h5_sits_nk_enabled = false;
+    std::string h5_sits_module_name;
+    std::size_t h5_sits_k_count = 0;
+    bool h5_metadynamics_scalar_enabled = false;
+    bool h5_qc_scalar_enabled = false;
+    bool h5_qc_spin_square_enabled = false;
+    bool h5_reaxff_enabled = false;
+    std::vector<std::string> h5_reaxff_terms;
+    double h5_trajectory_finalize_elapsed_s = 0.0;
+    double h5_observable_finalize_elapsed_s = 0.0;
+    double h5_restart_finalize_elapsed_s = 0.0;
     char restart_name[CHAR_LENGTH_MAX];
     void Initial(CONTROLLER* controller, MD_INFORMATION* md_info);
+    void Initial_H5_Trajectory(CONTROLLER* controller);
+    void Initial_H5_Observable(CONTROLLER* controller);
+    void Initial_H5_Restart(CONTROLLER* controller);
+    void Write_H5_Legacy_Sidecar_Provenance(
+        CONTROLLER* controller, SpongeH5MD::TrajectoryH5Writer* writer,
+        const char* context);
+    void Write_H5_Legacy_Sidecar_Provenance(
+        CONTROLLER* controller, SpongeH5MD::VdsTrajectoryH5Writer* writer,
+        const char* context);
+    void Write_H5_Legacy_Sidecar_Provenance(
+        CONTROLLER* controller, SpongeH5MD::ObservableH5Writer* writer,
+        const char* context);
+    void Write_H5_Legacy_Sidecar_Provenance(CONTROLLER* controller,
+                                            SpongeH5MD::RestartH5Writer* writer,
+                                            const char* context);
+    void Initial_H5_Nose_Hoover_Chain(CONTROLLER* controller,
+                                      std::size_t chain_length);
+    void Initial_H5_Sits_Nk(CONTROLLER* controller, const char* module_name,
+                            std::size_t k_count);
+    void Initial_H5_Metadynamics(CONTROLLER* controller, int is_initialized);
+    void Initial_H5_Qc(CONTROLLER* controller, int is_initialized);
+    void Initial_H5_Reaxff(CONTROLLER* controller, int is_initialized);
+    void Append_H5_Trajectory_Frame(CONTROLLER* controller);
+    void Append_H5_Observable_Frame(CONTROLLER* controller);
+    void Append_H5_Observable_Only_Frame(CONTROLLER* controller);
+    void Append_H5_Nose_Hoover_Chain_Frame(CONTROLLER* controller,
+                                           const float* coordinates,
+                                           const float* velocities,
+                                           std::size_t chain_length);
+    void Append_H5_Sits_Nk_Frame(CONTROLLER* controller,
+                                 const char* module_name, const float* values,
+                                 std::size_t k_count);
+    void Append_H5_Metadynamics_Scalar_Frame(CONTROLLER* controller,
+                                             double meta, double rbias,
+                                             double rct);
+    void Append_H5_Qc_Frame(CONTROLLER* controller);
+    void Append_H5_Reaxff_Frame(CONTROLLER* controller);
+    void Write_H5_Metadynamics_Diagnostic_File(CONTROLLER* controller,
+                                               const char* module_name,
+                                               const char* component,
+                                               const char* file_name);
+    void Write_H5_Qc_Scf_Output_File(CONTROLLER* controller,
+                                     const char* file_name);
+    void Finalize_H5_Trajectory(CONTROLLER* controller);
+    void Finalize_H5_Observable(CONTROLLER* controller);
+    void Export_H5_Restart_File(
+        CONTROLLER* controller, const float* nhc_coordinates = NULL,
+        const float* nhc_velocities = NULL, std::size_t nhc_chain_length = 0,
+        const char* sits_module_name = NULL, const float* sits_nk_values = NULL,
+        std::size_t sits_k_count = 0, const char* metad_module_name = NULL,
+        const char* metad_hills_file_name = NULL,
+        const char* metad_history_file_name = NULL,
+        const char* metad_edge_file_name = NULL,
+        const char* metad_potential_file_name = NULL,
+        const char* metad_direct_file_name = NULL,
+        const SpongeH5MD::RestartDynamicState* dynamic_state = NULL);
+    bool Should_Write_Legacy_Restart(CONTROLLER* controller);
     void Export_Restart_File(const char* rst7_name = NULL);
     void Append_Crd_Traj_File(FILE* fp = NULL);
     void Append_Box_Traj_File(FILE* fp = NULL);
