@@ -1774,7 +1774,37 @@ Acceptance:
   by exactly one PR-scoped commit authored by
   `Xiaoxuan Yu <xiaoxuan_yu@pku.edu.cn>`.
 
-## 55. Artifacts and Temporary-Space Policy
+## 55. PR 58: Dynamic NHC Restart-Load Runtime Closure
+
+Close the dynamic Nose-Hoover-chain restart-load runtime gate with a fixture
+that exercises normal NVT continuation without unrelated full-contract rerun
+modules.
+
+- Preserve the real bundled topology, protocol binding, and restart state, but
+  remove force-field, many-body, QC, enhanced-sampling, restraint, steering,
+  constraint, and wall roots only from the temporary dynamic-NHC test copy.
+- Keep the other protocol/full success and unsupported-policy failure cases on
+  their existing broad fixtures so their contract coverage does not shrink.
+- Run one NVT step at `dt=0`, require NHC initialization, reject non-finite
+  `mdout` and restart state, require a non-zero input state, and require exact
+  input/output NHC-state equality.
+- Record the observed crash correctly: the former fixture reached the QC Fock
+  builder during normal dynamics and failed before it could establish NHC
+  restart continuation behavior.
+
+Acceptance:
+
+- The focused restart-load closure passes with runtime smoke enabled and the
+  output restart contains a finite, non-empty, non-zero, exactly preserved NHC
+  state.
+- The complete opt-in runtime group passes the normal input/output matrix,
+  non-trivial REAXFF/EDIP parity, restart-load closure, and VDS terminal/resume
+  smoke together.
+- Static staged H5 bundle labels, the 152-test contract smoke, formatting, and
+  diff checks pass, followed by exactly one PR-scoped commit authored by
+  `Xiaoxuan Yu <xiaoxuan_yu@pku.edu.cn>`.
+
+## 56. Artifacts and Temporary-Space Policy
 
 - Use `SPONGE_BUNDLED_IO_AB_RUN_ROOT` for all heavy runs.
 - Put production artifacts on the workspace filesystem rather than `/tmp`.
@@ -1784,7 +1814,7 @@ Acceptance:
 - Record artifact byte counts and enforce a configurable per-case quota.
 - Cleanup must only remove directories created by the current gate run.
 
-## 56. PR Completion Log
+## 57. PR Completion Log
 
 Append one row immediately after completing and committing each PR.
 
@@ -1849,3 +1879,4 @@ Append one row immediately after completing and committing each PR.
 | PR 55: Clean source provenance gate | Complete | This commit | clean/mismatched/modified/untracked temporary-Git guards; real dirty-tree CLI rejection; 152-test contract smoke; Ruff; format; `git diff --check` | Production derivation now requires exact `HEAD`, an empty porcelain status including untracked files, and persisted `source_tree_state=clean`. The current worktree is correctly rejected before artifact loading, so its available RTX 4090 cannot be used to claim a commit-qualified PR 7c streak until the bundled I/O source baseline is tracked. |
 | PR 56: Track bundled I/O implementation baseline | Complete | This commit | fresh CPU `SPONGE` build; staged H5 bundle CTest labels; opt-in runtime smoke audit; 152-test contract smoke; schema examples; Ruff; `pixi lock --check`; `git diff --check` | The audited bundled I/O implementation, schemas, fixtures, examples, and tests are now tracked. Static/file-level gates pass; opt-in normal A/B and VDS terminal/resume pass. EDIP remains all-trivial in the manybody gate and dynamic NHC restart-load exits after initialization, so full behavioral equivalence and PR 7c promotion remain unproven. |
 | PR 57: Non-trivial REAXFF/EDIP runtime parity | Complete | This commit | focused production `normal_edip_nonzero` CPU A/B; runtime `test_h5_reaxff_edip_runtime_parity`; staged H5 bundle labels; formatting; `git diff --check` | The combined gate now gives legacy binary, bundled sidecar, and pure H5 routes the same interacting two-atom frames and empty pair exclusions. EDIP and REAXFF remain subject to finite non-zero assertions and full mdout/H5 observable parity across legacy output and bundled VDS off/on output. The independent dynamic NHC restart-load failure remains open. |
+| PR 58: Dynamic NHC restart-load runtime closure | Complete | This commit | focused runtime `test_h5_restart_load_runtime_closure`; complete four-test opt-in runtime group; staged H5 bundle labels; 152-test contract smoke; formatting; `git diff --check` | The dynamic NHC case now uses an isolated normal-NVT fixture instead of entering unrelated QC and rerun modules. It executes one finite `dt=0` step, confirms NHC initialization, rejects non-finite mdout/restart values, and requires exact non-zero NHC-state roundtrip. Existing protocol/full success and unsupported-policy failure branches remain on their broad fixtures. |

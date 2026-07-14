@@ -92,9 +92,12 @@ compares legacy output and bundled output with VDS off/on and verifies the
 many-body observable columns in H5 output.
 `test_h5_restart_load_runtime_closure` separately runs `input_h5_restart_load`
 policies that the broad matrix scrubs for stability: supported protocol
-sidecar, dynamic NHC, and full NHC+SITS paths must run; unsupported rerun NHC,
-metadynamics-without-module, and pure-bundled custom-pair protocol gaps must
-fail with their precise runtime diagnostics.
+sidecar, dynamic NHC, and full NHC+SITS paths must run. The dynamic NHC case
+uses an isolated core topology and minimal protocol binding, executes one
+finite `dt=0` step, and requires exact finite, non-zero NHC-state roundtrip
+into the output restart. Unsupported rerun NHC, metadynamics-without-module, and
+pure-bundled custom-pair protocol gaps must fail with their precise runtime
+diagnostics.
 `test_h5_vds_terminal_resume_smoke` separately exercises VDS terminal
 tail-shard failure with complete-prefix repair and the no-op resume-policy path
 where all terminal shards finalize cleanly.

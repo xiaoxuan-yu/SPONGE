@@ -1,4 +1,6 @@
-﻿#include <cctype>
+﻿#include <algorithm>
+#include <cctype>
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -175,6 +177,22 @@ void Enable_Meta_In_Restart_Protocol_Sidecar(
         SpongeH5MD::Restart_Protocol_Sidecar_Path("cv_in_file"), cv_text);
 }
 
+void Isolate_NHC_Dynamic_Runtime_Inputs(const std::filesystem::path& root)
+{
+    const auto topology = root / "topology.spgt.h5";
+    for (const char* object_path : {"/forcefield", "/manybody", "/qc"})
+    {
+        Delete_H5_Object_If_Exists(topology, object_path);
+    }
+
+    const auto protocol = root / "protocol.spgp.h5";
+    for (const char* object_path : {"/constraint", "/cv", "/meta", "/protocol",
+                                    "/restraint", "/sits", "/steer", "/wall"})
+    {
+        Delete_H5_Object_If_Exists(protocol, object_path);
+    }
+}
+
 PreparedCase Prepare_Restart_Load_Case(
     const std::filesystem::path& temp_root, const std::string& name,
     const std::filesystem::path& source_dir, const std::string& load_policy,
@@ -201,6 +219,10 @@ PreparedCase Prepare_Restart_Load_Case(
     {
         Enable_Meta_In_Restart_Protocol_Sidecar(prepared.root /
                                                 "restart.spgr.h5");
+    }
+    if (nvt_with_nhc && load_policy == "dynamic" && !enable_sits)
+    {
+        Isolate_NHC_Dynamic_Runtime_Inputs(prepared.root);
     }
 
     std::string mdin = Read_Text(prepared.root / "mdin.bundled.spg.toml");
@@ -313,6 +335,45 @@ void Require_Restart_Contains(const std::filesystem::path& h5_path,
     REQUIRE_TRUE(file.exist(object_path));
 }
 
+std::vector<float> Read_H5_Float_Dataset(const std::filesystem::path& h5_path,
+                                         const std::string& object_path)
+{
+    HighFive::File file(h5_path.string(), HighFive::File::ReadOnly);
+    const auto dataset = file.getDataSet(object_path);
+    const auto dimensions = dataset.getSpace().getDimensions();
+    std::size_t value_count = 1;
+    for (const auto dimension : dimensions)
+    {
+        value_count *= dimension;
+    }
+    std::vector<float> values(value_count);
+    REQUIRE_TRUE(H5Dread(dataset.getId(), H5T_NATIVE_FLOAT, H5S_ALL, H5S_ALL,
+                         H5P_DEFAULT, values.data()) >= 0);
+    return values;
+}
+
+void Require_Finite_Values(const std::vector<float>& values)
+{
+    REQUIRE_TRUE(!values.empty());
+    for (const float value : values)
+    {
+        REQUIRE_TRUE(std::isfinite(value));
+    }
+}
+
+void Require_No_Nonfinite_Text(const std::filesystem::path& path)
+{
+    std::istringstream stream(Read_Text(path));
+    std::string token;
+    while (stream >> token)
+    {
+        std::transform(token.begin(), token.end(), token.begin(),
+                       [](unsigned char c) { return std::tolower(c); });
+        REQUIRE_TRUE(token.find("nan") == std::string::npos);
+        REQUIRE_TRUE(token.find("inf") == std::string::npos);
+    }
+}
+
 void Require_Runtime_Smoke_Enabled()
 {
     const char* enabled = std::getenv("SPONGE_H5_ENABLE_RUNTIME_SMOKE");
@@ -352,9 +413,21 @@ void Run_Restart_Load_Runtime_Closure(
     const auto dynamic_nhc = Prepare_Restart_Load_Case(
         temp_root, "restart_load_dynamic_supported_nhc_nvt", pure_source,
         "dynamic", true, false, false, false, false);
-    Run_SPONGE(sponge_executable, dynamic_nhc);
+    const auto dynamic_nhc_log = Run_SPONGE(sponge_executable, dynamic_nhc);
+    Require_Contains(Read_Text(dynamic_nhc_log),
+                     "START INITIALIZING NOSE HOOVER CHAIN");
+    Require_No_Nonfinite_Text(dynamic_nhc.mdout);
     Require_Restart_Contains(dynamic_nhc.h5_restart,
                              SpongeH5MD::path::restart_nhc);
+    const auto input_nhc = Read_H5_Float_Dataset(
+        dynamic_nhc.root / "restart.spgr.h5", SpongeH5MD::path::restart_nhc);
+    const auto output_nhc = Read_H5_Float_Dataset(
+        dynamic_nhc.h5_restart, SpongeH5MD::path::restart_nhc);
+    Require_Finite_Values(input_nhc);
+    Require_Finite_Values(output_nhc);
+    REQUIRE_TRUE(std::any_of(input_nhc.begin(), input_nhc.end(),
+                             [](const float value) { return value != 0.0f; }));
+    REQUIRE_EQ(input_nhc, output_nhc);
 
     const auto full_supported = Prepare_Restart_Load_Case(
         temp_root, "restart_load_full_supported_nhc_sits", sidecar_source,
