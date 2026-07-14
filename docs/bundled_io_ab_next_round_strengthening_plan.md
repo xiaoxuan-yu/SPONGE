@@ -15,6 +15,10 @@ case 数量替代行为证据，而是让每个 supported contract 都能回答�
 `output.vds.cross_process_append_resume` 必须继续保持 `unsupported`，最终声明必须
 明确排除该能力。不得使用“全功能等价”“完全替代 legacy I/O”等未限定表述。
 
+Artifact `scope_statement` 固定为：
+
+> Equivalence is limited to explicitly enumerated supported contracts and runtime scenarios and excludes cross-process VDS reopen-and-append/resume.
+
 允许的阶段性结论为：
 
 > 在注册表明确列出的 supported contract、已执行的 CPU/GPU/MPI 场景、给定容差

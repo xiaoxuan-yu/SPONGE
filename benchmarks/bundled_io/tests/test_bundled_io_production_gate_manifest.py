@@ -16,14 +16,19 @@ except ModuleNotFoundError:  # Python 3.10
     import tomli as tomllib
 
 from benchmarks.bundled_io.ab_contracts import (
+    SCOPED_EQUIVALENCE_STATEMENT,
+    VDS_CROSS_PROCESS_RESUME_CONTRACT,
     AssertionEvidence,
     ContractSpec,
     audit_input_evolution_contracts,
     load_contract_registry,
     load_implementation_inventory,
     registry_summary,
+    required_scope_exclusions,
     validate_contract_registry,
     validate_implementation_inventory,
+    validate_scope_boundary,
+    validated_passed_contract_levels,
 )
 from benchmarks.bundled_io.execution_matrix import (
     ProductionRun,
@@ -134,6 +139,9 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 PIXI_TOML = REPO_ROOT / "pixi.toml"
 H5_BUNDLE_RUNNER = REPO_ROOT / "tests" / "h5_bundle" / "run_h5_bundle_tests.sh"
 AUDIT_DOC = REPO_ROOT / "docs" / "sponge_h5_bundle_unit_test_audit_matrix.md"
+NEXT_ROUND_PLAN = (
+    REPO_ROOT / "docs" / "bundled_io_ab_next_round_strengthening_plan.md"
+)
 VDS_WRITER_TEST = (
     REPO_ROOT
     / "tests"
@@ -294,6 +302,10 @@ def test_release_boundary_keeps_ab_opt_in_shadow_only():
         "contract and runtime scenarios"
     ) in doc
     assert "cross-process VDS reopen-and-append resume" in doc
+    assert SCOPED_EQUIVALENCE_STATEMENT in doc
+    assert SCOPED_EQUIVALENCE_STATEMENT in " ".join(
+        NEXT_ROUND_PLAN.read_text(encoding="utf-8").split()
+    )
 
 
 def test_ab_production_harness_has_executable_contract_coverage():
@@ -447,6 +459,78 @@ def test_ab_production_harness_has_executable_contract_coverage():
     assert repair.status == "supported"
     assert repair.case_ids == ("normal_vds_complete_prefix_noop",)
     assert repair.assertion_ids == ("h5_complete_prefix_repair_equivalence",)
+
+
+def test_vds_resume_scope_boundary_is_explicit_and_non_executable():
+    contracts = load_contract_registry()
+    exclusions = required_scope_exclusions(contracts)
+    vds_resume = contracts[VDS_CROSS_PROCESS_RESUME_CONTRACT]
+    same_process_repair = contracts["output.vds.complete_prefix_repair"]
+
+    assert VDS_CROSS_PROCESS_RESUME_CONTRACT in exclusions
+    assert vds_resume.status == "unsupported"
+    assert vds_resume.minimum_evidence == "E4"
+    assert vds_resume.case_ids == ()
+    assert vds_resume.assertion_ids == ()
+    assert not set(vds_resume.case_ids).intersection(
+        same_process_repair.case_ids
+    )
+
+    payload = {
+        "scope_exclusions": list(exclusions),
+        "scope_statement": SCOPED_EQUIVALENCE_STATEMENT,
+    }
+    assert validate_scope_boundary(contracts, payload) == exclusions
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        ("remove_exclusion", "scope_exclusions"),
+        ("claim_full_equivalence", "unbounded equivalence"),
+        ("silently_support_vds_resume", "must remain unsupported"),
+    ],
+)
+def test_vds_resume_scope_boundary_rejects_claim_mutations(mutation, message):
+    contracts = load_contract_registry()
+    payload = {
+        "scope_exclusions": list(required_scope_exclusions(contracts)),
+        "scope_statement": SCOPED_EQUIVALENCE_STATEMENT,
+    }
+    if mutation == "remove_exclusion":
+        payload["scope_exclusions"].remove(VDS_CROSS_PROCESS_RESUME_CONTRACT)
+    elif mutation == "claim_full_equivalence":
+        payload["scope_statement"] = "Full legacy/bundled equivalence."
+    else:
+        contracts = dict(contracts)
+        contracts[VDS_CROSS_PROCESS_RESUME_CONTRACT] = replace(
+            contracts[VDS_CROSS_PROCESS_RESUME_CONTRACT],
+            status="supported",
+        )
+
+    with pytest.raises(AssertionError, match=message):
+        validate_scope_boundary(contracts, payload)
+
+
+def test_same_process_vds_repair_cannot_forge_resume_evidence():
+    contracts = load_contract_registry()
+    cases = {
+        "normal_vds_complete_prefix_noop": {
+            "records": [
+                {
+                    "case_id": "normal_vds_complete_prefix_noop",
+                    "contract_id": VDS_CROSS_PROCESS_RESUME_CONTRACT,
+                    "assertion_id": "h5_complete_prefix_repair_equivalence",
+                    "evidence_level": "E4",
+                    "status": "passed",
+                    "details": {"method": "same_process_tail_repair"},
+                }
+            ]
+        }
+    }
+
+    with pytest.raises(AssertionError, match="forged assertion"):
+        validated_passed_contract_levels(contracts, cases)
 
 
 def test_output_family_process_matrix_is_complete_and_mutation_guarded():
@@ -3177,8 +3261,24 @@ def _ready_promotion_fixture():
             case_ids=tuple(report_cases),
             assertion_ids=("synthetic_equivalence",),
             inventory_refs=(),
-        )
+        ),
+        VDS_CROSS_PROCESS_RESUME_CONTRACT: ContractSpec(
+            contract_id=VDS_CROSS_PROCESS_RESUME_CONTRACT,
+            direction="output",
+            component="trajectory_vds",
+            status="unsupported",
+            minimum_evidence="E4",
+            legacy_surface="legacy process restart and append",
+            bundled_surface="VDS reopen-and-append",
+            case_ids=(),
+            assertion_ids=(),
+            inventory_refs=(),
+            reason=(
+                "The VDS writer does not implement an append/resume open mode."
+            ),
+        ),
     }
+    scope_exclusions = required_scope_exclusions(contracts)
     runs = tuple(
         ProductionRun(
             run_id=f"run-{index}",
@@ -3188,10 +3288,21 @@ def _ready_promotion_fixture():
             finalize_fraction=0.1,
             output_bytes_ratio=1.0,
             comparator_mutations_rejected=True,
+            scope_exclusions=scope_exclusions,
+            scope_statement=SCOPED_EQUIVALENCE_STATEMENT,
         )
         for index in range(matrix.required_consecutive_production_runs)
     )
-    return matrix, contracts, {"cases": report_cases}, runs
+    return (
+        matrix,
+        contracts,
+        {
+            "cases": report_cases,
+            "scope_exclusions": list(scope_exclusions),
+            "scope_statement": SCOPED_EQUIVALENCE_STATEMENT,
+        },
+        runs,
+    )
 
 
 def test_execution_matrix_enumerates_every_required_axis_and_risk_pair():
@@ -3446,7 +3557,9 @@ def test_promotion_requires_environment_metadata_for_every_scenario():
                     }
                 ]
             }
-        }
+        },
+        "scope_exclusions": list(required_scope_exclusions(contracts)),
+        "scope_statement": SCOPED_EQUIVALENCE_STATEMENT,
     }
     assert evaluate_promotion_readiness(
         matrix,
@@ -3591,6 +3704,36 @@ def test_promotion_requires_all_comparator_mutations_to_be_rejected():
     )
 
 
+def test_promotion_requires_scoped_evidence_report():
+    matrix, contracts, report, runs = _ready_promotion_fixture()
+    report = dict(report)
+    report.pop("scope_exclusions")
+
+    decision = evaluate_promotion_readiness(matrix, contracts, report, runs)
+
+    assert decision.ready is False
+    assert any(
+        "scope boundary is invalid" in item for item in decision.blockers
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "token"),
+    [
+        ("scope_exclusions", (), "scope exclusions"),
+        ("scope_statement", "Full equivalence.", "scope statement"),
+    ],
+)
+def test_promotion_requires_scoped_production_runs(field, value, token):
+    matrix, contracts, report, runs = _ready_promotion_fixture()
+    runs = (*runs[:-1], replace(runs[-1], **{field: value}))
+
+    decision = evaluate_promotion_readiness(matrix, contracts, report, runs)
+
+    assert decision.ready is False
+    assert any(token in item for item in decision.blockers)
+
+
 def test_shadow_workflow_runs_tiers_without_becoming_a_release_gate():
     workflow = AB_SHADOW_WORKFLOW.read_text(encoding="utf-8")
     release = RELEASE_WORKFLOW.read_text(encoding="utf-8")
@@ -3698,6 +3841,8 @@ def _promotion_artifacts(tmp_path: Path):
             "schema_version": "1",
             "run_id": PROMOTION_RUN_ID,
             "registry_summary": registry_summary(contracts),
+            "scope_exclusions": list(required_scope_exclusions(contracts)),
+            "scope_statement": SCOPED_EQUIVALENCE_STATEMENT,
             "cases": evidence_cases,
         },
     )
@@ -3796,6 +3941,10 @@ def test_production_run_is_derived_from_complete_hashed_evidence(tmp_path):
     assert run.runtime_ratio == pytest.approx(1.038)
     assert run.finalize_fraction == pytest.approx(0.138)
     assert run.output_bytes_ratio == pytest.approx(1.038)
+    assert run.scope_exclusions == required_scope_exclusions(
+        load_contract_registry()
+    )
+    assert run.scope_statement == SCOPED_EQUIVALENCE_STATEMENT
     assert provenance["source_commit"] == PROMOTION_SOURCE_COMMIT
     assert provenance["source_tree_state"] == "clean"
     assert all(
@@ -3825,6 +3974,30 @@ def test_production_run_rejects_partial_comparator_mutation_evidence(tmp_path):
 
     with pytest.raises(AssertionError, match="lack passing rejection evidence"):
         _derive_promotion_run(artifacts)
+
+
+def test_production_run_rejects_missing_scope_exclusion(tmp_path):
+    artifacts = _promotion_artifacts(tmp_path)
+    evidence = artifacts[2]
+    report = json.loads(evidence.read_text(encoding="utf-8"))
+    report["scope_exclusions"].remove(VDS_CROSS_PROCESS_RESUME_CONTRACT)
+    _write_promotion_json(evidence, report)
+
+    with pytest.raises(AssertionError, match="scope_exclusions"):
+        _derive_promotion_run(artifacts)
+
+
+def test_history_loader_rejects_missing_scope_boundary(tmp_path):
+    artifacts = _promotion_artifacts(tmp_path)
+    run, provenance = _derive_promotion_run(artifacts)
+    history_path = tmp_path / "production_history.json"
+    append_production_run_history(history_path, run, provenance)
+    history = json.loads(history_path.read_text(encoding="utf-8"))
+    history["runs"][0].pop("scope_exclusions")
+    _write_promotion_json(history_path, history)
+
+    with pytest.raises(AssertionError, match="scope_exclusions"):
+        load_production_run_history(history_path)
 
 
 def test_production_run_rejects_failed_comparator_pytest_session(tmp_path):

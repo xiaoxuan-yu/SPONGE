@@ -54,6 +54,12 @@ INPUT_EVOLUTION_COHORTS = {
     "manybody_custom",
     "protocol_stateful",
 }
+VDS_CROSS_PROCESS_RESUME_CONTRACT = "output.vds.cross_process_append_resume"
+SCOPED_EQUIVALENCE_STATEMENT = (
+    "Equivalence is limited to explicitly enumerated supported contracts "
+    "and runtime scenarios and excludes cross-process VDS "
+    "reopen-and-append/resume."
+)
 
 
 @dataclass(frozen=True)
@@ -249,6 +255,7 @@ def validate_contract_registry(
                     f"in case {case_id}"
                 )
 
+    required_scope_exclusions(contracts)
     summary = registry_summary(contracts)
     summary["input_evolution"] = audit_input_evolution_contracts(
         contracts, cases
@@ -499,6 +506,53 @@ def registry_summary(
     }
 
 
+def required_scope_exclusions(
+    contracts: Mapping[str, ContractSpec],
+) -> tuple[str, ...]:
+    contract = contracts.get(VDS_CROSS_PROCESS_RESUME_CONTRACT)
+    if contract is None:
+        raise AssertionError(
+            "A/B contract registry is missing the VDS cross-process resume "
+            "scope exclusion"
+        )
+    if (
+        contract.status != "unsupported"
+        or contract.minimum_evidence != "E4"
+        or contract.case_ids
+        or contract.assertion_ids
+        or "does not implement an append/resume open mode"
+        not in contract.reason
+    ):
+        raise AssertionError(
+            "VDS cross-process resume must remain unsupported/E4 without "
+            "executable evidence and with the reviewed writer limitation"
+        )
+    return tuple(
+        sorted(
+            contract_id
+            for contract_id, spec in contracts.items()
+            if spec.status == "unsupported"
+        )
+    )
+
+
+def validate_scope_boundary(
+    contracts: Mapping[str, ContractSpec], payload: Mapping[str, object]
+) -> tuple[str, ...]:
+    expected = required_scope_exclusions(contracts)
+    actual = payload.get("scope_exclusions")
+    if actual != list(expected) and actual != expected:
+        raise AssertionError(
+            "A/B scope_exclusions are missing or stale: "
+            f"expected={list(expected)}, actual={actual!r}"
+        )
+    if payload.get("scope_statement") != SCOPED_EQUIVALENCE_STATEMENT:
+        raise AssertionError(
+            "A/B scope statement is missing or claims unbounded equivalence"
+        )
+    return expected
+
+
 def update_evidence_report(
     path: Path,
     contracts: Mapping[str, ContractSpec],
@@ -525,6 +579,8 @@ def update_evidence_report(
             "records": [record.as_dict() for record in records],
         }
         report["registry_summary"] = registry_summary(contracts)
+        report["scope_exclusions"] = list(required_scope_exclusions(contracts))
+        report["scope_statement"] = SCOPED_EQUIVALENCE_STATEMENT
         report["coverage"] = _report_coverage(contracts, cases)
         temporary = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
         temporary.write_text(
@@ -555,6 +611,7 @@ def validate_complete_evidence_report(
         raise AssertionError(
             "A/B evidence report registry_summary is missing or stale"
         )
+    validate_scope_boundary(contracts, report)
     if coverage["missing_supported_contracts"]:
         raise AssertionError(
             "A/B evidence report is missing supported contracts: "
@@ -569,8 +626,7 @@ def validate_complete_evidence_report(
     }
     if incomplete_classes:
         raise AssertionError(
-            "A/B evidence-class coverage is incomplete: "
-            f"{incomplete_classes}"
+            f"A/B evidence-class coverage is incomplete: {incomplete_classes}"
         )
     report["coverage"] = coverage
     return report
@@ -753,8 +809,10 @@ def _validate_contract_oracle(
                 f"{case_id} {contract_id} oracle requires non-empty {field}"
             )
     compared_payload = oracle.get("compared_payload")
-    if not isinstance(compared_payload, list) or not compared_payload or not all(
-        isinstance(item, str) and item for item in compared_payload
+    if (
+        not isinstance(compared_payload, list)
+        or not compared_payload
+        or not all(isinstance(item, str) and item for item in compared_payload)
     ):
         raise AssertionError(
             f"{case_id} {contract_id} oracle requires compared_payload"
@@ -768,11 +826,15 @@ def validated_passed_contract_levels(
 
     levels: dict[str, list[str]] = {}
     for case_id, case_payload in cases.items():
-        if not isinstance(case_id, str) or not isinstance(case_payload, Mapping):
+        if not isinstance(case_id, str) or not isinstance(
+            case_payload, Mapping
+        ):
             raise AssertionError("A/B evidence cases must map IDs to objects")
         records = case_payload.get("records")
         if not isinstance(records, list):
-            raise AssertionError(f"A/B evidence case {case_id} requires records")
+            raise AssertionError(
+                f"A/B evidence case {case_id} requires records"
+            )
         for record in records:
             if not isinstance(record, Mapping):
                 raise AssertionError(

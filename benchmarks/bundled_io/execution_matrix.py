@@ -10,8 +10,11 @@ from typing import Mapping, Sequence
 
 from benchmarks.bundled_io.ab_contracts import (
     REGISTRY_PATH,
+    SCOPED_EQUIVALENCE_STATEMENT,
+    VDS_CROSS_PROCESS_RESUME_CONTRACT,
     ContractSpec,
     load_contract_registry,
+    validate_scope_boundary,
     validated_passed_contract_levels,
 )
 
@@ -122,6 +125,8 @@ class ProductionRun:
     finalize_fraction: float
     output_bytes_ratio: float
     comparator_mutations_rejected: bool
+    scope_exclusions: tuple[str, ...] = ()
+    scope_statement: str = ""
 
 
 @dataclass(frozen=True)
@@ -392,6 +397,11 @@ def evaluate_promotion_readiness(
         blockers.append(f"execution scenarios lack evidence: {unresolved}")
 
     report = evidence_report or {}
+    try:
+        expected_scope_exclusions = validate_scope_boundary(contracts, report)
+    except AssertionError as error:
+        blockers.append(f"scope boundary is invalid: {error}")
+        expected_scope_exclusions = ()
     report_cases = report.get("cases")
     if not isinstance(report_cases, dict):
         report_cases = {}
@@ -455,6 +465,14 @@ def evaluate_promotion_readiness(
         )
     else:
         for run in qualifying:
+            if run.scope_exclusions != expected_scope_exclusions:
+                blockers.append(
+                    f"scope exclusions are missing or stale in run {run.run_id}"
+                )
+            if run.scope_statement != SCOPED_EQUIVALENCE_STATEMENT:
+                blockers.append(
+                    f"scope statement is invalid in run {run.run_id}"
+                )
             if not run.comparator_mutations_rejected:
                 blockers.append(
                     f"comparator mutations were not all rejected in run {run.run_id}"
@@ -513,6 +531,23 @@ def _parse_production_run(raw: object, index: int) -> ProductionRun:
         "comparator_evidence_sha256",
     ):
         _required_sha256(raw, key, label)
+    scope_exclusions = raw.get("scope_exclusions")
+    if (
+        not isinstance(scope_exclusions, list)
+        or not all(
+            isinstance(contract_id, str) and contract_id
+            for contract_id in scope_exclusions
+        )
+        or len(scope_exclusions) != len(set(scope_exclusions))
+        or VDS_CROSS_PROCESS_RESUME_CONTRACT not in scope_exclusions
+    ):
+        raise AssertionError(
+            f"{label} scope_exclusions must uniquely include "
+            f"{VDS_CROSS_PROCESS_RESUME_CONTRACT}"
+        )
+    scope_statement = _required_string(raw, "scope_statement", label)
+    if scope_statement != SCOPED_EQUIVALENCE_STATEMENT:
+        raise AssertionError(f"{label} scope_statement is invalid")
     return ProductionRun(
         run_id=_required_string(raw, "run_id", label),
         passed=passed,
@@ -527,6 +562,8 @@ def _parse_production_run(raw: object, index: int) -> ProductionRun:
             raw, "output_bytes_ratio", label, minimum=0.0
         ),
         comparator_mutations_rejected=mutations,
+        scope_exclusions=tuple(scope_exclusions),
+        scope_statement=scope_statement,
     )
 
 

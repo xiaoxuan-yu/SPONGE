@@ -12,8 +12,10 @@ from pathlib import Path
 from typing import Mapping, Sequence
 
 from benchmarks.bundled_io.ab_contracts import (
+    SCOPED_EQUIVALENCE_STATEMENT,
     ContractSpec,
     load_contract_registry,
+    required_scope_exclusions,
     validate_complete_evidence_report,
 )
 from benchmarks.bundled_io.execution_matrix import (
@@ -189,6 +191,8 @@ def derive_production_run(
         finalize_fraction=performance["finalize_fraction"],
         output_bytes_ratio=performance["output_bytes_ratio"],
         comparator_mutations_rejected=True,
+        scope_exclusions=required_scope_exclusions(contracts),
+        scope_statement=SCOPED_EQUIVALENCE_STATEMENT,
     )
     provenance = {
         "source_commit": source_commit,
@@ -327,6 +331,8 @@ def _validate_behavior_evidence(
         output_bytes_ratio=matrix.performance_budgets.maximum_output_bytes_ratio
         * 0.5,
         comparator_mutations_rejected=True,
+        scope_exclusions=required_scope_exclusions(contracts),
+        scope_statement=SCOPED_EQUIVALENCE_STATEMENT,
     )
     candidate = replace(matrix, promotion_state="candidate")
     decision = evaluate_promotion_readiness(

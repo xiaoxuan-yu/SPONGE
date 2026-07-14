@@ -199,3 +199,6 @@ the contract, reader, matrix, and restart-closure suites, a passing
 supported input/output contract and runtime scenarios. It does not claim to
 prove behavior outside that contract, including cross-process VDS
 reopen-and-append resume, which remains unsupported.
+
+Equivalence is limited to explicitly enumerated supported contracts and runtime
+scenarios and excludes cross-process VDS reopen-and-append/resume.
