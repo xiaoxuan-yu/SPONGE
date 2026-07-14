@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import shutil
 import statistics
@@ -265,6 +266,7 @@ def _feature_runtime_case(
     ensemble: str = "nve",
     thermostat: str = "none",
     comparison: str = "deterministic",
+    backend: str = "cpu",
 ) -> MatrixRuntimeCase:
     return MatrixRuntimeCase(
         scenario_id=scenario_id,
@@ -273,7 +275,7 @@ def _feature_runtime_case(
         barostat="none",
         box_geometry="orthogonal",
         constraint=constraint,
-        backend="cpu",
+        backend=backend,
         omp_threads=1,
         mpi_ranks=mpi_ranks,
         comparison=comparison,
@@ -367,6 +369,104 @@ MATRIX_RUNTIME_CASES = (
         constraint="custom",
         tier="production",
     ),
+    _feature_runtime_case(
+        "feature_edip_gpu_omp1_rank1",
+        "manybody",
+        "normal_edip_nonzero",
+        backend="gpu",
+        tier="production",
+    ),
+    _feature_runtime_case(
+        "feature_reaxff_gpu_omp1_rank1",
+        "manybody",
+        "normal_reaxff_payload_sensitivity",
+        backend="gpu",
+        tier="production",
+    ),
+    _feature_runtime_case(
+        "feature_qc_gpu_omp1_rank1",
+        "qc",
+        "rerun_qc_type_typed_unrestricted_vds_off",
+        ensemble="rerun",
+        backend="gpu",
+        tier="production",
+    ),
+    _feature_runtime_case(
+        "feature_sits_gpu_omp1_rank1_vds",
+        "sits",
+        "normal_sits_typed_configuration_nonzero",
+        vds=True,
+        backend="gpu",
+        tier="production",
+    ),
+    _feature_runtime_case(
+        "feature_metadynamics_gpu_omp1_rank1",
+        "metadynamics",
+        "normal_meta_protocol_full_restart_continuation",
+        backend="gpu",
+        tier="production",
+    ),
+    _feature_runtime_case(
+        "feature_positional_restraint_gpu_omp1_rank1",
+        "positional_restraint",
+        "normal_positional_restraint_typed_nonzero",
+        backend="gpu",
+        tier="production",
+    ),
+    _feature_runtime_case(
+        "feature_cv_restraint_gpu_omp1_rank1",
+        "cv_restraint",
+        "normal_cv_restraint_typed_nonzero",
+        backend="gpu",
+        tier="production",
+    ),
+    _feature_runtime_case(
+        "feature_soft_wall_gpu_omp1_rank1",
+        "soft_wall",
+        "normal_soft_wall_typed_nonzero",
+        backend="gpu",
+        tier="production",
+    ),
+    _feature_runtime_case(
+        "feature_virtual_atom_gpu_omp1_rank1",
+        "virtual_atom",
+        "normal_virtual_atoms_pbc_boundary",
+        backend="gpu",
+        tier="production",
+    ),
+    _feature_runtime_case(
+        "feature_constraint_gpu_omp1_rank1",
+        "constraint",
+        "normal_constraint_typed_projection",
+        constraint="custom",
+        backend="gpu",
+        tier="production",
+    ),
+    _feature_runtime_case(
+        "feature_edip_gpu_omp1_rank2",
+        "manybody",
+        "normal_edip_nonzero",
+        mpi_ranks=2,
+        backend="gpu",
+        tier="production",
+    ),
+    _feature_runtime_case(
+        "feature_virtual_atom_gpu_omp1_rank2",
+        "virtual_atom",
+        "normal_virtual_atoms_pbc_boundary",
+        mpi_ranks=2,
+        backend="gpu",
+        tier="production",
+    ),
+    _feature_runtime_case(
+        "feature_constraint_gpu_omp1_rank2",
+        "constraint",
+        "normal_constraint_sidecar_projection",
+        mpi_ranks=2,
+        constraint="custom",
+        backend="gpu",
+        tier="production",
+    ),
 )
 
 
@@ -402,7 +502,9 @@ def test_legacy_and_bundled_execution_matrix_behavior(
         replica_root = case_root / f"replica_{replica_index:02d}"
         if matrix_case.source_case_id is None:
             legacy_dir, bundled_dir = _prepare_pair(matrix_case, replica_root)
-            _prepare_runtime_mdin(matrix_case, legacy_dir, "mdin.spg.toml", seed)
+            _prepare_runtime_mdin(
+                matrix_case, legacy_dir, "mdin.spg.toml", seed
+            )
             _prepare_runtime_mdin(
                 matrix_case,
                 bundled_dir,
@@ -427,6 +529,24 @@ def test_legacy_and_bundled_execution_matrix_behavior(
                 branch="bundled",
                 replica_seed=seed,
             )
+            if matrix_case.backend == "gpu" and matrix_case.mpi_ranks > 1:
+                for directory, mdin_name in (
+                    (legacy_dir, "mdin.spg.toml"),
+                    (bundled_dir, "mdin.bundled.spg.toml"),
+                ):
+                    mdin_path = directory / mdin_name
+                    device_map = os.environ.get(
+                        "SPONGE_BUNDLED_IO_AB_GPU_DEVICES", "0"
+                    ).strip()
+                    if not device_map:
+                        raise AssertionError("GPU MPI device map is empty")
+                    mdin_path.write_text(
+                        _insert_root_toml_keys(
+                            mdin_path.read_text(encoding="utf-8"),
+                            [f'device = "{device_map}"'],
+                        ),
+                        encoding="utf-8",
+                    )
         legacy_metrics = _run_matrix_sponge(
             matrix_case, legacy_dir, _mdin_name(legacy_dir)
         )
@@ -489,9 +609,9 @@ def test_legacy_and_bundled_execution_matrix_behavior(
 def _run_metadynamics_matrix_case(
     matrix_case: MatrixRuntimeCase, ab_case: AbCase
 ) -> None:
-    if matrix_case.mpi_ranks != 1 or matrix_case.backend != "cpu":
+    if matrix_case.mpi_ranks != 1:
         raise AssertionError(
-            "the metadynamics feature scenario is a CPU rank-1 continuation"
+            "the metadynamics feature scenario is a rank-1 continuation"
         )
     _run_meta_protocol_full_restart_case(ab_case, load_contract_registry())
     case_root = _output_root() / ab_case.name
@@ -535,10 +655,26 @@ def _selected(case: MatrixRuntimeCase) -> bool:
     return (
         "all" in selectors
         or case.scenario_id in selectors
-        or ("cpu-rank1" in selectors and case.backend == "cpu" and case.mpi_ranks == 1)
-        or ("cpu-rank2" in selectors and case.backend == "cpu" and case.mpi_ranks == 2)
-        or ("gpu-rank1" in selectors and case.backend == "gpu" and case.mpi_ranks == 1)
-        or ("gpu-rank2" in selectors and case.backend == "gpu" and case.mpi_ranks == 2)
+        or (
+            "cpu-rank1" in selectors
+            and case.backend == "cpu"
+            and case.mpi_ranks == 1
+        )
+        or (
+            "cpu-rank2" in selectors
+            and case.backend == "cpu"
+            and case.mpi_ranks == 2
+        )
+        or (
+            "gpu-rank1" in selectors
+            and case.backend == "gpu"
+            and case.mpi_ranks == 1
+        )
+        or (
+            "gpu-rank2" in selectors
+            and case.backend == "gpu"
+            and case.mpi_ranks == 2
+        )
         or case.tier in selectors
     )
 
@@ -670,7 +806,9 @@ def _prepare_runtime_mdin(
     case: MatrixRuntimeCase, case_dir: Path, mdin_name: str, seed: int
 ) -> None:
     mdin_path = case_dir / mdin_name
-    text = _remove_key_lines(mdin_path.read_text(encoding="utf-8"), _runtime_key_names())
+    text = _remove_key_lines(
+        mdin_path.read_text(encoding="utf-8"), _runtime_key_names()
+    )
     step_limit, interval = _step_and_interval(case)
     additions = _runtime_keys(
         case,
@@ -873,6 +1011,18 @@ def _record_matrix_evidence(
     artifact_bytes: int,
 ) -> None:
     path = _output_root() / MATRIX_EVIDENCE_NAME
+    source_commit = os.environ.get("SPONGE_BUNDLED_IO_AB_SOURCE_COMMIT")
+    if not source_commit:
+        source_commit = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=REPO_ROOT,
+            text=True,
+            capture_output=True,
+            check=True,
+        ).stdout.strip()
+    source_tree_state = os.environ.get(
+        "SPONGE_BUNDLED_IO_AB_SOURCE_TREE_STATE", "unattested"
+    )
     if path.exists():
         report = json.loads(path.read_text(encoding="utf-8"))
     else:
@@ -881,12 +1031,23 @@ def _record_matrix_evidence(
         report = {
             "schema_version": 1,
             "run_id": EVIDENCE_RUN_ID,
+            "source_commit": source_commit,
+            "source_tree_state": source_tree_state,
             "cases": {},
         }
+    if report.get("source_commit") != source_commit:
+        raise AssertionError(
+            "matrix evidence source commit changed within a run"
+        )
+    if report.get("source_tree_state") != source_tree_state:
+        raise AssertionError(
+            "matrix evidence source tree state changed within a run"
+        )
     cases = report.setdefault("cases", {})
     cases[case.scenario_id] = {
         "metadata": {
             **case.axis_values(),
+            **_accelerator_metadata(case),
             "omp_num_threads": case.omp_threads,
             "mpi_rank_count": case.mpi_ranks,
             "rank0_output_owner": True,
@@ -917,5 +1078,49 @@ def _record_matrix_evidence(
     os.replace(temporary, path)
 
 
+def _accelerator_metadata(case: MatrixRuntimeCase) -> dict[str, object]:
+    if case.backend != "gpu":
+        return {}
+    device_map = os.environ.get("SPONGE_BUNDLED_IO_AB_GPU_DEVICES", "0").strip()
+    if not device_map:
+        raise AssertionError("GPU matrix evidence requires a device map")
+    query = subprocess.run(
+        [
+            "nvidia-smi",
+            "--query-gpu=name,driver_version",
+            "--format=csv,noheader",
+        ],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if query.returncode != 0 or not query.stdout.strip():
+        raise AssertionError(
+            "GPU matrix evidence requires nvidia-smi model/driver metadata"
+        )
+    model, separator, driver = query.stdout.splitlines()[0].partition(",")
+    if not separator or not model.strip() or not driver.strip():
+        raise AssertionError("nvidia-smi returned malformed GPU metadata")
+    nvcc = subprocess.run(
+        ["nvcc", "--version"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    runtime = re.search(r"\brelease\s+([0-9.]+)", nvcc.stdout)
+    if nvcc.returncode != 0 or runtime is None:
+        raise AssertionError(
+            "GPU matrix evidence requires CUDA runtime metadata"
+        )
+    return {
+        "gpu_device_map": device_map,
+        "gpu_model": model.strip(),
+        "cuda_driver_version": driver.strip(),
+        "cuda_runtime_version": runtime.group(1),
+    }
+
+
 def _directory_bytes(root: Path) -> int:
-    return sum(path.stat().st_size for path in root.rglob("*") if path.is_file())
+    return sum(
+        path.stat().st_size for path in root.rglob("*") if path.is_file()
+    )

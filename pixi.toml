@@ -18,6 +18,7 @@ dev-cpu-mpi = ["dev", "cpu-mpi", "cpu"]
 dev-hip = ["dev", "hip"]
 dev-cuda12 = ["dev", "cuda", "cuda12"]
 dev-cuda13 = ["dev", "cuda", "cuda13"]
+dev-cuda13-mpi = ["dev", "cuda", "cuda13", "cuda-mpi"]
 ref-gen = ["ref-gen"]
 
 [feature.cuda.target.linux-64.dependencies]
@@ -58,6 +59,10 @@ cuda-nvcc = "13.0.*"
 
 [feature.cuda13.target.win-64.dependencies]
 cuda-nvcc = "13.0.*"
+
+[feature.cuda-mpi.target.linux-64.dependencies]
+openmpi = "5.*"
+nccl = "*"
 
 [feature.hip.target.linux-64.dependencies]
 highfive = "*"
@@ -227,6 +232,9 @@ compile = { cmd = "cmake --build build-$PIXI_ENVIRONMENT_NAME --config Release -
 [feature.cuda.target.linux-64.tasks]
 configure = "cmake -S . -B build-$PIXI_ENVIRONMENT_NAME -G Ninja -DPARALLEL='cuda' -DCUDA_ARCH='all-major' -DCMAKE_INSTALL_PREFIX=\"$CONDA_PREFIX\" -DCMAKE_PREFIX_PATH=\"$CONDA_PREFIX\" -DCMAKE_CXX_COMPILER=\"$CONDA_PREFIX/bin/x86_64-conda-linux-gnu-c++\" -DCMAKE_CUDA_HOST_COMPILER=\"$CONDA_PREFIX/bin/x86_64-conda-linux-gnu-g++\" -DCMAKE_CUDA_FLAGS=\"-ccbin=$CONDA_PREFIX/bin/x86_64-conda-linux-gnu-g++\""
 compile = { cmd = "cmake --build build-$PIXI_ENVIRONMENT_NAME --config Release --target install --parallel {{ jobs }}", args = [{ arg = "jobs", default = "4" }] }
+
+[feature.cuda-mpi.target.linux-64.tasks]
+configure-cuda-mpi = "cmake -S . -B build-$PIXI_ENVIRONMENT_NAME -G Ninja -DPARALLEL='cuda' -DMPI=ON -DMPI_CXX_COMPILER=\"$CONDA_PREFIX/bin/mpicxx\" -DCUDA_ARCH='all-major' -DCMAKE_INSTALL_PREFIX=\"$CONDA_PREFIX\" -DCMAKE_PREFIX_PATH=\"$CONDA_PREFIX\" -DCMAKE_CXX_COMPILER=\"$CONDA_PREFIX/bin/x86_64-conda-linux-gnu-c++\" -DCMAKE_CUDA_HOST_COMPILER=\"$CONDA_PREFIX/bin/x86_64-conda-linux-gnu-g++\" -DCMAKE_CUDA_FLAGS=\"-ccbin=$CONDA_PREFIX/bin/x86_64-conda-linux-gnu-g++\""
 
 [feature.cuda.target.win-64.tasks]
 configure = "cmake -S . -B build-$PIXI_ENVIRONMENT_NAME -G Ninja -DPARALLEL='cuda' -DCUDA_ARCH='all-major' -DCMAKE_INSTALL_PREFIX=\"$CONDA_PREFIX\" -DCMAKE_PREFIX_PATH=\"$CONDA_PREFIX\""

@@ -80,7 +80,7 @@ def write_comparator_mutation_report(
 
 
 def merge_matrix_evidence(
-    paths: Sequence[Path], run_id: str
+    paths: Sequence[Path], run_id: str, source_commit: str | None = None
 ) -> dict[str, object]:
     if not paths:
         raise AssertionError("at least one matrix evidence report is required")
@@ -91,6 +91,7 @@ def merge_matrix_evidence(
     }
     merged_cases = merged["cases"]
     assert isinstance(merged_cases, dict)
+    observed_source_commit = None
     for path in paths:
         report = _load_json_object(path, "matrix evidence")
         if report.get("schema_version") not in {1, "1"}:
@@ -101,6 +102,32 @@ def merge_matrix_evidence(
                 f"expected={run_id!r}, actual={report.get('run_id')!r}, "
                 f"path={path}"
             )
+        report_source_commit = report.get("source_commit")
+        if (
+            not isinstance(report_source_commit, str)
+            or re.fullmatch(r"[0-9a-f]{7,64}", report_source_commit) is None
+        ):
+            raise AssertionError(
+                f"matrix evidence has invalid source commit: {path}"
+            )
+        if source_commit is not None and report_source_commit != source_commit:
+            raise AssertionError(
+                "matrix evidence source commit mismatch: "
+                f"expected={source_commit}, actual={report_source_commit}, "
+                f"path={path}"
+            )
+        if (
+            observed_source_commit is not None
+            and report_source_commit != observed_source_commit
+        ):
+            raise AssertionError(
+                f"matrix evidence source commits differ: {path}"
+            )
+        if report.get("source_tree_state") != "clean":
+            raise AssertionError(
+                f"matrix evidence source tree is not clean: {path}"
+            )
+        observed_source_commit = report_source_commit
         cases = report.get("cases")
         if not isinstance(cases, dict):
             raise AssertionError(
@@ -113,6 +140,8 @@ def merge_matrix_evidence(
                     f"conflicting matrix evidence for case {case_id}: {path}"
                 )
             merged_cases[case_id] = payload
+    merged["source_commit"] = observed_source_commit
+    merged["source_tree_state"] = "clean"
     return merged
 
 
@@ -142,7 +171,9 @@ def derive_production_run(
     evidence = validate_complete_evidence_report(
         evidence_path, contracts, run_id
     )
-    matrix_evidence = merge_matrix_evidence(matrix_evidence_paths, run_id)
+    matrix_evidence = merge_matrix_evidence(
+        matrix_evidence_paths, run_id, source_commit
+    )
     comparator_evidence = _load_json_object(
         comparator_evidence_path, "comparator mutation evidence"
     )
@@ -380,10 +411,20 @@ def _metadata_proves_scenario(
         mpi_ranks = int(metadata.get("mpi_rank_count"))
     except (TypeError, ValueError):
         return False
+    gpu_metadata_valid = scenario.backend != "gpu" or all(
+        isinstance(metadata.get(name), str) and metadata.get(name)
+        for name in (
+            "gpu_device_map",
+            "gpu_model",
+            "cuda_driver_version",
+            "cuda_runtime_version",
+        )
+    )
     return (
         omp_threads == scenario.omp_threads
         and mpi_ranks == scenario.mpi_ranks
         and metadata.get("rank0_output_owner") is True
+        and gpu_metadata_valid
     )
 
 

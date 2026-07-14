@@ -54,6 +54,11 @@ REQUIRED_RANK2_FEATURE_FAMILIES = {
     "virtual_atom",
     "constraint",
 }
+REQUIRED_GPU_RANK2_FEATURE_FAMILIES = {
+    "manybody",
+    "virtual_atom",
+    "constraint",
+}
 
 
 @dataclass(frozen=True)
@@ -154,7 +159,9 @@ def load_execution_matrix(path: Path = MATRIX_PATH) -> ExecutionMatrix:
     required_axes: dict[str, tuple[object, ...]] = {}
     for name, values in raw_axes.items():
         if not isinstance(values, list) or not values:
-            raise AssertionError(f"execution axis {name} must be a non-empty list")
+            raise AssertionError(
+                f"execution axis {name} must be a non-empty list"
+            )
         if any(not isinstance(value, (str, int)) for value in values):
             raise AssertionError(f"execution axis {name} has an invalid value")
         if len(values) != len(set(values)):
@@ -174,7 +181,9 @@ def load_execution_matrix(path: Path = MATRIX_PATH) -> ExecutionMatrix:
 
     raw_scenarios = payload.get("scenarios")
     if not isinstance(raw_scenarios, list) or not raw_scenarios:
-        raise AssertionError("execution matrix scenarios must be a non-empty list")
+        raise AssertionError(
+            "execution matrix scenarios must be a non-empty list"
+        )
     scenarios = tuple(
         _parse_scenario(raw, index) for index, raw in enumerate(raw_scenarios)
     )
@@ -211,7 +220,9 @@ def validate_execution_matrix(
     if len(scenario_ids) != len(set(scenario_ids)):
         raise AssertionError("execution matrix scenario IDs must be unique")
 
-    known_cases = set(available_case_ids) if available_case_ids is not None else None
+    known_cases = (
+        set(available_case_ids) if available_case_ids is not None else None
+    )
     observed_axes = {name: set() for name in REQUIRED_AXIS_NAMES}
     for scenario in matrix.scenarios:
         if scenario.status not in VALID_SCENARIO_STATUSES:
@@ -222,11 +233,17 @@ def validate_execution_matrix(
             raise AssertionError(
                 f"{scenario.scenario_id} has invalid tier {scenario.tier}"
             )
-        if scenario.status in {"executable", "evidenced"} and not scenario.case_ids:
+        if (
+            scenario.status in {"executable", "evidenced"}
+            and not scenario.case_ids
+        ):
             raise AssertionError(
                 f"{scenario.status} scenario {scenario.scenario_id} has no case IDs"
             )
-        if scenario.status in {"deferred", "unsupported"} and not scenario.reason:
+        if (
+            scenario.status in {"deferred", "unsupported"}
+            and not scenario.reason
+        ):
             raise AssertionError(
                 f"{scenario.status} scenario {scenario.scenario_id} requires a reason"
             )
@@ -269,9 +286,14 @@ def validate_execution_matrix(
                 )
         canonical = tuple(sorted(combination.items()))
         if canonical in canonical_combinations:
-            raise AssertionError(f"duplicate required combination: {dict(combination)}")
+            raise AssertionError(
+                f"duplicate required combination: {dict(combination)}"
+            )
         canonical_combinations.add(canonical)
-        if not any(_scenario_matches(scenario, combination) for scenario in matrix.scenarios):
+        if not any(
+            _scenario_matches(scenario, combination)
+            for scenario in matrix.scenarios
+        ):
             raise AssertionError(
                 f"required execution combination has no scenario: {dict(combination)}"
             )
@@ -299,6 +321,30 @@ def validate_execution_matrix(
         )
         for feature_family in REQUIRED_RANK2_FEATURE_FAMILIES
     )
+    required_feature_combinations.update(
+        tuple(
+            sorted(
+                {
+                    "backend": "gpu",
+                    "mpi_ranks": 1,
+                    "feature_family": feature_family,
+                }.items()
+            )
+        )
+        for feature_family in REQUIRED_FEATURE_FAMILIES
+    )
+    required_feature_combinations.update(
+        tuple(
+            sorted(
+                {
+                    "backend": "gpu",
+                    "mpi_ranks": 2,
+                    "feature_family": feature_family,
+                }.items()
+            )
+        )
+        for feature_family in REQUIRED_GPU_RANK2_FEATURE_FAMILIES
+    )
     missing_feature_combinations = sorted(
         required_feature_combinations - canonical_combinations, key=str
     )
@@ -316,7 +362,9 @@ def load_production_run_history(path: Path) -> tuple[ProductionRun, ...]:
     raw_runs = payload.get("runs")
     if not isinstance(raw_runs, list):
         raise AssertionError("production run history runs must be a list")
-    runs = tuple(_parse_production_run(raw, index) for index, raw in enumerate(raw_runs))
+    runs = tuple(
+        _parse_production_run(raw, index) for index, raw in enumerate(raw_runs)
+    )
     run_ids = [run.run_id for run in runs]
     if len(run_ids) != len(set(run_ids)):
         raise AssertionError("production run IDs must be unique")
@@ -374,7 +422,9 @@ def evaluate_promotion_readiness(
                 f"{contract_id}:{sorted(actual)}<{contract.minimum_evidence}"
             )
     if missing_contracts:
-        blockers.append(f"supported contracts lack evidence: {sorted(missing_contracts)}")
+        blockers.append(
+            f"supported contracts lack evidence: {sorted(missing_contracts)}"
+        )
     if insufficient_contracts:
         blockers.append(
             f"supported contracts have insufficient evidence: {insufficient_contracts}"
@@ -467,7 +517,9 @@ def _parse_production_run(raw: object, index: int) -> ProductionRun:
         run_id=_required_string(raw, "run_id", label),
         passed=passed,
         retry_count=_required_int(raw, "retry_count", label, minimum=0),
-        runtime_ratio=_required_number(raw, "runtime_ratio", label, minimum=0.0),
+        runtime_ratio=_required_number(
+            raw, "runtime_ratio", label, minimum=0.0
+        ),
         finalize_fraction=_required_number(
             raw, "finalize_fraction", label, minimum=0.0
         ),
@@ -509,10 +561,20 @@ def _case_proves_scenario(
         mpi_ranks = int(metadata.get("mpi_rank_count"))
     except (TypeError, ValueError):
         return False
+    gpu_metadata_valid = scenario.backend != "gpu" or all(
+        isinstance(metadata.get(name), str) and metadata.get(name)
+        for name in (
+            "gpu_device_map",
+            "gpu_model",
+            "cuda_driver_version",
+            "cuda_runtime_version",
+        )
+    )
     return (
         omp_threads == scenario.omp_threads
         and mpi_ranks == scenario.mpi_ranks
         and metadata.get("rank0_output_owner") is True
+        and gpu_metadata_valid
     )
 
 
@@ -539,8 +601,10 @@ def _passed_contract_levels(
 def _evidence_satisfies(actual: str, required: str) -> bool:
     if actual == "F1" or required == "F1":
         return actual == required
-    return actual in EVIDENCE_RANK and required in EVIDENCE_RANK and (
-        EVIDENCE_RANK[actual] >= EVIDENCE_RANK[required]
+    return (
+        actual in EVIDENCE_RANK
+        and required in EVIDENCE_RANK
+        and (EVIDENCE_RANK[actual] >= EVIDENCE_RANK[required])
     )
 
 
@@ -576,7 +640,9 @@ def _validate_budgets(budgets: PerformanceBudgets) -> None:
     }
     for name, value in values.items():
         if not math.isfinite(value) or value <= 0.0:
-            raise AssertionError(f"performance budget {name} must be finite and positive")
+            raise AssertionError(
+                f"performance budget {name} must be finite and positive"
+            )
 
 
 def _scenario_matches(
@@ -602,16 +668,16 @@ def _required_object(
     return dict(value)
 
 
-def _required_string(payload: Mapping[str, object], key: str, label: str) -> str:
+def _required_string(
+    payload: Mapping[str, object], key: str, label: str
+) -> str:
     value = payload.get(key)
     if not isinstance(value, str) or not value:
         raise AssertionError(f"{label} requires non-empty string {key}")
     return value
 
 
-def _required_bool(
-    payload: Mapping[str, object], key: str, label: str
-) -> bool:
+def _required_bool(payload: Mapping[str, object], key: str, label: str) -> bool:
     value = payload.get(key)
     if not isinstance(value, bool):
         raise AssertionError(f"{label} requires boolean {key}")
@@ -662,7 +728,9 @@ def _required_number(
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Validate bundled I/O A/B matrix")
+    parser = argparse.ArgumentParser(
+        description="Validate bundled I/O A/B matrix"
+    )
     parser.add_argument("--matrix", type=Path, default=MATRIX_PATH)
     parser.add_argument("--evaluate", action="store_true")
     parser.add_argument("--contracts", type=Path, default=REGISTRY_PATH)
@@ -676,7 +744,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             parser.error("--evaluate requires --evidence and --history")
         evidence = _load_json_object(args.evidence, "A/B evidence report")
         matrix_evidence = (
-            _load_json_object(args.matrix_evidence, "A/B matrix evidence report")
+            _load_json_object(
+                args.matrix_evidence, "A/B matrix evidence report"
+            )
             if args.matrix_evidence is not None
             else None
         )

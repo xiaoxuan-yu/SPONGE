@@ -3132,6 +3132,16 @@ def _ready_promotion_fixture():
         report_cases[case_id] = {
             "metadata": {
                 **scenario.axis_values(),
+                **(
+                    {
+                        "gpu_device_map": "0",
+                        "gpu_model": "synthetic GPU",
+                        "cuda_driver_version": "999.0",
+                        "cuda_runtime_version": "13.0",
+                    }
+                    if scenario.backend == "gpu"
+                    else {}
+                ),
                 "omp_num_threads": scenario.omp_threads,
                 "mpi_rank_count": scenario.mpi_ranks,
                 "rank0_output_owner": True,
@@ -3220,7 +3230,7 @@ def test_execution_matrix_enumerates_every_required_axis_and_risk_pair():
         for scenario in matrix.scenarios
         if scenario.status == "executable"
     ]
-    assert len(executable) == 26
+    assert len(executable) == 39
     for scenario in executable:
         assert scenario.case_ids[0] == scenario.scenario_id
         runtime_case = runtime_cases[scenario.scenario_id]
@@ -3429,9 +3439,7 @@ def test_promotion_requires_environment_metadata_for_every_scenario():
                         "assertion_id": "synthetic_equivalence",
                         "evidence_level": "E3",
                         "status": "passed",
-                        "details": {
-                            "method": "synthetic_runtime_comparison"
-                        },
+                        "details": {"method": "synthetic_runtime_comparison"},
                     }
                 ]
             }
@@ -3473,6 +3481,24 @@ def test_promotion_metadata_must_prove_feature_family_and_vds():
     assert decision.ready is False
     assert any(
         feature_scenario.scenario_id in blocker
+        and "does not prove environment" in blocker
+        for blocker in decision.blockers
+    )
+
+
+def test_promotion_metadata_must_prove_gpu_hardware():
+    matrix, contracts, report, runs = _ready_promotion_fixture()
+    gpu_scenario = next(
+        scenario for scenario in matrix.scenarios if scenario.backend == "gpu"
+    )
+    case_payload = report["cases"][gpu_scenario.case_ids[0]]
+    case_payload["metadata"].pop("gpu_model")
+
+    decision = evaluate_promotion_readiness(matrix, contracts, report, runs)
+
+    assert decision.ready is False
+    assert any(
+        gpu_scenario.scenario_id in blocker
         and "does not prove environment" in blocker
         for blocker in decision.blockers
     )
@@ -3576,17 +3602,27 @@ def test_shadow_workflow_runs_tiers_without_becoming_a_release_gate():
         workflow.count("SPONGE_BUNDLED_IO_AB_MATRIX_SCENARIOS: cpu-rank1") == 2
     )
     assert "SPONGE_BUNDLED_IO_AB_MATRIX_SCENARIOS: cpu-rank2" in workflow
+    assert "SPONGE_BUNDLED_IO_AB_MATRIX_SCENARIOS: gpu-rank1" in workflow
+    assert "SPONGE_BUNDLED_IO_AB_MATRIX_SCENARIOS: gpu-rank2" in workflow
     assert "pixi install -e dev-cpu-mpi" in workflow
+    assert "pixi install -e dev-cuda13" in workflow
+    assert "pixi install -e dev-cuda13-mpi" in workflow
+    assert "pixi run -e dev-cuda13-mpi configure-cuda-mpi" in workflow
+    assert "runs-on: [self-hosted, linux, x64, gpu, cuda13]" in workflow
+    assert "runs-on: [self-hosted, linux, x64, gpu, cuda13, mpi]" in workflow
+    assert "nvidia-smi --query-gpu=name,driver_version" in workflow
     assert (
         workflow.count(
             "SPONGE_BUNDLED_IO_AB_RUN_ID: "
             "${{ github.run_id }}-${{ github.run_attempt }}"
         )
-        == 2
+        == 4
     )
     assert "SPONGE_BUNDLED_IO_AB_COMPARATOR_EVIDENCE:" in workflow
     assert "ab_comparator_evidence.json" in workflow
-    assert workflow.count("continue-on-error: true") == 3
+    assert workflow.count("continue-on-error: true") == 5
+    assert "bundled-io-ab-gpu-${{ github.run_id }}" in workflow
+    assert "bundled-io-ab-gpu-mpi-${{ github.run_id }}" in workflow
     assert "schedule:" in workflow
     assert "actions/upload-artifact@v4" in workflow
     assert "bundled-io-ab-shadow" not in release
@@ -3656,6 +3692,16 @@ def _promotion_artifacts(tmp_path: Path):
         matrix_cases[scenario.case_ids[0]] = {
             "metadata": {
                 **scenario.axis_values(),
+                **(
+                    {
+                        "gpu_device_map": "0",
+                        "gpu_model": "synthetic GPU",
+                        "cuda_driver_version": "999.0",
+                        "cuda_runtime_version": "13.0",
+                    }
+                    if scenario.backend == "gpu"
+                    else {}
+                ),
                 "omp_num_threads": scenario.omp_threads,
                 "mpi_rank_count": scenario.mpi_ranks,
                 "rank0_output_owner": True,
@@ -3683,6 +3729,8 @@ def _promotion_artifacts(tmp_path: Path):
             {
                 "schema_version": 1,
                 "run_id": PROMOTION_RUN_ID,
+                "source_commit": PROMOTION_SOURCE_COMMIT,
+                "source_tree_state": "clean",
                 "cases": dict(selected),
             },
         )
@@ -3730,9 +3778,9 @@ def test_production_run_is_derived_from_complete_hashed_evidence(tmp_path):
     assert run.run_id == PROMOTION_RUN_ID
     assert run.passed is True
     assert run.comparator_mutations_rejected is True
-    assert run.runtime_ratio == pytest.approx(1.025)
-    assert run.finalize_fraction == pytest.approx(0.125)
-    assert run.output_bytes_ratio == pytest.approx(1.025)
+    assert run.runtime_ratio == pytest.approx(1.038)
+    assert run.finalize_fraction == pytest.approx(0.138)
+    assert run.output_bytes_ratio == pytest.approx(1.038)
     assert provenance["source_commit"] == PROMOTION_SOURCE_COMMIT
     assert provenance["source_tree_state"] == "clean"
     assert all(
@@ -3794,6 +3842,22 @@ def test_production_run_rejects_unproven_matrix_environment(tmp_path):
         _derive_promotion_run(artifacts)
 
 
+def test_production_run_rejects_missing_gpu_matrix_artifacts(tmp_path):
+    artifacts = _promotion_artifacts(tmp_path)
+    matrix_evidence = artifacts[-2]
+    for path in matrix_evidence:
+        report = json.loads(path.read_text(encoding="utf-8"))
+        report["cases"] = {
+            case_id: payload
+            for case_id, payload in report["cases"].items()
+            if payload["metadata"]["backend"] != "gpu"
+        }
+        _write_promotion_json(path, report)
+
+    with pytest.raises(AssertionError, match="does not prove environment"):
+        _derive_promotion_run(artifacts)
+
+
 def test_production_run_rejects_below_minimum_contract_evidence(tmp_path):
     artifacts = _promotion_artifacts(tmp_path)
     contracts = artifacts[1]
@@ -3848,6 +3912,17 @@ def test_matrix_evidence_merge_rejects_stale_and_conflicting_runs(tmp_path):
     _write_promotion_json(matrix_evidence[0], stale)
     _write_promotion_json(matrix_evidence[1], other)
     with pytest.raises(AssertionError, match="conflicting matrix evidence"):
+        merge_matrix_evidence(matrix_evidence, PROMOTION_RUN_ID)
+
+
+def test_matrix_evidence_merge_rejects_mixed_source_commits(tmp_path):
+    artifacts = _promotion_artifacts(tmp_path)
+    matrix_evidence = artifacts[-2]
+    report = json.loads(matrix_evidence[1].read_text(encoding="utf-8"))
+    report["source_commit"] = "b" * 40
+    _write_promotion_json(matrix_evidence[1], report)
+
+    with pytest.raises(AssertionError, match="source commits differ"):
         merge_matrix_evidence(matrix_evidence, PROMOTION_RUN_ID)
 
 

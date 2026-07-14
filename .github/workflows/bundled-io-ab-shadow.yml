@@ -115,10 +115,15 @@ jobs:
     env:
       SPONGE_BUNDLED_IO_AB_RUN_ROOT: ${{ github.workspace }}/outputs/ab-production
       SPONGE_BUNDLED_IO_AB_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+      SPONGE_BUNDLED_IO_AB_SOURCE_COMMIT: ${{ github.sha }}
+      SPONGE_BUNDLED_IO_AB_SOURCE_TREE_STATE: clean
       SPONGE_BUNDLED_IO_AB_COMPARATOR_EVIDENCE: ${{ github.workspace }}/outputs/ab-production/ab_comparator_evidence.json
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
+
+      - name: Attest clean CPU source checkout
+        run: test -z "$(git status --porcelain --untracked-files=all)"
 
       - name: Setup Pixi
         uses: prefix-dev/setup-pixi@v0.9.4
@@ -167,9 +172,14 @@ jobs:
     env:
       SPONGE_BUNDLED_IO_AB_RUN_ROOT: ${{ github.workspace }}/outputs/ab-mpi
       SPONGE_BUNDLED_IO_AB_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+      SPONGE_BUNDLED_IO_AB_SOURCE_COMMIT: ${{ github.sha }}
+      SPONGE_BUNDLED_IO_AB_SOURCE_TREE_STATE: clean
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
+
+      - name: Attest clean CPU MPI source checkout
+        run: test -z "$(git status --porcelain --untracked-files=all)"
 
       - name: Setup Pixi
         uses: prefix-dev/setup-pixi@v0.9.4
@@ -201,3 +211,115 @@ jobs:
           name: bundled-io-ab-mpi-${{ github.run_id }}
           path: outputs/ab-mpi
           if-no-files-found: warn
+
+  production-gpu:
+    name: GPU rank-1 behavior matrix (shadow)
+    if: >-
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' && inputs.tier == 'production')
+    needs: contract
+    continue-on-error: true
+    runs-on: [self-hosted, linux, x64, gpu, cuda13]
+    timeout-minutes: 360
+    env:
+      SPONGE_BUNDLED_IO_AB_RUN_ROOT: ${{ github.workspace }}/outputs/ab-gpu
+      SPONGE_BUNDLED_IO_AB_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+      SPONGE_BUNDLED_IO_AB_SOURCE_COMMIT: ${{ github.sha }}
+      SPONGE_BUNDLED_IO_AB_GPU_DEVICES: "0"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Attest clean GPU source checkout
+        run: test -z "$(git status --porcelain --untracked-files=all)"
+
+      - name: Record GPU hardware
+        run: nvidia-smi --query-gpu=name,driver_version --format=csv
+
+      - name: Setup Pixi
+        uses: prefix-dev/setup-pixi@v0.9.4
+        with:
+          run-install: false
+
+      - name: Install CUDA environment
+        run: pixi install -e dev-cuda13
+
+      - name: Configure and compile SPONGE CUDA
+        run: |
+          pixi run -e dev-cuda13 configure
+          pixi run -e dev-cuda13 compile
+
+      - name: Run GPU rank-1 execution matrix
+        env:
+          SPONGE_BUNDLED_IO_AB_PROFILE: production
+          SPONGE_BUNDLED_IO_AB_BACKEND: gpu
+          SPONGE_BUNDLED_IO_AB_MATRIX_SCENARIOS: gpu-rank1
+          SPONGE_BUNDLED_IO_AB_SOURCE_TREE_STATE: clean
+        run: >-
+          pixi run -e dev-cuda13 python -X utf8 -m pytest
+          benchmarks/bundled_io/tests/test_bundled_io_ab_execution_matrix.py
+          -s --tb=short
+
+      - name: Upload GPU evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bundled-io-ab-gpu-${{ github.run_id }}
+          path: outputs/ab-gpu
+          if-no-files-found: error
+
+  production-gpu-mpi:
+    name: GPU MPI rank-2 behavior matrix (shadow)
+    if: >-
+      github.event_name == 'schedule' ||
+      (github.event_name == 'workflow_dispatch' && inputs.tier == 'production')
+    needs: contract
+    continue-on-error: true
+    runs-on: [self-hosted, linux, x64, gpu, cuda13, mpi]
+    timeout-minutes: 360
+    env:
+      SPONGE_BUNDLED_IO_AB_RUN_ROOT: ${{ github.workspace }}/outputs/ab-gpu-mpi
+      SPONGE_BUNDLED_IO_AB_RUN_ID: ${{ github.run_id }}-${{ github.run_attempt }}
+      SPONGE_BUNDLED_IO_AB_SOURCE_COMMIT: ${{ github.sha }}
+      SPONGE_BUNDLED_IO_AB_GPU_DEVICES: "0"
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Attest clean GPU MPI source checkout
+        run: test -z "$(git status --porcelain --untracked-files=all)"
+
+      - name: Record GPU MPI hardware
+        run: nvidia-smi --query-gpu=name,driver_version --format=csv
+
+      - name: Setup Pixi
+        uses: prefix-dev/setup-pixi@v0.9.4
+        with:
+          run-install: false
+
+      - name: Install CUDA MPI environment
+        run: pixi install -e dev-cuda13-mpi
+
+      - name: Configure and compile SPONGE CUDA MPI
+        run: |
+          pixi run -e dev-cuda13-mpi configure-cuda-mpi
+          pixi run -e dev-cuda13-mpi compile
+
+      - name: Run GPU rank-2 execution matrix
+        env:
+          SPONGE_BUNDLED_IO_AB_PROFILE: production
+          SPONGE_BUNDLED_IO_AB_BACKEND: gpu
+          SPONGE_BUNDLED_IO_AB_MATRIX_SCENARIOS: gpu-rank2
+          SPONGE_BUNDLED_IO_AB_SOURCE_TREE_STATE: clean
+        run: >-
+          pixi run -e dev-cuda13-mpi python -X utf8 -m pytest
+          benchmarks/bundled_io/tests/test_bundled_io_ab_execution_matrix.py
+          -s --tb=short
+
+      - name: Upload GPU MPI evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bundled-io-ab-gpu-mpi-${{ github.run_id }}
+          path: outputs/ab-gpu-mpi
+          if-no-files-found: error
