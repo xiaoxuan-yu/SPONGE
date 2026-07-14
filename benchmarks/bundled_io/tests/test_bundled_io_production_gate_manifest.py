@@ -99,6 +99,8 @@ from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
     _assert_gb_force_oracle,
     _assert_nontrivial_equivalent_forces,
     _assert_nonzero_dt_evolution,
+    _assert_rerun_direct_payload,
+    _assert_rerun_optional_presence,
     _assert_residue_com_res_virial_oracle,
     _assert_residue_pbc_mapping_oracle,
     _assert_sits_nk_typed_restart_oracle,
@@ -377,6 +379,8 @@ def test_ab_production_harness_has_executable_contract_coverage():
         "rerun_restart_absent_same_bootstrap_vds_off",
         "rerun_boundary_start0_strip0_limit1_vds_off",
         "rerun_boundary_start1_strip0_unlimited_no_velocity_vds_on",
+        "rerun_optional_no_velocity_no_force_vds_on",
+        "rerun_selected_stream_velocity_force_vds_on",
         "rerun_boundary_start0_strip1_beyond_selected_vds_on",
         "rerun_boundary_start0_strip0_exact_eof_box_vds_off",
         "rerun_boundary_start1_strip1_limit1_selected_no_velocity_vds_off",
@@ -760,6 +764,61 @@ def test_nonzero_dt_evolution_oracle_rejects_schedule_and_frozen_coordinates():
     frozen = dict(payload, position=[0.0, 0.0, 0.0] * 3)
     with pytest.raises(AssertionError, match="coordinates are frozen"):
         _assert_nonzero_dt_evolution("mutation", frozen, frozen, dt=0.001)
+
+
+def test_rerun_direct_payload_oracle_rejects_payload_and_schedule_mutations():
+    values = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+    kwargs = {
+        "case_name": "mutation",
+        "name": "velocity",
+        "legacy_values": values,
+        "h5_values": values,
+        "h5_shape": (2, 1, 3),
+        "h5_steps": [10.0, 20.0],
+        "h5_times": [0.1, 0.2],
+        "expected_steps": [10.0, 20.0],
+        "expected_times": [0.1, 0.2],
+        "relative_tolerance": 0.0,
+        "absolute_tolerance": 0.0,
+    }
+    assert _assert_rerun_direct_payload(**kwargs)["frame_count"] == 2
+
+    with pytest.raises(AssertionError, match="value count mismatch"):
+        _assert_rerun_direct_payload(**dict(kwargs, legacy_values=values[:3]))
+    with pytest.raises(AssertionError, match="step schedule"):
+        _assert_rerun_direct_payload(**dict(kwargs, h5_steps=[11.0, 20.0]))
+    with pytest.raises(AssertionError, match="direct legacy/H5 rerun velocity"):
+        _assert_rerun_direct_payload(
+            **dict(kwargs, h5_values=[4.0, 5.0, 6.0, 1.0, 2.0, 3.0])
+        )
+
+
+def test_rerun_optional_presence_oracle_rejects_one_sided_fields():
+    _assert_rerun_optional_presence(
+        "mutation",
+        "force",
+        expected=False,
+        h5_present=False,
+        legacy_present=False,
+    )
+    with pytest.raises(AssertionError, match="optional field force presence"):
+        _assert_rerun_optional_presence(
+            "mutation",
+            "force",
+            expected=False,
+            h5_present=True,
+            legacy_present=False,
+        )
+    with pytest.raises(
+        AssertionError, match="optional field velocity presence"
+    ):
+        _assert_rerun_optional_presence(
+            "mutation",
+            "velocity",
+            expected=True,
+            h5_present=True,
+            legacy_present=False,
+        )
 
 
 def test_meta_protocol_full_restart_uses_one_checkpoint_and_e4_continuation():

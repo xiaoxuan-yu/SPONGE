@@ -1808,6 +1808,11 @@ void Main_Print()
         md_info.output.Append_Crd_Traj_File();
         md_info.output.Append_Vel_Traj_File();
         md_info.output.Append_Box_Traj_File();
+        if (md_info.output.h5_trajectory_force_enabled)
+        {
+            md_info.Frc_dd_to_Host(dd.frc, dd.atom_local_label,
+                                   dd.atom_local_id, main_stream);
+        }
         md_info.output.Append_H5_Trajectory_Frame(&controller);
         meta.Write_Potential();
 #ifdef USE_MPI

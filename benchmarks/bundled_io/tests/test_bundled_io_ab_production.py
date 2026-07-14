@@ -573,6 +573,7 @@ class AbCase:
     rerun_frame_limit: int | None = 2
     rerun_need_box_update: bool = False
     rerun_velocity_present: bool = True
+    rerun_force_output: bool = True
     trajectory_particle_stream: str = "all"
     trajectory_file_name: str = "trajectory.spg.h5md"
     failure_mutation: str | None = None
@@ -2232,7 +2233,57 @@ def _rerun_boundary_cases() -> list[AbCase]:
             rerun_frame_limit=None,
             rerun_need_box_update=True,
             rerun_velocity_present=False,
+            rerun_force_output=False,
             trajectory_file_name="trajectory.no_velocity.spg.h5md",
+        ),
+        AbCase(
+            name="rerun_optional_no_velocity_no_force_vds_on",
+            fixture_case="full_contract_rerun",
+            legacy_subdir="legacy_input",
+            bundled_subdir="bundled_input_with_legacy_sidecar/bundle",
+            mode="rerun",
+            vds=True,
+            statistical_md=False,
+            restart_load_policy="structural",
+            contract_ids=(
+                *shared_contracts,
+                "output.trajectory",
+                "output.observable",
+                "output.trajectory.vds_on",
+            ),
+            assertion_ids=(
+                *shared_assertions,
+                "h5_rerun_semantic_equivalence",
+            ),
+            rerun_frame_limit=2,
+            rerun_need_box_update=False,
+            rerun_velocity_present=False,
+            rerun_force_output=False,
+            trajectory_file_name="trajectory.no_velocity.spg.h5md",
+        ),
+        AbCase(
+            name="rerun_selected_stream_velocity_force_vds_on",
+            fixture_case="full_contract_rerun",
+            legacy_subdir="legacy_input",
+            bundled_subdir="bundled_input_with_legacy_sidecar/bundle",
+            mode="rerun",
+            vds=True,
+            statistical_md=False,
+            restart_load_policy="structural",
+            contract_ids=(
+                *shared_contracts,
+                "input.trajectory.particle_stream",
+                "output.trajectory",
+                "output.observable",
+                "output.trajectory.vds_on",
+            ),
+            assertion_ids=(
+                *shared_assertions,
+                "h5_rerun_semantic_equivalence",
+            ),
+            rerun_frame_limit=2,
+            trajectory_particle_stream="selected",
+            trajectory_file_name="trajectory.selected.spg.h5md",
         ),
         AbCase(
             name="rerun_boundary_start0_strip1_beyond_selected_vds_on",
@@ -11139,6 +11190,9 @@ def _prepare_mdin(
         "rst",
         "qc_restricted",
         "qc_scf_print_iter",
+        "rerun_output_crd",
+        "rerun_output_box",
+        "rerun_output_vel",
     }
     if case.mode in {"normal", "chunk_boundary"}:
         remove_keys.update(
@@ -11224,6 +11278,16 @@ def _prepare_mdin(
                     f'"{case.trajectory_particle_stream}"',
                 ]
             )
+        additions.extend(
+            [
+                f'rerun_output_crd = "output/{branch}_rerun.crd"',
+                f'rerun_output_box = "output/{branch}_rerun.box"',
+            ]
+        )
+        if case.rerun_velocity_present:
+            additions.append(f'rerun_output_vel = "output/{branch}_rerun.vel"')
+        if case.rerun_force_output:
+            additions.append(f'frc = "output/{branch}_rerun.frc"')
         if _has_key_line(text, "input_h5_restart_path"):
             additions.append(
                 f'input_h5_restart_load = "{case.restart_load_policy}"'
@@ -11761,6 +11825,7 @@ def _compare_outputs(
                         "trajectory_frame_count": h5_comparison[
                             "trajectory_frame_count"
                         ],
+                        "payloads": h5_comparison["payloads"],
                     },
                 )
             )
@@ -17790,11 +17855,23 @@ def _validate_branch_output_contract(
     if case.mode == "rerun" and branch == "legacy":
         if not (case_dir / "mdout.txt").exists():
             raise AssertionError(f"{case.name} legacy rerun did not emit mdout")
-        # Rerun reaches its frame loop before the H5 output initializers on the
-        # legacy-text path.  Bundled output is therefore checked against the
-        # legacy mdout/trajectory semantics in _compare_rerun_h5_output.
+        expected = {
+            "position": case_dir / "output/legacy_rerun.crd",
+            "box": case_dir / "output/legacy_rerun.box",
+        }
+        if case.rerun_velocity_present:
+            expected["velocity"] = case_dir / "output/legacy_rerun.vel"
+        if case.rerun_force_output:
+            expected["force"] = case_dir / "output/legacy_rerun.frc"
+        missing = sorted(
+            name for name, path in expected.items() if not path.exists()
+        )
+        if missing:
+            raise AssertionError(
+                f"{case.name} legacy rerun outputs are missing: {missing}"
+            )
         return {
-            "h5_emission": "legacy_rerun_h5_output_not_available",
+            "direct_output_fields": sorted(expected),
             "mdout_rows": len(_read_mdout(case_dir / "mdout.txt")["rows"]),
         }
     files = _output_h5_files(case, case_dir)
@@ -18055,11 +18132,23 @@ def _validate_trajectory_output(
             return
 
     required = set(H5_COMPARE_DATASETS)
-    if case.mode != "normal":
-        required -= {
-            "/particles/all/velocity/value",
-            "/particles/all/force/value",
-        }
+    optional_expectations = {
+        "/particles/all/velocity/value": (
+            case.mode == "normal"
+            or (case.mode == "rerun" and case.rerun_velocity_present)
+        ),
+        "/particles/all/force/value": (
+            case.mode == "normal"
+            or (case.mode == "rerun" and case.rerun_force_output)
+        ),
+    }
+    for dataset, expected in optional_expectations.items():
+        if not expected:
+            required.discard(dataset)
+            if dataset in paths:
+                raise AssertionError(
+                    f"{case.name} unexpectedly retained optional {dataset}"
+                )
     missing = sorted(required - paths)
     if missing:
         raise AssertionError(
@@ -18098,11 +18187,10 @@ def _validate_trajectory_output(
                 f"{case.name} trajectory {dataset} frame shape mismatch: "
                 f"shape={shape}, frames={len(steps)}"
             )
-    if case.mode == "normal":
-        for dataset in (
-            "/particles/all/velocity/value",
-            "/particles/all/force/value",
-        ):
+    if case.mode in {"normal", "rerun"}:
+        for dataset, expected in optional_expectations.items():
+            if not expected:
+                continue
             shape = _h5_dataset_shape(path, dataset)
             if not shape or shape[0] != len(steps):
                 raise AssertionError(
@@ -18380,6 +18468,77 @@ def _compare_rerun_h5_output(case: AbCase, run: AbRun) -> dict[str, object]:
             absolute_tolerance=absolute_tolerance,
         )
 
+    output_times = _h5_numeric_values(trajectory_output, "/particles/all/time")
+    input_time_path = f"{stream_root}/time"
+    expected_times = output_times
+    if input_time_path in _h5_paths(input_trajectory):
+        input_times = _h5_numeric_values(input_trajectory, input_time_path)
+        expected_times = [input_times[index] for index in matching_indices]
+        _assert_numeric_sequences_close(
+            f"{case.name} rerun time schedule",
+            expected_times,
+            output_times,
+            relative_tolerance=0.0,
+            absolute_tolerance=1.0e-12,
+        )
+
+    payload_datasets = {
+        "position": "/particles/all/position/value",
+        "box": "/particles/all/box/edges/value",
+        "velocity": "/particles/all/velocity/value",
+        "force": "/particles/all/force/value",
+    }
+    expected_presence = {
+        "position": True,
+        "box": True,
+        "velocity": case.rerun_velocity_present,
+        "force": case.rerun_force_output,
+    }
+    output_paths = _h5_paths(trajectory_output)
+    payloads = {}
+    for name, dataset in payload_datasets.items():
+        present = dataset in output_paths
+        legacy_path = run.legacy_dir / f"output/legacy_rerun.{name}"
+        if name == "position":
+            legacy_path = run.legacy_dir / "output/legacy_rerun.crd"
+        elif name == "velocity":
+            legacy_path = run.legacy_dir / "output/legacy_rerun.vel"
+        elif name == "force":
+            legacy_path = run.legacy_dir / "output/legacy_rerun.frc"
+        _assert_rerun_optional_presence(
+            case.name,
+            name,
+            expected=expected_presence[name],
+            h5_present=present,
+            legacy_present=legacy_path.exists(),
+        )
+        if not present:
+            payloads[name] = {"present": False, "frame_count": 0}
+            continue
+        legacy_values = _read_legacy_rerun_payload(name, legacy_path)
+        output_values = _h5_numeric_values(trajectory_output, dataset)
+        shape = _h5_dataset_shape(trajectory_output, dataset)
+        relative_tolerance, absolute_tolerance = _deterministic_tolerance(
+            dataset
+        )
+        payloads[name] = _assert_rerun_direct_payload(
+            case.name,
+            name,
+            legacy_values,
+            output_values,
+            shape,
+            output_steps,
+            output_times,
+            [input_steps[index] for index in matching_indices],
+            expected_times,
+            relative_tolerance=relative_tolerance,
+            absolute_tolerance=absolute_tolerance,
+        )
+        payloads[name]["legacy_path"] = str(
+            legacy_path.relative_to(run.legacy_dir)
+        )
+        payloads[name]["h5_dataset"] = dataset
+
     # _compare_mdout_deterministically already proves legacy and bundled mdout
     # equivalence. The bundled observable output was checked against bundled
     # mdout in _validate_observable_output, which gives a transitive semantic
@@ -18392,12 +18551,115 @@ def _compare_rerun_h5_output(case: AbCase, run: AbRun) -> dict[str, object]:
     if case.vds and _vds_shard_count(trajectory_output) <= 0:
         raise AssertionError(f"{case.name} bundled VDS output has no shards")
     return {
-        "method": "legacy_mdout_to_bundled_h5_semantic_bridge",
-        "legacy_rerun_h5_output": "not_available",
+        "method": "direct_legacy_sidecar_to_bundled_h5_rerun_bridge",
         "trajectory_frame_count": len(output_steps),
+        "payloads": payloads,
         "observable": observable_columns,
         "bundled_shard_count": _vds_shard_count(trajectory_output),
     }
+
+
+def _assert_rerun_optional_presence(
+    case_name: str,
+    name: str,
+    *,
+    expected: bool,
+    h5_present: bool,
+    legacy_present: bool,
+) -> None:
+    if h5_present != expected or legacy_present != expected:
+        raise AssertionError(
+            f"{case_name} rerun optional field {name} presence differs: "
+            f"expected={expected}, h5={h5_present}, legacy={legacy_present}"
+        )
+
+
+def _assert_rerun_direct_payload(
+    case_name: str,
+    name: str,
+    legacy_values: Sequence[float],
+    h5_values: Sequence[float],
+    h5_shape: tuple[int, ...],
+    h5_steps: Sequence[float],
+    h5_times: Sequence[float],
+    expected_steps: Sequence[float],
+    expected_times: Sequence[float],
+    *,
+    relative_tolerance: float,
+    absolute_tolerance: float,
+) -> dict[str, object]:
+    if len(h5_shape) < 2:
+        raise AssertionError(
+            f"{case_name} rerun {name} payload is not frame-shaped: "
+            f"shape={h5_shape}"
+        )
+    frame_count = h5_shape[0]
+    frame_width = math.prod(h5_shape[1:])
+    expected_value_count = frame_count * frame_width
+    if len(h5_values) != expected_value_count or len(legacy_values) != (
+        expected_value_count
+    ):
+        raise AssertionError(
+            f"{case_name} rerun {name} value count mismatch: "
+            f"shape={h5_shape}, legacy={len(legacy_values)}, "
+            f"h5={len(h5_values)}"
+        )
+    if not (
+        len(h5_steps)
+        == len(h5_times)
+        == len(expected_steps)
+        == len(expected_times)
+        == frame_count
+    ):
+        raise AssertionError(
+            f"{case_name} rerun {name} frame schedule length mismatch: "
+            f"frames={frame_count}, steps={len(h5_steps)}, "
+            f"times={len(h5_times)}, expected_steps={len(expected_steps)}, "
+            f"expected_times={len(expected_times)}"
+        )
+    _assert_numeric_sequences_close(
+        f"{case_name} rerun {name} step schedule",
+        expected_steps,
+        h5_steps,
+        relative_tolerance=0.0,
+        absolute_tolerance=0.0,
+    )
+    _assert_numeric_sequences_close(
+        f"{case_name} rerun {name} time schedule",
+        expected_times,
+        h5_times,
+        relative_tolerance=0.0,
+        absolute_tolerance=1.0e-12,
+    )
+    _assert_numeric_sequences_close(
+        f"{case_name} direct legacy/H5 rerun {name}",
+        legacy_values,
+        h5_values,
+        relative_tolerance=relative_tolerance,
+        absolute_tolerance=absolute_tolerance,
+    )
+    return {
+        "present": True,
+        "frame_count": frame_count,
+        "step": list(h5_steps),
+        "time": list(h5_times),
+    }
+
+
+def _read_legacy_rerun_payload(name: str, path: Path) -> list[float]:
+    if name != "box":
+        return _read_native_float32_file(path)
+    values = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        fields = [float(field) for field in line.split()]
+        if len(fields) != 6:
+            raise AssertionError(
+                f"legacy rerun box row must have 6 values: {line}"
+            )
+        values.extend(
+            (fields[0], 0.0, 0.0, 0.0, fields[1], 0.0, 0.0, 0.0, fields[2])
+        )
+    return values
 
 
 def _h5_integer_values(path: Path, dataset: str) -> list[int]:
@@ -18683,16 +18945,13 @@ def _rerun_expected_box_values(
     if len(input_box_shape) < 2:
         raise AssertionError("rerun box input is not frame-shaped")
     box_width = math.prod(input_box_shape[1:])
-    if _rerun_updates_box(run.bundled_dir):
-        return [
-            value
-            for frame_index in matching_indices
-            for value in input_boxes[
-                frame_index * box_width : (frame_index + 1) * box_width
-            ]
+    return [
+        value
+        for frame_index in matching_indices
+        for value in input_boxes[
+            frame_index * box_width : (frame_index + 1) * box_width
         ]
-    restart_boxes = _rerun_bootstrap_box_values(run, box_width)
-    return restart_boxes * len(matching_indices)
+    ]
 
 
 def _rerun_bootstrap_box_values(run: AbRun, box_width: int) -> list[float]:

@@ -10,6 +10,7 @@ struct RERUN_information
     FILE* box_file = NULL;
     FILE* vel_file = NULL;
     bool h5_trajectory_enabled = false;
+    bool h5_velocity_present = false;
     int h5_trajectory_frame_count = 0;
     int h5_next_frame_index = 0;
     std::unique_ptr<SpongeH5MD::TrajectoryH5Reader> h5_trajectory_reader;

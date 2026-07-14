@@ -32,19 +32,24 @@ bool Parse_H5MD_Output_Double(const std::string& text, double* value)
     return SpongeH5OutputRoute::Parse_Output_Double(text, value);
 }
 
-void Fill_H5MD_Box_Edges(const MD_INFORMATION* md_info, float box_edges[9])
+void Fill_H5MD_Box_Edges(MD_INFORMATION* md_info, float box_edges[9])
 {
     if (md_info->pbc.pbc)
     {
-        box_edges[0] = md_info->pbc.cell.a11;
+        const LTMatrix3 cell =
+            md_info->mode == md_info->RERUN
+                ? md_info->pbc.Get_Cell(md_info->sys.box_length,
+                                        md_info->sys.box_angle)
+                : md_info->pbc.cell;
+        box_edges[0] = cell.a11;
         box_edges[1] = 0.0f;
         box_edges[2] = 0.0f;
-        box_edges[3] = md_info->pbc.cell.a21;
-        box_edges[4] = md_info->pbc.cell.a22;
+        box_edges[3] = cell.a21;
+        box_edges[4] = cell.a22;
         box_edges[5] = 0.0f;
-        box_edges[6] = md_info->pbc.cell.a31;
-        box_edges[7] = md_info->pbc.cell.a32;
-        box_edges[8] = md_info->pbc.cell.a33;
+        box_edges[6] = cell.a31;
+        box_edges[7] = cell.a32;
+        box_edges[8] = cell.a33;
     }
     else
     {
@@ -342,9 +347,25 @@ void MD_INFORMATION::trajectory_output::Initial(CONTROLLER* controller,
             controller->Set_File_Buffer(frc_traj,
                                         sizeof(VECTOR) * md_info->atom_numbers);
         }
+        if (controller->Command_Exist("rerun_output_vel"))
+        {
+            is_vel_traj = 1;
+            Open_File_Safely(&vel_traj, controller->Command("rerun_output_vel"),
+                             "wb");
+            controller->Set_File_Buffer(vel_traj,
+                                        sizeof(VECTOR) * md_info->atom_numbers);
+        }
     }
-    if (write_trajectory_interval != 0 &&
-        h5_output_plan.legacy.Enabled(TRAJ_COMMAND))
+    if (write_trajectory_interval != 0 && md_info->mode == md_info->RERUN &&
+        controller->Command_Exist("rerun_output_crd"))
+    {
+        Open_File_Safely(&crd_traj, controller->Command("rerun_output_crd"),
+                         "wb");
+        controller->Set_File_Buffer(crd_traj,
+                                    sizeof(VECTOR) * md_info->atom_numbers);
+    }
+    else if (write_trajectory_interval != 0 &&
+             h5_output_plan.legacy.Enabled(TRAJ_COMMAND))
     {
         crd_traj = controller->Get_Output_File(true, TRAJ_COMMAND, ".dat",
                                                TRAJ_DEFAULT_FILENAME);
@@ -354,8 +375,14 @@ void MD_INFORMATION::trajectory_output::Initial(CONTROLLER* controller,
                                         sizeof(VECTOR) * md_info->atom_numbers);
         }
     }
-    if (write_trajectory_interval != 0 &&
-        h5_output_plan.legacy.Enabled(BOX_TRAJ_COMMAND))
+    if (write_trajectory_interval != 0 && md_info->mode == md_info->RERUN &&
+        controller->Command_Exist("rerun_output_box"))
+    {
+        Open_File_Safely(&box_traj, controller->Command("rerun_output_box"),
+                         "w");
+    }
+    else if (write_trajectory_interval != 0 &&
+             h5_output_plan.legacy.Enabled(BOX_TRAJ_COMMAND))
     {
         box_traj = controller->Get_Output_File(false, BOX_TRAJ_COMMAND, ".box",
                                                BOX_TRAJ_DEFAULT_FILENAME);
@@ -1270,9 +1297,6 @@ void MD_INFORMATION::trajectory_output::Append_H5_Trajectory_Frame(
     const float* force = NULL;
     if (h5_trajectory_force_enabled)
     {
-        deviceMemcpy(md_info->force, md_info->frc,
-                     sizeof(VECTOR) * md_info->atom_numbers,
-                     deviceMemcpyDeviceToHost);
         force = &md_info->force[0].x;
     }
     if (h5_trajectory_vds_enabled)
@@ -1678,11 +1702,10 @@ bool MD_INFORMATION::trajectory_output::Check_Mdout_Step()
 
 bool MD_INFORMATION::trajectory_output::Check_Force_Step()
 {
-    return md_info->mode == md_info->RERUN ||
-           md_info->output.write_trajectory_interval &&
-               (md_info->output.print_zeroth_frame || md_info->sys.steps) &&
-               md_info->sys.steps % md_info->output.write_trajectory_interval ==
-                   0;
+    if (md_info->mode == md_info->RERUN) return Check_Trajectory_Step();
+    return md_info->output.write_trajectory_interval &&
+           (md_info->output.print_zeroth_frame || md_info->sys.steps) &&
+           md_info->sys.steps % md_info->output.write_trajectory_interval == 0;
 }
 
 bool MD_INFORMATION::trajectory_output::Check_Trajectory_Step()

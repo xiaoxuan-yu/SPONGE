@@ -62,6 +62,7 @@ void MD_INFORMATION::RERUN_information::Initial(CONTROLLER* controller,
                 }
                 h5_trajectory_frame_count =
                     static_cast<int>(metadata.frame_count);
+                h5_velocity_present = metadata.has_velocity;
                 controller->printf("        Open rerun H5MD trajectory '%s'\n",
                                    input_plan.trajectory.binding.path.c_str());
             }
@@ -161,6 +162,7 @@ bool MD_INFORMATION::RERUN_information::Iteration(int strip)
             const auto selection = SpongeH5MD::Select_Next_H5_Rerun_Frame(
                 h5_next_frame_index, strip, h5_trajectory_frame_count);
             h5_next_frame_index = selection.next_frame_index;
+            md_info->sys.steps += selection.skipped_frames;
             if (!selection.has_frame)
             {
                 md_info->sys.step_limit = md_info->sys.steps;
@@ -240,6 +242,12 @@ bool MD_INFORMATION::RERUN_information::Iteration(int strip)
                 }
             }
         }
+        if ((h5_trajectory_enabled && !h5_velocity_present) ||
+            (!h5_trajectory_enabled && vel_file == NULL))
+        {
+            memset(this->md_info->velocity, 0,
+                   sizeof(VECTOR) * this->md_info->atom_numbers);
+        }
     }
 #ifdef USE_MPI
     MPI_Bcast(&md_info->sys.step_limit, sizeof(int), MPI_BYTE, 0,
@@ -273,9 +281,8 @@ bool MD_INFORMATION::RERUN_information::Iteration(int strip)
     deviceMemcpy(this->md_info->crd, this->md_info->coordinate,
                  sizeof(VECTOR) * this->md_info->atom_numbers,
                  deviceMemcpyHostToDevice);
-    if (vel_file != NULL || h5_trajectory_enabled)
-        deviceMemcpy(this->md_info->vel, this->md_info->velocity,
-                     sizeof(VECTOR) * this->md_info->atom_numbers,
-                     deviceMemcpyHostToDevice);
+    deviceMemcpy(this->md_info->vel, this->md_info->velocity,
+                 sizeof(VECTOR) * this->md_info->atom_numbers,
+                 deviceMemcpyHostToDevice);
     return box_changed;
 }
