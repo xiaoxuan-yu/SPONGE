@@ -43,6 +43,32 @@ def _case(case_name: str):
     return next(case for case in _cases_for_profile() if case.name == case_name)
 
 
+def _synthetic_details(case, assertion_id, contracts):
+    details = {"method": "unit_test_derived_from_declared_case"}
+    if assertion_id != "input_semantic_equivalence":
+        return details
+    details["contract_oracles"] = {
+        contract_id: {
+            "oracle_contract_id": contract_id,
+            "control_mutation": {"kind": "synthetic_surface_substitution"},
+            "expected_delta": {"relation": "equivalent"},
+            "actual_delta": {"result": "equivalent"},
+            "compared_payload": ["synthetic_observable"],
+        }
+        for contract_id in case.contract_ids
+        if assertion_id in contracts[contract_id].assertion_ids
+    }
+    details["results"] = [
+        {
+            "contract_id": contract_id,
+            "observables": ["synthetic_observable"],
+            "replicas": [{"legacy_nontrivial": True, "bundled_nontrivial": True}],
+        }
+        for contract_id in details["contract_oracles"]
+    ]
+    return details
+
+
 def test_real_registry_and_case_matrix_are_symmetric():
     contracts = load_contract_registry()
     summary = validate_contract_registry(contracts, _cases_for_profile())
@@ -55,6 +81,13 @@ def test_real_registry_and_case_matrix_are_symmetric():
         "deferred": 0,
         "supported": 93,
         "unsupported": 4,
+    }
+    assert summary["evidence_class_counts"] == {
+        "inventory": 1,
+        "conversion": 0,
+        "runtime_behavior": 77,
+        "continuation": 14,
+        "failure_semantics": 5,
     }
 
 
@@ -122,6 +155,65 @@ def test_e0_cannot_satisfy_an_e3_contract():
         build_case_evidence(contracts, case, assertions)
 
 
+def test_empty_assertion_details_are_not_behavior_evidence():
+    contracts = load_contract_registry()
+    case = _case("normal_core_h5_output")
+    assertions = [
+        AssertionEvidence(
+            assertion_id=assertion_id,
+            evidence_level=_synthetic_evidence_level(assertion_id),
+            details=(
+                {}
+                if index == 0
+                else _synthetic_details(case, assertion_id, contracts)
+            ),
+        )
+        for index, assertion_id in enumerate(case.assertion_ids)
+    ]
+
+    with pytest.raises(AssertionError, match="non-empty evidence details"):
+        build_case_evidence(contracts, case, assertions)
+
+
+def test_forged_assertion_id_is_not_contract_evidence():
+    contracts = load_contract_registry()
+    case = _case("normal_core_h5_output")
+    assertions = [
+        AssertionEvidence(
+            assertion_id=("forged_behavior_assertion" if index == 0 else assertion_id),
+            evidence_level=_synthetic_evidence_level(assertion_id),
+            details=_synthetic_details(case, assertion_id, contracts),
+        )
+        for index, assertion_id in enumerate(case.assertion_ids)
+    ]
+
+    with pytest.raises(AssertionError, match="assertion evidence mismatch"):
+        build_case_evidence(contracts, case, assertions)
+
+
+def test_shared_input_assertion_requires_the_matching_contract_oracle():
+    contracts = load_contract_registry()
+    case = _case("normal_core_topology_payload_sensitivity")
+    assertions = []
+    for assertion_id in case.assertion_ids:
+        details = _synthetic_details(case, assertion_id, contracts)
+        if assertion_id == "input_semantic_equivalence":
+            contract_id = next(iter(details["contract_oracles"]))
+            details["contract_oracles"][contract_id]["oracle_contract_id"] = (
+                "input.topology.wrong"
+            )
+        assertions.append(
+            AssertionEvidence(
+                assertion_id=assertion_id,
+                evidence_level=_synthetic_evidence_level(assertion_id),
+                details=details,
+            )
+        )
+
+    with pytest.raises(AssertionError, match="oracle contract mismatch"):
+        build_case_evidence(contracts, case, assertions)
+
+
 def test_evidence_report_merges_cases_and_recomputes_coverage(tmp_path):
     contracts = load_contract_registry()
     cases = _cases_for_profile()[:2]
@@ -132,7 +224,7 @@ def test_evidence_report_merges_cases_and_recomputes_coverage(tmp_path):
             AssertionEvidence(
                 assertion_id=assertion_id,
                 evidence_level=_synthetic_evidence_level(assertion_id),
-                details={"method": "unit_test"},
+                details=_synthetic_details(case, assertion_id, contracts),
             )
             for assertion_id in case.assertion_ids
         ]
@@ -147,6 +239,11 @@ def test_evidence_report_merges_cases_and_recomputes_coverage(tmp_path):
         )
 
     assert set(report["cases"]) == {case.name for case in cases}
+    assert report["registry_summary"]["status_counts"] == {
+        "deferred": 0,
+        "supported": 93,
+        "unsupported": 4,
+    }
     coverage = report["coverage"]
     assert coverage["covered_supported_contract_count"] > 0
     assert coverage["missing_supported_contracts"]
@@ -154,6 +251,13 @@ def test_evidence_report_merges_cases_and_recomputes_coverage(tmp_path):
     assert coverage["status_coverage"]["supported"]["contract_count"] == 93
     assert coverage["status_coverage"]["deferred"]["contract_count"] == 0
     assert coverage["status_coverage"]["unsupported"]["contract_count"] == 4
+    assert set(coverage["evidence_class_coverage"]) == {
+        "inventory",
+        "conversion",
+        "runtime_behavior",
+        "continuation",
+        "failure_semantics",
+    }
     with pytest.raises(AssertionError, match="missing supported contracts"):
         validate_complete_evidence_report(report_path, contracts, "unit-run")
 
@@ -185,7 +289,7 @@ def test_complete_report_requires_and_accepts_every_supported_contract(
             AssertionEvidence(
                 assertion_id=assertion_id,
                 evidence_level=_synthetic_evidence_level(assertion_id),
-                details={"method": "complete_report_unit_test"},
+                details=_synthetic_details(case, assertion_id, contracts),
             )
             for assertion_id in case.assertion_ids
         ]
@@ -205,6 +309,21 @@ def test_complete_report_requires_and_accepts_every_supported_contract(
     coverage = report["coverage"]
     assert coverage["supported_coverage_fraction"] == 1.0
     assert coverage["missing_supported_contracts"] == []
+    assert coverage["evidence_class_coverage"]["inventory"][
+        "coverage_fraction"
+    ] == 1.0
+    assert coverage["evidence_class_coverage"]["conversion"] == {
+        "contract_count": 0,
+        "contract_ids": [],
+        "covered_contract_count": 0,
+        "covered_contracts": [],
+        "missing_contracts": [],
+        "coverage_fraction": 1.0,
+    }
+    assert all(
+        payload["coverage_fraction"] == 1.0
+        for payload in coverage["evidence_class_coverage"].values()
+    )
     assert coverage["status_coverage"]["supported"] == {
         "contract_count": 93,
         "contract_ids": sorted(

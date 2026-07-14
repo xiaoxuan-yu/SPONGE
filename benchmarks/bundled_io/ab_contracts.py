@@ -25,6 +25,21 @@ INVENTORY_SECTIONS = {
 }
 EVIDENCE_RANK = {"E0": 0, "E1": 1, "E2": 2, "E3": 3, "E4": 4}
 VALID_EVIDENCE_LEVELS = set(EVIDENCE_RANK) | {"F1"}
+EVIDENCE_CLASSES = {
+    "E0": "inventory",
+    "E1": "conversion",
+    "E2": "conversion",
+    "E3": "runtime_behavior",
+    "E4": "continuation",
+    "F1": "failure_semantics",
+}
+REQUIRED_EVIDENCE_CLASSES = (
+    "inventory",
+    "conversion",
+    "runtime_behavior",
+    "continuation",
+    "failure_semantics",
+)
 DYNAMIC_RESTART_CONTRACT_STATUSES = {
     "input.restart.dynamic.integrator_state": "supported",
     "input.restart.dynamic.nose_hoover_chain": "supported",
@@ -409,6 +424,14 @@ def build_case_evidence(
             f"unexpected={unexpected}"
         )
 
+    for assertion in assertions:
+        _require_evidence_level(assertion.evidence_level)
+        if not isinstance(assertion.details, Mapping) or not assertion.details:
+            raise AssertionError(
+                f"{case_id} assertion {assertion.assertion_id} requires "
+                "non-empty evidence details"
+            )
+
     records: list[EvidenceRecord] = []
     for contract_id in _case_values(case, "contract_ids"):
         if contract_id not in contracts:
@@ -440,6 +463,9 @@ def build_case_evidence(
         best = max(
             eligible, key=lambda item: _evidence_sort_rank(item.evidence_level)
         )
+        details = _contract_scoped_details(
+            case_id, contract_id, best.assertion_id, best.details
+        )
         records.append(
             EvidenceRecord(
                 case_id=case_id,
@@ -447,7 +473,7 @@ def build_case_evidence(
                 assertion_id=best.assertion_id,
                 evidence_level=best.evidence_level,
                 status="passed",
-                details=best.details,
+                details=details,
             )
         )
     return records
@@ -458,15 +484,18 @@ def registry_summary(
 ) -> dict[str, object]:
     counts = {status: 0 for status in sorted(VALID_STATUSES)}
     minimum_levels: dict[str, int] = {}
+    evidence_classes = {name: 0 for name in REQUIRED_EVIDENCE_CLASSES}
     for spec in contracts.values():
         counts[spec.status] += 1
         minimum_levels[spec.minimum_evidence] = (
             minimum_levels.get(spec.minimum_evidence, 0) + 1
         )
+        evidence_classes[_evidence_class(spec.minimum_evidence)] += 1
     return {
         "contract_count": len(contracts),
         "status_counts": counts,
         "minimum_evidence_counts": dict(sorted(minimum_levels.items())),
+        "evidence_class_counts": evidence_classes,
     }
 
 
@@ -495,6 +524,7 @@ def update_evidence_report(
             "metadata": dict(metadata),
             "records": [record.as_dict() for record in records],
         }
+        report["registry_summary"] = registry_summary(contracts)
         report["coverage"] = _report_coverage(contracts, cases)
         temporary = path.with_suffix(path.suffix + f".{os.getpid()}.tmp")
         temporary.write_text(
@@ -520,6 +550,11 @@ def validate_complete_evidence_report(
     if not isinstance(cases, dict):
         raise AssertionError("A/B evidence report cases must be an object")
     coverage = _report_coverage(contracts, cases)
+    expected_registry_summary = registry_summary(contracts)
+    if report.get("registry_summary") != expected_registry_summary:
+        raise AssertionError(
+            "A/B evidence report registry_summary is missing or stale"
+        )
     if coverage["missing_supported_contracts"]:
         raise AssertionError(
             "A/B evidence report is missing supported contracts: "
@@ -527,6 +562,17 @@ def validate_complete_evidence_report(
         )
     if coverage["supported_coverage_fraction"] != 1.0:
         raise AssertionError("A/B supported contract coverage must equal 1.0")
+    incomplete_classes = {
+        name: payload["missing_contracts"]
+        for name, payload in coverage["evidence_class_coverage"].items()
+        if payload["contract_count"] and payload["coverage_fraction"] != 1.0
+    }
+    if incomplete_classes:
+        raise AssertionError(
+            "A/B evidence-class coverage is incomplete: "
+            f"{incomplete_classes}"
+        )
+    report["coverage"] = coverage
     return report
 
 
@@ -641,6 +687,142 @@ def _evidence_sort_rank(level: str) -> int:
     return EVIDENCE_RANK.get(level, 0)
 
 
+def _evidence_class(level: str) -> str:
+    _require_evidence_level(level)
+    return EVIDENCE_CLASSES[level]
+
+
+def _contract_scoped_details(
+    case_id: str,
+    contract_id: str,
+    assertion_id: str,
+    details: Mapping[str, object],
+) -> dict[str, object]:
+    scoped = dict(details)
+    if assertion_id != "input_semantic_equivalence":
+        return scoped
+
+    raw_oracles = details.get("contract_oracles")
+    if not isinstance(raw_oracles, Mapping):
+        raise AssertionError(
+            f"{case_id} input behavior evidence requires contract_oracles"
+        )
+    oracle = raw_oracles.get(contract_id)
+    if not isinstance(oracle, Mapping):
+        raise AssertionError(
+            f"{case_id} input behavior evidence has no independent oracle "
+            f"for {contract_id}"
+        )
+    _validate_contract_oracle(case_id, contract_id, oracle)
+    raw_results = details.get("results")
+    if not isinstance(raw_results, list):
+        raise AssertionError(
+            f"{case_id} input behavior evidence requires result details"
+        )
+    matching_results = [
+        result
+        for result in raw_results
+        if isinstance(result, Mapping)
+        and result.get("contract_id") == contract_id
+    ]
+    if len(matching_results) != 1:
+        raise AssertionError(
+            f"{case_id} input behavior evidence requires one result for "
+            f"{contract_id}, got {len(matching_results)}"
+        )
+    scoped.pop("contract_oracles", None)
+    scoped.pop("contracts", None)
+    scoped.pop("results", None)
+    scoped["contract_oracle"] = dict(oracle)
+    scoped["contract_result"] = dict(matching_results[0])
+    return scoped
+
+
+def _validate_contract_oracle(
+    case_id: str, contract_id: str, oracle: Mapping[str, object]
+) -> None:
+    if oracle.get("oracle_contract_id") != contract_id:
+        raise AssertionError(
+            f"{case_id} input behavior oracle contract mismatch: "
+            f"expected={contract_id}, actual={oracle.get('oracle_contract_id')}"
+        )
+    for field in ("control_mutation", "expected_delta", "actual_delta"):
+        value = oracle.get(field)
+        if not isinstance(value, Mapping) or not value:
+            raise AssertionError(
+                f"{case_id} {contract_id} oracle requires non-empty {field}"
+            )
+    compared_payload = oracle.get("compared_payload")
+    if not isinstance(compared_payload, list) or not compared_payload or not all(
+        isinstance(item, str) and item for item in compared_payload
+    ):
+        raise AssertionError(
+            f"{case_id} {contract_id} oracle requires compared_payload"
+        )
+
+
+def validated_passed_contract_levels(
+    contracts: Mapping[str, ContractSpec], cases: Mapping[str, object]
+) -> dict[str, tuple[str, ...]]:
+    """Return only structurally valid, contract-owned passing evidence."""
+
+    levels: dict[str, list[str]] = {}
+    for case_id, case_payload in cases.items():
+        if not isinstance(case_id, str) or not isinstance(case_payload, Mapping):
+            raise AssertionError("A/B evidence cases must map IDs to objects")
+        records = case_payload.get("records")
+        if not isinstance(records, list):
+            raise AssertionError(f"A/B evidence case {case_id} requires records")
+        for record in records:
+            if not isinstance(record, Mapping):
+                raise AssertionError(
+                    f"A/B evidence case {case_id} contains a non-object record"
+                )
+            if record.get("status") != "passed":
+                continue
+            contract_id = record.get("contract_id")
+            if not isinstance(contract_id, str) or contract_id not in contracts:
+                raise AssertionError(
+                    f"A/B evidence case {case_id} has unknown contract "
+                    f"{contract_id!r}"
+                )
+            spec = contracts[contract_id]
+            if record.get("case_id") != case_id:
+                raise AssertionError(
+                    f"A/B evidence record case mismatch for {contract_id}"
+                )
+            assertion_id = record.get("assertion_id")
+            if assertion_id not in spec.assertion_ids:
+                raise AssertionError(
+                    f"A/B evidence record forged assertion for {contract_id}: "
+                    f"{assertion_id!r}"
+                )
+            level = record.get("evidence_level")
+            if not isinstance(level, str):
+                raise AssertionError(
+                    f"A/B evidence record {contract_id} has no evidence level"
+                )
+            if not _evidence_satisfies(level, spec.minimum_evidence):
+                raise AssertionError(
+                    f"A/B evidence record {contract_id} requires "
+                    f"{spec.minimum_evidence}, got {level}"
+                )
+            details = record.get("details")
+            if not isinstance(details, Mapping) or not details:
+                raise AssertionError(
+                    f"A/B evidence record {contract_id} requires non-empty details"
+                )
+            if assertion_id == "input_semantic_equivalence":
+                oracle = details.get("contract_oracle")
+                if not isinstance(oracle, Mapping):
+                    raise AssertionError(
+                        f"A/B evidence record {contract_id} has no scoped oracle"
+                    )
+                _validate_contract_oracle(case_id, contract_id, oracle)
+            levels.setdefault(contract_id, []).append(level)
+    return {name: tuple(values) for name, values in levels.items()}
+
+
 def _read_existing_report(path: Path) -> dict[str, object]:
     if not path.exists():
         return {"schema_version": "1", "cases": {}}
@@ -653,13 +835,7 @@ def _read_existing_report(path: Path) -> dict[str, object]:
 def _report_coverage(
     contracts: Mapping[str, ContractSpec], cases: Mapping[str, object]
 ) -> dict[str, object]:
-    passed_contracts = {
-        record["contract_id"]
-        for case_payload in cases.values()
-        if isinstance(case_payload, dict)
-        for record in case_payload.get("records", [])
-        if isinstance(record, dict) and record.get("status") == "passed"
-    }
+    passed_contracts = set(validated_passed_contract_levels(contracts, cases))
     supported = {
         contract_id
         for contract_id, spec in contracts.items()
@@ -681,6 +857,28 @@ def _report_coverage(
             "evidenced_contract_count": len(evidenced),
             "evidenced_contracts": evidenced,
         }
+    evidence_class_coverage = {}
+    for evidence_class in REQUIRED_EVIDENCE_CLASSES:
+        class_contracts = {
+            contract_id
+            for contract_id, spec in contracts.items()
+            if spec.status == "supported"
+            and _evidence_class(spec.minimum_evidence) == evidence_class
+        }
+        class_covered = sorted(class_contracts.intersection(passed_contracts))
+        class_missing = sorted(class_contracts - passed_contracts)
+        evidence_class_coverage[evidence_class] = {
+            "contract_count": len(class_contracts),
+            "contract_ids": sorted(class_contracts),
+            "covered_contract_count": len(class_covered),
+            "covered_contracts": class_covered,
+            "missing_contracts": class_missing,
+            "coverage_fraction": (
+                len(class_covered) / len(class_contracts)
+                if class_contracts
+                else 1.0
+            ),
+        }
     return {
         "supported_contract_count": len(supported),
         "covered_supported_contract_count": len(covered),
@@ -690,4 +888,5 @@ def _report_coverage(
         "covered_supported_contracts": covered,
         "missing_supported_contracts": missing,
         "status_coverage": status_coverage,
+        "evidence_class_coverage": evidence_class_coverage,
     }

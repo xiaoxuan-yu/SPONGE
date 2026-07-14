@@ -21,6 +21,7 @@ from benchmarks.bundled_io.ab_contracts import (
     audit_input_evolution_contracts,
     load_contract_registry,
     load_implementation_inventory,
+    registry_summary,
     validate_contract_registry,
     validate_implementation_inventory,
 )
@@ -3137,9 +3138,12 @@ def _ready_promotion_fixture():
             },
             "records": [
                 {
+                    "case_id": case_id,
                     "contract_id": contract_id,
+                    "assertion_id": "synthetic_equivalence",
                     "evidence_level": "E3",
                     "status": "passed",
+                    "details": {"method": "synthetic_runtime_comparison"},
                 }
             ],
         }
@@ -3374,14 +3378,20 @@ def test_promotion_requires_environment_metadata_for_every_scenario():
     matrix, contracts, report, runs = _ready_promotion_fixture()
     assert evaluate_promotion_readiness(matrix, contracts, report, runs).ready
     contract_id = next(iter(contracts))
+    contract_case_id = contracts[contract_id].case_ids[0]
     contract_report = {
         "cases": {
-            "contract_case": {
+            contract_case_id: {
                 "records": [
                     {
+                        "case_id": contract_case_id,
                         "contract_id": contract_id,
+                        "assertion_id": "synthetic_equivalence",
                         "evidence_level": "E3",
                         "status": "passed",
+                        "details": {
+                            "method": "synthetic_runtime_comparison"
+                        },
                     }
                 ]
             }
@@ -3403,6 +3413,36 @@ def test_promotion_requires_environment_metadata_for_every_scenario():
     assert decision.ready is False
     assert any(
         first.scenario_id in blocker and "does not prove environment" in blocker
+        for blocker in decision.blockers
+    )
+
+
+def test_promotion_rejects_a_handwritten_pass_record_without_details():
+    matrix, contracts, report, runs = _ready_promotion_fixture()
+    first_case = next(iter(report["cases"].values()))
+    first_case["records"][0]["details"] = {}
+
+    decision = evaluate_promotion_readiness(matrix, contracts, report, runs)
+
+    assert decision.ready is False
+    assert any(
+        "contract evidence schema is invalid" in blocker
+        and "non-empty details" in blocker
+        for blocker in decision.blockers
+    )
+
+
+def test_promotion_rejects_e0_presented_as_runtime_behavior():
+    matrix, contracts, report, runs = _ready_promotion_fixture()
+    first_case = next(iter(report["cases"].values()))
+    first_case["records"][0]["evidence_level"] = "E0"
+
+    decision = evaluate_promotion_readiness(matrix, contracts, report, runs)
+
+    assert decision.ready is False
+    assert any(
+        "contract evidence schema is invalid" in blocker
+        and "requires E3, got E0" in blocker
         for blocker in decision.blockers
     )
 
@@ -3506,26 +3546,47 @@ def _write_promotion_json(path: Path, payload: object) -> None:
 def _promotion_artifacts(tmp_path: Path):
     matrix = load_execution_matrix()
     contracts = load_contract_registry()
+    declared_cases = {case.name: case for case in _cases_for_profile()}
     evidence_path = tmp_path / "ab_evidence.json"
+    evidence_cases = {}
+    for contract_id, contract in contracts.items():
+        if contract.status != "supported":
+            continue
+        case_id = contract.case_ids[0]
+        assertion_id = next(
+            assertion_id
+            for assertion_id in contract.assertion_ids
+            if assertion_id in declared_cases[case_id].assertion_ids
+        )
+        details = {"method": "promotion_fixture_contract_evidence"}
+        if assertion_id == "input_semantic_equivalence":
+            details["contract_oracle"] = {
+                "oracle_contract_id": contract_id,
+                "control_mutation": {"kind": "fixture_surface_substitution"},
+                "expected_delta": {"relation": "equivalent"},
+                "actual_delta": {"result": "equivalent"},
+                "compared_payload": ["fixture_observable"],
+            }
+        evidence_cases.setdefault(
+            case_id,
+            {"metadata": {"profile": "production"}, "records": []},
+        )["records"].append(
+            {
+                "case_id": case_id,
+                "contract_id": contract_id,
+                "assertion_id": assertion_id,
+                "evidence_level": contract.minimum_evidence,
+                "status": "passed",
+                "details": details,
+            }
+        )
     _write_promotion_json(
         evidence_path,
         {
             "schema_version": "1",
             "run_id": PROMOTION_RUN_ID,
-            "cases": {
-                "complete_contract_gate": {
-                    "metadata": {"profile": "production"},
-                    "records": [
-                        {
-                            "contract_id": contract_id,
-                            "evidence_level": contract.minimum_evidence,
-                            "status": "passed",
-                        }
-                        for contract_id, contract in contracts.items()
-                        if contract.status == "supported"
-                    ],
-                }
-            },
+            "registry_summary": registry_summary(contracts),
+            "cases": evidence_cases,
         },
     )
 
@@ -3684,13 +3745,14 @@ def test_production_run_rejects_below_minimum_contract_evidence(tmp_path):
     )
     record = next(
         item
-        for item in report["cases"]["complete_contract_gate"]["records"]
+        for case_payload in report["cases"].values()
+        for item in case_payload["records"]
         if item["contract_id"] == e4_contract
     )
     record["evidence_level"] = "E3"
     _write_promotion_json(evidence, report)
 
-    with pytest.raises(AssertionError, match="insufficient evidence"):
+    with pytest.raises(AssertionError, match="requires E4, got E3"):
         _derive_promotion_run(artifacts)
 
 

@@ -12159,6 +12159,7 @@ def _compare_outputs(
     input_semantics = _compare_input_semantics(case, runs)
     if input_semantics:
         comparison["input_semantics"] = input_semantics
+        contract_oracles = _build_input_contract_oracles(input_semantics)
         evidence.append(
             AssertionEvidence(
                 assertion_id="input_semantic_equivalence",
@@ -12169,6 +12170,7 @@ def _compare_outputs(
                     ],
                     "criterion": "present_nontrivial_module_owned_result",
                     "results": input_semantics,
+                    "contract_oracles": contract_oracles,
                 },
             )
         )
@@ -12687,6 +12689,83 @@ def _compare_input_semantics(
             }
         )
     return results
+
+
+def _build_input_contract_oracles(
+    input_semantics: Sequence[Mapping[str, object]],
+) -> dict[str, dict[str, object]]:
+    """Scope the shared input assertion to one executable oracle per contract."""
+
+    contract_oracles = {}
+    for result in input_semantics:
+        contract_id = result.get("contract_id")
+        observables = result.get("observables")
+        replicas = result.get("replicas")
+        if not isinstance(contract_id, str) or not contract_id:
+            raise AssertionError("input semantic result has no contract ID")
+        if not isinstance(observables, list) or not observables:
+            raise AssertionError(
+                f"{contract_id} input semantic result has no observables"
+            )
+        if not isinstance(replicas, list) or not replicas:
+            raise AssertionError(
+                f"{contract_id} input semantic result has no replicas"
+            )
+        focused_controls = []
+        for replica_index, replica in enumerate(replicas):
+            if not isinstance(replica, Mapping):
+                raise AssertionError(
+                    f"{contract_id} input semantic replica is not an object"
+                )
+            for control_kind in ("oracle", "force", "nonzero_dt_evolution"):
+                control = replica.get(control_kind)
+                if isinstance(control, Mapping) and control:
+                    focused_controls.append(
+                        {
+                            "replica_index": replica_index,
+                            "control_kind": control_kind,
+                            "result": dict(control),
+                        }
+                    )
+        contract_oracles[contract_id] = {
+            "oracle_contract_id": contract_id,
+            "control_mutation": {
+                "kind": "legacy_surface_to_bundled_h5_substitution",
+                "changed_variable": contract_id,
+                "focused_payload_controls": focused_controls,
+            },
+            "expected_delta": {
+                "cross_branch": "within_configured_tolerance",
+                "module_owned_payload": "present_and_nontrivial",
+                "configured_tolerances": [
+                    {
+                        "relative": replica.get("relative_tolerance"),
+                        "absolute": replica.get("absolute_tolerance"),
+                    }
+                    for replica in replicas
+                ],
+            },
+            "actual_delta": {
+                "cross_branch": result.get("cross_branch_comparison"),
+                "replica_count": len(replicas),
+                "observable_deltas": [
+                    replica.get("observable_deltas") for replica in replicas
+                ],
+                "legacy_nontrivial": all(
+                    replica.get("legacy_nontrivial") is True
+                    for replica in replicas
+                ),
+                "bundled_nontrivial": all(
+                    replica.get("bundled_nontrivial") is True
+                    for replica in replicas
+                ),
+                "focused_payload_control_count": len(focused_controls),
+            },
+            "compared_payload": list(observables),
+        }
+    if len(contract_oracles) != len(input_semantics):
+        raise AssertionError("input semantic results contain duplicate contracts")
+    return contract_oracles
 
 
 def _compare_nonzero_dt_input_evolution(

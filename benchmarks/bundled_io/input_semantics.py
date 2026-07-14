@@ -90,6 +90,7 @@ def assert_module_semantics(
         )
 
     nontrivial = {"legacy": False, "bundled": False}
+    observable_deltas = {}
     for observable in spec.observables:
         legacy = _observable_values(label, "legacy", legacy_rows, observable)
         bundled = _observable_values(label, "bundled", bundled_rows, observable)
@@ -109,6 +110,19 @@ def assert_module_semantics(
                 relative_tolerance=relative_tolerance,
                 absolute_tolerance=absolute_tolerance,
             )
+        paired_deltas = [
+            abs(left - right)
+            for left, right in zip(legacy, bundled)
+            if math.isfinite(left) and math.isfinite(right)
+        ]
+        observable_deltas[observable] = {
+            "legacy_value_count": len(legacy),
+            "bundled_value_count": len(bundled),
+            "finite_pair_count": len(paired_deltas),
+            "maximum_absolute_delta": (
+                max(paired_deltas) if paired_deltas else None
+            ),
+        }
 
     for branch, has_nontrivial_result in nontrivial.items():
         if not has_nontrivial_result:
@@ -121,6 +135,9 @@ def assert_module_semantics(
         "observables": list(spec.observables),
         "minimum_magnitude": spec.minimum_magnitude,
         "deterministic": deterministic,
+        "relative_tolerance": relative_tolerance,
+        "absolute_tolerance": absolute_tolerance,
+        "observable_deltas": observable_deltas,
         "legacy_nontrivial": nontrivial["legacy"],
         "bundled_nontrivial": nontrivial["bundled"],
     }

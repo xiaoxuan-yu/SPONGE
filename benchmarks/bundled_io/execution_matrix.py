@@ -12,6 +12,7 @@ from benchmarks.bundled_io.ab_contracts import (
     REGISTRY_PATH,
     ContractSpec,
     load_contract_registry,
+    validated_passed_contract_levels,
 )
 
 MATRIX_PATH = Path(__file__).with_name("contracts") / "ab_execution_matrix.json"
@@ -295,7 +296,13 @@ def evaluate_promotion_readiness(
     scenario_cases = scenario_report.get("cases")
     if not isinstance(scenario_cases, dict):
         scenario_cases = {}
-    contract_levels = _passed_contract_levels(report_cases)
+    try:
+        contract_levels = validated_passed_contract_levels(
+            contracts, report_cases
+        )
+    except AssertionError as error:
+        blockers.append(f"contract evidence schema is invalid: {error}")
+        contract_levels = {}
     missing_contracts = []
     insufficient_contracts = []
     for contract_id, contract in contracts.items():
