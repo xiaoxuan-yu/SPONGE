@@ -168,6 +168,17 @@
       "inventory_refs": ["h5_output_keys:output_h5_restart_path"]
     },
     {
+      "contract_id": "output.family.combinations",
+      "direction": "output",
+      "component": "output_family_matrix",
+      "status": "supported",
+      "minimum_evidence": "E3",
+      "legacy_surface": "default legacy suppression and explicit legacy coexistence",
+      "bundled_surface": "all seven non-empty trajectory, observable, and restart output-family combinations",
+      "case_ids": ["normal_output_family_trajectory_suppressed", "normal_output_family_trajectory_coexist", "normal_output_family_observable_suppressed", "normal_output_family_observable_coexist", "normal_output_family_restart_suppressed", "normal_output_family_restart_coexist", "normal_output_family_trajectory_observable_suppressed", "normal_output_family_trajectory_observable_coexist", "normal_output_family_trajectory_restart_suppressed", "normal_output_family_trajectory_restart_coexist", "normal_output_family_observable_restart_suppressed", "normal_output_family_observable_restart_coexist", "normal_output_family_trajectory_observable_restart_suppressed", "normal_output_family_trajectory_observable_restart_coexist"],
+      "assertion_ids": ["output_family_process_matrix"]
+    },
+    {
       "contract_id": "output.trajectory.vds_off",
       "direction": "output",
       "component": "trajectory_vds",

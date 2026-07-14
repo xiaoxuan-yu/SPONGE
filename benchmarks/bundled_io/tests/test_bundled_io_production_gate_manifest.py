@@ -85,6 +85,7 @@ from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
     FOCUSED_VIRTUAL_ATOMS_PBC_FIXTURE,
     INPUT_SEMANTIC_SPECS_BY_CASE,
     MDINFO_CONTRACT_KEYS,
+    OUTPUT_FAMILY_COMBINATIONS,
     PROFILE_LIMITS,
     RERUN_INPUT_SEMANTIC_SPECS,
     SUPPORTED_TOPOLOGY_SCHEMA_VERSIONS,
@@ -106,6 +107,7 @@ from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
     _assert_sw_pair_three_body_oracle,
     _assert_tersoff_angular_oracle,
     _assert_virtual_atom_oracle,
+    _audit_output_family_cases,
     _cases_for_profile,
     _expected_rerun_frame_indices,
     _h5_string_values,
@@ -410,6 +412,10 @@ def test_ab_production_harness_has_executable_contract_coverage():
         "failure_restart_dynamic_without_owner",
         "failure_restart_protocol_without_owner",
         "failure_restart_full_without_owner",
+    } | {
+        f"normal_output_family_{'_'.join(families)}_{legacy_mode}"
+        for families in OUTPUT_FAMILY_COMBINATIONS
+        for legacy_mode in ("suppressed", "coexist")
     }
     assert summary["status_counts"]["supported"] > 0
     assert contracts["output.vds.cross_process_append_resume"].status == (
@@ -419,6 +425,40 @@ def test_ab_production_harness_has_executable_contract_coverage():
     assert repair.status == "supported"
     assert repair.case_ids == ("normal_vds_complete_prefix_noop",)
     assert repair.assertion_ids == ("h5_complete_prefix_repair_equivalence",)
+
+
+def test_output_family_process_matrix_is_complete_and_mutation_guarded():
+    cases = _cases_for_profile()
+    audit = _audit_output_family_cases(cases)
+    assert audit == {
+        "case_count": 14,
+        "combination_count": 7,
+        "legacy_modes": ("suppressed", "coexist"),
+    }
+
+    output_cases = [case for case in cases if case.mode == "output_family"]
+    assert {
+        (case.output_families, case.legacy_output_mode) for case in output_cases
+    } == {
+        (families, legacy_mode)
+        for families in OUTPUT_FAMILY_COMBINATIONS
+        for legacy_mode in ("suppressed", "coexist")
+    }
+    contract = load_contract_registry()["output.family.combinations"]
+    assert contract.minimum_evidence == "E3"
+    assert set(contract.case_ids) == {case.name for case in output_cases}
+    assert contract.assertion_ids == ("output_family_process_matrix",)
+
+    removed = next(
+        case
+        for case in output_cases
+        if case.output_families == ("restart",)
+        and case.legacy_output_mode == "suppressed"
+    )
+    with pytest.raises(AssertionError, match="process matrix is incomplete"):
+        _audit_output_family_cases(
+            [case for case in cases if case is not removed]
+        )
 
 
 def test_structural_restart_uses_bundled_producer_e4_continuation():

@@ -275,6 +275,15 @@ META_OBSERVABLE_ROOT = "/observables/all/metadynamics"
 TRAJECTORY_REL = Path("output") / "ab.spg.h5md"
 OBSERVABLE_REL = Path("output") / "ab.obs.spg.h5md"
 RESTART_REL = Path("output") / "ab.spgr.h5"
+OUTPUT_FAMILY_COMBINATIONS = (
+    ("trajectory",),
+    ("observable",),
+    ("restart",),
+    ("trajectory", "observable"),
+    ("trajectory", "restart"),
+    ("observable", "restart"),
+    ("trajectory", "observable", "restart"),
+)
 
 INPUT_SEMANTIC_SPECS_BY_CASE = {
     "normal_core_h5_output": (
@@ -575,6 +584,8 @@ class AbCase:
     evolution_contract_ids: tuple[str, ...] = ()
     evolution_cohort: str = ""
     evolution_dt: float = 0.0
+    output_families: tuple[str, ...] = ()
+    legacy_output_mode: str = "coexist"
 
 
 @dataclass
@@ -1966,9 +1977,75 @@ def _cases_for_profile() -> list[AbCase]:
         ),
     ]
     cases.extend(_chunk_boundary_cases())
+    cases.extend(_output_family_cases())
     cases.extend(_rerun_boundary_cases())
     cases.extend(_failure_cases())
     return cases
+
+
+def _output_family_cases() -> list[AbCase]:
+    cases = []
+    for families in OUTPUT_FAMILY_COMBINATIONS:
+        family_name = "_".join(families)
+        for legacy_mode in ("suppressed", "coexist"):
+            cases.append(
+                AbCase(
+                    name=f"normal_output_family_{family_name}_{legacy_mode}",
+                    fixture_case="tip3p_validation_generated",
+                    legacy_subdir="generated_legacy",
+                    bundled_subdir="generated_bundled",
+                    mode="output_family",
+                    vds=False,
+                    statistical_md=False,
+                    restart_load_policy="structural",
+                    contract_ids=("output.family.combinations",),
+                    assertion_ids=("output_family_process_matrix",),
+                    normal_step_limit=2,
+                    normal_interval=1,
+                    normal_dt=1.0e-3,
+                    output_families=families,
+                    legacy_output_mode=legacy_mode,
+                )
+            )
+    return cases
+
+
+def _audit_output_family_cases(cases: list[AbCase]) -> dict[str, object]:
+    expected = {
+        (families, legacy_mode)
+        for families in OUTPUT_FAMILY_COMBINATIONS
+        for legacy_mode in ("suppressed", "coexist")
+    }
+    output_cases = [case for case in cases if case.mode == "output_family"]
+    actual = {
+        (case.output_families, case.legacy_output_mode) for case in output_cases
+    }
+    if len(output_cases) != len(expected) or actual != expected:
+        missing = sorted(expected - actual)
+        extra = sorted(actual - expected)
+        raise AssertionError(
+            "output family process matrix is incomplete: "
+            f"cases={len(output_cases)}, expected={len(expected)}, "
+            f"missing={missing}, extra={extra}"
+        )
+    for case in output_cases:
+        if case.contract_ids != ("output.family.combinations",):
+            raise AssertionError(
+                f"{case.name} has unexpected contracts {case.contract_ids}"
+            )
+        if case.assertion_ids != ("output_family_process_matrix",):
+            raise AssertionError(
+                f"{case.name} has unexpected assertions {case.assertion_ids}"
+            )
+        if case.vds or case.normal_step_limit != 2 or case.normal_interval != 1:
+            raise AssertionError(
+                f"{case.name} changed the bounded process-matrix schedule"
+            )
+    return {
+        "case_count": len(output_cases),
+        "combination_count": len(OUTPUT_FAMILY_COMBINATIONS),
+        "legacy_modes": ("suppressed", "coexist"),
+    }
 
 
 def _chunk_boundary_cases() -> list[AbCase]:
@@ -2632,6 +2709,9 @@ def test_legacy_and_bundled_ab_behavior(case: AbCase):
         return
     if case.mode == "chunk_boundary":
         _run_chunk_boundary_case(case, contracts)
+        return
+    if case.mode == "output_family":
+        _run_output_family_case(case, contracts)
         return
     root = _output_root()
     case_root = root / case.name
@@ -5218,6 +5298,325 @@ def _run_chunk_boundary_case(case: AbCase, contracts) -> None:
         EVIDENCE_RUN_ID,
     )
     print(f"\nBundled I/O A/B chunk metrics: {metrics_path}")
+
+
+def _run_output_family_case(case: AbCase, contracts) -> None:
+    case_root = _output_root() / case.name
+    legacy_dir, bundled_dir = _prepare_case_pair(case, case_root, 20260709)
+    for branch, case_dir in (("legacy", legacy_dir), ("bundled", bundled_dir)):
+        _prepare_output_family_mdin(case, case_dir, branch=branch)
+        _run_sponge(case_dir, _mdin_name(case_dir))
+
+    run = AbRun(
+        replica_index=0,
+        replica_seed=20260709,
+        legacy_dir=legacy_dir,
+        bundled_dir=bundled_dir,
+        legacy_metrics={},
+        bundled_metrics={},
+        legacy_output_contract={},
+        bundled_output_contract={},
+    )
+    mdout = _compare_mdout_deterministically(case, run)
+    h5 = _compare_h5_outputs_deterministically(case, run)
+    branches = {
+        branch: _validate_output_family_layout(case, directory)
+        for branch, directory in (
+            ("legacy", legacy_dir),
+            ("bundled", bundled_dir),
+        )
+    }
+    continuation = None
+    if case.output_families == ("restart",):
+        continuation = _run_restart_only_output_continuation(case, bundled_dir)
+    details = {
+        "families": list(case.output_families),
+        "legacy_output_mode": case.legacy_output_mode,
+        "mdout_rows": mdout["rows"],
+        "h5_families": sorted(h5),
+        "branches": branches,
+        "restart_only_continuation": continuation,
+    }
+    evidence_level = "E4" if continuation is not None else "E3"
+    assertions = (
+        AssertionEvidence(
+            assertion_id="output_family_process_matrix",
+            evidence_level=evidence_level,
+            details=details,
+        ),
+    )
+    evidence = build_case_evidence(contracts, case, assertions)
+    metrics_path = case_root / "ab_metrics.json"
+    metrics_path.write_text(
+        json.dumps(
+            {
+                "profile": PROFILE,
+                "case": case.name,
+                "contract_ids": list(case.contract_ids),
+                "assertion_ids": list(case.assertion_ids),
+                "evidence": [record.as_dict() for record in evidence],
+                "comparison": details,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    update_evidence_report(
+        _output_root() / "ab_evidence.json",
+        contracts,
+        case,
+        evidence,
+        {
+            "profile": PROFILE,
+            "sponge_executable": str(_sponge_executable()),
+            "metrics_path": str(metrics_path),
+        },
+        EVIDENCE_RUN_ID,
+    )
+
+
+def _prepare_output_family_mdin(
+    case: AbCase, case_dir: Path, *, branch: str
+) -> None:
+    normal_case = replace(case, mode="normal", output_families=())
+    _prepare_mdin(
+        case_dir,
+        _mdin_name(case_dir),
+        normal_case,
+        branch=branch,
+        replica_seed=20260709,
+    )
+    mdin_path = case_dir / _mdin_name(case_dir)
+    text = mdin_path.read_text(encoding="utf-8")
+    remove_keys = {"print_zeroth_frame"}
+    enabled = set(case.output_families)
+    if "trajectory" not in enabled:
+        remove_keys.update(
+            {
+                "output_h5_trajectory_path",
+                "output_h5_trajectory_vds",
+                "output_h5_trajectory_chunk_size",
+                "output_h5_trajectory_repair_policy",
+            }
+        )
+    if "observable" not in enabled:
+        remove_keys.add("output_h5_observable_path")
+    if "restart" not in enabled:
+        remove_keys.add("output_h5_restart_path")
+    if case.legacy_output_mode == "suppressed":
+        remove_keys.update({"crd", "box", "vel", "frc", "rst"})
+    elif case.legacy_output_mode == "coexist":
+        if "trajectory" not in enabled:
+            remove_keys.update({"crd", "box", "vel", "frc"})
+        if "restart" not in enabled:
+            remove_keys.add("rst")
+    else:
+        raise AssertionError(
+            f"{case.name} has unknown legacy output mode {case.legacy_output_mode}"
+        )
+    mdin_path.write_text(
+        _insert_root_toml_keys(
+            _remove_key_lines(text, remove_keys), ["print_zeroth_frame = 0"]
+        ),
+        encoding="utf-8",
+    )
+
+
+def _validate_output_family_layout(
+    case: AbCase, case_dir: Path
+) -> dict[str, object]:
+    expected = _output_h5_files(case, case_dir)
+    all_paths = {
+        "trajectory": case_dir / TRAJECTORY_REL,
+        "observable": case_dir / OBSERVABLE_REL,
+        "restart": case_dir / RESTART_REL,
+    }
+    for family, path in all_paths.items():
+        if path.exists() != (family in expected):
+            raise AssertionError(
+                f"{case.name} {family} file presence changed: {path.exists()}"
+            )
+        temporary = path.with_name(path.name + ".tmp")
+        if temporary.exists():
+            raise AssertionError(
+                f"{case.name} left temporary output {temporary}"
+            )
+
+    summary = {}
+    if "trajectory" in expected:
+        _validate_trajectory_output(case, expected["trajectory"], case_dir)
+        summary["trajectory"] = {
+            "status": _h5_string_values(
+                expected["trajectory"], "/parameters/sponge/output/status"
+            ),
+            "frame_count": int(
+                _h5_numeric_values(
+                    expected["trajectory"],
+                    "/parameters/sponge/output/frame_count",
+                )[-1]
+            ),
+        }
+    if "observable" in expected:
+        summary["observable"] = _validate_observable_output(
+            case.name, expected["observable"], case_dir / "mdout.txt"
+        )
+    if "restart" in expected:
+        _validate_restart_output(case.name, expected["restart"])
+        summary["restart"] = {"readable": True}
+
+    legacy_paths = {
+        "crd": case_dir / "output/legacy.crd",
+        "box": case_dir / "output/legacy.box",
+        "vel": case_dir / "output/legacy.vel",
+        "frc": case_dir / "output/legacy.frc",
+        "rst_coordinate": case_dir / "output/legacy_restart_coordinate.txt",
+        "rst_velocity": case_dir / "output/legacy_restart_velocity.txt",
+    }
+    if case.legacy_output_mode == "suppressed":
+        unexpected = sorted(
+            name for name, path in legacy_paths.items() if path.exists()
+        )
+        if unexpected:
+            raise AssertionError(
+                f"{case.name} default legacy suppression failed: {unexpected}"
+            )
+    else:
+        if "trajectory" in expected:
+            _validate_output_family_trajectory_coexistence(
+                case, case_dir, expected["trajectory"]
+            )
+        if "restart" in expected:
+            _validate_restart_legacy_coexistence(
+                case, case_dir, expected["restart"]
+            )
+    forbidden_provenance = {"crd", "box", "vel", "frc", "rst"}
+    if case.legacy_output_mode == "suppressed":
+        for family, path in expected.items():
+            sidecar_root = "/parameters/sponge/files/legacy_sidecars/key"
+            keys = (
+                _h5_string_values(path, sidecar_root)
+                if sidecar_root in _h5_paths(path)
+                else []
+            )
+            overlap = sorted(forbidden_provenance.intersection(keys))
+            if overlap:
+                raise AssertionError(
+                    f"{case.name} {family} has suppressed provenance: {overlap}"
+                )
+    summary["legacy_artifacts"] = {
+        name: path.exists() for name, path in legacy_paths.items()
+    }
+    return summary
+
+
+def _validate_output_family_trajectory_coexistence(
+    case: AbCase, case_dir: Path, trajectory: Path
+) -> None:
+    keys = _h5_string_values(
+        trajectory, "/parameters/sponge/files/legacy_sidecars/key"
+    )
+    paths = _h5_string_values(
+        trajectory, "/parameters/sponge/files/legacy_sidecars/path"
+    )
+    provenance = dict(zip(keys, paths))
+    expected = {
+        "crd": "output/legacy.crd",
+        "box": "output/legacy.box",
+        "vel": "output/legacy.vel",
+        "frc": "output/legacy.frc",
+    }
+    if {key: provenance.get(key) for key in expected} != expected:
+        raise AssertionError(
+            f"{case.name} trajectory coexistence provenance differs: "
+            f"{provenance}"
+        )
+    missing_or_empty = sorted(
+        key
+        for key, relative_path in expected.items()
+        if not (case_dir / relative_path).is_file()
+        or (case_dir / relative_path).stat().st_size == 0
+    )
+    if missing_or_empty:
+        raise AssertionError(
+            f"{case.name} trajectory coexistence artifacts are absent or "
+            f"empty: {missing_or_empty}"
+        )
+
+
+def _run_restart_only_output_continuation(
+    case: AbCase, producer_dir: Path
+) -> dict[str, object]:
+    continuation = producer_dir.parent / "bundled_restart_only_continuation"
+    if continuation.exists():
+        shutil.rmtree(continuation)
+    shutil.copytree(producer_dir, continuation)
+    checkpoint = continuation / "family_checkpoint.spgr.h5"
+    shutil.copy2(continuation / RESTART_REL, checkpoint)
+    output = continuation / "output"
+    if output.exists():
+        shutil.rmtree(output)
+    output.mkdir()
+    for file_name in ("mdout.txt", "mdinfo.txt", "run.stdout", "run.stderr"):
+        path = continuation / file_name
+        if path.exists():
+            path.unlink()
+    mdin_path = continuation / _mdin_name(continuation)
+    text = _remove_key_lines(
+        mdin_path.read_text(encoding="utf-8"),
+        {
+            "input_h5_restart_path",
+            "input_h5_restart_load",
+            "output_h5_trajectory_path",
+            "output_h5_trajectory_vds",
+            "output_h5_trajectory_chunk_size",
+            "output_h5_trajectory_repair_policy",
+            "output_h5_observable_path",
+            "output_h5_restart_path",
+            "crd",
+            "box",
+            "vel",
+            "frc",
+            "rst",
+            "step_limit",
+            "write_mdout_interval",
+            "write_trajectory_interval",
+            "write_restart_file_interval",
+            "mdout",
+            "mdinfo",
+        },
+    )
+    mdin_path.write_text(
+        _insert_root_toml_keys(
+            text,
+            [
+                'input_h5_restart_path = "family_checkpoint.spgr.h5"',
+                'input_h5_restart_load = "structural"',
+                "step_limit = 1",
+                "write_mdout_interval = 1",
+                'mdout = "mdout.txt"',
+                'mdinfo = "mdinfo.txt"',
+            ],
+        ),
+        encoding="utf-8",
+    )
+    outcome = _run_sponge_process(continuation, mdin_path.name)
+    if outcome.returncode != 0:
+        raise AssertionError(
+            f"{case.name} restart-only continuation failed with code "
+            f"{outcome.returncode}\n{outcome.stdout}\n{outcome.stderr}"
+        )
+    rows = _read_mdout(continuation / "mdout.txt")["rows"]
+    if len(rows) != 1 or [row.get("step") for row in rows] != [1.0]:
+        raise AssertionError(
+            f"{case.name} restart-only continuation schedule changed: {rows}"
+        )
+    result = {
+        "exit_code": outcome.returncode,
+        "mdout_rows": len(rows),
+        "checkpoint_sha256": _sha256_file(checkpoint),
+    }
+    shutil.rmtree(continuation)
+    return result
 
 
 def _assert_chunk_boundary_layout(
@@ -17140,17 +17539,22 @@ def _validate_full_contract_input(
 
 
 def _output_h5_files(case: AbCase, root: Path) -> dict[str, Path]:
-    files = {
+    if case.output_families:
+        enabled = set(case.output_families)
+    else:
+        enabled = {"trajectory", "observable"}
+        if case.mode in {
+            "normal",
+            "dynamic_continuation",
+            "protocol_full_continuation",
+        }:
+            enabled.add("restart")
+    paths = {
         "trajectory": root / TRAJECTORY_REL,
         "observable": root / OBSERVABLE_REL,
+        "restart": root / RESTART_REL,
     }
-    if case.mode in {
-        "normal",
-        "dynamic_continuation",
-        "protocol_full_continuation",
-    }:
-        files["restart"] = root / RESTART_REL
-    return files
+    return {family: paths[family] for family in paths if family in enabled}
 
 
 def _validate_branch_output_contract(

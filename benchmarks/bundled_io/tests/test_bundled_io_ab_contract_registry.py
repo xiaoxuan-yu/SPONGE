@@ -50,7 +50,7 @@ def test_real_registry_and_case_matrix_are_symmetric():
     assert summary["contract_count"] == len(contracts)
     assert summary["status_counts"] == {
         "deferred": 0,
-        "supported": 91,
+        "supported": 92,
         "unsupported": 4,
     }
 
@@ -148,7 +148,7 @@ def test_evidence_report_merges_cases_and_recomputes_coverage(tmp_path):
     assert coverage["covered_supported_contract_count"] > 0
     assert coverage["missing_supported_contracts"]
     assert 0.0 < coverage["supported_coverage_fraction"] < 1.0
-    assert coverage["status_coverage"]["supported"]["contract_count"] == 91
+    assert coverage["status_coverage"]["supported"]["contract_count"] == 92
     assert coverage["status_coverage"]["deferred"]["contract_count"] == 0
     assert coverage["status_coverage"]["unsupported"]["contract_count"] == 4
     with pytest.raises(AssertionError, match="missing supported contracts"):
@@ -203,13 +203,13 @@ def test_complete_report_requires_and_accepts_every_supported_contract(
     assert coverage["supported_coverage_fraction"] == 1.0
     assert coverage["missing_supported_contracts"] == []
     assert coverage["status_coverage"]["supported"] == {
-        "contract_count": 91,
+        "contract_count": 92,
         "contract_ids": sorted(
             contract_id
             for contract_id, contract in contracts.items()
             if contract.status == "supported"
         ),
-        "evidenced_contract_count": 91,
+        "evidenced_contract_count": 92,
         "evidenced_contracts": sorted(
             contract_id
             for contract_id, contract in contracts.items()
