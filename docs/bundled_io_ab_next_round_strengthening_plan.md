@@ -516,6 +516,19 @@ workflow，并运行适用的 feature-family 交叉场景。
 ci(bundled-io): collect GPU matrix evidence
 ```
 
+### PR 72a：固定 shadow converter 工具链
+
+PR 72 的首次 immutable clean-source GPU run 暴露出 Pixi 中已发布的 Xponge 不含
+`legacy-to-bundle`，且本地开发 commit 尚未推送，不能作为 CI pin。单独使用一个修正
+PR：checkout 远端可取得的 XPONGE commit，并应用由本仓库审计、SHA-256 固定的最小
+runtime patch。所有 shadow jobs 使用同一 converter 根目录；manifest 测试必须锁定
+base commit、patch 路径、应用次数和 patch digest。该修正不改变比较容差，也不把
+GPU core 统计失败改写成通过。
+
+```text
+ci(bundled-io): pin shadow converter toolchain
+```
+
 ## 18. PR 73：VDS cross-process resume 支持边界门禁
 
 ### 目标

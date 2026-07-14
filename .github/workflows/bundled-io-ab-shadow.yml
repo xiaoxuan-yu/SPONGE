@@ -31,6 +31,9 @@ concurrency:
   group: bundled-io-ab-shadow-${{ github.ref }}
   cancel-in-progress: false
 
+env:
+  SPONGE_XPONGE_ROOT: ${{ github.workspace }}/.xponge-source
+
 jobs:
   contract:
     name: Contract and promotion guards (shadow)
@@ -39,6 +42,18 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
+
+      - name: Checkout pinned XPONGE converter
+        uses: actions/checkout@v5
+        with:
+          repository: SPONGEMM/XPONGE
+          ref: d607b8965d18c4ac3c307d00aba974da7e81fa89
+          path: .xponge-source
+
+      - name: Apply reviewed XPONGE converter runtime patch
+        run: >-
+          git -C .xponge-source apply
+          "$GITHUB_WORKSPACE/benchmarks/bundled_io/contracts/xponge_converter_runtime.patch"
 
       - name: Setup Pixi
         uses: prefix-dev/setup-pixi@v0.9.4
@@ -67,6 +82,18 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v5
+
+      - name: Checkout pinned XPONGE converter
+        uses: actions/checkout@v5
+        with:
+          repository: SPONGEMM/XPONGE
+          ref: d607b8965d18c4ac3c307d00aba974da7e81fa89
+          path: .xponge-source
+
+      - name: Apply reviewed XPONGE converter runtime patch
+        run: >-
+          git -C .xponge-source apply
+          "$GITHUB_WORKSPACE/benchmarks/bundled_io/contracts/xponge_converter_runtime.patch"
 
       - name: Setup Pixi
         uses: prefix-dev/setup-pixi@v0.9.4
@@ -125,6 +152,18 @@ jobs:
       - name: Attest clean CPU source checkout
         run: test -z "$(git status --porcelain --untracked-files=all)"
 
+      - name: Checkout pinned XPONGE converter
+        uses: actions/checkout@v5
+        with:
+          repository: SPONGEMM/XPONGE
+          ref: d607b8965d18c4ac3c307d00aba974da7e81fa89
+          path: .xponge-source
+
+      - name: Apply reviewed XPONGE converter runtime patch
+        run: >-
+          git -C .xponge-source apply
+          "$GITHUB_WORKSPACE/benchmarks/bundled_io/contracts/xponge_converter_runtime.patch"
+
       - name: Setup Pixi
         uses: prefix-dev/setup-pixi@v0.9.4
         with:
@@ -181,6 +220,18 @@ jobs:
       - name: Attest clean CPU MPI source checkout
         run: test -z "$(git status --porcelain --untracked-files=all)"
 
+      - name: Checkout pinned XPONGE converter
+        uses: actions/checkout@v5
+        with:
+          repository: SPONGEMM/XPONGE
+          ref: d607b8965d18c4ac3c307d00aba974da7e81fa89
+          path: .xponge-source
+
+      - name: Apply reviewed XPONGE converter runtime patch
+        run: >-
+          git -C .xponge-source apply
+          "$GITHUB_WORKSPACE/benchmarks/bundled_io/contracts/xponge_converter_runtime.patch"
+
       - name: Setup Pixi
         uses: prefix-dev/setup-pixi@v0.9.4
         with:
@@ -232,6 +283,18 @@ jobs:
 
       - name: Attest clean GPU source checkout
         run: test -z "$(git status --porcelain --untracked-files=all)"
+
+      - name: Checkout pinned XPONGE converter
+        uses: actions/checkout@v5
+        with:
+          repository: SPONGEMM/XPONGE
+          ref: d607b8965d18c4ac3c307d00aba974da7e81fa89
+          path: .xponge-source
+
+      - name: Apply reviewed XPONGE converter runtime patch
+        run: >-
+          git -C .xponge-source apply
+          "$GITHUB_WORKSPACE/benchmarks/bundled_io/contracts/xponge_converter_runtime.patch"
 
       - name: Record GPU hardware
         run: nvidia-smi --query-gpu=name,driver_version --format=csv
@@ -288,6 +351,18 @@ jobs:
 
       - name: Attest clean GPU MPI source checkout
         run: test -z "$(git status --porcelain --untracked-files=all)"
+
+      - name: Checkout pinned XPONGE converter
+        uses: actions/checkout@v5
+        with:
+          repository: SPONGEMM/XPONGE
+          ref: d607b8965d18c4ac3c307d00aba974da7e81fa89
+          path: .xponge-source
+
+      - name: Apply reviewed XPONGE converter runtime patch
+        run: >-
+          git -C .xponge-source apply
+          "$GITHUB_WORKSPACE/benchmarks/bundled_io/contracts/xponge_converter_runtime.patch"
 
       - name: Record GPU MPI hardware
         run: nvidia-smi --query-gpu=name,driver_version --format=csv

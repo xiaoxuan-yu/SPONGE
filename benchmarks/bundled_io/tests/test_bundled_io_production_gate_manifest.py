@@ -153,6 +153,9 @@ MODULE_TEST = (
 HIGHFIVE_TEST = REPO_ROOT / "tests/h5_bundle/test_highfive_backend_io.cpp"
 AB_SHADOW_WORKFLOW = REPO_ROOT / ".github/workflows/bundled-io-ab-shadow.yml"
 RELEASE_WORKFLOW = REPO_ROOT / ".github/workflows/release.yml"
+XPONGE_RUNTIME_PATCH = (
+    REPO_ROOT / "benchmarks/bundled_io/contracts/xponge_converter_runtime.patch"
+)
 MATRIX_FIXTURE_ROOT = REPO_ROOT / "benchmarks/bundled_io/fixtures/tip3p_matrix"
 FULL_CONTRACT_FIXTURE_ROOT = (
     REPO_ROOT / "tests/h5_bundle/fixtures/input_matrix/full_contract_rerun"
@@ -3611,6 +3614,18 @@ def test_shadow_workflow_runs_tiers_without_becoming_a_release_gate():
     assert "runs-on: [self-hosted, linux, x64, gpu, cuda13]" in workflow
     assert "runs-on: [self-hosted, linux, x64, gpu, cuda13, mpi]" in workflow
     assert "nvidia-smi --query-gpu=name,driver_version" in workflow
+    assert (
+        "SPONGE_XPONGE_ROOT: ${{ github.workspace }}/.xponge-source" in workflow
+    )
+    assert workflow.count("repository: SPONGEMM/XPONGE") == 6
+    assert workflow.count("ref: d607b8965d18c4ac3c307d00aba974da7e81fa89") == 6
+    assert workflow.count("path: .xponge-source") == 6
+    assert workflow.count("Apply reviewed XPONGE converter runtime patch") == 6
+    assert workflow.count("xponge_converter_runtime.patch") == 6
+    assert (
+        hashlib.sha256(XPONGE_RUNTIME_PATCH.read_bytes()).hexdigest()
+        == "9f5730ab18aa2946d47e3a40c0f9934e86e16b17b7ce64588d6e867af870d1f4"
+    )
     assert (
         workflow.count(
             "SPONGE_BUNDLED_IO_AB_RUN_ID: "
