@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import os
@@ -540,6 +541,18 @@ class H5VirtualAtomRecord:
 
 def _cases_for_profile() -> list[AbCase]:
     cases = [
+        AbCase(
+            name="normal_structural_restart_continuation",
+            fixture_case="tip3p_validation_generated",
+            legacy_subdir="generated_legacy",
+            bundled_subdir="generated_bundled",
+            mode="structural_continuation",
+            vds=False,
+            statistical_md=False,
+            restart_load_policy="structural",
+            contract_ids=("input.restart_load.structural",),
+            assertion_ids=("restart_continuation_equivalence",),
+        ),
         AbCase(
             name="normal_core_h5_output",
             fixture_case="tip3p_validation_generated",
@@ -1474,7 +1487,6 @@ def _cases_for_profile() -> list[AbCase]:
                 "output.trajectory.vds_off",
                 "input.full_contract.inventory",
                 "input.full_contract.pure_native",
-                "input.restart_load.structural",
                 "input.manybody.reaxff",
                 "input.topology.nb14_extra",
                 "input.topology.bond",
@@ -1513,7 +1525,6 @@ def _cases_for_profile() -> list[AbCase]:
                 "output.trajectory.vds_on",
                 "input.full_contract.inventory",
                 "input.full_contract.pure_native",
-                "input.restart_load.structural",
                 "input.manybody.reaxff",
                 "input.topology.nb14_extra",
                 "input.topology.bond",
@@ -1552,7 +1563,6 @@ def _cases_for_profile() -> list[AbCase]:
                 "output.trajectory.vds_off",
                 "input.full_contract.inventory",
                 "input.full_contract.sidecar",
-                "input.restart_load.structural",
                 "input.manybody.reaxff",
                 "input.topology.nb14_extra",
                 "input.topology.bond",
@@ -1591,7 +1601,6 @@ def _cases_for_profile() -> list[AbCase]:
                 "output.trajectory.vds_on",
                 "input.full_contract.inventory",
                 "input.full_contract.sidecar",
-                "input.restart_load.structural",
                 "input.manybody.reaxff",
                 "input.topology.nb14_extra",
                 "input.topology.bond",
@@ -1771,7 +1780,6 @@ def _rerun_boundary_cases() -> list[AbCase]:
         "input.rerun.frame_limit",
         "input.rerun.box_update",
         "input.trajectory.velocity_optional",
-        "input.restart_load.structural",
         "output.legacy.mdout",
     )
     shared_assertions = (
@@ -2332,6 +2340,9 @@ def test_legacy_and_bundled_ab_behavior(case: AbCase):
     if case.failure_mutation is not None:
         _run_failure_case(case, contracts)
         return
+    if case.mode == "structural_continuation":
+        _run_structural_restart_case(case, contracts)
+        return
     if case.mode == "dynamic_continuation":
         _run_nhc_dynamic_restart_case(case, contracts)
         return
@@ -2549,6 +2560,98 @@ def _run_failure_case(case: AbCase, contracts) -> None:
         EVIDENCE_RUN_ID,
     )
     print(f"\nBundled I/O A/B failure metrics: {metrics_path}")
+
+
+def _run_structural_restart_case(case: AbCase, contracts) -> None:
+    case_root = _output_root() / case.name
+    legacy_dir, bundled_dir = _prepare_normal_tip3p_pair(case_root, 20260714)
+    producer_case = replace(
+        case,
+        mode="normal",
+        normal_step_limit=1,
+        normal_interval=1,
+        normal_dt=0.0001,
+    )
+    for branch, case_dir, mdin_name in (
+        ("legacy", legacy_dir, "mdin.spg.toml"),
+        ("bundled", bundled_dir, "mdin.bundled.spg.toml"),
+    ):
+        _prepare_mdin(
+            case_dir,
+            mdin_name,
+            producer_case,
+            branch=branch,
+            replica_seed=20260714,
+        )
+        mdin_path = case_dir / mdin_name
+        mdin_path.write_text(
+            _remove_key_lines(
+                mdin_path.read_text(encoding="utf-8"), {"constrain_mode"}
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    producer_metrics = {
+        "legacy": _run_sponge(legacy_dir, "mdin.spg.toml"),
+        "bundled": _run_sponge(bundled_dir, "mdin.bundled.spg.toml"),
+    }
+    producer_state = {
+        "legacy": _validate_restart_legacy_coexistence(
+            case, legacy_dir, legacy_dir / RESTART_REL
+        ),
+        "bundled": _validate_restart_legacy_coexistence(
+            case, bundled_dir, bundled_dir / RESTART_REL
+        ),
+    }
+    run = AbRun(
+        replica_index=0,
+        replica_seed=20260714,
+        legacy_dir=legacy_dir,
+        bundled_dir=bundled_dir,
+        legacy_metrics=producer_metrics["legacy"],
+        bundled_metrics=producer_metrics["bundled"],
+        legacy_output_contract={},
+        bundled_output_contract={},
+    )
+    continuation = _compare_restart_continuation(case, run)
+    assertion = AssertionEvidence(
+        assertion_id="restart_continuation_equivalence",
+        evidence_level="E4",
+        details={
+            "method": "independent_producers_and_branch_owned_restart_sources",
+            "producer_state": producer_state,
+            "continuation": continuation,
+        },
+    )
+    evidence = build_case_evidence(contracts, case, (assertion,))
+    metrics = {
+        "profile": PROFILE,
+        "case": case.name,
+        "contract_ids": list(case.contract_ids),
+        "assertion_ids": list(case.assertion_ids),
+        "evidence": [record.as_dict() for record in evidence],
+        "restart_load_policy": case.restart_load_policy,
+        "producer_metrics": producer_metrics,
+        "comparison": assertion.details,
+    }
+    metrics_path = case_root / "ab_metrics.json"
+    metrics_path.write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+    update_evidence_report(
+        _output_root() / "ab_evidence.json",
+        contracts,
+        case,
+        evidence,
+        {
+            "profile": PROFILE,
+            "restart_load_policy": case.restart_load_policy,
+            "producer_branches": ["legacy", "bundled"],
+            "sponge_executable": str(_sponge_executable()),
+            "metrics_path": str(metrics_path),
+        },
+        EVIDENCE_RUN_ID,
+    )
+    print(f"\nBundled I/O A/B structural restart metrics: {metrics_path}")
 
 
 def _run_nhc_dynamic_restart_case(case: AbCase, contracts) -> None:
@@ -13281,23 +13384,162 @@ def _compare_mdinfo_structured(
     }
 
 
+def _sha256_file(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _restart_state_summary(state: dict[str, object]) -> dict[str, object]:
+    values = {
+        quantity: list(state[quantity])
+        for quantity in ("position", "velocity", "box")
+    }
+    return {
+        "atom_count": state["atom_count"],
+        "step": state["step"],
+        "time": state["time"],
+        "value_counts": {
+            quantity: len(payload) for quantity, payload in values.items()
+        },
+        "maximum_absolute_values": {
+            quantity: max(map(abs, payload), default=0.0)
+            for quantity, payload in values.items()
+        },
+    }
+
+
+def _restart_continuation_source(
+    run: AbRun, producer_branch: str, source_dir: Path
+) -> tuple[dict[str, object], dict[str, object]]:
+    expected_dirs = {
+        "legacy": run.legacy_dir,
+        "bundled": run.bundled_dir,
+    }
+    if producer_branch not in expected_dirs:
+        raise AssertionError(
+            f"unknown structural restart producer branch: {producer_branch}"
+        )
+    expected_dir = expected_dirs[producer_branch]
+    if source_dir.resolve() != expected_dir.resolve():
+        raise AssertionError(
+            f"{producer_branch} structural restart producer source mismatch: "
+            f"expected={expected_dir}, actual={source_dir}"
+        )
+
+    if producer_branch == "legacy":
+        state = _read_legacy_restart_state(source_dir)
+        source_paths = {
+            "coordinate": source_dir / "output/legacy_restart_coordinate.txt",
+            "velocity": source_dir / "output/legacy_restart_velocity.txt",
+        }
+        route = "legacy_coordinate_velocity_text"
+    else:
+        restart_path = source_dir / RESTART_REL
+        positions = _h5_numeric_values(
+            restart_path, "/particles/all/position/value"
+        )
+        velocities = _h5_numeric_values(
+            restart_path, "/particles/all/velocity/value"
+        )
+        box = _h5_numeric_values(restart_path, "/particles/all/box/edges/value")
+        steps = _h5_numeric_values(restart_path, "/particles/all/step")
+        times = _h5_numeric_values(restart_path, "/particles/all/time")
+        if len(steps) != 1 or len(times) != 1 or len(positions) % 3 != 0:
+            raise AssertionError(
+                "bundled structural restart must contain one complete state"
+            )
+        state = {
+            "atom_count": len(positions) // 3,
+            "step": int(steps[0]),
+            "time": times[0],
+            "position": positions,
+            "velocity": velocities,
+            "box": box,
+        }
+        source_paths = {"restart": restart_path}
+        route = "bundled_h5_restart"
+
+    missing = [
+        str(path) for path in source_paths.values() if not path.is_file()
+    ]
+    if missing:
+        raise AssertionError(
+            f"{producer_branch} structural restart source is missing: {missing}"
+        )
+    evidence = {
+        "producer_branch": producer_branch,
+        "source_directory": str(source_dir.resolve()),
+        "route": route,
+        "sha256": {
+            name: _sha256_file(path) for name, path in source_paths.items()
+        },
+        "structural_payload": _restart_state_summary(state),
+    }
+    return evidence, state
+
+
+def _assert_restart_source_states_close(
+    case: AbCase, states: dict[str, dict[str, object]]
+) -> None:
+    legacy = states["legacy"]
+    bundled = states["bundled"]
+    if legacy["atom_count"] != bundled["atom_count"]:
+        raise AssertionError(f"{case.name} producer restart atom count differs")
+    if legacy["step"] != bundled["step"]:
+        raise AssertionError(f"{case.name} producer restart step differs")
+    _assert_numeric_sequences_close(
+        f"{case.name} producer restart time",
+        [legacy["time"]],
+        [bundled["time"]],
+        relative_tolerance=0.0,
+        absolute_tolerance=1.0e-12,
+    )
+    for quantity in ("position", "velocity", "box"):
+        relative_tolerance, absolute_tolerance = _deterministic_tolerance(
+            quantity
+        )
+        _assert_numeric_sequences_close(
+            f"{case.name} producer restart {quantity}",
+            legacy[quantity],
+            bundled[quantity],
+            relative_tolerance=relative_tolerance,
+            absolute_tolerance=max(absolute_tolerance, 5.0e-5),
+        )
+
+
 def _compare_restart_continuation(
     case: AbCase, run: AbRun
 ) -> dict[str, object]:
+    continuation_trajectory = Path("output/continuation.spg.h5md")
+    continuation_restart = Path("output/continuation.spgr.h5")
+    sources = {}
+    source_states = {}
     continuations = {}
     step_limit = 2
     for branch, source_dir, source_mdin in (
         ("legacy", run.legacy_dir, "mdin.spg.toml"),
-        ("h5", run.bundled_dir, "mdin.bundled.spg.toml"),
+        ("bundled", run.bundled_dir, "mdin.bundled.spg.toml"),
     ):
+        source_evidence, source_state = _restart_continuation_source(
+            run, branch, source_dir
+        )
+        sources[branch] = source_evidence
+        source_states[branch] = source_state
+
         destination = source_dir.parent / f"continuation_{branch}"
         if destination.exists():
             shutil.rmtree(destination)
         shutil.copytree(source_dir, destination)
-        if branch == "h5":
-            shutil.copy2(
-                run.legacy_dir / RESTART_REL, destination / RESTART_REL
+        for name, expected_sha256 in source_evidence["sha256"].items():
+            copied_path = (
+                destination / RESTART_REL
+                if name == "restart"
+                else destination / f"output/legacy_restart_{name}.txt"
             )
+            if _sha256_file(copied_path) != expected_sha256:
+                raise AssertionError(
+                    f"{case.name} {branch} restart source changed while copied"
+                )
+
         mdin_path = destination / source_mdin
         text = _remove_key_lines(
             mdin_path.read_text(encoding="utf-8"),
@@ -13307,7 +13549,9 @@ def _compare_restart_continuation(
                 "thermostat_seed",
                 "thermostat_tau",
                 "target_temperature",
+                "constrain_mode",
                 "step_limit",
+                "dt",
                 "print_zeroth_frame",
                 "write_mdout_interval",
                 "write_trajectory_interval",
@@ -13317,6 +13561,8 @@ def _compare_restart_continuation(
                 "input_h5_restart_path",
                 "input_h5_restart_load",
                 "output_h5_trajectory_path",
+                "output_h5_trajectory_vds",
+                "output_h5_trajectory_chunk_size",
                 "output_h5_restart_path",
                 "output_h5_observable_path",
                 "mdout",
@@ -13331,12 +13577,22 @@ def _compare_restart_continuation(
         additions = [
             'mode = "nve"',
             f"step_limit = {step_limit}",
+            "dt = 0.0001",
             "print_zeroth_frame = 1",
             "write_mdout_interval = 1",
-            "write_trajectory_interval = 0",
-            "write_restart_file_interval = 0",
+            "write_trajectory_interval = 1",
+            "write_restart_file_interval = 1",
             'mdout = "continuation.mdout"',
             'mdinfo = "continuation.mdinfo"',
+            'crd = "output/continuation.crd"',
+            'box = "output/continuation.box"',
+            'vel = "output/continuation.vel"',
+            'frc = "output/continuation.frc"',
+            'rst = "output/continuation_restart"',
+            f'output_h5_trajectory_path = "{continuation_trajectory.as_posix()}"',
+            "output_h5_trajectory_vds = false",
+            "output_h5_trajectory_chunk_size = 2",
+            f'output_h5_restart_path = "{continuation_restart.as_posix()}"',
         ]
         if branch == "legacy":
             additions.extend(
@@ -13356,17 +13612,37 @@ def _compare_restart_continuation(
             text.rstrip() + "\n" + "\n".join(additions) + "\n",
             encoding="utf-8",
         )
-        _run_sponge(destination, source_mdin)
-        continuations[branch] = _read_mdout(destination / "continuation.mdout")
+        outcome = _run_sponge_process(destination, source_mdin)
+        if outcome.returncode != 0:
+            raise AssertionError(
+                f"SPONGE continuation failed in {destination} with code "
+                f"{outcome.returncode}\n[stdout]\n{outcome.stdout}\n"
+                f"[stderr]\n{outcome.stderr}"
+            )
+        trajectory_path = destination / continuation_trajectory
+        restart_path = destination / continuation_restart
+        if not trajectory_path.is_file() or not restart_path.is_file():
+            raise AssertionError(
+                f"{case.name} {branch} continuation outputs are incomplete"
+            )
+        _validate_restart_output(case.name, restart_path)
+        continuations[branch] = {
+            "mdout": _read_mdout(destination / "continuation.mdout"),
+            "trajectory": trajectory_path,
+            "restart": restart_path,
+            "exit_code": outcome.returncode,
+            "elapsed_s": outcome.elapsed_s,
+        }
 
+    _assert_restart_source_states_close(case, source_states)
     columns = _require_matching_mdout_columns(
-        continuations["legacy"],
-        continuations["h5"],
+        continuations["legacy"]["mdout"],
+        continuations["bundled"]["mdout"],
         f"{case.name} restart continuation",
     )
-    legacy_rows = continuations["legacy"]["rows"]
-    h5_rows = continuations["h5"]["rows"]
-    if len(legacy_rows) != len(h5_rows):
+    legacy_rows = continuations["legacy"]["mdout"]["rows"]
+    bundled_rows = continuations["bundled"]["mdout"]["rows"]
+    if len(legacy_rows) != len(bundled_rows):
         raise AssertionError(
             f"{case.name} restart continuation row count differs"
         )
@@ -13377,14 +13653,71 @@ def _compare_restart_continuation(
         _assert_numeric_sequences_close(
             f"{case.name} restart continuation {column}",
             [row[column] for row in legacy_rows],
-            [row[column] for row in h5_rows],
+            [row[column] for row in bundled_rows],
             relative_tolerance=relative_tolerance,
             absolute_tolerance=absolute_tolerance,
         )
+
+    semantic_datasets = {
+        "trajectory": (
+            "/particles/all/step",
+            "/particles/all/time",
+            "/particles/all/position/value",
+            "/particles/all/velocity/value",
+            "/particles/all/force/value",
+            "/particles/all/box/edges/value",
+        ),
+        "restart": (
+            "/particles/all/step",
+            "/particles/all/time",
+            "/particles/all/position/value",
+            "/particles/all/velocity/value",
+            "/particles/all/box/edges/value",
+        ),
+    }
+    for family, datasets in semantic_datasets.items():
+        legacy_path = continuations["legacy"][family]
+        bundled_path = continuations["bundled"][family]
+        for dataset in datasets:
+            legacy_values = _h5_numeric_values(legacy_path, dataset)
+            bundled_values = _h5_numeric_values(bundled_path, dataset)
+            _assert_matching_numeric_shape(
+                f"{case.name} continuation {family}:{dataset}",
+                legacy_path,
+                bundled_path,
+                dataset,
+                legacy_values,
+                bundled_values,
+            )
+            relative_tolerance, absolute_tolerance = _deterministic_tolerance(
+                dataset
+            )
+            _assert_numeric_sequences_close(
+                f"{case.name} continuation {family}:{dataset}",
+                legacy_values,
+                bundled_values,
+                relative_tolerance=relative_tolerance,
+                absolute_tolerance=absolute_tolerance,
+            )
+
     return {
-        "method": "legacy_and_h5_restart_two_step_nve_continuation",
+        "method": "branch_owned_restart_two_step_nve_continuation",
+        "dt": 0.0001,
+        "constraint_mode": "disabled_to_isolate_restart_loading",
+        "sources": sources,
         "rows": len(legacy_rows),
         "columns": columns,
+        "semantic_h5_datasets": {
+            family: list(datasets)
+            for family, datasets in semantic_datasets.items()
+        },
+        "end_status": {
+            branch: {
+                "exit_code": continuations[branch]["exit_code"],
+                "elapsed_s": continuations[branch]["elapsed_s"],
+            }
+            for branch in ("legacy", "bundled")
+        },
     }
 
 

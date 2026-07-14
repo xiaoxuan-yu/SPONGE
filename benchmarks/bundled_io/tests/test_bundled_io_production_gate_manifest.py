@@ -87,6 +87,7 @@ from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
     PROFILE_LIMITS,
     RERUN_INPUT_SEMANTIC_SPECS,
     SUPPORTED_TOPOLOGY_SCHEMA_VERSIONS,
+    AbRun,
     _assert_complete_prefix_noop_layout,
     _assert_constraint_projection_oracle,
     _assert_core_topology_payload_response,
@@ -108,6 +109,7 @@ from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
     _h5_string_values,
     _insert_root_toml_keys,
     _parse_mdinfo_key_values,
+    _restart_continuation_source,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -303,6 +305,7 @@ def test_ab_production_harness_has_executable_contract_coverage():
         "rerun_frame_limit": 2,
     }
     assert {case.name for case in cases} == {
+        "normal_structural_restart_continuation",
         "normal_core_h5_output",
         "normal_core_topology_payload_sensitivity",
         "normal_nb14_scaled_nonzero",
@@ -404,6 +407,46 @@ def test_ab_production_harness_has_executable_contract_coverage():
     assert repair.status == "supported"
     assert repair.case_ids == ("normal_vds_complete_prefix_noop",)
     assert repair.assertion_ids == ("h5_complete_prefix_repair_equivalence",)
+
+
+def test_structural_restart_uses_bundled_producer_e4_continuation():
+    contracts = load_contract_registry()
+    case = next(
+        case
+        for case in _cases_for_profile()
+        if case.name == "normal_structural_restart_continuation"
+    )
+    contract = contracts["input.restart_load.structural"]
+
+    assert "input.restart_load.structural" in case.contract_ids
+    assert "restart_continuation_equivalence" in case.assertion_ids
+    assert contract.status == "supported"
+    assert contract.minimum_evidence == "E4"
+    assert contract.case_ids == (case.name,)
+    assert contract.assertion_ids == ("restart_continuation_equivalence",)
+
+
+def test_structural_restart_source_guard_rejects_legacy_h5_swap(tmp_path):
+    legacy_dir = tmp_path / "legacy"
+    bundled_dir = tmp_path / "bundled"
+    legacy_dir.mkdir()
+    bundled_dir.mkdir()
+    run = AbRun(
+        replica_index=0,
+        replica_seed=1,
+        legacy_dir=legacy_dir,
+        bundled_dir=bundled_dir,
+        legacy_metrics={},
+        bundled_metrics={},
+        legacy_output_contract={},
+        bundled_output_contract={},
+    )
+
+    with pytest.raises(
+        AssertionError,
+        match="bundled structural restart producer source mismatch",
+    ):
+        _restart_continuation_source(run, "bundled", legacy_dir)
 
 
 def test_nhc_dynamic_restart_uses_one_checkpoint_and_e4_continuation():

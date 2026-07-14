@@ -269,11 +269,11 @@
       "direction": "input",
       "component": "restart",
       "status": "supported",
-      "minimum_evidence": "E3",
+      "minimum_evidence": "E4",
       "legacy_surface": "legacy structural restart",
       "bundled_surface": "input_h5_restart_load=structural",
-      "case_ids": ["rerun_full_contract_pure_vds_off", "rerun_full_contract_pure_vds_on", "rerun_full_contract_sidecar_vds_off", "rerun_full_contract_sidecar_vds_on", "rerun_boundary_start0_strip0_limit1_vds_off", "rerun_boundary_start1_strip0_unlimited_no_velocity_vds_on", "rerun_boundary_start0_strip1_beyond_selected_vds_on", "rerun_boundary_start0_strip0_exact_eof_box_vds_off", "rerun_boundary_start1_strip1_limit1_selected_no_velocity_vds_off"],
-      "assertion_ids": ["mdout_deterministic_equivalence"],
+      "case_ids": ["normal_structural_restart_continuation"],
+      "assertion_ids": ["restart_continuation_equivalence"],
       "inventory_refs": [
         "h5_input_keys:input_h5_restart_path",
         "h5_input_keys:input_h5_restart_load"

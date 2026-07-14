@@ -33,6 +33,10 @@ def _synthetic_evidence_level(assertion_id: str) -> str:
     return "E3"
 
 
+def _case(case_name: str):
+    return next(case for case in _cases_for_profile() if case.name == case_name)
+
+
 def test_real_registry_and_case_matrix_are_symmetric():
     contracts = load_contract_registry()
     summary = validate_contract_registry(contracts, _cases_for_profile())
@@ -69,7 +73,7 @@ def test_unknown_contract_reference_fails_the_gate():
 
 def test_missing_runtime_assertion_evidence_fails_the_gate():
     contracts = load_contract_registry()
-    case = _cases_for_profile()[0]
+    case = _case("normal_core_h5_output")
     assertions = [
         AssertionEvidence(
             assertion_id="mdout_statistical_equivalence",
@@ -84,7 +88,7 @@ def test_missing_runtime_assertion_evidence_fails_the_gate():
 
 def test_e0_cannot_satisfy_an_e3_contract():
     contracts = load_contract_registry()
-    case = _cases_for_profile()[0]
+    case = _case("normal_core_h5_output")
     assertions = [
         AssertionEvidence(
             assertion_id=assertion_id,
@@ -133,7 +137,7 @@ def test_evidence_report_merges_cases_and_recomputes_coverage(tmp_path):
 
 def test_failure_evidence_cannot_satisfy_behavior_evidence():
     contracts = load_contract_registry()
-    case = _cases_for_profile()[0]
+    case = _case("normal_core_h5_output")
     assertions = [
         AssertionEvidence(
             assertion_id=assertion_id,

@@ -1806,6 +1806,13 @@ Acceptance:
 
 ## 56. Artifacts and Temporary-Space Policy
 
+The detailed next-round strengthening scopes for PR 59 through PR 74 are
+maintained in
+[`bundled_io_ab_next_round_strengthening_plan.md`](bundled_io_ab_next_round_strengthening_plan.md).
+That plan explicitly keeps cross-process VDS reopen-and-append/resume
+unsupported for this round and requires every promotion statement to exclude
+that capability.
+
 - Use `SPONGE_BUNDLED_IO_AB_RUN_ROOT` for all heavy runs.
 - Put production artifacts on the workspace filesystem rather than `/tmp`.
 - Delete successful per-replica payloads after evidence extraction.
@@ -1880,3 +1887,4 @@ Append one row immediately after completing and committing each PR.
 | PR 56: Track bundled I/O implementation baseline | Complete | This commit | fresh CPU `SPONGE` build; staged H5 bundle CTest labels; opt-in runtime smoke audit; 152-test contract smoke; schema examples; Ruff; `pixi lock --check`; `git diff --check` | The audited bundled I/O implementation, schemas, fixtures, examples, and tests are now tracked. Static/file-level gates pass; opt-in normal A/B and VDS terminal/resume pass. EDIP remains all-trivial in the manybody gate and dynamic NHC restart-load exits after initialization, so full behavioral equivalence and PR 7c promotion remain unproven. |
 | PR 57: Non-trivial REAXFF/EDIP runtime parity | Complete | This commit | focused production `normal_edip_nonzero` CPU A/B; runtime `test_h5_reaxff_edip_runtime_parity`; staged H5 bundle labels; formatting; `git diff --check` | The combined gate now gives legacy binary, bundled sidecar, and pure H5 routes the same interacting two-atom frames and empty pair exclusions. EDIP and REAXFF remain subject to finite non-zero assertions and full mdout/H5 observable parity across legacy output and bundled VDS off/on output. The independent dynamic NHC restart-load failure remains open. |
 | PR 58: Dynamic NHC restart-load runtime closure | Complete | This commit | focused runtime `test_h5_restart_load_runtime_closure`; complete four-test opt-in runtime group; staged H5 bundle labels; 152-test contract smoke; formatting; `git diff --check` | The dynamic NHC case now uses an isolated normal-NVT fixture instead of entering unrelated QC and rerun modules. It executes one finite `dt=0` step, confirms NHC initialization, rejects non-finite mdout/restart values, and requires exact non-zero NHC-state roundtrip. Existing protocol/full success and unsupported-policy failure branches remain on their broad fixtures. |
+| PR 59: Structural restart producer-source closure | Complete | This commit | 154-test contract smoke; real CUDA `normal_structural_restart_continuation` E4 A/B; execution-matrix CLI; Ruff; `git diff --check` | Independent legacy-input and bundled-input producers each run one non-zero step and emit their own restart. The two-step non-zero-dt NVE continuations bind only the branch-owned text or H5 source, record source directory/payload/SHA-256, and compare all mdout columns plus trajectory position/velocity/force/box and final structural restart state. A source-swap mutation is rejected before launch. `input.restart_load.structural` now requires E4 from this focused case; cross-process VDS reopen-and-append/resume remains unsupported. |
