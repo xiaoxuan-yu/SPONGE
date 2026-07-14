@@ -749,6 +749,7 @@
       "minimum_evidence": "E3",
       "legacy_surface": "exclude_in_file",
       "bundled_surface": "/topology/exclusions",
+      "single_point_justification": "Exclusions are a static pair mask; the isolated Coulomb oracle mutates only the excluded pair and checks analytic energy plus the complete force payload.",
       "case_ids": ["normal_exclusions_coulomb_oracle"],
       "assertion_ids": ["input_semantic_equivalence"]
     },
@@ -760,6 +761,7 @@
       "minimum_evidence": "E3",
       "legacy_surface": "gb_in_file",
       "bundled_surface": "pure native /forcefield/gb without sidecars",
+      "single_point_justification": "GB radii and scale factors are frame-local force-field parameters; isolated native-state controls distinguish GB from Coulomb-only energy and force.",
       "case_ids": ["normal_gb_native_nonzero"],
       "assertion_ids": ["input_semantic_equivalence"],
       "reason": ""
@@ -772,6 +774,7 @@
       "minimum_evidence": "E3",
       "legacy_surface": "gb_in_file",
       "bundled_surface": "/forcefield/gb native state plus H5 gb_in_file activation binding",
+      "single_point_justification": "The compatibility binding only activates the frame-local GB consumer; the focused hybrid oracle independently rejects activation-only and Coulomb-only behavior.",
       "case_ids": ["normal_gb_hybrid_nonzero"],
       "assertion_ids": ["input_semantic_equivalence"],
       "reason": ""
@@ -784,6 +787,7 @@
       "minimum_evidence": "E3",
       "legacy_surface": "LJ_soft_core_in_file",
       "bundled_surface": "/forcefield/lj_soft_core",
+      "single_point_justification": "LJ soft-core parameters are consumed by a frame-local force kernel; the focused payload control changes the owned energy and complete force fingerprint.",
       "case_ids": ["normal_lj_soft_core_nonzero"],
       "assertion_ids": ["input_semantic_equivalence"]
     },
@@ -795,6 +799,7 @@
       "minimum_evidence": "E3",
       "legacy_surface": "subsys_division_in_file",
       "bundled_surface": "/forcefield/subsys_division",
+      "single_point_justification": "Subsystem division is a static atom classification; the isolated partition oracle changes membership and verifies the resulting soft-core contribution.",
       "case_ids": ["normal_subsystem_division_partition"],
       "assertion_ids": ["input_semantic_equivalence"],
       "reason": ""
@@ -807,6 +812,7 @@
       "minimum_evidence": "E3",
       "legacy_surface": "virtual_atom_in_file",
       "bundled_surface": "/forcefield/virtual_atom",
+      "single_point_justification": "Virtual-atom construction is an algebraic per-frame mapping; exact reconstructed coordinates and redistributed real-atom forces cover all four types.",
       "case_ids": ["normal_virtual_atoms_all_types"],
       "assertion_ids": ["input_semantic_equivalence"]
     },
@@ -818,6 +824,7 @@
       "minimum_evidence": "E3",
       "legacy_surface": "periodic virtual-atom reconstruction",
       "bundled_surface": "/forcefield/virtual_atom under PBC",
+      "single_point_justification": "The PBC virtual-atom contract is a per-frame minimum-image mapping; the boundary oracle distinguishes the periodic coordinate from the non-periodic result.",
       "case_ids": ["normal_virtual_atoms_pbc_boundary"],
       "assertion_ids": ["input_semantic_equivalence"]
     },
@@ -829,6 +836,7 @@
       "minimum_evidence": "E3",
       "legacy_surface": "SW_in_file",
       "bundled_surface": "/manybody/sw",
+      "single_point_justification": "Stillinger-Weber is a frame-local potential; the isolated lambda mutation changes both pair/three-body energy and the complete force fingerprint.",
       "case_ids": ["normal_sw_typed_pair_three_body"],
       "assertion_ids": ["input_semantic_equivalence"],
       "reason": ""
@@ -841,6 +849,7 @@
       "minimum_evidence": "E3",
       "legacy_surface": "SW_in_file",
       "bundled_surface": "/parameters/sponge/files/legacy_sidecars binding for SW_in_file",
+      "single_point_justification": "The SW sidecar feeds the same frame-local potential; a sidecar-only lambda mutation independently changes energy and complete force.",
       "case_ids": ["normal_sw_sidecar_pair_three_body"],
       "assertion_ids": ["input_semantic_equivalence"],
       "reason": ""
@@ -865,6 +874,7 @@
       "minimum_evidence": "E3",
       "legacy_surface": "TERSOFF_in_file",
       "bundled_surface": "/manybody/tersoff",
+      "single_point_justification": "Tersoff is a frame-local bond-order potential; the typed gamma-zero control changes angular energy and the complete force fingerprint.",
       "case_ids": ["normal_tersoff_typed_angular"],
       "assertion_ids": ["input_semantic_equivalence"],
       "reason": ""
@@ -877,6 +887,7 @@
       "minimum_evidence": "E3",
       "legacy_surface": "TERSOFF_in_file",
       "bundled_surface": "/parameters/sponge/files/legacy_sidecars binding for TERSOFF_in_file",
+      "single_point_justification": "The Tersoff sidecar feeds the frame-local bond-order potential; an isolated gamma mutation changes energy and complete force.",
       "case_ids": ["normal_tersoff_sidecar_angular"],
       "assertion_ids": ["input_semantic_equivalence"],
       "reason": ""
@@ -889,6 +900,7 @@
       "minimum_evidence": "E3",
       "legacy_surface": "pairwise_force_in_file and payload",
       "bundled_surface": "/forcefield/custom_force/pairwise",
+      "single_point_justification": "Custom pairwise definitions are frame-local expressions; the isolated analytic energy and complete-force oracle proves definition and parameter consumption.",
       "case_ids": ["normal_custom_pair_nonzero"],
       "assertion_ids": ["input_semantic_equivalence"]
     },
@@ -924,6 +936,7 @@
       "minimum_evidence": "E3",
       "legacy_surface": "steer block and referenced CV definitions in cv_in_file",
       "bundled_surface": "/cv/config",
+      "single_point_justification": "Steering evaluates a frame-local CV force; typed weight and CV-definition mutations have analytic energy and complete-force responses.",
       "case_ids": ["normal_steering_cv_typed_nonzero"],
       "assertion_ids": ["input_semantic_equivalence"],
       "reason": ""
@@ -936,6 +949,7 @@
       "minimum_evidence": "E3",
       "legacy_surface": "steer block in cv_in_file",
       "bundled_surface": "protocol /parameters/sponge/files/legacy_sidecars binding for cv_in_file",
+      "single_point_justification": "The CV sidecar drives the same frame-local steering force; the focused distance/weight oracle checks analytic energy and complete force.",
       "case_ids": ["normal_steering_cv_sidecar_nonzero"],
       "assertion_ids": ["input_semantic_equivalence"],
       "reason": ""
@@ -1054,6 +1068,7 @@
       "minimum_evidence": "E3",
       "legacy_surface": "improper_dihedral_in_file and improper_in_file alias",
       "bundled_surface": "unmodified legacy-to-bundle /forcefield/improper/{atoms,pk,phi0} integration",
+      "single_point_justification": "Improper torsion parameters are frame-local; canonical and alias conversions plus a pk-only mutation scale the analytic energy and every force component.",
       "case_ids": ["normal_improper_converted_canonical_nonzero", "normal_improper_converted_alias_nonzero"],
       "assertion_ids": ["input_semantic_equivalence"],
       "inventory_refs": ["topology_sidecar_keys:improper_in_file"]
@@ -1066,6 +1081,7 @@
       "minimum_evidence": "E3",
       "legacy_surface": "improper_dihedral_in_file",
       "bundled_surface": "/forcefield/improper/{atoms,pk,phi0} without sidecars",
+      "single_point_justification": "Native improper parameters are frame-local; the isolated pk-only control scales the owned energy and every force component.",
       "case_ids": ["normal_improper_native_nonzero"],
       "assertion_ids": ["input_semantic_equivalence"],
       "reason": ""
@@ -1078,6 +1094,7 @@
       "minimum_evidence": "E3",
       "legacy_surface": "nb14_in_file",
       "bundled_surface": "/forcefield/nb14",
+      "single_point_justification": "NB14 scaling is a static pair correction; zeroing only the typed LJ scale changes NB14 LJ energy and force while preserving electrostatics.",
       "case_ids": ["normal_nb14_scaled_nonzero"],
       "assertion_ids": ["input_semantic_equivalence"],
       "inventory_refs": ["topology_sidecar_keys:nb14_in_file"]
@@ -1102,6 +1119,7 @@
       "minimum_evidence": "E3",
       "legacy_surface": "virtual_atoms_in_file",
       "bundled_surface": "/forcefield/virtual_atom",
+      "single_point_justification": "The plural alias selects the same algebraic virtual-atom mapping; exact PBC reconstruction and redistributed-force checks prove alias consumption.",
       "case_ids": ["normal_virtual_atoms_plural_alias"],
       "assertion_ids": ["input_semantic_equivalence"],
       "inventory_refs": ["topology_sidecar_keys:virtual_atoms_in_file"]

@@ -17,6 +17,7 @@ except ModuleNotFoundError:  # Python 3.10
 
 from benchmarks.bundled_io.ab_contracts import (
     ContractSpec,
+    audit_input_evolution_contracts,
     load_contract_registry,
     load_implementation_inventory,
     validate_contract_registry,
@@ -95,6 +96,7 @@ from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
     _assert_focused_improper_oracle,
     _assert_gb_force_oracle,
     _assert_nontrivial_equivalent_forces,
+    _assert_nonzero_dt_evolution,
     _assert_residue_com_res_virial_oracle,
     _assert_residue_pbc_mapping_oracle,
     _assert_sits_nk_typed_restart_oracle,
@@ -609,6 +611,81 @@ def test_remaining_function_contracts_have_independent_payload_cases():
         )
     }
     assert functional_full_contract_only == set()
+
+
+def test_input_only_contracts_have_evolution_or_reviewed_single_point_reason():
+    contracts = load_contract_registry()
+    cases = _cases_for_profile()
+    audit = audit_input_evolution_contracts(contracts, cases)
+    assert audit["audited_contract_count"] == 23
+    assert len(audit["raw_audit"]["input_behavior_only"]) == 23
+    assert len(audit["raw_audit"]["single_step_only"]) == 23
+    assert len(audit["raw_audit"]["zero_dt_only"]) == 21
+    assert set(audit["dynamic_contracts"]) == {
+        "input.protocol.sits",
+        "input.protocol.sits.nk_typed_restart",
+        "input.topology.residue",
+        "input.topology.residue.sidecar",
+        "input.manybody.edip",
+    }
+    assert len(audit["single_point_justifications"]) == 18
+    assert audit["unresolved_contracts"] == ()
+    assert audit["cohorts"] == [
+        "manybody_custom",
+        "protocol_stateful",
+        "topology_pbc",
+    ]
+
+    mutated = dict(contracts)
+    contract_id = "input.topology.exclusions"
+    mutated[contract_id] = replace(
+        mutated[contract_id], single_point_justification=""
+    )
+    with pytest.raises(AssertionError, match="lack nonzero-dt evolution"):
+        audit_input_evolution_contracts(mutated, cases)
+
+
+def test_nonzero_dt_evolution_oracle_rejects_schedule_and_frozen_coordinates():
+    payload = {
+        "mdout": {
+            "columns": ["potential"],
+            "rows": [
+                {"potential": 1.0},
+                {"potential": 1.1},
+                {"potential": 1.2},
+            ],
+        },
+        "step": [1.0, 2.0, 3.0],
+        "time": [0.0, 0.001, 0.002],
+        "position": [
+            0.0,
+            0.0,
+            0.0,
+            0.1,
+            0.0,
+            0.0,
+            0.2,
+            0.0,
+            0.0,
+        ],
+        "velocity": [0.1, 0.0, 0.0] * 3,
+        "force": [1.0, 0.0, 0.0] * 3,
+        "box": [10.0, 0.0, 0.0, 0.0, 10.0, 0.0, 0.0, 0.0, 10.0] * 3,
+    }
+    result = _assert_nonzero_dt_evolution(
+        "mutation", payload, payload, dt=0.001
+    )
+    assert result["maximum_coordinate_delta"] == pytest.approx(0.2)
+
+    bad_schedule = dict(payload, step=[1.0, 3.0, 4.0])
+    with pytest.raises(AssertionError, match="schedule changed"):
+        _assert_nonzero_dt_evolution(
+            "mutation", bad_schedule, bad_schedule, dt=0.001
+        )
+
+    frozen = dict(payload, position=[0.0, 0.0, 0.0] * 3)
+    with pytest.raises(AssertionError, match="coordinates are frozen"):
+        _assert_nonzero_dt_evolution("mutation", frozen, frozen, dt=0.001)
 
 
 def test_meta_protocol_full_restart_uses_one_checkpoint_and_e4_continuation():

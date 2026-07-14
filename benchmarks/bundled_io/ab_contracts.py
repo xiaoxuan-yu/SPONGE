@@ -34,6 +34,11 @@ DYNAMIC_RESTART_CONTRACT_STATUSES = {
     "input.restart.dynamic.andersen_rng": "unsupported",
     "input.restart.dynamic.monte_carlo_barostat_rng": "unsupported",
 }
+INPUT_EVOLUTION_COHORTS = {
+    "topology_pbc",
+    "manybody_custom",
+    "protocol_stateful",
+}
 
 
 @dataclass(frozen=True)
@@ -49,6 +54,7 @@ class ContractSpec:
     assertion_ids: tuple[str, ...]
     inventory_refs: tuple[str, ...]
     reason: str = ""
+    single_point_justification: str = ""
 
 
 @dataclass(frozen=True)
@@ -228,7 +234,129 @@ def validate_contract_registry(
                     f"in case {case_id}"
                 )
 
-    return registry_summary(contracts)
+    summary = registry_summary(contracts)
+    summary["input_evolution"] = audit_input_evolution_contracts(
+        contracts, cases
+    )
+    return summary
+
+
+def audit_input_evolution_contracts(
+    contracts: Mapping[str, ContractSpec], cases: Sequence[object]
+) -> dict[str, object]:
+    """Audit supported input contracts whose evidence is input-only."""
+
+    case_by_id = {_case_id(case): case for case in cases}
+    dynamic_contracts: dict[str, tuple[str, ...]] = {}
+    justified_contracts: dict[str, str] = {}
+    unaudited_contracts: list[str] = []
+
+    for case in cases:
+        evolution_contract_ids = getattr(case, "evolution_contract_ids", ())
+        if not isinstance(evolution_contract_ids, tuple) or not all(
+            isinstance(item, str) and item for item in evolution_contract_ids
+        ):
+            raise AssertionError(
+                f"{_case_id(case)} requires a string tuple "
+                "evolution_contract_ids"
+            )
+        _require_unique(
+            evolution_contract_ids, f"{_case_id(case)} evolution_contract_ids"
+        )
+        if not evolution_contract_ids:
+            continue
+        unknown = sorted(set(evolution_contract_ids) - set(contracts))
+        undeclared = sorted(
+            set(evolution_contract_ids)
+            - set(_case_values(case, "contract_ids"))
+        )
+        if unknown or undeclared:
+            raise AssertionError(
+                f"{_case_id(case)} evolution contracts are invalid: "
+                f"unknown={unknown}, undeclared={undeclared}"
+            )
+        cohort = getattr(case, "evolution_cohort", "")
+        if cohort not in INPUT_EVOLUTION_COHORTS:
+            raise AssertionError(
+                f"{_case_id(case)} evolution cohort must be one of "
+                f"{sorted(INPUT_EVOLUTION_COHORTS)}"
+            )
+        dt = getattr(case, "evolution_dt", 0.0)
+        if not isinstance(dt, (int, float)) or dt <= 0.0:
+            raise AssertionError(
+                f"{_case_id(case)} evolution_dt must be positive"
+            )
+
+    audited_contract_ids = []
+    for contract_id, contract in contracts.items():
+        if (
+            contract.status != "supported"
+            or contract.direction != "input"
+            or "input_semantic_equivalence" not in contract.assertion_ids
+            or not contract.case_ids
+            or not all(
+                getattr(case_by_id[case_id], "input_behavior_only", False)
+                for case_id in contract.case_ids
+            )
+        ):
+            continue
+        audited_contract_ids.append(contract_id)
+        dynamic_cases = tuple(
+            case_id
+            for case_id in contract.case_ids
+            if contract_id
+            in getattr(case_by_id[case_id], "evolution_contract_ids", ())
+        )
+        if dynamic_cases:
+            dynamic_contracts[contract_id] = dynamic_cases
+        elif contract.single_point_justification:
+            justified_contracts[contract_id] = (
+                contract.single_point_justification
+            )
+        else:
+            unaudited_contracts.append(contract_id)
+
+    if unaudited_contracts:
+        raise AssertionError(
+            "supported input-only contracts lack nonzero-dt evolution or "
+            f"single-point justification: {sorted(unaudited_contracts)}"
+        )
+    single_step_only = [
+        contract_id
+        for contract_id in audited_contract_ids
+        if all(
+            getattr(case_by_id[case_id], "mode", "") == "normal"
+            and getattr(case_by_id[case_id], "normal_step_limit", None) == 1
+            for case_id in contracts[contract_id].case_ids
+        )
+    ]
+    zero_dt_only = [
+        contract_id
+        for contract_id in audited_contract_ids
+        if all(
+            getattr(case_by_id[case_id], "mode", "") == "normal"
+            and getattr(case_by_id[case_id], "normal_dt", None) == 0.0
+            for case_id in contracts[contract_id].case_ids
+        )
+    ]
+    return {
+        "audited_contract_count": len(audited_contract_ids),
+        "raw_audit": {
+            "input_behavior_only": tuple(audited_contract_ids),
+            "single_step_only": tuple(single_step_only),
+            "zero_dt_only": tuple(zero_dt_only),
+        },
+        "dynamic_contracts": dynamic_contracts,
+        "single_point_justifications": justified_contracts,
+        "unresolved_contracts": (),
+        "cohorts": sorted(
+            {
+                getattr(case_by_id[case_id], "evolution_cohort")
+                for case_ids in dynamic_contracts.values()
+                for case_id in case_ids
+            }
+        ),
+    }
 
 
 def _validate_dynamic_restart_contract_inventory(
@@ -446,12 +574,18 @@ def _parse_contract(raw: Mapping[str, object]) -> ContractSpec:
     reason = raw.get("reason", "")
     if not isinstance(reason, str):
         raise AssertionError(f"{values['contract_id']} reason must be a string")
+    single_point_justification = raw.get("single_point_justification", "")
+    if not isinstance(single_point_justification, str):
+        raise AssertionError(
+            f"{values['contract_id']} single_point_justification must be a string"
+        )
     return ContractSpec(
         **values,
         case_ids=case_ids,
         assertion_ids=assertion_ids,
         inventory_refs=inventory_refs,
         reason=reason,
+        single_point_justification=single_point_justification,
     )
 
 

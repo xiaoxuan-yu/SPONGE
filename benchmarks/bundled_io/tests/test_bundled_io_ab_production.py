@@ -572,6 +572,9 @@ class AbCase:
     normal_dt: float | None = None
     expected_trajectory_frames: int | None = None
     input_behavior_only: bool = False
+    evolution_contract_ids: tuple[str, ...] = ()
+    evolution_cohort: str = ""
+    evolution_dt: float = 0.0
 
 
 @dataclass
@@ -957,6 +960,12 @@ def _cases_for_profile() -> list[AbCase]:
             normal_interval=1,
             normal_dt=0.0,
             input_behavior_only=True,
+            evolution_contract_ids=(
+                "input.protocol.sits",
+                "input.protocol.sits.nk_typed_restart",
+            ),
+            evolution_cohort="protocol_stateful",
+            evolution_dt=1.0e-4,
         ),
         AbCase(
             name="normal_sits_typed_inactive_configuration",
@@ -998,6 +1007,9 @@ def _cases_for_profile() -> list[AbCase]:
             normal_interval=1,
             normal_dt=0.0,
             input_behavior_only=True,
+            evolution_contract_ids=("input.manybody.edip",),
+            evolution_cohort="manybody_custom",
+            evolution_dt=1.0e-5,
         ),
         AbCase(
             name="normal_reaxff_payload_sensitivity",
@@ -1372,6 +1384,9 @@ def _cases_for_profile() -> list[AbCase]:
             normal_interval=1,
             normal_dt=0.001,
             input_behavior_only=True,
+            evolution_contract_ids=("input.topology.residue.sidecar",),
+            evolution_cohort="topology_pbc",
+            evolution_dt=1.0e-3,
         ),
         AbCase(
             name="normal_residue_typed_pbc_mapping",
@@ -1416,6 +1431,9 @@ def _cases_for_profile() -> list[AbCase]:
             normal_interval=1,
             normal_dt=0.001,
             input_behavior_only=True,
+            evolution_contract_ids=("input.topology.residue",),
+            evolution_cohort="topology_pbc",
+            evolution_dt=1.0e-3,
         ),
         AbCase(
             name="normal_gb_hybrid_nonzero",
@@ -11494,6 +11512,7 @@ def _compare_input_semantics(
 ) -> list[dict[str, object]]:
     specs = _input_semantic_specs(case)
     results = []
+    evolution_by_replica: dict[int, dict[str, object]] = {}
     for spec in specs:
         replica_results = []
         for run in runs:
@@ -11661,6 +11680,14 @@ def _compare_input_semantics(
                 replica_result["oracle"] = (
                     _compare_focused_virtual_atoms_oracle(case, run)
                 )
+            if spec.contract_id in case.evolution_contract_ids:
+                if run.replica_index not in evolution_by_replica:
+                    evolution_by_replica[run.replica_index] = (
+                        _compare_nonzero_dt_input_evolution(case, run)
+                    )
+                replica_result["nonzero_dt_evolution"] = evolution_by_replica[
+                    run.replica_index
+                ]
             replica_results.append(replica_result)
         results.append(
             {
@@ -11675,6 +11702,187 @@ def _compare_input_semantics(
             }
         )
     return results
+
+
+def _compare_nonzero_dt_input_evolution(
+    case: AbCase, run: AbRun
+) -> dict[str, object]:
+    evolution_case = replace(
+        case,
+        normal_step_limit=3,
+        normal_interval=1,
+        normal_dt=case.evolution_dt,
+    )
+    directories = {}
+    for branch, source in (
+        ("legacy", run.legacy_dir),
+        ("bundled", run.bundled_dir),
+    ):
+        target = source.parent / f"{branch}_nonzero_dt_evolution"
+        if target.exists():
+            shutil.rmtree(target)
+        shutil.copytree(source, target)
+        output = target / "output"
+        if output.exists():
+            shutil.rmtree(output)
+        for materialized in target.glob(".sponge_h5_*"):
+            if materialized.is_dir():
+                shutil.rmtree(materialized)
+            else:
+                materialized.unlink()
+        for file_name in (
+            "mdout.txt",
+            "mdinfo.txt",
+            "qc_scf.txt",
+            "run.stdout",
+            "run.stderr",
+        ):
+            path = target / file_name
+            if path.exists():
+                path.unlink()
+        _prepare_mdin(
+            target,
+            _mdin_name(target),
+            evolution_case,
+            branch=branch,
+            replica_seed=run.replica_seed,
+        )
+        _run_sponge(target, _mdin_name(target))
+        directories[branch] = target
+
+    payloads = {
+        branch: _read_nonzero_dt_evolution_payload(directory)
+        for branch, directory in directories.items()
+    }
+    result = _assert_nonzero_dt_evolution(
+        case.name,
+        payloads["legacy"],
+        payloads["bundled"],
+        dt=case.evolution_dt,
+    )
+    result.update(
+        {
+            "cohort": case.evolution_cohort,
+            "contract_ids": list(case.evolution_contract_ids),
+            "step_limit": 3,
+        }
+    )
+    for directory in directories.values():
+        shutil.rmtree(directory)
+    return result
+
+
+def _read_nonzero_dt_evolution_payload(case_dir: Path) -> dict[str, object]:
+    trajectory = case_dir / TRAJECTORY_REL
+    mdout = _read_mdout(case_dir / "mdout.txt")
+    return {
+        "mdout": mdout,
+        "step": _h5_numeric_values(trajectory, "/particles/all/step"),
+        "time": _h5_numeric_values(trajectory, "/particles/all/time"),
+        "position": _h5_numeric_values(
+            trajectory, "/particles/all/position/value"
+        ),
+        "velocity": _h5_numeric_values(
+            trajectory, "/particles/all/velocity/value"
+        ),
+        "force": _h5_numeric_values(trajectory, "/particles/all/force/value"),
+        "box": _h5_numeric_values(trajectory, "/particles/all/box/edges/value"),
+    }
+
+
+def _assert_nonzero_dt_evolution(
+    label: str,
+    legacy: dict[str, object],
+    bundled: dict[str, object],
+    *,
+    dt: float,
+) -> dict[str, object]:
+    if not math.isfinite(dt) or dt <= 0.0:
+        raise AssertionError(
+            f"{label} evolution dt must be positive and finite"
+        )
+    expected_steps = [1.0, 2.0, 3.0]
+    expected_times = [0.0, dt, 2.0 * dt]
+    for branch, payload in (("legacy", legacy), ("bundled", bundled)):
+        steps = payload["step"]
+        times = payload["time"]
+        if steps != expected_steps:
+            raise AssertionError(
+                f"{label} {branch} evolution schedule changed: {steps}"
+            )
+        _assert_numeric_sequences_close(
+            f"{label} {branch} evolution time schedule",
+            expected_times,
+            times,
+            relative_tolerance=0.0,
+            absolute_tolerance=1.0e-12,
+        )
+        mdout = payload["mdout"]
+        if len(mdout["rows"]) != 3:
+            raise AssertionError(
+                f"{label} {branch} evolution emitted "
+                f"{len(mdout['rows'])} mdout rows instead of 3"
+            )
+        for field in ("position", "velocity", "force", "box"):
+            values = payload[field]
+            if not values or not all(math.isfinite(value) for value in values):
+                raise AssertionError(
+                    f"{label} {branch} evolution {field} is empty or non-finite"
+                )
+
+    columns = _require_matching_mdout_columns(
+        legacy["mdout"], bundled["mdout"], f"{label} evolution"
+    )
+    for column in columns:
+        legacy_values = [row[column] for row in legacy["mdout"]["rows"]]
+        bundled_values = [row[column] for row in bundled["mdout"]["rows"]]
+        relative_tolerance, absolute_tolerance = _deterministic_tolerance(
+            column
+        )
+        _assert_numeric_sequences_close(
+            f"{label} evolution mdout {column}",
+            legacy_values,
+            bundled_values,
+            relative_tolerance=relative_tolerance,
+            absolute_tolerance=absolute_tolerance,
+        )
+    for field in ("step", "time", "position", "velocity", "force", "box"):
+        relative_tolerance, absolute_tolerance = _deterministic_tolerance(field)
+        _assert_numeric_sequences_close(
+            f"{label} evolution {field}",
+            legacy[field],
+            bundled[field],
+            relative_tolerance=relative_tolerance,
+            absolute_tolerance=absolute_tolerance,
+        )
+
+    positions = bundled["position"]
+    if len(positions) % 3 != 0:
+        raise AssertionError(f"{label} evolution position payload is malformed")
+    values_per_frame = len(positions) // 3
+    if values_per_frame == 0:
+        raise AssertionError(f"{label} evolution position payload is empty")
+    maximum_coordinate_delta = max(
+        abs(final - initial)
+        for initial, final in zip(
+            positions[:values_per_frame],
+            positions[-values_per_frame:],
+            strict=True,
+        )
+    )
+    if maximum_coordinate_delta <= 1.0e-8:
+        raise AssertionError(f"{label} evolution coordinates are frozen")
+    return {
+        "frame_count": 3,
+        "steps": expected_steps,
+        "times": expected_times,
+        "maximum_coordinate_delta": maximum_coordinate_delta,
+        "maximum_abs_recorded_force": max(
+            abs(value) for value in bundled["force"]
+        ),
+        "compared_particle_fields": ["position", "velocity", "force", "box"],
+        "mdout_column_count": len(columns),
+    }
 
 
 def _compare_focused_sits_nk_typed_restart(
