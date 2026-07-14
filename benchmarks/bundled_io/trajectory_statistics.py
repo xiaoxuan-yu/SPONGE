@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import math
-import statistics
 from collections.abc import Sequence
+
+import numpy as np
 
 
 def trajectory_observable_series(
@@ -15,8 +16,13 @@ def trajectory_observable_series(
     atom_weights: Sequence[float] | None = None,
     box_values: Sequence[float] | None = None,
     box_shape: tuple[int, ...] | None = None,
+    include_atom_features: bool = True,
+    maximum_pair_samples: int = 4096,
 ) -> dict[str, list[float]]:
     """Convert a particle or box trajectory into physical frame observables."""
+
+    if maximum_pair_samples < 1:
+        raise AssertionError("maximum pair samples must be positive")
 
     if dataset.endswith("/box/edges/value") and len(shape) == 3:
         return _box_observables(values, shape)
@@ -36,11 +42,15 @@ def trajectory_observable_series(
             atom_weights,
             box_values=box_values,
             box_shape=box_shape,
+            include_atom_features=include_atom_features,
+            maximum_pair_samples=maximum_pair_samples,
         )
     if dataset.endswith("/velocity/value"):
         return _velocity_observables(values, shape, atom_weights)
     if dataset.endswith("/force/value"):
-        return _force_observables(values, shape)
+        return _force_observables(
+            values, shape, include_atom_features=include_atom_features
+        )
     return {}
 
 
@@ -91,69 +101,64 @@ def _position_observables(
     *,
     box_values: Sequence[float] | None,
     box_shape: tuple[int, ...] | None,
+    include_atom_features: bool,
+    maximum_pair_samples: int,
 ) -> dict[str, list[float]]:
-    frames = _vector_frames(values, shape)
+    frames = np.asarray(values, dtype=float).reshape(shape)
     boxes = _position_boxes(box_values, box_shape, shape[0])
-    inverses = (
-        [_inverse_matrix(box) for box in boxes] if boxes is not None else None
+    box_array = (
+        np.asarray(boxes, dtype=float).reshape((-1, 3, 3))
+        if boxes is not None
+        else None
     )
+    inverses = np.linalg.inv(box_array) if box_array is not None else None
     if boxes is not None:
-        frames = [
-            [_wrap_position(vector, box, inverse) for vector in frame]
-            for frame, box, inverse in zip(frames, boxes, inverses)
-        ]
+        fractional = np.einsum("fai,fij->faj", frames, inverses)
+        frames = np.einsum(
+            "fai,fij->faj", fractional - np.floor(fractional), box_array
+        )
     origin = frames[0]
-    weights = (
-        list(atom_weights) if atom_weights is not None else [1.0] * shape[1]
+    weights = np.asarray(
+        atom_weights if atom_weights is not None else [1.0] * shape[1],
+        dtype=float,
     )
     center_name = (
         "center_of_mass" if atom_weights is not None else "center_of_geometry"
     )
-    total_weight = sum(weights)
+    total_weight = float(np.sum(weights))
+    centers = np.einsum("a,fai->fi", weights, frames) / total_weight
     result = {
-        f"{center_name}_component_{axis}": [
-            sum(weight * vector[axis] for weight, vector in zip(weights, frame))
-            / total_weight
-            for frame in frames
-        ]
+        f"{center_name}_component_{axis}": centers[:, axis].tolist()
         for axis in range(3)
     }
-    for atom_index in range(shape[1]):
-        result[f"atom_{atom_index}_squared_displacement"] = [
-            _norm(
-                _minimum_image(
-                    tuple(
-                        frame[atom_index][axis] - origin[atom_index][axis]
-                        for axis in range(3)
-                    ),
-                    boxes[frame_index] if boxes is not None else None,
-                    inverses[frame_index] if inverses is not None else None,
-                )
+    if include_atom_features:
+        displacements = frames - origin
+        if box_array is not None:
+            fractional = np.einsum("fai,fij->faj", displacements, inverses)
+            displacements = np.einsum(
+                "fai,fij->faj", fractional - np.rint(fractional), box_array
             )
-            ** 2
-            for frame_index, frame in enumerate(frames)
-        ]
-    pair_distances = []
-    sampled_pairs = _sampled_atom_pairs(shape[1])
-    for frame_index, frame in enumerate(frames):
-        distances = [
-            _norm(
-                _minimum_image(
-                    tuple(
-                        frame[right][axis] - frame[left][axis]
-                        for axis in range(3)
-                    ),
-                    boxes[frame_index] if boxes is not None else None,
-                    inverses[frame_index] if inverses is not None else None,
-                )
+        squared_displacements = np.sum(displacements * displacements, axis=2)
+        for atom_index in range(shape[1]):
+            result[f"atom_{atom_index}_squared_displacement"] = (
+                squared_displacements[:, atom_index].tolist()
             )
-            for left, right in sampled_pairs
-        ]
-        pair_distances.append(distances or [0.0])
+    sampled_pairs = _sampled_atom_pairs(shape[1], maximum_pair_samples)
+    if sampled_pairs:
+        left, right = np.asarray(sampled_pairs, dtype=int).T
+        pair_vectors = frames[:, right, :] - frames[:, left, :]
+        if box_array is not None:
+            fractional = np.einsum("fpi,fij->fpj", pair_vectors, inverses)
+            pair_vectors = np.einsum(
+                "fpi,fij->fpj", fractional - np.rint(fractional), box_array
+            )
+        pair_distances = np.linalg.norm(pair_vectors, axis=2)
+    else:
+        pair_distances = np.zeros((shape[0], 1), dtype=float)
     for name, fraction in (("q25", 0.25), ("median", 0.5), ("q75", 0.75)):
-        result[f"pair_distance_{name}"] = [
-            _quantile(distances, fraction) for distances in pair_distances
-        ]
+        result[f"pair_distance_{name}"] = np.quantile(
+            pair_distances, fraction, axis=1
+        ).tolist()
     return result
 
 
@@ -165,12 +170,20 @@ def _position_boxes(
     if values is None and shape is None:
         return None
     if values is None or shape is None:
-        raise AssertionError("position box values and shape must be provided together")
-    if len(shape) != 3 or shape[1:] != (3, 3) or shape[0] not in {1, frame_count}:
+        raise AssertionError(
+            "position box values and shape must be provided together"
+        )
+    if (
+        len(shape) != 3
+        or shape[1:] != (3, 3)
+        or shape[0] not in {1, frame_count}
+    ):
         raise AssertionError(f"invalid position box shape: {shape}")
     if len(values) != shape[0] * 9:
         raise AssertionError("position box shape/value mismatch")
-    matrices = [tuple(values[index * 9 : (index + 1) * 9]) for index in range(shape[0])]
+    matrices = [
+        tuple(values[index * 9 : (index + 1) * 9]) for index in range(shape[0])
+    ]
     if len(matrices) == 1:
         return matrices * frame_count
     return matrices
@@ -261,60 +274,53 @@ def _velocity_observables(
     shape: tuple[int, ...],
     atom_weights: Sequence[float] | None,
 ) -> dict[str, list[float]]:
-    frames = _vector_frames(values, shape)
+    frames = np.asarray(values, dtype=float).reshape(shape)
     result: dict[str, list[float]] = {}
     for axis in range(3):
-        result[f"component_{axis}_mean"] = [
-            statistics.fmean(vector[axis] for vector in frame)
-            for frame in frames
-        ]
-        result[f"component_{axis}_variance"] = [
-            statistics.pvariance(vector[axis] for vector in frame)
-            for frame in frames
-        ]
+        result[f"component_{axis}_mean"] = np.mean(
+            frames[:, :, axis], axis=1
+        ).tolist()
+        result[f"component_{axis}_variance"] = np.var(
+            frames[:, :, axis], axis=1
+        ).tolist()
+    squared_speeds = np.sum(frames * frames, axis=2)
     if atom_weights is None:
-        result["mean_squared_speed"] = [
-            statistics.fmean(_norm(vector) ** 2 for vector in frame)
-            for frame in frames
-        ]
+        result["mean_squared_speed"] = np.mean(squared_speeds, axis=1).tolist()
     else:
-        total_mass = sum(atom_weights)
-        result["mass_weighted_mean_squared_speed"] = [
-            sum(
-                weight * _norm(vector) ** 2
-                for weight, vector in zip(atom_weights, frame)
-            )
-            / total_mass
-            for frame in frames
-        ]
-    return _add_norm_distribution(result, frames)
+        weights = np.asarray(atom_weights, dtype=float)
+        result["mass_weighted_mean_squared_speed"] = (
+            np.einsum("a,fa->f", weights, squared_speeds) / np.sum(weights)
+        ).tolist()
+    return _add_numpy_norm_distribution(result, np.sqrt(squared_speeds))
 
 
 def _force_observables(
-    values: Sequence[float], shape: tuple[int, ...]
+    values: Sequence[float],
+    shape: tuple[int, ...],
+    *,
+    include_atom_features: bool,
 ) -> dict[str, list[float]]:
-    frames = _vector_frames(values, shape)
+    frames = np.asarray(values, dtype=float).reshape(shape)
     result: dict[str, list[float]] = {
-        f"net_component_{axis}": [
-            sum(vector[axis] for vector in frame) for frame in frames
-        ]
+        f"net_component_{axis}": np.sum(frames[:, :, axis], axis=1).tolist()
         for axis in range(3)
     }
-    result["component_rms"] = [
-        math.sqrt(
-            statistics.fmean(
-                component * component
-                for vector in frame
-                for component in vector
-            )
-        )
-        for frame in frames
-    ]
-    for atom_index in range(shape[1]):
-        result[f"atom_{atom_index}_norm"] = [
-            _norm(frame[atom_index]) for frame in frames
-        ]
-    return _add_norm_distribution(result, frames)
+    result["component_rms"] = np.sqrt(
+        np.mean(frames * frames, axis=(1, 2))
+    ).tolist()
+    norms = np.linalg.norm(frames, axis=2)
+    if include_atom_features:
+        for atom_index in range(shape[1]):
+            result[f"atom_{atom_index}_norm"] = norms[:, atom_index].tolist()
+    return _add_numpy_norm_distribution(result, norms)
+
+
+def _add_numpy_norm_distribution(
+    result: dict[str, list[float]], norms: np.ndarray
+) -> dict[str, list[float]]:
+    for name, fraction in (("q25", 0.25), ("median", 0.5), ("q75", 0.75)):
+        result[f"norm_{name}"] = np.quantile(norms, fraction, axis=1).tolist()
+    return result
 
 
 def _add_norm_distribution(

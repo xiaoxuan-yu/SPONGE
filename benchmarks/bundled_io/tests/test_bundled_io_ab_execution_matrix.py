@@ -14,6 +14,10 @@ from pathlib import Path
 import pytest
 
 from benchmarks.bundled_io.ab_contracts import load_contract_registry
+from benchmarks.bundled_io.execution_matrix import (
+    MINIMUM_PRODUCTION_STATISTICAL_PAIRED_BLOCKS,
+    MINIMUM_PRODUCTION_STATISTICAL_REPLICAS,
+)
 from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
     EVIDENCE_RUN_ID,
     OBSERVABLE_REL,
@@ -569,11 +573,14 @@ def test_legacy_and_bundled_execution_matrix_behavior(
         )
 
     if matrix_case.statistical:
-        mdout = _compare_mdout_statistically(ab_case, runs)
+        mdout = _compare_mdout_statistically(
+            ab_case, runs, inference_unit="replica"
+        )
         h5 = _compare_h5_outputs_statistically(
             ab_case,
             runs,
             families=_matrix_h5_families(matrix_case),
+            inference_unit="replica",
         )
     else:
         mdout = _compare_mdout_deterministically(ab_case, runs[0])
@@ -640,6 +647,8 @@ def _run_metadynamics_matrix_case(
 def _matrix_h5_families(
     matrix_case: MatrixRuntimeCase,
 ) -> set[str] | None:
+    if matrix_case.statistical:
+        return {"trajectory", "observable"}
     if matrix_case.source_case_id is None:
         return None
     if matrix_case.feature_family == "sits" and matrix_case.mpi_ranks == 2:
@@ -749,20 +758,73 @@ def _assert_rank0_output_ownership(
 
 
 def _replica_count(case: MatrixRuntimeCase) -> int:
-    if not case.statistical:
-        return 1
-    if os.environ.get("SPONGE_BUNDLED_IO_AB_MATRIX_FAST") == "1":
-        return 4
-    return int(PROFILE_LIMITS[PROFILE]["normal_replicas"])
+    return int(_matrix_sample_plan(case)["replica_count"])
 
 
 def _step_and_interval(case: MatrixRuntimeCase) -> tuple[int, int]:
+    plan = _matrix_sample_plan(case)
+    return int(plan["step_limit"]), int(plan["write_interval"])
+
+
+def _matrix_sample_plan(
+    case: MatrixRuntimeCase,
+    *,
+    profile: str | None = None,
+    fast_mode: bool | None = None,
+) -> dict[str, object]:
+    selected_profile = PROFILE if profile is None else profile
+    if selected_profile not in PROFILE_LIMITS:
+        raise AssertionError(
+            "execution matrix sample profile must be medium or production"
+        )
+    if fast_mode is None:
+        fast_mode = os.environ.get("SPONGE_BUNDLED_IO_AB_MATRIX_FAST") == "1"
     if not case.statistical:
-        return 5, 1
-    if os.environ.get("SPONGE_BUNDLED_IO_AB_MATRIX_FAST") == "1":
-        return 64, 1
-    limits = PROFILE_LIMITS[PROFILE]
-    return int(limits["normal_step_limit"]), int(limits["normal_interval"])
+        return {
+            "profile": selected_profile,
+            "fast_mode": fast_mode,
+            "replica_count": 1,
+            "step_limit": 5,
+            "write_interval": 1,
+            "frame_count_lower_bound": 5,
+            "blocks_per_replica_lower_bound": 0,
+            "paired_block_count_lower_bound": 0,
+        }
+
+    limits = PROFILE_LIMITS[selected_profile]
+    if fast_mode:
+        replica_count = 4
+        step_limit = 64
+        write_interval = 1
+    else:
+        replica_count = int(limits["normal_replicas"])
+        if selected_profile == "production":
+            replica_count = max(
+                replica_count, MINIMUM_PRODUCTION_STATISTICAL_REPLICAS
+            )
+        step_limit = int(limits["normal_step_limit"])
+        write_interval = int(limits["normal_interval"])
+    frame_count = step_limit // write_interval
+    usable_frames = max(0, frame_count - int(limits["normal_burn_in_frames"]))
+    blocks_per_replica = usable_frames // int(limits["normal_block_size"])
+    paired_block_count = replica_count * blocks_per_replica
+    return {
+        "profile": selected_profile,
+        "fast_mode": fast_mode,
+        "inference_unit": "replica",
+        "replica_count": replica_count,
+        "step_limit": step_limit,
+        "write_interval": write_interval,
+        "frame_count_lower_bound": frame_count,
+        "blocks_per_replica_lower_bound": blocks_per_replica,
+        "paired_block_count_lower_bound": paired_block_count,
+        "minimum_production_paired_blocks": (
+            MINIMUM_PRODUCTION_STATISTICAL_PAIRED_BLOCKS
+        ),
+        "minimum_production_replicas": (
+            MINIMUM_PRODUCTION_STATISTICAL_REPLICAS
+        ),
+    }
 
 
 def _prepare_pair(
@@ -1053,6 +1115,7 @@ def _record_matrix_evidence(
             "rank0_output_owner": True,
             "profile": PROFILE,
             "source_case_id": case.source_case_id or case.scenario_id,
+            "sample_plan": _matrix_sample_plan(case),
             "performance": performance,
             "artifact_bytes": artifact_bytes,
         },

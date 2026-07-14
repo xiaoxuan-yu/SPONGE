@@ -563,7 +563,52 @@ ci(bundled-io): pin shadow converter toolchain
 test(bundled-io): enforce VDS resume scope boundary
 ```
 
-## 19. PR 74：受限范围 promotion 与三次 clean production evidence
+## 19. PR 73b：独立 replica 统计推断与 GPU core 阻断修正
+
+### 触发原因
+
+PR 72 的完整 GPU selector 在 Middle NVT/SETTLE 和 NHC NVT 场景暴露出两个统计
+阻断。最初增加单 replica 步数仍不能形成更多独立样本，并且扁平化 H5 分量会把
+坐标分量或同一轨迹内 block 误当成独立观测。因此本修正必须先于 PR 74，且不能
+amend 已完成的 PR 72/73。
+
+### 实施设计
+
+- production statistical matrix 固定使用至少 48 个独立 seed 的 replica；每个
+  replica 保持 10,000 steps、100-step write interval、20-frame burn-in 和 10-frame
+  block，共至少 384 个原始 paired blocks。
+- 均值等价的 SEM 以每个 replica 的 post-burn block mean 为独立推断单位；block
+  数只用于单条轨迹内降噪，不再扩大独立样本数。
+- promotion metadata 必须证明 `profile=production`、`fast_mode=false`、至少 48 个
+  replica 和 384 个 paired blocks；伪造任一字段都阻止 promotion。
+- statistical H5 matrix 只比较有时间演化的 trajectory/observable family；单帧
+  restart snapshot 不做伪统计，restart 继续由确定性和 E4 continuation gate 证明。
+- position、velocity、force 和 box 不比较扁平原始分量的伪样本，而比较物理时间序列。
+  replica 级系综门禁使用全局/分布特征；逐原子 mutation 灵敏度仍由 block-mode
+  mutation gate 保留。
+- position 保留确定性均匀抽取的 4096 对 PBC 距离分位数；PBC、velocity、force 和
+  quantile 计算使用向量化实现，不降低 oracle 分辨率。
+- fluctuation 的数值零判定使用机器尺度，不得把均值 absolute margin 当作 std 的
+  零阈值；实际波动仍受原 `maximum_std_ratio` 约束。
+
+### 验收
+
+- mutation test 证明大量相关 blocks 不能冒充独立 replicas。
+- production/fast sample-plan、restart-family 排除、逐原子 feature 边界和 std 零阈值
+  悬崖均有静态或单元回归。
+- RTX 4090 上 `middle_nvt_settle_gpu_omp4_rank1` 与
+  `nhc_nvt_unconstrained_gpu_omp1_rank1` 均以 48 replicas、原 3σ/容差通过 mdout、
+  trajectory 和 observable 门禁。
+- 本 PR 只修正统计证据设计；不改变 promotion state，不计入三次 clean production
+  evidence。
+
+### 唯一 commit
+
+```text
+test(bundled-io): power matrix statistics by replica
+```
+
+## 20. PR 74：受限范围 promotion 与三次 clean production evidence
 
 ### 目标
 
@@ -607,7 +652,7 @@ test(bundled-io): enforce VDS resume scope boundary
 ci(bundled-io): promote scoped A/B evidence
 ```
 
-## 20. 依赖与执行顺序
+## 21. 依赖与执行顺序
 
 ```text
 PR59
@@ -621,13 +666,14 @@ PR68
 PR59–68 → PR69 → PR70
 PR70 → PR71 → PR72
 PR70 → PR73
-PR59–73 → PR74
+PR72/PR73 → PR73b
+PR59–73b → PR74
 ```
 
 PR 63–68 在逻辑上可以独立设计，但实际提交仍按编号串行进行，以保持每个分支基于
 上一 PR 的单一已审计 HEAD。
 
-## 21. 每 PR completion log 模板
+## 22. 每 PR completion log 模板
 
 每个 PR 在总计划 completion log 追加一行：
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import statistics
 
 import h5py
 import pytest
@@ -20,6 +21,7 @@ from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
     _chunk_boundary_cases,
     _deterministic_tolerance,
     _statistical_policy,
+    _trajectory_feature_names_for_inference,
 )
 from benchmarks.bundled_io.trajectory_statistics import (
     trajectory_observable_series,
@@ -89,12 +91,95 @@ def test_statistical_equivalence_rejects_changed_fluctuations():
         compare_replicas("temperature", legacy, bundled, POLICY)
 
 
+def test_fluctuation_ratio_has_no_cliff_at_absolute_mean_margin():
+    policy = StatisticalEquivalencePolicy(
+        burn_in_frames=0,
+        block_size=2,
+        minimum_blocks_per_replica=3,
+        confidence_z=3.0,
+        relative_margin=0.0,
+        absolute_margin=0.01,
+        maximum_std_ratio=1.5,
+    )
+    legacy = [[-0.012, -0.012, 0.0, 0.0, 0.012, 0.012]]
+    bundled = [[-0.0124, -0.0124, 0.0, 0.0, 0.0124, 0.0124]]
+
+    result = compare_replicas("velocity quantile", legacy, bundled, policy)
+
+    assert result["std_ratio"] == pytest.approx(0.0124 / 0.012)
+    assert result["std_ratio"] < policy.maximum_std_ratio
+
+
 def test_statistical_equivalence_reports_tost_p_value():
     replicas = [[0.0, 0.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0]]
 
     result = compare_replicas("temperature", replicas, replicas, POLICY)
 
     assert result["equivalence_p_value"] == 0.0
+
+
+def test_replica_inference_uses_independent_replica_means_for_sem():
+    policy = StatisticalEquivalencePolicy(
+        burn_in_frames=0,
+        block_size=2,
+        minimum_blocks_per_replica=3,
+        confidence_z=3.0,
+        relative_margin=0.0,
+        absolute_margin=1.0,
+        maximum_std_ratio=1.5,
+        inference_unit="replica",
+    )
+    legacy = [[9.0, 9.0, 10.0, 10.0, 11.0, 11.0]] * 3
+    bundled = [
+        [value + delta for value in replica]
+        for replica, delta in zip(legacy, (0.1, -0.1, 0.2))
+    ]
+
+    result = compare_replicas("energy", legacy, bundled, policy)
+
+    expected_deltas = [0.1, -0.1, 0.2]
+    assert result["inference_unit"] == "replica"
+    assert result["paired_block_count"] == 9
+    assert result["paired_replica_count"] == 3
+    assert result["inference_sample_count"] == 3
+    assert result["mean_delta_sem"] == pytest.approx(
+        statistics.stdev(expected_deltas) / math.sqrt(3)
+    )
+
+
+def test_correlated_blocks_cannot_masquerade_as_independent_replicas():
+    common = dict(
+        burn_in_frames=0,
+        block_size=2,
+        minimum_blocks_per_replica=100,
+        confidence_z=3.0,
+        relative_margin=0.0,
+        absolute_margin=0.05,
+        maximum_std_ratio=1.5,
+    )
+    legacy = [[8.0, 10.0, 10.0, 12.0] * 50] * 2
+    bundled = [
+        [value + 0.2 for value in legacy[0]],
+        [value - 0.2 for value in legacy[1]],
+    ]
+
+    block_result = compare_replicas(
+        "energy",
+        legacy,
+        bundled,
+        StatisticalEquivalencePolicy(**common, inference_unit="block"),
+    )
+    assert block_result["confidence_bound"] < 0.05
+
+    with pytest.raises(
+        AssertionError, match="mean is not statistically equivalent"
+    ):
+        compare_replicas(
+            "energy",
+            legacy,
+            bundled,
+            StatisticalEquivalencePolicy(**common, inference_unit="replica"),
+        )
 
 
 def test_holm_correction_rejects_observable_that_only_passes_uncorrected_alpha():
@@ -277,6 +362,31 @@ def test_box_observables_include_matrix_volume_lengths_and_angles():
     assert observables["angle_0_1"] == [pytest.approx(math.pi / 2.0)]
 
 
+def test_replica_inference_uses_ensemble_not_per_atom_trajectory_features():
+    observables = {
+        "component_rms": [1.0, 2.0],
+        "norm_median": [1.0, 2.0],
+        "atom_1000_norm": [1.0, 2.0],
+    }
+
+    assert _trajectory_feature_names_for_inference(observables, "replica") == {
+        "component_rms",
+        "norm_median",
+    }
+    assert _trajectory_feature_names_for_inference(observables, "block") == set(
+        observables
+    )
+
+    generated = trajectory_observable_series(
+        "/particles/all/force/value",
+        [1.0, 0.0, 0.0, -1.0, 0.0, 0.0],
+        (1, 2, 3),
+        include_atom_features=False,
+    )
+    assert "component_rms" in generated
+    assert not any(name.startswith("atom_") for name in generated)
+
+
 def test_comparator_policies_are_quantity_specific():
     assert (
         _statistical_policy("pressure").absolute_margin
@@ -337,9 +447,7 @@ def test_chunk_boundary_layout_rejects_frame_and_shard_mutations(tmp_path):
     trajectory = tmp_path / TRAJECTORY_REL
     trajectory.parent.mkdir(parents=True)
     with h5py.File(trajectory, "w") as handle:
-        handle.create_dataset(
-            "/parameters/sponge/output/frame_count", data=[3]
-        )
+        handle.create_dataset("/parameters/sponge/output/frame_count", data=[3])
         handle.create_dataset(
             "/particles/all/position/value", shape=(3, 2, 3), dtype="f4"
         )

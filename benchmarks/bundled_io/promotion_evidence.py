@@ -19,6 +19,8 @@ from benchmarks.bundled_io.ab_contracts import (
     validate_complete_evidence_report,
 )
 from benchmarks.bundled_io.execution_matrix import (
+    MINIMUM_PRODUCTION_STATISTICAL_PAIRED_BLOCKS,
+    MINIMUM_PRODUCTION_STATISTICAL_REPLICAS,
     ExecutionMatrix,
     ExecutionScenario,
     ProductionRun,
@@ -426,11 +428,27 @@ def _metadata_proves_scenario(
             "cuda_runtime_version",
         )
     )
+    statistical_metadata_valid = scenario.comparison != "statistical" or (
+        isinstance(metadata.get("sample_plan"), dict)
+        and metadata["sample_plan"].get("profile") == "production"
+        and metadata["sample_plan"].get("fast_mode") is False
+        and metadata["sample_plan"].get("inference_unit") == "replica"
+        and isinstance(metadata["sample_plan"].get("replica_count"), int)
+        and metadata["sample_plan"]["replica_count"]
+        >= MINIMUM_PRODUCTION_STATISTICAL_REPLICAS
+        and isinstance(
+            metadata["sample_plan"].get("paired_block_count_lower_bound"),
+            int,
+        )
+        and metadata["sample_plan"]["paired_block_count_lower_bound"]
+        >= MINIMUM_PRODUCTION_STATISTICAL_PAIRED_BLOCKS
+    )
     return (
         omp_threads == scenario.omp_threads
         and mpi_ranks == scenario.mpi_ranks
         and metadata.get("rank0_output_owner") is True
         and gpu_metadata_valid
+        and statistical_metadata_valid
     )
 
 

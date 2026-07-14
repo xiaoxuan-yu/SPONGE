@@ -12770,7 +12770,9 @@ def _build_input_contract_oracles(
             "compared_payload": list(observables),
         }
     if len(contract_oracles) != len(input_semantics):
-        raise AssertionError("input semantic results contain duplicate contracts")
+        raise AssertionError(
+            "input semantic results contain duplicate contracts"
+        )
     return contract_oracles
 
 
@@ -17613,7 +17615,9 @@ def _observable_quantity(label: str) -> str:
     return "energy"
 
 
-def _statistical_policy(label: str = "energy") -> StatisticalEquivalencePolicy:
+def _statistical_policy(
+    label: str = "energy", *, inference_unit: str = "block"
+) -> StatisticalEquivalencePolicy:
     limits = PROFILE_LIMITS[PROFILE]
     quantity = _observable_quantity(label)
     absolute_margin = PHYSICAL_ABSOLUTE_MARGINS[PROFILE].get(
@@ -17627,6 +17631,7 @@ def _statistical_policy(label: str = "energy") -> StatisticalEquivalencePolicy:
         relative_margin=float(limits["normal_relative_margin"]),
         absolute_margin=absolute_margin,
         maximum_std_ratio=STATISTICAL_MAXIMUM_STD_RATIO,
+        inference_unit=inference_unit,
     )
 
 
@@ -17811,7 +17816,10 @@ def _assert_nonfinite_patterns_match(
 
 
 def _compare_mdout_statistically(
-    case: AbCase, runs: Sequence[AbRun]
+    case: AbCase,
+    runs: Sequence[AbRun],
+    *,
+    inference_unit: str = "block",
 ) -> dict[str, object]:
     parsed = [
         (
@@ -17838,7 +17846,7 @@ def _compare_mdout_statistically(
                 f"legacy={len(left['rows'])}, bundled={len(right['rows'])}"
             )
 
-    policy = _statistical_policy()
+    policy = _statistical_policy(inference_unit=inference_unit)
     comparison: dict[str, object] = {
         "method": "independent_replicas_block_mean_equivalence",
         "replicas": len(runs),
@@ -17903,7 +17911,9 @@ def _compare_mdout_statistically(
                     not math.isfinite(value) for value in all_values
                 ),
             }
-            column_policy = _statistical_policy(column)
+            column_policy = _statistical_policy(
+                column, inference_unit=inference_unit
+            )
             if finite_legacy[0] and _can_use_statistics(
                 finite_legacy, column_policy
             ):
@@ -17918,7 +17928,9 @@ def _compare_mdout_statistically(
             comparison["columns"][column] = nonfinite_result
             continue
 
-        column_policy = _statistical_policy(column)
+        column_policy = _statistical_policy(
+            column, inference_unit=inference_unit
+        )
         result = compare_replicas(
             f"{case.name} mdout {column}",
             legacy_replicas,
@@ -18708,10 +18720,14 @@ def _compare_h5_outputs_deterministically(
     bundled_files = _output_h5_files(case, run.bundled_dir)
     if families is not None:
         legacy_files = {
-            name: path for name, path in legacy_files.items() if name in families
+            name: path
+            for name, path in legacy_files.items()
+            if name in families
         }
         bundled_files = {
-            name: path for name, path in bundled_files.items() if name in families
+            name: path
+            for name, path in bundled_files.items()
+            if name in families
         }
     if set(legacy_files) != set(bundled_files):
         raise AssertionError(
@@ -19414,6 +19430,8 @@ def _compare_h5_outputs_statistically(
     case: AbCase,
     runs: Sequence[AbRun],
     families: set[str] | None = None,
+    *,
+    inference_unit: str = "block",
 ) -> dict[str, object]:
     expected_families = set(_output_h5_files(case, runs[0].legacy_dir))
     if families is not None:
@@ -19444,7 +19462,11 @@ def _compare_h5_outputs_statistically(
             kind = _h5_dataset_kind(legacy_path, dataset)
             if kind == "numeric":
                 numeric_summary = _compare_h5_numeric_dataset_statistics(
-                    case, runs, name, dataset
+                    case,
+                    runs,
+                    name,
+                    dataset,
+                    inference_unit=inference_unit,
                 )
                 dataset_summaries[dataset] = numeric_summary
                 equivalence_result = _primary_equivalence_result(
@@ -19471,7 +19493,9 @@ def _compare_h5_outputs_statistically(
             holm_correct_equivalence_family(
                 f"{case.name} {name} H5 dataset family",
                 family_results,
-                alpha=_holm_alpha(_statistical_policy(name)),
+                alpha=_holm_alpha(
+                    _statistical_policy(name, inference_unit=inference_unit)
+                ),
             )
         summaries[name] = {
             "method": "all_dataset_schema_and_statistical_values",
@@ -19492,7 +19516,12 @@ def _primary_equivalence_result(
 
 
 def _compare_h5_numeric_dataset_statistics(
-    case: AbCase, runs: Sequence[AbRun], name: str, dataset: str
+    case: AbCase,
+    runs: Sequence[AbRun],
+    name: str,
+    dataset: str,
+    *,
+    inference_unit: str = "block",
 ) -> dict[str, object]:
     legacy_replicas = []
     bundled_replicas = []
@@ -19550,7 +19579,10 @@ def _compare_h5_numeric_dataset_statistics(
             for replica in bundled_replicas
         ]
         result: dict[str, object] = {"method": "exact_nonfinite_pattern"}
-        finite_policy = replace(_statistical_policy(dataset), burn_in_frames=0)
+        finite_policy = replace(
+            _statistical_policy(dataset, inference_unit=inference_unit),
+            burn_in_frames=0,
+        )
         if finite_legacy[0] and _can_use_statistics(
             finite_legacy, finite_policy
         ):
@@ -19562,17 +19594,64 @@ def _compare_h5_numeric_dataset_statistics(
             )
         return result
 
-    policy = _statistical_policy(dataset)
+    policy = _statistical_policy(dataset, inference_unit=inference_unit)
     flat_policy = replace(policy, burn_in_frames=0)
     result: dict[str, object] = {}
-    if _can_use_statistics(legacy_replicas, flat_policy):
+    atom_weights = (
+        _trajectory_atom_weights(runs[0], dataset, shape) if shape else None
+    )
+    legacy_observables = (
+        [
+            trajectory_observable_series(
+                dataset,
+                values,
+                shape,
+                atom_weights=atom_weights,
+                include_atom_features=inference_unit != "replica",
+                maximum_pair_samples=4096,
+                **_trajectory_box_arguments(
+                    _output_h5_files(case, run.legacy_dir)[name], dataset
+                ),
+            )
+            for run, values in zip(runs, legacy_replicas)
+        ]
+        if shape
+        else []
+    )
+    bundled_observables = (
+        [
+            trajectory_observable_series(
+                dataset,
+                values,
+                shape,
+                atom_weights=atom_weights,
+                include_atom_features=inference_unit != "replica",
+                maximum_pair_samples=4096,
+                **_trajectory_box_arguments(
+                    _output_h5_files(case, run.bundled_dir)[name], dataset
+                ),
+            )
+            for run, values in zip(runs, bundled_replicas)
+        ]
+        if shape
+        else []
+    )
+    has_physical_observables = bool(
+        legacy_observables and legacy_observables[0]
+    )
+    compare_flat_values = not (
+        inference_unit == "replica" and has_physical_observables
+    )
+    if compare_flat_values and _can_use_statistics(
+        legacy_replicas, flat_policy
+    ):
         result["flat_values"] = compare_replicas(
             f"{case.name} {name}:{dataset} flat values",
             legacy_replicas,
             bundled_replicas,
             flat_policy,
         )
-    else:
+    elif compare_flat_values:
         for replica_index, (legacy, bundled) in enumerate(
             zip(legacy_replicas, bundled_replicas)
         ):
@@ -19585,7 +19664,7 @@ def _compare_h5_numeric_dataset_statistics(
             )
         result["flat_values"] = {"method": "exact_short_series"}
 
-    if shape and len(shape) >= 1 and shape[0] > 1:
+    if compare_flat_values and shape and len(shape) >= 1 and shape[0] > 1:
         legacy_frame_means = [
             _frame_summary_series(values, shape, rms=False)
             for values in legacy_replicas
@@ -19616,38 +19695,20 @@ def _compare_h5_numeric_dataset_statistics(
                 policy,
             )
     if shape:
-        atom_weights = _trajectory_atom_weights(runs[0], dataset, shape)
-        legacy_observables = [
-            trajectory_observable_series(
-                dataset,
-                values,
-                shape,
-                atom_weights=atom_weights,
-                **_trajectory_box_arguments(
-                    _output_h5_files(case, run.legacy_dir)[name], dataset
-                ),
+        if has_physical_observables:
+            all_feature_names = set(legacy_observables[0])
+            feature_names = _trajectory_feature_names_for_inference(
+                legacy_observables[0], inference_unit
             )
-            for run, values in zip(runs, legacy_replicas)
-        ]
-        bundled_observables = [
-            trajectory_observable_series(
-                dataset,
-                values,
-                shape,
-                atom_weights=atom_weights,
-                **_trajectory_box_arguments(
-                    _output_h5_files(case, run.bundled_dir)[name], dataset
-                ),
-            )
-            for run, values in zip(runs, bundled_replicas)
-        ]
-        if legacy_observables and legacy_observables[0]:
-            feature_names = set(legacy_observables[0])
-            if any(set(item) != feature_names for item in legacy_observables):
+            if any(
+                set(item) != all_feature_names for item in legacy_observables
+            ):
                 raise AssertionError(
                     f"{case.name} {dataset} legacy features differ"
                 )
-            if any(set(item) != feature_names for item in bundled_observables):
+            if any(
+                set(item) != all_feature_names for item in bundled_observables
+            ):
                 raise AssertionError(
                     f"{case.name} {dataset} bundled features differ"
                 )
@@ -19655,7 +19716,10 @@ def _compare_h5_numeric_dataset_statistics(
             for feature in sorted(feature_names):
                 legacy_series = [item[feature] for item in legacy_observables]
                 bundled_series = [item[feature] for item in bundled_observables]
-                feature_policy = _statistical_policy(f"{dataset} {feature}")
+                feature_policy = _statistical_policy(
+                    f"{dataset} {feature}",
+                    inference_unit=inference_unit,
+                )
                 if not _can_use_statistics(legacy_series, feature_policy):
                     continue
                 feature_results[feature] = compare_replicas(
@@ -19672,6 +19736,17 @@ def _compare_h5_numeric_dataset_statistics(
                 )
                 result["trajectory_observables"] = feature_results
     return result
+
+
+def _trajectory_feature_names_for_inference(
+    observables: dict[str, list[float]], inference_unit: str
+) -> set[str]:
+    feature_names = set(observables)
+    if inference_unit == "replica":
+        feature_names = {
+            name for name in feature_names if not name.startswith("atom_")
+        }
+    return feature_names
 
 
 def _trajectory_atom_weights(

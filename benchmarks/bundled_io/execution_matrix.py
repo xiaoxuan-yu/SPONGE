@@ -62,6 +62,8 @@ REQUIRED_GPU_RANK2_FEATURE_FAMILIES = {
     "virtual_atom",
     "constraint",
 }
+MINIMUM_PRODUCTION_STATISTICAL_REPLICAS = 48
+MINIMUM_PRODUCTION_STATISTICAL_PAIRED_BLOCKS = 384
 
 
 @dataclass(frozen=True)
@@ -607,11 +609,27 @@ def _case_proves_scenario(
             "cuda_runtime_version",
         )
     )
+    statistical_metadata_valid = scenario.comparison != "statistical" or (
+        isinstance(metadata.get("sample_plan"), dict)
+        and metadata["sample_plan"].get("profile") == "production"
+        and metadata["sample_plan"].get("fast_mode") is False
+        and metadata["sample_plan"].get("inference_unit") == "replica"
+        and isinstance(metadata["sample_plan"].get("replica_count"), int)
+        and metadata["sample_plan"]["replica_count"]
+        >= MINIMUM_PRODUCTION_STATISTICAL_REPLICAS
+        and isinstance(
+            metadata["sample_plan"].get("paired_block_count_lower_bound"),
+            int,
+        )
+        and metadata["sample_plan"]["paired_block_count_lower_bound"]
+        >= MINIMUM_PRODUCTION_STATISTICAL_PAIRED_BLOCKS
+    )
     return (
         omp_threads == scenario.omp_threads
         and mpi_ranks == scenario.mpi_ranks
         and metadata.get("rank0_output_owner") is True
         and gpu_metadata_valid
+        and statistical_metadata_valid
     )
 
 

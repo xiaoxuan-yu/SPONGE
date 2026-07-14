@@ -24,6 +24,7 @@ class StatisticalEquivalencePolicy:
     relative_margin: float
     absolute_margin: float
     maximum_std_ratio: float
+    inference_unit: str = "block"
 
 
 @dataclass(frozen=True)
@@ -134,15 +135,16 @@ def compare_replicas(
     legacy_replicas: Sequence[Sequence[float]],
     bundled_replicas: Sequence[Sequence[float]],
     policy: StatisticalEquivalencePolicy,
-) -> dict[str, float | int]:
+) -> dict[str, float | int | str]:
     """Require practical mean and fluctuation equivalence across replicas.
 
     Each legacy/bundled pair receives the same seed, while distinct replica
-    pairs use independent seeds. The mean decision therefore uses matched
-    block differences and a conservative normal-approximation confidence
-    bound: ``abs(delta) + z * SEM(delta) <= practical_margin``. The standard
-    deviation ratio is a separate guard against a bundled path that preserves
-    a mean but changes the ensemble fluctuations.
+    pairs use independent seeds. ``inference_unit='replica'`` first averages
+    post-warmup blocks within each run and estimates the mean-difference SEM
+    across independent replica pairs. ``inference_unit='block'`` retains the
+    lower-cost block-level inference used by non-matrix smoke cases. The
+    standard-deviation ratio remains a separate guard against a bundled path
+    that preserves a mean but changes the ensemble fluctuations.
     """
 
     if len(legacy_replicas) != len(bundled_replicas):
@@ -158,6 +160,8 @@ def compare_replicas(
         raise ValueError("equivalence margins must not be negative")
     if policy.maximum_std_ratio < 1.0:
         raise ValueError("maximum_std_ratio must be at least one")
+    if policy.inference_unit not in {"block", "replica"}:
+        raise ValueError("inference_unit must be block or replica")
 
     paired_blocks = [
         (
@@ -180,11 +184,30 @@ def compare_replicas(
     bundled_blocks = [block for _, blocks in paired_blocks for block in blocks]
     legacy = summarize(legacy_blocks)
     bundled = summarize(bundled_blocks)
-    paired_deltas = [
+    paired_block_deltas = [
         bundled_block - legacy_block
         for legacy_blocks, bundled_blocks in paired_blocks
         for legacy_block, bundled_block in zip(legacy_blocks, bundled_blocks)
     ]
+    if policy.inference_unit == "replica":
+        if len(paired_blocks) < 2:
+            raise ValueError(
+                "replica-level inference requires at least two replica pairs"
+            )
+        legacy_replica_means = [
+            statistics.fmean(blocks) for blocks, _ in paired_blocks
+        ]
+        bundled_replica_means = [
+            statistics.fmean(blocks) for _, blocks in paired_blocks
+        ]
+        paired_deltas = [
+            bundled_mean - legacy_mean
+            for legacy_mean, bundled_mean in zip(
+                legacy_replica_means, bundled_replica_means
+            )
+        ]
+    else:
+        paired_deltas = paired_block_deltas
     delta = statistics.fmean(paired_deltas)
     delta_sem = statistics.stdev(paired_deltas) / math.sqrt(len(paired_deltas))
     scale = max(
@@ -207,7 +230,7 @@ def compare_replicas(
         upper_p = 1.0 - normal_cdf((margin - delta) / delta_sem)
         equivalence_p_value = max(0.0, min(1.0, max(lower_p, upper_p)))
 
-    zero_scale = max(policy.absolute_margin, 1.0e-15)
+    zero_scale = 1.0e-15
     if legacy.std <= zero_scale and bundled.std <= zero_scale:
         std_ratio = 1.0
     elif min(legacy.std, bundled.std) <= zero_scale:
@@ -227,7 +250,10 @@ def compare_replicas(
     return {
         "legacy_block_count": legacy.block_count,
         "bundled_block_count": bundled.block_count,
-        "paired_block_count": len(paired_deltas),
+        "paired_block_count": len(paired_block_deltas),
+        "paired_replica_count": len(paired_blocks),
+        "inference_sample_count": len(paired_deltas),
+        "inference_unit": policy.inference_unit,
         "legacy_mean": legacy.mean,
         "bundled_mean": bundled.mean,
         "legacy_std": legacy.std,

@@ -31,6 +31,8 @@ from benchmarks.bundled_io.ab_contracts import (
     validated_passed_contract_levels,
 )
 from benchmarks.bundled_io.execution_matrix import (
+    MINIMUM_PRODUCTION_STATISTICAL_PAIRED_BLOCKS,
+    MINIMUM_PRODUCTION_STATISTICAL_REPLICAS,
     ProductionRun,
     evaluate_promotion_readiness,
     load_execution_matrix,
@@ -53,6 +55,8 @@ from benchmarks.bundled_io.promotion_evidence import (
 )
 from benchmarks.bundled_io.tests.test_bundled_io_ab_execution_matrix import (
     MATRIX_RUNTIME_CASES,
+    _matrix_h5_families,
+    _matrix_sample_plan,
     _runtime_keys,
 )
 from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
@@ -3201,6 +3205,17 @@ def test_rerun_overrides_remain_root_keys_before_module_tables():
     assert parsed["REAXFF"] == {"in_file": "reaxff.txt"}
 
 
+def _synthetic_matrix_sample_plan(scenario) -> dict[str, object]:
+    runtime_case = next(
+        case
+        for case in MATRIX_RUNTIME_CASES
+        if case.scenario_id == scenario.scenario_id
+    )
+    return _matrix_sample_plan(
+        runtime_case, profile="production", fast_mode=False
+    )
+
+
 def _ready_promotion_fixture():
     matrix = load_execution_matrix()
     contract_id = "runtime.synthetic_matrix"
@@ -3232,6 +3247,7 @@ def _ready_promotion_fixture():
                 "omp_num_threads": scenario.omp_threads,
                 "mpi_rank_count": scenario.mpi_ranks,
                 "rank0_output_owner": True,
+                "sample_plan": _synthetic_matrix_sample_plan(scenario),
             },
             "records": [
                 {
@@ -3358,6 +3374,43 @@ def test_execution_matrix_enumerates_every_required_axis_and_risk_pair():
                 scenario.scenario_id,
                 runtime_case.source_case_id,
             )
+
+
+def test_production_statistical_matrix_has_predeclared_power_floor():
+    statistical_cases = [
+        case for case in MATRIX_RUNTIME_CASES if case.statistical
+    ]
+    assert statistical_cases
+    for case in statistical_cases:
+        plan = _matrix_sample_plan(case, profile="production", fast_mode=False)
+        assert plan["step_limit"] == 10_000
+        assert plan["replica_count"] == MINIMUM_PRODUCTION_STATISTICAL_REPLICAS
+        assert plan["inference_unit"] == "replica"
+        assert plan["blocks_per_replica_lower_bound"] == 8
+        assert plan["paired_block_count_lower_bound"] == 384
+        assert plan["paired_block_count_lower_bound"] >= (
+            MINIMUM_PRODUCTION_STATISTICAL_PAIRED_BLOCKS
+        )
+
+        fast_plan = _matrix_sample_plan(
+            case, profile="production", fast_mode=True
+        )
+        assert fast_plan["paired_block_count_lower_bound"] < (
+            MINIMUM_PRODUCTION_STATISTICAL_PAIRED_BLOCKS
+        )
+
+    assert PROFILE_LIMITS["production"]["normal_relative_margin"] == 1.0e-2
+    assert PROFILE_LIMITS["production"]["normal_absolute_margin"] == 5.0e-2
+
+
+def test_statistical_matrix_compares_dynamic_h5_families_not_restart_snapshot():
+    statistical_cases = [
+        case for case in MATRIX_RUNTIME_CASES if case.statistical
+    ]
+
+    assert statistical_cases
+    for case in statistical_cases:
+        assert _matrix_h5_families(case) == {"trajectory", "observable"}
 
 
 def test_execution_matrix_fixture_hashes_are_reviewed_and_pinned():
@@ -3597,6 +3650,41 @@ def test_promotion_metadata_must_prove_feature_family_and_vds():
     assert decision.ready is False
     assert any(
         feature_scenario.scenario_id in blocker
+        and "does not prove environment" in blocker
+        for blocker in decision.blockers
+    )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        (
+            "replica_count",
+            MINIMUM_PRODUCTION_STATISTICAL_REPLICAS - 1,
+        ),
+        (
+            "paired_block_count_lower_bound",
+            MINIMUM_PRODUCTION_STATISTICAL_PAIRED_BLOCKS - 1,
+        ),
+        ("fast_mode", True),
+        ("inference_unit", "block"),
+    ],
+)
+def test_promotion_rejects_underpowered_statistical_matrix(field, value):
+    matrix, contracts, report, runs = _ready_promotion_fixture()
+    scenario = next(
+        item for item in matrix.scenarios if item.comparison == "statistical"
+    )
+    sample_plan = report["cases"][scenario.case_ids[0]]["metadata"][
+        "sample_plan"
+    ]
+    sample_plan[field] = value
+
+    decision = evaluate_promotion_readiness(matrix, contracts, report, runs)
+
+    assert decision.ready is False
+    assert any(
+        scenario.scenario_id in blocker
         and "does not prove environment" in blocker
         for blocker in decision.blockers
     )
@@ -3865,6 +3953,7 @@ def _promotion_artifacts(tmp_path: Path):
                 "omp_num_threads": scenario.omp_threads,
                 "mpi_rank_count": scenario.mpi_ranks,
                 "rank0_output_owner": True,
+                "sample_plan": _synthetic_matrix_sample_plan(scenario),
                 "performance": {
                     "runtime_ratio": 1.0 + index * 0.001,
                     "finalize_fraction": 0.1 + index * 0.001,
