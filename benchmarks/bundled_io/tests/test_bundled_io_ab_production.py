@@ -51,6 +51,11 @@ FIXTURE_ROOT = REPO_ROOT / "tests" / "h5_bundle" / "fixtures" / "input_matrix"
 XPONGE_DEV_ROOT = REPO_ROOT.parent / "XPONGE"
 SITS_FF19SB_CMAP_FIXTURE = "sits_ff19sb_cmap_peptide"
 FOCUSED_CORE_TOPOLOGY_FIXTURE = "focused_core_topology_two_atom"
+FOCUSED_BOND_FIXTURE = "focused_bond_two_atom"
+FOCUSED_ANGLE_FIXTURE = "focused_angle_three_atom"
+FOCUSED_UREY_BRADLEY_FIXTURE = "focused_urey_bradley_three_atom"
+FOCUSED_DIHEDRAL_FIXTURE = "focused_dihedral_four_atom"
+FOCUSED_LISTED_FIXTURE = "focused_listed_two_atom"
 FOCUSED_NB14_SCALED_FIXTURE = "focused_nb14_scaled_two_atom"
 FOCUSED_NB14_EXTRA_FIXTURE = "focused_nb14_extra_two_atom"
 FOCUSED_EDIP_FIXTURE = "focused_edip_two_atom"
@@ -278,6 +283,23 @@ INPUT_SEMANTIC_SPECS_BY_CASE = {
         InputSemanticSpec("input.topology.mass", ("temperature",), 1.0e-6),
         InputSemanticSpec("input.topology.charge", ("Coulomb",), 1.0e-6),
         InputSemanticSpec("input.topology.lj", ("LJ",), 1.0e-6),
+    ),
+    "normal_bond_payload_sensitivity": (
+        InputSemanticSpec("input.topology.bond", ("bond",), 1.0e-6),
+    ),
+    "normal_angle_payload_sensitivity": (
+        InputSemanticSpec("input.topology.angle", ("angle",), 1.0e-6),
+    ),
+    "normal_urey_bradley_payload_sensitivity": (
+        InputSemanticSpec(
+            "input.topology.urey_bradley", ("urey_bradley",), 1.0e-6
+        ),
+    ),
+    "normal_dihedral_payload_sensitivity": (
+        InputSemanticSpec("input.topology.dihedral", ("dihedral",), 1.0e-6),
+    ),
+    "normal_listed_payload_sensitivity": (
+        InputSemanticSpec("input.custom.listed", ("custom_bond",), 1.0e-6),
     ),
     "normal_nb14_scaled_nonzero": (
         InputSemanticSpec(
@@ -620,6 +642,104 @@ def _cases_for_profile() -> list[AbCase]:
                 "input.topology.charge",
                 "input.topology.lj",
             ),
+            assertion_ids=(
+                "mdout_deterministic_equivalence",
+                "input_semantic_equivalence",
+            ),
+            normal_step_limit=1,
+            normal_interval=1,
+            normal_dt=0.0,
+            input_behavior_only=True,
+        ),
+        AbCase(
+            name="normal_bond_payload_sensitivity",
+            fixture_case=FOCUSED_BOND_FIXTURE,
+            legacy_subdir="generated_legacy",
+            bundled_subdir="generated_bundled",
+            mode="normal",
+            vds=False,
+            statistical_md=False,
+            restart_load_policy="structural",
+            contract_ids=("output.legacy.mdout", "input.topology.bond"),
+            assertion_ids=(
+                "mdout_deterministic_equivalence",
+                "input_semantic_equivalence",
+            ),
+            normal_step_limit=1,
+            normal_interval=1,
+            normal_dt=0.0,
+            input_behavior_only=True,
+        ),
+        AbCase(
+            name="normal_angle_payload_sensitivity",
+            fixture_case=FOCUSED_ANGLE_FIXTURE,
+            legacy_subdir="generated_legacy",
+            bundled_subdir="generated_bundled",
+            mode="normal",
+            vds=False,
+            statistical_md=False,
+            restart_load_policy="structural",
+            contract_ids=("output.legacy.mdout", "input.topology.angle"),
+            assertion_ids=(
+                "mdout_deterministic_equivalence",
+                "input_semantic_equivalence",
+            ),
+            normal_step_limit=1,
+            normal_interval=1,
+            normal_dt=0.0,
+            input_behavior_only=True,
+        ),
+        AbCase(
+            name="normal_urey_bradley_payload_sensitivity",
+            fixture_case=FOCUSED_UREY_BRADLEY_FIXTURE,
+            legacy_subdir="generated_legacy",
+            bundled_subdir="generated_bundled",
+            mode="normal",
+            vds=False,
+            statistical_md=False,
+            restart_load_policy="structural",
+            contract_ids=(
+                "output.legacy.mdout",
+                "input.topology.urey_bradley",
+            ),
+            assertion_ids=(
+                "mdout_deterministic_equivalence",
+                "input_semantic_equivalence",
+            ),
+            normal_step_limit=1,
+            normal_interval=1,
+            normal_dt=0.0,
+            input_behavior_only=True,
+        ),
+        AbCase(
+            name="normal_dihedral_payload_sensitivity",
+            fixture_case=FOCUSED_DIHEDRAL_FIXTURE,
+            legacy_subdir="generated_legacy",
+            bundled_subdir="generated_bundled",
+            mode="normal",
+            vds=False,
+            statistical_md=False,
+            restart_load_policy="structural",
+            contract_ids=("output.legacy.mdout", "input.topology.dihedral"),
+            assertion_ids=(
+                "mdout_deterministic_equivalence",
+                "input_semantic_equivalence",
+            ),
+            normal_step_limit=1,
+            normal_interval=1,
+            normal_dt=0.0,
+            input_behavior_only=True,
+        ),
+        AbCase(
+            name="normal_listed_payload_sensitivity",
+            fixture_case=FOCUSED_LISTED_FIXTURE,
+            legacy_subdir="generated_legacy",
+            bundled_subdir="generated_bundled",
+            mode="normal",
+            vds=False,
+            statistical_md=False,
+            restart_load_policy="structural",
+            contract_ids=("output.legacy.mdout", "input.custom.listed"),
             assertion_ids=(
                 "mdout_deterministic_equivalence",
                 "input_semantic_equivalence",
@@ -5228,6 +5348,14 @@ def _prepare_case_pair(
     if case.mode in {"normal", "chunk_boundary"}:
         if case.fixture_case == FOCUSED_CORE_TOPOLOGY_FIXTURE:
             return _prepare_focused_core_topology_pair(case_root)
+        if case.fixture_case in {
+            FOCUSED_BOND_FIXTURE,
+            FOCUSED_ANGLE_FIXTURE,
+            FOCUSED_UREY_BRADLEY_FIXTURE,
+            FOCUSED_DIHEDRAL_FIXTURE,
+            FOCUSED_LISTED_FIXTURE,
+        }:
+            return _prepare_focused_bonded_pair(case.fixture_case, case_root)
         if case.fixture_case == FOCUSED_NB14_SCALED_FIXTURE:
             return _prepare_focused_nb14_pair(case_root, "nb14_in_file")
         if case.fixture_case == FOCUSED_NB14_EXTRA_FIXTURE:
@@ -5863,6 +5991,209 @@ def _prepare_sits_ff19sb_cmap_pair(
     _convert_legacy_case(legacy_source, converted_dir)
     shutil.copytree(converted_dir / "bundle", bundled_dir)
     return legacy_dir, bundled_dir
+
+
+FOCUSED_BONDED_MODULES = {
+    FOCUSED_BOND_FIXTURE: "bond",
+    FOCUSED_ANGLE_FIXTURE: "angle",
+    FOCUSED_UREY_BRADLEY_FIXTURE: "urey_bradley",
+    FOCUSED_DIHEDRAL_FIXTURE: "dihedral",
+    FOCUSED_LISTED_FIXTURE: "listed",
+}
+
+
+def _prepare_focused_bonded_pair(
+    fixture_case: str, case_root: Path
+) -> tuple[Path, Path]:
+    module = FOCUSED_BONDED_MODULES[fixture_case]
+    legacy_source = case_root / f"focused_{module}_source"
+    legacy_dir = case_root / "legacy"
+    converted_dir = case_root / f"converted_focused_{module}_bundle"
+    bundled_dir = case_root / "bundled"
+    for path in (legacy_source, legacy_dir, converted_dir, bundled_dir):
+        if path.exists():
+            shutil.rmtree(path)
+    _write_focused_bonded_input(legacy_source, module)
+    shutil.copytree(legacy_source, legacy_dir)
+    _convert_legacy_case(legacy_source, converted_dir)
+    shutil.copytree(converted_dir / "bundle", bundled_dir)
+
+    if module == "listed":
+        bundled_mdin = bundled_dir / "mdin.bundled.spg.toml"
+        bundled_mdin.write_text(
+            _remove_key_lines(
+                bundled_mdin.read_text(encoding="utf-8"),
+                {"listed_forces_in_file", "custom_bond_in_file"},
+            ).rstrip()
+            + "\n",
+            encoding="utf-8",
+        )
+
+    topology_path = bundled_dir / "topology.spgt.h5"
+    with h5py.File(topology_path, "r+") as topology:
+        sidecar_table = "/parameters/sponge/files/legacy_sidecars"
+        if sidecar_table in topology:
+            del topology[sidecar_table]
+    legacy_sidecars = bundled_dir / "legacy_sidecars"
+    if legacy_sidecars.exists():
+        shutil.rmtree(legacy_sidecars)
+    _validate_focused_bonded_routes(module, legacy_dir, bundled_dir)
+    return legacy_dir, bundled_dir
+
+
+def _write_focused_bonded_input(case_dir: Path, module: str) -> None:
+    coordinates = {
+        "bond": ((0.0, 0.0, 0.0), (2.0, 0.0, 0.0)),
+        "listed": ((0.0, 0.0, 0.0), (2.0, 0.0, 0.0)),
+        "angle": (
+            (1.0, 0.0, 0.0),
+            (0.0, 0.0, 0.0),
+            (0.0, 1.0, 0.0),
+        ),
+        "urey_bradley": (
+            (1.0, 0.0, 0.0),
+            (0.0, 0.0, 0.0),
+            (0.0, 1.0, 0.0),
+        ),
+        "dihedral": (
+            (0.0, 1.0, 0.0),
+            (0.0, 0.0, 0.0),
+            (1.0, 0.0, 0.0),
+            (1.0, 1.0, 1.0),
+        ),
+    }[module]
+    case_dir.mkdir(parents=True, exist_ok=True)
+    atom_count = len(coordinates)
+    (case_dir / "mass.txt").write_text(
+        f"{atom_count}\n" + "12.0\n" * atom_count, encoding="utf-8"
+    )
+    coordinate_lines = [f"{atom_count} 0.0"]
+    coordinate_lines.extend(" ".join(map(str, xyz)) for xyz in coordinates)
+    coordinate_lines.extend(("1000.0 1000.0 1000.0", "90.0 90.0 90.0"))
+    (case_dir / "coordinate.txt").write_text(
+        "\n".join(coordinate_lines) + "\n", encoding="utf-8"
+    )
+    (case_dir / "velocity.txt").write_text(
+        f"{atom_count}\n" + "0.0 0.0 0.0\n" * atom_count,
+        encoding="utf-8",
+    )
+
+    module_lines = []
+    if module == "bond":
+        (case_dir / "bond.txt").write_text(
+            "1\n0 1 10.0 1.5\n", encoding="utf-8"
+        )
+        module_lines.append('bond_in_file = "bond.txt"')
+    elif module == "angle":
+        (case_dir / "angle.txt").write_text(
+            "1\n0 1 2 2.0 0.5\n", encoding="utf-8"
+        )
+        module_lines.append('angle_in_file = "angle.txt"')
+    elif module == "urey_bradley":
+        (case_dir / "urey_bradley.txt").write_text(
+            "1\n0 1 2 0.0 1.5707963268 5.0 1.0\n", encoding="utf-8"
+        )
+        module_lines.append('urey_bradley_in_file = "urey_bradley.txt"')
+    elif module == "dihedral":
+        (case_dir / "dihedral.txt").write_text(
+            "1\n0 1 2 3 1 2.0 0.0\n", encoding="utf-8"
+        )
+        module_lines.append('dihedral_in_file = "dihedral.txt"')
+    elif module == "listed":
+        (case_dir / "listed_forces.txt").write_text(
+            "[[[ custom_bond ]]]\n"
+            "[[ potential ]]\n"
+            "E = k * (r_ab - r0) * (r_ab - r0);\n"
+            "[[ parameters ]]\n"
+            "int atom_a, int atom_b, float k, float r0\n"
+            "[[ connected_atoms ]]\n"
+            "ab\n"
+            "[[ constrain_distance ]]\n"
+            "r0\n"
+            "[[ end ]]\n",
+            encoding="utf-8",
+        )
+        (case_dir / "custom_bond.txt").write_text(
+            "1\n0 1 7.0 1.5\n", encoding="utf-8"
+        )
+        module_lines.extend(
+            (
+                'listed_forces_in_file = "listed_forces.txt"',
+                'custom_bond_in_file = "custom_bond.txt"',
+            )
+        )
+    else:
+        raise AssertionError(f"unknown focused bonded module: {module}")
+
+    mdin_lines = [
+        f'md_name = "bundled io ab focused {module}"',
+        'mode = "nve"',
+        "pbc = false",
+        "step_limit = 1",
+        "dt = 0.0",
+        "cutoff = 8.0",
+        'mass_in_file = "mass.txt"',
+        'coordinate_in_file = "coordinate.txt"',
+        'velocity_in_file = "velocity.txt"',
+        *module_lines,
+        "force_whole_output = true",
+        "print_zeroth_frame = 0",
+        "write_mdout_interval = 1",
+        "write_information_interval = 1",
+    ]
+    (case_dir / "mdin.spg.toml").write_text(
+        "\n".join(mdin_lines) + "\n", encoding="utf-8"
+    )
+
+
+def _validate_focused_bonded_routes(
+    module: str, legacy_dir: Path, bundled_dir: Path
+) -> None:
+    legacy_keys = {
+        "bond": ("bond_in_file",),
+        "angle": ("angle_in_file",),
+        "urey_bradley": ("urey_bradley_in_file",),
+        "dihedral": ("dihedral_in_file",),
+        "listed": ("listed_forces_in_file", "custom_bond_in_file"),
+    }[module]
+    legacy_mdin = (legacy_dir / "mdin.spg.toml").read_text(encoding="utf-8")
+    bundled_mdin = (bundled_dir / "mdin.bundled.spg.toml").read_text(
+        encoding="utf-8"
+    )
+    for key in legacy_keys:
+        if not _has_key_line(legacy_mdin, key):
+            raise AssertionError(
+                f"focused {module} legacy route is missing {key}"
+            )
+        if _has_key_line(bundled_mdin, key):
+            raise AssertionError(
+                f"focused {module} bundled route retained {key}"
+            )
+    if (bundled_dir / "legacy_sidecars").exists():
+        raise AssertionError(f"focused {module} bundle retained sidecars")
+
+    root = (
+        "/forcefield/custom_force/listed"
+        if module == "listed"
+        else f"/forcefield/{module}"
+    )
+    topology_path = bundled_dir / "topology.spgt.h5"
+    paths = _h5_paths(topology_path)
+    required = {root, f"{root}/count"}
+    if module == "listed":
+        required.update(
+            {
+                f"{root}/potential",
+                f"{root}/data/custom_bond/parameter/value",
+            }
+        )
+    else:
+        required.add(f"{root}/atoms")
+    missing = sorted(required - paths)
+    if missing:
+        raise AssertionError(
+            f"focused {module} typed topology is incomplete: {missing}"
+        )
 
 
 def _prepare_focused_core_topology_pair(
@@ -10894,6 +11225,12 @@ def _compare_input_semantics(
                         case, run, spec.contract_id
                     )
                 )
+            elif case.fixture_case in FOCUSED_BONDED_MODULES:
+                replica_result["oracle"] = (
+                    _compare_focused_bonded_payload_sensitivity(
+                        case, run, spec.contract_id
+                    )
+                )
             elif spec.contract_id in {
                 "input.manybody.tersoff",
                 "input.manybody.tersoff.sidecar",
@@ -12873,6 +13210,216 @@ def _compare_focused_core_topology_sensitivity(
     }
     shutil.rmtree(control_dir)
     return result
+
+
+FOCUSED_BONDED_ORACLES = {
+    "input.topology.bond": {
+        "module": "bond",
+        "observable": "bond",
+        "mutation_paths": ("/forcefield/bond/k",),
+        "expected_energy": 2.5,
+        "expected_force": (10.0, 0.0, 0.0, -10.0, 0.0, 0.0),
+    },
+    "input.topology.angle": {
+        "module": "angle",
+        "observable": "angle",
+        "mutation_paths": ("/forcefield/angle/k",),
+        "expected_energy": 2.0 * (math.pi / 2.0 - 0.5) ** 2,
+        "expected_force": (
+            0.0,
+            4.0 * (math.pi / 2.0 - 0.5),
+            0.0,
+            -4.0 * (math.pi / 2.0 - 0.5),
+            -4.0 * (math.pi / 2.0 - 0.5),
+            0.0,
+            4.0 * (math.pi / 2.0 - 0.5),
+            0.0,
+            0.0,
+        ),
+    },
+    "input.topology.urey_bradley": {
+        "module": "urey_bradley",
+        "observable": "urey_bradley",
+        "mutation_paths": ("/forcefield/urey_bradley/bond_k",),
+        "expected_energy": 5.0 * (math.sqrt(2.0) - 1.0) ** 2,
+        "expected_force": (
+            -5.0 * (2.0 - math.sqrt(2.0)),
+            5.0 * (2.0 - math.sqrt(2.0)),
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            5.0 * (2.0 - math.sqrt(2.0)),
+            -5.0 * (2.0 - math.sqrt(2.0)),
+            0.0,
+        ),
+    },
+    "input.topology.dihedral": {
+        "module": "dihedral",
+        "observable": "dihedral",
+        "mutation_paths": ("/forcefield/dihedral/k",),
+        "expected_energy": 2.0 * (1.0 + 1.0 / math.sqrt(2.0)),
+        "expected_force": (
+            0.0,
+            0.0,
+            -math.sqrt(2.0),
+            0.0,
+            0.0,
+            math.sqrt(2.0),
+            0.0,
+            1.0 / math.sqrt(2.0),
+            -1.0 / math.sqrt(2.0),
+            0.0,
+            -1.0 / math.sqrt(2.0),
+            1.0 / math.sqrt(2.0),
+        ),
+    },
+    "input.custom.listed": {
+        "module": "listed",
+        "observable": "custom_bond",
+        "mutation_paths": (
+            "/forcefield/custom_force/listed/data/custom_bond/parameter/value",
+            "/forcefield/custom_force/listed/data/custom_bond/parameter/float_value",
+        ),
+        "expected_energy": 1.75,
+        "expected_force": (7.0, 0.0, 0.0, -7.0, 0.0, 0.0),
+    },
+}
+
+
+def _compare_focused_bonded_payload_sensitivity(
+    case: AbCase, run: AbRun, contract_id: str
+) -> dict[str, object]:
+    if contract_id not in FOCUSED_BONDED_ORACLES:
+        raise AssertionError(
+            f"{case.name} has no bonded oracle for {contract_id}"
+        )
+    oracle = FOCUSED_BONDED_ORACLES[contract_id]
+    expected_module = FOCUSED_BONDED_MODULES[case.fixture_case]
+    if oracle["module"] != expected_module:
+        raise AssertionError(
+            f"{case.name} fixture/oracle mismatch: "
+            f"{expected_module} != {oracle['module']}"
+        )
+    observable = str(oracle["observable"])
+    branch_results = {}
+    branch_forces = {}
+    for branch, directory in (
+        ("legacy", run.legacy_dir),
+        ("bundled", run.bundled_dir),
+    ):
+        rows = _read_mdout(directory / "mdout.txt")["rows"]
+        if len(rows) != 1:
+            raise AssertionError(f"{case.name} {branch} expected one mdout row")
+        energy = rows[0].get(observable, math.nan)
+        if not math.isfinite(energy) or abs(energy) <= 1.0e-8:
+            raise AssertionError(
+                f"{case.name} {branch} has trivial {observable} energy"
+            )
+        force = _read_native_float32_file(directory / "output" / "legacy.frc")
+        _require_finite_values(case, f"{branch} {observable} force", force)
+        expected_force = oracle["expected_force"]
+        if expected_force is not None:
+            _assert_numeric_sequences_close(
+                f"{case.name} {branch} precomputed force oracle",
+                expected_force,
+                force,
+                relative_tolerance=1.0e-5,
+                absolute_tolerance=1.0e-5,
+            )
+        if not math.isclose(
+            energy,
+            float(oracle["expected_energy"]),
+            rel_tol=0.0,
+            abs_tol=5.1e-3,
+        ):
+            raise AssertionError(
+                f"{case.name} {branch} energy oracle mismatch: {energy}"
+            )
+        branch_results[branch] = {"energy": energy, "force": force}
+        branch_forces[branch] = force
+
+    _assert_numeric_sequences_close(
+        f"{case.name} bonded energy",
+        [branch_results["legacy"]["energy"]],
+        [branch_results["bundled"]["energy"]],
+        relative_tolerance=1.0e-5,
+        absolute_tolerance=1.0e-6,
+    )
+    force_equivalence = _assert_nontrivial_equivalent_forces(
+        f"{case.name} bonded force",
+        branch_forces["legacy"],
+        branch_forces["bundled"],
+    )
+
+    control_dir = run.bundled_dir.parent / f"bundled_{expected_module}_k_zero"
+    if control_dir.exists():
+        shutil.rmtree(control_dir)
+    shutil.copytree(run.bundled_dir, control_dir)
+    output_dir = control_dir / "output"
+    if output_dir.exists():
+        shutil.rmtree(output_dir)
+    output_dir.mkdir(parents=True)
+    for file_name in ("mdout.txt", "mdinfo.txt", "run.stdout", "run.stderr"):
+        path = control_dir / file_name
+        if path.exists():
+            path.unlink()
+
+    with h5py.File(control_dir / "topology.spgt.h5", "r+") as topology:
+        for dataset_path in oracle["mutation_paths"]:
+            if dataset_path not in topology:
+                raise AssertionError(
+                    f"{case.name} control is missing {dataset_path}"
+                )
+            dataset = topology[dataset_path]
+            if expected_module == "listed":
+                dataset[0, 2] = 0.0
+            else:
+                dataset[0] = 0.0
+    outcome = _run_sponge_process(control_dir, _mdin_name(control_dir))
+    if outcome.returncode != 0:
+        raise AssertionError(
+            f"{case.name} zero-k control failed with {outcome.returncode}\n"
+            f"{outcome.stdout}\n{outcome.stderr}"
+        )
+    control_rows = _read_mdout(control_dir / "mdout.txt")["rows"]
+    if len(control_rows) != 1:
+        raise AssertionError(f"{case.name} zero-k control expected one row")
+    control_energy = control_rows[0].get(observable, math.nan)
+    control_force = _read_native_float32_file(
+        control_dir / "output" / "legacy.frc"
+    )
+    _require_finite_values(case, "zero-k control force", control_force)
+    if not math.isfinite(control_energy) or abs(control_energy) > 1.0e-6:
+        raise AssertionError(
+            f"{case.name} zero-k control retained energy {control_energy}"
+        )
+    if max(abs(value) for value in control_force) > 1.0e-5:
+        raise AssertionError(f"{case.name} zero-k control retained force")
+    maximum_force_delta = max(
+        abs(left - right)
+        for left, right in zip(
+            branch_forces["bundled"], control_force, strict=True
+        )
+    )
+    shutil.rmtree(control_dir)
+    return {
+        "method": "isolated_typed_payload_with_k_zero_mutation",
+        "module": expected_module,
+        "observable": observable,
+        "typed_mutation_paths": list(oracle["mutation_paths"]),
+        "expected_energy": oracle["expected_energy"],
+        "expected_force": oracle["expected_force"],
+        "branches": branch_results,
+        "force_equivalence": force_equivalence,
+        "control": {
+            "energy": control_energy,
+            "maximum_force_magnitude": max(
+                abs(value) for value in control_force
+            ),
+            "maximum_force_delta": maximum_force_delta,
+        },
+    }
 
 
 def _assert_core_topology_payload_response(

@@ -530,7 +530,7 @@
       "minimum_evidence": "E3",
       "legacy_surface": "bond_in_file",
       "bundled_surface": "/forcefield/bond",
-      "case_ids": ["rerun_full_contract_pure_vds_off", "rerun_full_contract_pure_vds_on", "rerun_full_contract_sidecar_vds_off", "rerun_full_contract_sidecar_vds_on"],
+      "case_ids": ["normal_bond_payload_sensitivity", "rerun_full_contract_pure_vds_off", "rerun_full_contract_pure_vds_on", "rerun_full_contract_sidecar_vds_off", "rerun_full_contract_sidecar_vds_on"],
       "assertion_ids": ["input_semantic_equivalence"]
     },
     {
@@ -541,7 +541,7 @@
       "minimum_evidence": "E3",
       "legacy_surface": "angle_in_file",
       "bundled_surface": "/forcefield/angle",
-      "case_ids": ["rerun_full_contract_pure_vds_off", "rerun_full_contract_pure_vds_on", "rerun_full_contract_sidecar_vds_off", "rerun_full_contract_sidecar_vds_on"],
+      "case_ids": ["normal_angle_payload_sensitivity", "rerun_full_contract_pure_vds_off", "rerun_full_contract_pure_vds_on", "rerun_full_contract_sidecar_vds_off", "rerun_full_contract_sidecar_vds_on"],
       "assertion_ids": ["input_semantic_equivalence"]
     },
     {
@@ -552,7 +552,7 @@
       "minimum_evidence": "E3",
       "legacy_surface": "urey_bradley_in_file",
       "bundled_surface": "/forcefield/urey_bradley",
-      "case_ids": ["rerun_full_contract_pure_vds_off", "rerun_full_contract_pure_vds_on", "rerun_full_contract_sidecar_vds_off", "rerun_full_contract_sidecar_vds_on"],
+      "case_ids": ["normal_urey_bradley_payload_sensitivity", "rerun_full_contract_pure_vds_off", "rerun_full_contract_pure_vds_on", "rerun_full_contract_sidecar_vds_off", "rerun_full_contract_sidecar_vds_on"],
       "assertion_ids": ["input_semantic_equivalence"]
     },
     {
@@ -563,7 +563,7 @@
       "minimum_evidence": "E3",
       "legacy_surface": "dihedral_in_file",
       "bundled_surface": "/forcefield/dihedral",
-      "case_ids": ["rerun_full_contract_pure_vds_off", "rerun_full_contract_pure_vds_on", "rerun_full_contract_sidecar_vds_off", "rerun_full_contract_sidecar_vds_on"],
+      "case_ids": ["normal_dihedral_payload_sensitivity", "rerun_full_contract_pure_vds_off", "rerun_full_contract_pure_vds_on", "rerun_full_contract_sidecar_vds_off", "rerun_full_contract_sidecar_vds_on"],
       "assertion_ids": ["input_semantic_equivalence"]
     },
     {
@@ -574,7 +574,7 @@
       "minimum_evidence": "E3",
       "legacy_surface": "listed_forces_in_file and payload",
       "bundled_surface": "/forcefield/custom_force/listed",
-      "case_ids": ["rerun_full_contract_pure_vds_off", "rerun_full_contract_pure_vds_on", "rerun_full_contract_sidecar_vds_off", "rerun_full_contract_sidecar_vds_on"],
+      "case_ids": ["normal_listed_payload_sensitivity", "rerun_full_contract_pure_vds_off", "rerun_full_contract_pure_vds_on", "rerun_full_contract_sidecar_vds_off", "rerun_full_contract_sidecar_vds_on"],
       "assertion_ids": ["input_semantic_equivalence"]
     },
     {

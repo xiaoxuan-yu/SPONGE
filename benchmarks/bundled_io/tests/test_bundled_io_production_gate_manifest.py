@@ -308,6 +308,11 @@ def test_ab_production_harness_has_executable_contract_coverage():
         "normal_structural_restart_continuation",
         "normal_core_h5_output",
         "normal_core_topology_payload_sensitivity",
+        "normal_bond_payload_sensitivity",
+        "normal_angle_payload_sensitivity",
+        "normal_urey_bradley_payload_sensitivity",
+        "normal_dihedral_payload_sensitivity",
+        "normal_listed_payload_sensitivity",
         "normal_nb14_scaled_nonzero",
         "normal_nb14_extra_nonzero",
         "normal_nhc_dynamic_restart_continuation",
@@ -538,6 +543,31 @@ def test_pressure_barostat_restart_has_an_independent_e4_continuation_case():
     assert contract.case_ids == (case.name,)
     assert contract.assertion_ids == case.assertion_ids
     assert contract.reason == ""
+
+
+def test_bonded_and_listed_contracts_have_independent_payload_cases():
+    contracts = load_contract_registry()
+    cases = {case.name: case for case in _cases_for_profile()}
+    expected = {
+        "input.topology.bond": "normal_bond_payload_sensitivity",
+        "input.topology.angle": "normal_angle_payload_sensitivity",
+        "input.topology.urey_bradley": (
+            "normal_urey_bradley_payload_sensitivity"
+        ),
+        "input.topology.dihedral": "normal_dihedral_payload_sensitivity",
+        "input.custom.listed": "normal_listed_payload_sensitivity",
+    }
+    for contract_id, case_name in expected.items():
+        case = cases[case_name]
+        contract = contracts[contract_id]
+        assert case.mode == "normal"
+        assert case.statistical_md is False
+        assert case.normal_step_limit == 1
+        assert case.normal_dt == 0.0
+        assert contract_id in case.contract_ids
+        assert case_name in contract.case_ids
+        assert contract.minimum_evidence == "E3"
+        assert "input_semantic_equivalence" in contract.assertion_ids
 
 
 def test_meta_protocol_full_restart_uses_one_checkpoint_and_e4_continuation():
