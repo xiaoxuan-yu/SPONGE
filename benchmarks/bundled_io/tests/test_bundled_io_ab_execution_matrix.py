@@ -7,11 +7,12 @@ import shutil
 import statistics
 import subprocess
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import pytest
 
+from benchmarks.bundled_io.ab_contracts import load_contract_registry
 from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
     EVIDENCE_RUN_ID,
     OBSERVABLE_REL,
@@ -22,6 +23,7 @@ from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
     TRAJECTORY_REL,
     AbCase,
     AbRun,
+    _cases_for_profile,
     _collect_metrics,
     _compare_h5_outputs_deterministically,
     _compare_h5_outputs_statistically,
@@ -30,8 +32,11 @@ from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
     _insert_root_toml_keys,
     _mdin_name,
     _output_root,
+    _prepare_case_pair,
+    _prepare_mdin,
     _remove_key_lines,
     _reset_xponge_coordinate_start_time,
+    _run_meta_protocol_full_restart_case,
     _run_sponge,
     _sponge_executable,
 )
@@ -65,6 +70,9 @@ class MatrixRuntimeCase:
     mpi_ranks: int
     comparison: str
     tier: str
+    feature_family: str = "core"
+    vds: bool = False
+    source_case_id: str | None = None
 
     @property
     def statistical(self) -> bool:
@@ -80,10 +88,12 @@ class MatrixRuntimeCase:
             "omp_threads": self.omp_threads,
             "mpi_ranks": self.mpi_ranks,
             "comparison": self.comparison,
+            "feature_family": self.feature_family,
+            "vds": self.vds,
         }
 
 
-MATRIX_RUNTIME_CASES = (
+CORE_MATRIX_RUNTIME_CASES = (
     MatrixRuntimeCase(
         scenario_id="nve_unconstrained_cpu_omp1_rank1",
         ensemble="nve",
@@ -243,6 +253,123 @@ MATRIX_RUNTIME_CASES = (
 )
 
 
+def _feature_runtime_case(
+    scenario_id: str,
+    feature_family: str,
+    source_case_id: str,
+    *,
+    mpi_ranks: int = 1,
+    vds: bool = False,
+    constraint: str = "unconstrained",
+    tier: str = "medium",
+    ensemble: str = "nve",
+    thermostat: str = "none",
+    comparison: str = "deterministic",
+) -> MatrixRuntimeCase:
+    return MatrixRuntimeCase(
+        scenario_id=scenario_id,
+        ensemble=ensemble,
+        thermostat=thermostat,
+        barostat="none",
+        box_geometry="orthogonal",
+        constraint=constraint,
+        backend="cpu",
+        omp_threads=1,
+        mpi_ranks=mpi_ranks,
+        comparison=comparison,
+        tier=tier,
+        feature_family=feature_family,
+        vds=vds,
+        source_case_id=source_case_id,
+    )
+
+
+MATRIX_RUNTIME_CASES = (
+    *CORE_MATRIX_RUNTIME_CASES,
+    _feature_runtime_case(
+        "feature_edip_cpu_omp1_rank1", "manybody", "normal_edip_nonzero"
+    ),
+    _feature_runtime_case(
+        "feature_reaxff_cpu_omp1_rank1",
+        "manybody",
+        "normal_reaxff_payload_sensitivity",
+    ),
+    _feature_runtime_case(
+        "feature_qc_cpu_omp1_rank1",
+        "qc",
+        "rerun_qc_type_typed_unrestricted_vds_off",
+        ensemble="rerun",
+    ),
+    _feature_runtime_case(
+        "feature_sits_cpu_omp1_rank1_vds",
+        "sits",
+        "normal_sits_typed_configuration_nonzero",
+        vds=True,
+    ),
+    _feature_runtime_case(
+        "feature_metadynamics_cpu_omp1_rank1",
+        "metadynamics",
+        "normal_meta_protocol_full_restart_continuation",
+        tier="production",
+    ),
+    _feature_runtime_case(
+        "feature_positional_restraint_cpu_omp1_rank1",
+        "positional_restraint",
+        "normal_positional_restraint_typed_nonzero",
+    ),
+    _feature_runtime_case(
+        "feature_cv_restraint_cpu_omp1_rank1",
+        "cv_restraint",
+        "normal_cv_restraint_typed_nonzero",
+    ),
+    _feature_runtime_case(
+        "feature_soft_wall_cpu_omp1_rank1",
+        "soft_wall",
+        "normal_soft_wall_typed_nonzero",
+    ),
+    _feature_runtime_case(
+        "feature_virtual_atom_cpu_omp1_rank1",
+        "virtual_atom",
+        "normal_virtual_atoms_all_types",
+    ),
+    _feature_runtime_case(
+        "feature_constraint_cpu_omp1_rank1",
+        "constraint",
+        "normal_constraint_typed_projection",
+        constraint="custom",
+    ),
+    _feature_runtime_case(
+        "feature_edip_cpu_omp1_rank2",
+        "manybody",
+        "normal_edip_nonzero",
+        mpi_ranks=2,
+        tier="production",
+    ),
+    _feature_runtime_case(
+        "feature_sits_cpu_omp1_rank2",
+        "sits",
+        "normal_sits_ff19sb_cmap_peptide",
+        mpi_ranks=2,
+        tier="production",
+    ),
+    _feature_runtime_case(
+        "feature_virtual_atom_cpu_omp1_rank2",
+        "virtual_atom",
+        "normal_virtual_atoms_pbc_boundary",
+        mpi_ranks=2,
+        tier="production",
+    ),
+    _feature_runtime_case(
+        "feature_constraint_cpu_omp1_rank2",
+        "constraint",
+        "normal_constraint_sidecar_projection",
+        mpi_ranks=2,
+        constraint="custom",
+        tier="production",
+    ),
+)
+
+
 @pytest.mark.parametrize(
     "matrix_case", MATRIX_RUNTIME_CASES, ids=lambda case: case.scenario_id
 )
@@ -264,27 +391,50 @@ def test_legacy_and_bundled_execution_matrix_behavior(
             f"{matrix_case.backend}, got {configured_backend!r}"
         )
     monkeypatch.setenv("OMP_NUM_THREADS", str(matrix_case.omp_threads))
+    ab_case = _as_ab_case(matrix_case)
+    if matrix_case.feature_family == "metadynamics":
+        _run_metadynamics_matrix_case(matrix_case, ab_case)
+        return
     case_root = _output_root() / "execution_matrix" / matrix_case.scenario_id
     runs = []
     for replica_index in range(_replica_count(matrix_case)):
         seed = 20260709 + replica_index * 104729
         replica_root = case_root / f"replica_{replica_index:02d}"
-        legacy_dir, bundled_dir = _prepare_pair(matrix_case, replica_root)
-        _prepare_runtime_mdin(matrix_case, legacy_dir, "mdin.spg.toml", seed)
-        _prepare_runtime_mdin(
-            matrix_case,
-            bundled_dir,
-            "mdin.bundled.spg.toml",
-            seed,
-        )
+        if matrix_case.source_case_id is None:
+            legacy_dir, bundled_dir = _prepare_pair(matrix_case, replica_root)
+            _prepare_runtime_mdin(matrix_case, legacy_dir, "mdin.spg.toml", seed)
+            _prepare_runtime_mdin(
+                matrix_case,
+                bundled_dir,
+                "mdin.bundled.spg.toml",
+                seed,
+            )
+        else:
+            legacy_dir, bundled_dir = _prepare_case_pair(
+                ab_case, replica_root, seed
+            )
+            _prepare_mdin(
+                legacy_dir,
+                "mdin.spg.toml",
+                ab_case,
+                branch="legacy",
+                replica_seed=seed,
+            )
+            _prepare_mdin(
+                bundled_dir,
+                "mdin.bundled.spg.toml",
+                ab_case,
+                branch="bundled",
+                replica_seed=seed,
+            )
         legacy_metrics = _run_matrix_sponge(
             matrix_case, legacy_dir, _mdin_name(legacy_dir)
         )
         bundled_metrics = _run_matrix_sponge(
             matrix_case, bundled_dir, _mdin_name(bundled_dir)
         )
-        _assert_rank0_output_ownership(matrix_case, legacy_dir)
-        _assert_rank0_output_ownership(matrix_case, bundled_dir)
+        _assert_rank0_output_ownership(matrix_case, ab_case, legacy_dir)
+        _assert_rank0_output_ownership(matrix_case, ab_case, bundled_dir)
         runs.append(
             AbRun(
                 replica_index=replica_index,
@@ -298,13 +448,20 @@ def test_legacy_and_bundled_execution_matrix_behavior(
             )
         )
 
-    ab_case = _as_ab_case(matrix_case)
     if matrix_case.statistical:
         mdout = _compare_mdout_statistically(ab_case, runs)
-        h5 = _compare_h5_outputs_statistically(ab_case, runs)
+        h5 = _compare_h5_outputs_statistically(
+            ab_case,
+            runs,
+            families=_matrix_h5_families(matrix_case),
+        )
     else:
         mdout = _compare_mdout_deterministically(ab_case, runs[0])
-        h5 = _compare_h5_outputs_deterministically(ab_case, runs[0])
+        h5 = _compare_h5_outputs_deterministically(
+            ab_case,
+            runs[0],
+            families=_matrix_h5_families(matrix_case),
+        )
 
     artifact_bytes = _directory_bytes(case_root)
     quota = int(
@@ -327,6 +484,47 @@ def test_legacy_and_bundled_execution_matrix_behavior(
     )
     if os.environ.get("SPONGE_BUNDLED_IO_AB_RETAIN_SUCCESS") != "1":
         shutil.rmtree(case_root)
+
+
+def _run_metadynamics_matrix_case(
+    matrix_case: MatrixRuntimeCase, ab_case: AbCase
+) -> None:
+    if matrix_case.mpi_ranks != 1 or matrix_case.backend != "cpu":
+        raise AssertionError(
+            "the metadynamics feature scenario is a CPU rank-1 continuation"
+        )
+    _run_meta_protocol_full_restart_case(ab_case, load_contract_registry())
+    case_root = _output_root() / ab_case.name
+    metrics_path = case_root / "ab_metrics.json"
+    metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
+    continuation = metrics["continuation_metrics"]
+    legacy = continuation["legacy"]
+    full = continuation["full"]
+    performance = {
+        "runtime_ratio": float(full["elapsed_s"])
+        / max(float(legacy["elapsed_s"]), 1.0e-12),
+        "finalize_fraction": float(full["flush_finalize_elapsed_s"])
+        / max(float(full["elapsed_s"]), 1.0e-12),
+        "output_bytes_ratio": float(full["h5_files_total_bytes"])
+        / max(float(legacy["h5_files_total_bytes"]), 1.0),
+    }
+    _record_matrix_evidence(
+        matrix_case,
+        mdout={"method": "metadynamics_protocol_full_e4_continuation"},
+        h5={"restart_protocol_full": {}},
+        performance=performance,
+        artifact_bytes=_directory_bytes(case_root),
+    )
+
+
+def _matrix_h5_families(
+    matrix_case: MatrixRuntimeCase,
+) -> set[str] | None:
+    if matrix_case.source_case_id is None:
+        return None
+    if matrix_case.feature_family == "sits" and matrix_case.mpi_ranks == 2:
+        return {"observable"}
+    return {"trajectory", "observable"}
 
 
 def _selected(case: MatrixRuntimeCase) -> bool:
@@ -391,7 +589,7 @@ def _run_matrix_sponge(
 
 
 def _assert_rank0_output_ownership(
-    case: MatrixRuntimeCase, case_dir: Path
+    case: MatrixRuntimeCase, ab_case: AbCase, case_dir: Path
 ) -> None:
     stdout = (case_dir / "run.stdout").read_text(encoding="utf-8")
     finalize_reports = stdout.count("H5 I/O finalize timing:")
@@ -400,12 +598,13 @@ def _assert_rank0_output_ownership(
             f"{case.scenario_id} expected one rank-0 H5 finalize report, "
             f"got {finalize_reports}"
         )
-    required = (
+    required = [
         case_dir / "mdout.txt",
         case_dir / TRAJECTORY_REL,
         case_dir / OBSERVABLE_REL,
-        case_dir / RESTART_REL,
-    )
+    ]
+    if ab_case.mode == "normal":
+        required.append(case_dir / RESTART_REL)
     missing = [str(path) for path in required if not path.exists()]
     if missing:
         raise AssertionError(
@@ -606,13 +805,35 @@ def _runtime_key_names() -> set[str]:
 
 
 def _as_ab_case(case: MatrixRuntimeCase) -> AbCase:
+    if case.source_case_id is not None:
+        source = next(
+            item
+            for item in _cases_for_profile()
+            if item.name == case.source_case_id
+        )
+        source = replace(source, vds=case.vds)
+        if (
+            case.feature_family == "sits"
+            and source.name == "normal_sits_ff19sb_cmap_peptide"
+        ):
+            source = replace(
+                source,
+                restart_load_policy="structural",
+                statistical_md=False,
+                normal_step_limit=3,
+                normal_interval=1,
+                normal_dt=1.0e-5,
+            )
+        if case.feature_family == "qc":
+            return replace(source, rerun_force_output=False)
+        return source
     return AbCase(
         name=case.scenario_id,
         fixture_case="tip3p_validation_generated",
         legacy_subdir="generated_legacy",
         bundled_subdir="generated_bundled",
         mode="normal",
-        vds=False,
+        vds=case.vds,
         statistical_md=case.statistical,
         restart_load_policy="structural",
         contract_ids=(),
@@ -670,6 +891,7 @@ def _record_matrix_evidence(
             "mpi_rank_count": case.mpi_ranks,
             "rank0_output_owner": True,
             "profile": PROFILE,
+            "source_case_id": case.source_case_id or case.scenario_id,
             "performance": performance,
             "artifact_bytes": artifact_bytes,
         },
@@ -681,6 +903,8 @@ def _record_matrix_evidence(
                 "details": {
                     "mdout_method": mdout["method"],
                     "h5_families": sorted(h5),
+                    "feature_family": case.feature_family,
+                    "vds": case.vds,
                 },
             }
         ],

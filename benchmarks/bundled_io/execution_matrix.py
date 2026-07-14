@@ -25,6 +25,8 @@ REQUIRED_AXIS_NAMES = {
     "omp_threads",
     "mpi_ranks",
     "comparison",
+    "feature_family",
+    "vds",
 }
 VALID_PROMOTION_STATES = {"shadow", "candidate", "promoted"}
 VALID_SCENARIO_STATUSES = {
@@ -35,6 +37,23 @@ VALID_SCENARIO_STATUSES = {
 }
 VALID_TIERS = {"medium", "production"}
 EVIDENCE_RANK = {"E0": 0, "E1": 1, "E2": 2, "E3": 3, "E4": 4}
+REQUIRED_FEATURE_FAMILIES = {
+    "manybody",
+    "qc",
+    "sits",
+    "metadynamics",
+    "positional_restraint",
+    "cv_restraint",
+    "soft_wall",
+    "virtual_atom",
+    "constraint",
+}
+REQUIRED_RANK2_FEATURE_FAMILIES = {
+    "manybody",
+    "sits",
+    "virtual_atom",
+    "constraint",
+}
 
 
 @dataclass(frozen=True)
@@ -56,6 +75,8 @@ class ExecutionScenario:
     omp_threads: int
     mpi_ranks: int
     comparison: str
+    feature_family: str
+    vds: bool
     tier: str
     status: str
     case_ids: tuple[str, ...]
@@ -71,6 +92,8 @@ class ExecutionScenario:
             "omp_threads": self.omp_threads,
             "mpi_ranks": self.mpi_ranks,
             "comparison": self.comparison,
+            "feature_family": self.feature_family,
+            "vds": self.vds,
         }
 
 
@@ -252,6 +275,38 @@ def validate_execution_matrix(
             raise AssertionError(
                 f"required execution combination has no scenario: {dict(combination)}"
             )
+    required_feature_combinations = {
+        tuple(
+            sorted(
+                {
+                    "backend": "cpu",
+                    "mpi_ranks": 1,
+                    "feature_family": feature_family,
+                }.items()
+            )
+        )
+        for feature_family in REQUIRED_FEATURE_FAMILIES
+    }
+    required_feature_combinations.update(
+        tuple(
+            sorted(
+                {
+                    "backend": "cpu",
+                    "mpi_ranks": 2,
+                    "feature_family": feature_family,
+                }.items()
+            )
+        )
+        for feature_family in REQUIRED_RANK2_FEATURE_FAMILIES
+    )
+    missing_feature_combinations = sorted(
+        required_feature_combinations - canonical_combinations, key=str
+    )
+    if missing_feature_combinations:
+        raise AssertionError(
+            "execution matrix is missing required feature/environment "
+            f"combinations: {missing_feature_combinations}"
+        )
 
 
 def load_production_run_history(path: Path) -> tuple[ProductionRun, ...]:
@@ -382,6 +437,8 @@ def _parse_scenario(raw: object, index: int) -> ExecutionScenario:
         omp_threads=_required_int(raw, "omp_threads", label, minimum=1),
         mpi_ranks=_required_int(raw, "mpi_ranks", label, minimum=1),
         comparison=_required_string(raw, "comparison", label),
+        feature_family=_required_string(raw, "feature_family", label),
+        vds=_required_bool(raw, "vds", label),
         tier=_required_string(raw, "tier", label),
         status=_required_string(raw, "status", label),
         case_ids=tuple(case_ids),
@@ -442,6 +499,8 @@ def _case_proves_scenario(
         "constraint": scenario.constraint,
         "backend": scenario.backend,
         "comparison": scenario.comparison,
+        "feature_family": scenario.feature_family,
+        "vds": scenario.vds,
     }
     if any(metadata.get(name) != value for name, value in expected.items()):
         return False
@@ -547,6 +606,15 @@ def _required_string(payload: Mapping[str, object], key: str, label: str) -> str
     value = payload.get(key)
     if not isinstance(value, str) or not value:
         raise AssertionError(f"{label} requires non-empty string {key}")
+    return value
+
+
+def _required_bool(
+    payload: Mapping[str, object], key: str, label: str
+) -> bool:
+    value = payload.get(key)
+    if not isinstance(value, bool):
+        raise AssertionError(f"{label} requires boolean {key}")
     return value
 
 

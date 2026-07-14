@@ -3197,21 +3197,43 @@ def test_execution_matrix_enumerates_every_required_axis_and_risk_pair():
         "omp_threads",
         "mpi_ranks",
         "comparison",
+        "feature_family",
+        "vds",
     }
     assert matrix.required_consecutive_production_runs == 3
     assert matrix.promotion_state == "shadow"
+    assert set(matrix.required_axes["feature_family"]) == {
+        "core",
+        "manybody",
+        "qc",
+        "sits",
+        "metadynamics",
+        "positional_restraint",
+        "cv_restraint",
+        "soft_wall",
+        "virtual_atom",
+        "constraint",
+    }
+    assert set(matrix.required_axes["vds"]) == {False, True}
     executable = [
         scenario
         for scenario in matrix.scenarios
         if scenario.status == "executable"
     ]
-    assert len(executable) == 12
+    assert len(executable) == 26
     for scenario in executable:
-        assert scenario.case_ids == (scenario.scenario_id,)
+        assert scenario.case_ids[0] == scenario.scenario_id
         runtime_case = runtime_cases[scenario.scenario_id]
         assert scenario.axis_values() == runtime_case.axis_values()
         assert scenario.barostat == runtime_case.barostat
         assert scenario.tier == runtime_case.tier
+        if runtime_case.source_case_id is None:
+            assert scenario.case_ids == (scenario.scenario_id,)
+        else:
+            assert scenario.case_ids == (
+                scenario.scenario_id,
+                runtime_case.source_case_id,
+            )
 
 
 def test_execution_matrix_fixture_hashes_are_reviewed_and_pinned():
@@ -3340,6 +3362,24 @@ def test_execution_matrix_rejects_removed_axis_and_unmapped_combination():
             )
         )
 
+    without_rank2_manybody = tuple(
+        combination
+        for combination in matrix.required_combinations
+        if combination
+        != {
+            "backend": "cpu",
+            "mpi_ranks": 2,
+            "feature_family": "manybody",
+        }
+    )
+    with pytest.raises(AssertionError, match="missing required feature"):
+        validate_execution_matrix(
+            replace(
+                matrix,
+                required_combinations=without_rank2_manybody,
+            )
+        )
+
     unknown_case = replace(
         matrix.scenarios[0], case_ids=("missing_executable_case",)
     )
@@ -3413,6 +3453,27 @@ def test_promotion_requires_environment_metadata_for_every_scenario():
     assert decision.ready is False
     assert any(
         first.scenario_id in blocker and "does not prove environment" in blocker
+        for blocker in decision.blockers
+    )
+
+
+def test_promotion_metadata_must_prove_feature_family_and_vds():
+    matrix, contracts, report, runs = _ready_promotion_fixture()
+    feature_scenario = next(
+        scenario
+        for scenario in matrix.scenarios
+        if scenario.feature_family != "core"
+    )
+    case_payload = report["cases"][feature_scenario.case_ids[0]]
+    case_payload["metadata"]["feature_family"] = "core"
+    case_payload["metadata"]["vds"] = not feature_scenario.vds
+
+    decision = evaluate_promotion_readiness(matrix, contracts, report, runs)
+
+    assert decision.ready is False
+    assert any(
+        feature_scenario.scenario_id in blocker
+        and "does not prove environment" in blocker
         for blocker in decision.blockers
     )
 
@@ -3669,9 +3730,9 @@ def test_production_run_is_derived_from_complete_hashed_evidence(tmp_path):
     assert run.run_id == PROMOTION_RUN_ID
     assert run.passed is True
     assert run.comparator_mutations_rejected is True
-    assert run.runtime_ratio == pytest.approx(1.011)
-    assert run.finalize_fraction == pytest.approx(0.111)
-    assert run.output_bytes_ratio == pytest.approx(1.011)
+    assert run.runtime_ratio == pytest.approx(1.025)
+    assert run.finalize_fraction == pytest.approx(0.125)
+    assert run.output_bytes_ratio == pytest.approx(1.025)
     assert provenance["source_commit"] == PROMOTION_SOURCE_COMMIT
     assert provenance["source_tree_state"] == "clean"
     assert all(

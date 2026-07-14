@@ -11817,13 +11817,19 @@ def _scan_success_outputs(case_dir: Path) -> dict[str, object]:
             and path.suffix in {".crd", ".vel", ".frc", ".box"}
         )
     for path in numeric_sidecars:
-        if path.suffix == ".box":
-            values = [
-                float(token)
-                for token in path.read_text(encoding="utf-8").split()
-            ]
+        payload = path.read_bytes()
+        text_payload = None
+        try:
+            candidate = payload.decode("ascii")
+            if re.fullmatch(r"[\s0-9eE+.\-]*", candidate):
+                text_payload = candidate
+        except UnicodeDecodeError:
+            pass
+        if path.suffix == ".box" or text_payload is not None:
+            if text_payload is None:
+                text_payload = payload.decode("utf-8")
+            values = [float(token) for token in text_payload.split()]
         else:
-            payload = path.read_bytes()
             if len(payload) % 4 != 0:
                 raise AssertionError(
                     f"normal-success binary output is not float32-aligned: {path}"
@@ -18690,7 +18696,9 @@ def _validate_observable_output(
 
 
 def _compare_h5_outputs_deterministically(
-    case: AbCase, run: AbRun
+    case: AbCase,
+    run: AbRun,
+    families: set[str] | None = None,
 ) -> dict[str, object]:
     if case.mode == "rerun":
         return _compare_rerun_h5_output(case, run)
@@ -18698,6 +18706,13 @@ def _compare_h5_outputs_deterministically(
     compared: dict[str, object] = {}
     legacy_files = _output_h5_files(case, run.legacy_dir)
     bundled_files = _output_h5_files(case, run.bundled_dir)
+    if families is not None:
+        legacy_files = {
+            name: path for name, path in legacy_files.items() if name in families
+        }
+        bundled_files = {
+            name: path for name, path in bundled_files.items() if name in families
+        }
     if set(legacy_files) != set(bundled_files):
         raise AssertionError(
             f"{case.name} H5 output families differ: legacy={sorted(legacy_files)}, "
@@ -19396,9 +19411,13 @@ def _rerun_bootstrap_box_values(run: AbRun, box_width: int) -> list[float]:
 
 
 def _compare_h5_outputs_statistically(
-    case: AbCase, runs: Sequence[AbRun]
+    case: AbCase,
+    runs: Sequence[AbRun],
+    families: set[str] | None = None,
 ) -> dict[str, object]:
     expected_families = set(_output_h5_files(case, runs[0].legacy_dir))
+    if families is not None:
+        expected_families.intersection_update(families)
     summaries: dict[str, object] = {}
     for name in sorted(expected_families):
         baseline_datasets: set[str] | None = None
