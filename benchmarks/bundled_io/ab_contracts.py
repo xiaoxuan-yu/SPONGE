@@ -28,7 +28,7 @@ VALID_EVIDENCE_LEVELS = set(EVIDENCE_RANK) | {"F1"}
 DYNAMIC_RESTART_CONTRACT_STATUSES = {
     "input.restart.dynamic.integrator_state": "supported",
     "input.restart.dynamic.nose_hoover_chain": "supported",
-    "input.restart.dynamic.bussi_thermostat": "deferred",
+    "input.restart.dynamic.bussi_thermostat": "supported",
     "input.restart.dynamic.pressure_based_barostat": "deferred",
     "input.restart.dynamic.middle_langevin_rng": "unsupported",
     "input.restart.dynamic.andersen_rng": "unsupported",

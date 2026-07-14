@@ -311,6 +311,7 @@ def test_ab_production_harness_has_executable_contract_coverage():
         "normal_nb14_scaled_nonzero",
         "normal_nb14_extra_nonzero",
         "normal_nhc_dynamic_restart_continuation",
+        "normal_bussi_dynamic_restart_continuation",
         "normal_meta_protocol_full_restart_continuation",
         "normal_sits_ff19sb_cmap_peptide",
         "normal_edip_nonzero",
@@ -480,10 +481,7 @@ def test_nhc_dynamic_restart_uses_one_checkpoint_and_e4_continuation():
         == "E4"
     )
 
-    deferred = {
-        "input.restart.dynamic.bussi_thermostat",
-        "input.restart.dynamic.pressure_based_barostat",
-    }
+    deferred = {"input.restart.dynamic.pressure_based_barostat"}
     unsupported = {
         "input.restart.dynamic.middle_langevin_rng",
         "input.restart.dynamic.andersen_rng",
@@ -503,6 +501,27 @@ def test_nhc_dynamic_restart_uses_one_checkpoint_and_e4_continuation():
         assert contract.case_ids == ()
         assert contract.assertion_ids == ()
         assert contract.reason
+
+
+def test_bussi_dynamic_restart_has_an_independent_e4_continuation_case():
+    contracts = load_contract_registry()
+    case = next(
+        case
+        for case in _cases_for_profile()
+        if case.name == "normal_bussi_dynamic_restart_continuation"
+    )
+    contract = contracts["input.restart.dynamic.bussi_thermostat"]
+
+    assert case.mode == "bussi_continuation"
+    assert case.restart_load_policy == "dynamic"
+    assert case.statistical_md is False
+    assert case.contract_ids == (contract.contract_id,)
+    assert case.assertion_ids == ("restart_bussi_continuation_equivalence",)
+    assert contract.status == "supported"
+    assert contract.minimum_evidence == "E4"
+    assert contract.case_ids == (case.name,)
+    assert contract.assertion_ids == case.assertion_ids
+    assert contract.reason == ""
 
 
 def test_meta_protocol_full_restart_uses_one_checkpoint_and_e4_continuation():

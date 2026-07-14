@@ -100,15 +100,26 @@ inline bool BUSSI_THERMOSTAT_INFORMATION::Apply_H5_Restart_State(
         return false;
     }
     const auto module_floats = state.thermostat_float_states.find(module);
-    if (module_floats != state.thermostat_float_states.end())
+    if (module_floats == state.thermostat_float_states.end())
     {
-        const auto lambda_state = module_floats->second.find("lambda");
-        if (lambda_state != module_floats->second.end() &&
-            lambda_state->second.size() == 1)
+        if (error_message != nullptr)
         {
-            lambda = lambda_state->second[0];
+            *error_message = "Bussi thermostat restart state is missing lambda";
         }
+        return false;
     }
+    const auto lambda_state = module_floats->second.find("lambda");
+    if (lambda_state == module_floats->second.end() ||
+        lambda_state->second.size() != 1)
+    {
+        if (error_message != nullptr)
+        {
+            *error_message =
+                "Bussi thermostat restart state is missing a scalar lambda";
+        }
+        return false;
+    }
+    lambda = lambda_state->second[0];
     return true;
 }
 

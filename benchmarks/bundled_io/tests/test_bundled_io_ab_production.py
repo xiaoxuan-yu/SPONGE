@@ -243,6 +243,11 @@ RESTART_COMPARE_DATASETS = (
 
 NHC_RESTART_DATASET = "/parameters/restart/thermostat/nose_hoover_chain"
 NHC_OBSERVABLE_ROOT = "/observables/all/thermostat/nose_hoover_chain"
+BUSSI_RNG_DATASET = "/parameters/restart/rng_state/bussi_thermostat"
+BUSSI_LAMBDA_DATASET = "/parameters/restart/thermostat/bussi_thermostat/lambda"
+BUSSI_CONTINUATION_TOLERANCES = {
+    "/particles/all/velocity/value": (1.0e-5, 1.5e-4),
+}
 META_RESTART_ROOT = "/parameters/restart/bias/meta/meta"
 META_OBSERVABLE_ROOT = "/observables/all/metadynamics"
 
@@ -674,6 +679,18 @@ def _cases_for_profile() -> list[AbCase]:
                 "output.restart.dynamic_continuation",
             ),
             assertion_ids=("restart_dynamic_continuation_equivalence",),
+        ),
+        AbCase(
+            name="normal_bussi_dynamic_restart_continuation",
+            fixture_case="tip3p_validation_generated",
+            legacy_subdir="generated_legacy",
+            bundled_subdir="generated_bundled",
+            mode="bussi_continuation",
+            vds=False,
+            statistical_md=False,
+            restart_load_policy="dynamic",
+            contract_ids=("input.restart.dynamic.bussi_thermostat",),
+            assertion_ids=("restart_bussi_continuation_equivalence",),
         ),
         AbCase(
             name="normal_meta_protocol_full_restart_continuation",
@@ -2345,6 +2362,9 @@ def test_legacy_and_bundled_ab_behavior(case: AbCase):
     if case.mode == "structural_continuation":
         _run_structural_restart_case(case, contracts)
         return
+    if case.mode == "bussi_continuation":
+        _run_bussi_dynamic_restart_case(case, contracts)
+        return
     if case.mode == "dynamic_continuation":
         _run_nhc_dynamic_restart_case(case, contracts)
         return
@@ -2654,6 +2674,568 @@ def _run_structural_restart_case(case: AbCase, contracts) -> None:
         EVIDENCE_RUN_ID,
     )
     print(f"\nBundled I/O A/B structural restart metrics: {metrics_path}")
+
+
+def _write_bussi_mdin(
+    case_dir: Path,
+    *,
+    input_route: str,
+    step_limit: int,
+    thermostat_seed: int,
+) -> None:
+    if input_route == "legacy":
+        input_lines = [
+            'default_in_file_prefix = "tip3p"',
+            'velocity_in_file = "initial_velocity.txt"',
+        ]
+    elif input_route == "bundled_initial":
+        input_lines = [
+            'input_h5_topology_path = "topology.spgt.h5"',
+            'input_h5_protocol_path = "protocol.spgp.h5"',
+            'input_h5_restart_path = "restart.spgr.h5"',
+            'input_h5_restart_load = "structural"',
+        ]
+    elif input_route == "bundled_dynamic":
+        input_lines = [
+            'input_h5_topology_path = "topology.spgt.h5"',
+            'input_h5_protocol_path = "protocol.spgp.h5"',
+            'input_h5_restart_path = "output/producer.spgr.h5"',
+            'input_h5_restart_load = "dynamic"',
+        ]
+    else:
+        raise AssertionError(f"unknown Bussi input route: {input_route}")
+
+    lines = [
+        f'md_name = "bundled io ab Bussi {input_route}"',
+        'mode = "nvt"',
+        f"step_limit = {step_limit}",
+        "dt = 0.001",
+        "cutoff = 8.0",
+        *input_lines,
+        'thermostat = "bussi_thermostat"',
+        'thermostat_mode = "bussi_thermostat"',
+        f"thermostat_seed = {thermostat_seed}",
+        "thermostat_tau = 0.1",
+        "target_temperature = 300.0",
+        "print_zeroth_frame = 1",
+        "write_mdout_interval = 1",
+        "write_information_interval = 1",
+        "write_trajectory_interval = 1",
+        "write_restart_file_interval = 1",
+        'mdout = "mdout.txt"',
+        'mdinfo = "mdinfo.txt"',
+        'crd = "output/legacy.crd"',
+        'box = "output/legacy.box"',
+        'vel = "output/legacy.vel"',
+        'frc = "output/legacy.frc"',
+        'rst = "output/legacy_restart"',
+        f'output_h5_trajectory_path = "{TRAJECTORY_REL.as_posix()}"',
+        "output_h5_trajectory_vds = false",
+        "output_h5_trajectory_chunk_size = 4",
+        f'output_h5_observable_path = "{OBSERVABLE_REL.as_posix()}"',
+        f'output_h5_restart_path = "{RESTART_REL.as_posix()}"',
+    ]
+    (case_dir / "output").mkdir(parents=True, exist_ok=True)
+    (case_dir / "mdin.spg.toml").write_text(
+        "\n".join(lines) + "\n", encoding="utf-8"
+    )
+
+
+def _read_bussi_restart_state(path: Path) -> dict[str, object]:
+    rng = _h5_string_values(path, BUSSI_RNG_DATASET)
+    lambda_values = _h5_numeric_values(path, BUSSI_LAMBDA_DATASET)
+    steps = _h5_numeric_values(path, "/particles/all/step")
+    times = _h5_numeric_values(path, "/particles/all/time")
+    if (
+        len(rng) != 1
+        or not rng[0].strip()
+        or len(lambda_values) != 1
+        or len(steps) != 1
+        or len(times) != 1
+        or not all(
+            math.isfinite(value) for value in (*lambda_values, *steps, *times)
+        )
+    ):
+        raise AssertionError(f"invalid Bussi restart state: {path}")
+    return {
+        "rng": rng[0],
+        "lambda": lambda_values[0],
+        "step": int(steps[0]),
+        "time": times[0],
+        "sha256": _sha256_file(path),
+    }
+
+
+def _require_finite_values(
+    case: AbCase, label: str, values: Sequence[float]
+) -> None:
+    if not values or not all(math.isfinite(value) for value in values):
+        raise AssertionError(f"{case.name} {label} is empty or non-finite")
+
+
+def _compare_h5_frame_subset(
+    case: AbCase,
+    label: str,
+    reference_path: Path,
+    candidate_path: Path,
+    datasets: Sequence[str],
+    *,
+    time_dataset: str,
+    tolerance_overrides: dict[str, tuple[float, float]] | None = None,
+) -> dict[str, object]:
+    reference_times = _h5_numeric_values(reference_path, time_dataset)
+    candidate_times = _h5_numeric_values(candidate_path, time_dataset)
+    reference_indices = []
+    for candidate_time in candidate_times:
+        matches = [
+            index
+            for index, reference_time in enumerate(reference_times)
+            if math.isclose(
+                reference_time, candidate_time, rel_tol=0.0, abs_tol=1.0e-12
+            )
+        ]
+        if len(matches) != 1:
+            raise AssertionError(
+                f"{case.name} {label} time {candidate_time} has "
+                f"{len(matches)} reference matches"
+            )
+        reference_indices.append(matches[0])
+
+    compared = []
+    with h5py.File(reference_path, "r") as reference_h5:
+        for dataset in datasets:
+            if dataset not in reference_h5:
+                raise AssertionError(
+                    f"{case.name} {label} reference is missing {dataset}"
+                )
+            reference_values = reference_h5[dataset][reference_indices]
+            candidate_values = _h5_numeric_values(candidate_path, dataset)
+            flattened_reference = [
+                float(value) for value in reference_values.reshape(-1)
+            ]
+            _require_finite_values(
+                case, f"{label} reference {dataset}", flattened_reference
+            )
+            _require_finite_values(
+                case, f"{label} candidate {dataset}", candidate_values
+            )
+            if dataset.endswith("/step"):
+                reference_origin = flattened_reference[0]
+                candidate_origin = candidate_values[0]
+                flattened_reference = [
+                    value - reference_origin for value in flattened_reference
+                ]
+                candidate_values = [
+                    value - candidate_origin for value in candidate_values
+                ]
+            relative_tolerance, absolute_tolerance = (
+                tolerance_overrides or {}
+            ).get(dataset, _deterministic_tolerance(dataset))
+            _assert_numeric_sequences_close(
+                f"{case.name} {label} {dataset}",
+                flattened_reference,
+                candidate_values,
+                relative_tolerance=relative_tolerance,
+                absolute_tolerance=absolute_tolerance,
+            )
+            compared.append(dataset)
+    return {
+        "reference_indices": reference_indices,
+        "times": candidate_times,
+        "datasets": compared,
+        "step_comparison": "relative_to_branch_start",
+    }
+
+
+def _compare_bussi_mdout_suffix(
+    case: AbCase, reference_dir: Path, continuation_dir: Path
+) -> dict[str, object]:
+    reference = _read_mdout(reference_dir / "mdout.txt")
+    continuation = _read_mdout(continuation_dir / "mdout.txt")
+    columns = _require_matching_mdout_columns(
+        reference, continuation, f"{case.name} Bussi continuation"
+    )
+    continuation_rows = continuation["rows"]
+    reference_rows = reference["rows"][-len(continuation_rows) :]
+    for column in columns:
+        reference_values = [row[column] for row in reference_rows]
+        continuation_values = [row[column] for row in continuation_rows]
+        _require_finite_values(
+            case, f"Bussi mdout reference suffix {column}", reference_values
+        )
+        _require_finite_values(
+            case, f"Bussi mdout continuation {column}", continuation_values
+        )
+        if column == "step":
+            reference_origin = reference_values[0]
+            continuation_origin = continuation_values[0]
+            reference_values = [
+                value - reference_origin for value in reference_values
+            ]
+            continuation_values = [
+                value - continuation_origin for value in continuation_values
+            ]
+        relative_tolerance, absolute_tolerance = _deterministic_tolerance(
+            column
+        )
+        _assert_numeric_sequences_close(
+            f"{case.name} Bussi mdout suffix {column}",
+            reference_values,
+            continuation_values,
+            relative_tolerance=relative_tolerance,
+            absolute_tolerance=absolute_tolerance,
+        )
+    return {
+        "rows": len(continuation_rows),
+        "columns": columns,
+        "step_comparison": "relative_to_branch_start",
+    }
+
+
+def _prepare_bussi_continuation(
+    source_dir: Path,
+    destination: Path,
+    checkpoint: Path,
+    *,
+    thermostat_seed: int,
+) -> str:
+    if destination.exists():
+        shutil.rmtree(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(source_dir, destination)
+    for relative_path in (TRAJECTORY_REL, OBSERVABLE_REL, RESTART_REL):
+        output = destination / relative_path
+        if output.exists():
+            output.unlink()
+    producer_copy = destination / "output/producer.spgr.h5"
+    shutil.copy2(checkpoint, producer_copy)
+    checkpoint_sha256 = _sha256_file(checkpoint)
+    if _sha256_file(producer_copy) != checkpoint_sha256:
+        raise AssertionError("Bussi producer checkpoint changed while copied")
+    _write_bussi_mdin(
+        destination,
+        input_route="bundled_dynamic",
+        step_limit=2,
+        thermostat_seed=thermostat_seed,
+    )
+    return checkpoint_sha256
+
+
+def _run_bussi_mutation_controls(
+    case: AbCase,
+    bundled_producer_dir: Path,
+    checkpoint: Path,
+    expected_restart: Path,
+    mutation_root: Path,
+) -> dict[str, object]:
+    outcomes = {}
+    for mutation, diagnostic in (
+        ("corrupt_rng", "Failed to parse Bussi thermostat RNG state"),
+        ("missing_lambda", "Bussi thermostat restart state is missing"),
+    ):
+        destination = mutation_root / mutation
+        _prepare_bussi_continuation(
+            bundled_producer_dir,
+            destination,
+            checkpoint,
+            thermostat_seed=13579,
+        )
+        producer_copy = destination / "output/producer.spgr.h5"
+        with h5py.File(producer_copy, "r+") as restart:
+            if mutation == "corrupt_rng":
+                _replace_h5_string_dataset(
+                    restart, BUSSI_RNG_DATASET, "invalid_rng_state"
+                )
+            else:
+                del restart[BUSSI_LAMBDA_DATASET]
+        outcome = _run_sponge_process(destination, "mdin.spg.toml")
+        if outcome.returncode == 0 or diagnostic not in (
+            outcome.stdout + outcome.stderr
+        ):
+            raise AssertionError(
+                f"{case.name} {mutation} was not rejected with {diagnostic!r}"
+            )
+        outcomes[mutation] = {
+            "exit_code": outcome.returncode,
+            "diagnostic": diagnostic,
+        }
+
+    alternate = mutation_root / "alternate_rng"
+    _prepare_bussi_continuation(
+        bundled_producer_dir,
+        alternate,
+        checkpoint,
+        thermostat_seed=13579,
+    )
+    with h5py.File(alternate / "output/producer.spgr.h5", "r+") as restart:
+        _replace_h5_string_dataset(restart, BUSSI_RNG_DATASET, "1")
+    _run_sponge(alternate, "mdin.spg.toml")
+    expected_state = _read_bussi_restart_state(expected_restart)
+    alternate_state = _read_bussi_restart_state(alternate / RESTART_REL)
+    expected_velocity = _h5_numeric_values(
+        expected_restart, "/particles/all/velocity/value"
+    )
+    alternate_velocity = _h5_numeric_values(
+        alternate / RESTART_REL, "/particles/all/velocity/value"
+    )
+    if len(expected_velocity) != len(alternate_velocity):
+        raise AssertionError(
+            f"{case.name} alternate Bussi RNG velocity shape changed"
+        )
+    maximum_velocity_delta = max(
+        abs(left - right)
+        for left, right in zip(expected_velocity, alternate_velocity)
+    )
+    if (
+        alternate_state["rng"] == expected_state["rng"]
+        or maximum_velocity_delta <= 1.0e-5
+    ):
+        raise AssertionError(
+            f"{case.name} alternate valid Bussi RNG state was not observable"
+        )
+    outcomes["alternate_rng"] = {
+        "exit_code": 0,
+        "final_rng_differs": True,
+        "maximum_velocity_delta": maximum_velocity_delta,
+    }
+    return outcomes
+
+
+def _run_bussi_dynamic_restart_case(case: AbCase, contracts) -> None:
+    case_root = _output_root() / case.name
+    setup_root = case_root / "setup"
+    legacy_template, bundled_producer_dir = _prepare_normal_tip3p_pair(
+        setup_root, 20260714
+    )
+    reference_dir = case_root / "reference"
+    legacy_checkpoint_dir = case_root / "legacy_checkpoint"
+    for destination in (reference_dir, legacy_checkpoint_dir):
+        if destination.exists():
+            shutil.rmtree(destination)
+        shutil.copytree(legacy_template, destination)
+
+    _write_bussi_mdin(
+        reference_dir,
+        input_route="legacy",
+        step_limit=8,
+        thermostat_seed=20260714,
+    )
+    _write_bussi_mdin(
+        legacy_checkpoint_dir,
+        input_route="legacy",
+        step_limit=6,
+        thermostat_seed=20260714,
+    )
+    _write_bussi_mdin(
+        bundled_producer_dir,
+        input_route="bundled_initial",
+        step_limit=6,
+        thermostat_seed=20260714,
+    )
+    producer_metrics = {
+        "reference": _run_sponge(reference_dir, "mdin.spg.toml"),
+        "legacy_checkpoint": _run_sponge(
+            legacy_checkpoint_dir, "mdin.spg.toml"
+        ),
+        "bundled_checkpoint": _run_sponge(
+            bundled_producer_dir, "mdin.spg.toml"
+        ),
+    }
+
+    particle_datasets = (
+        "/particles/all/step",
+        "/particles/all/time",
+        "/particles/all/position/value",
+        "/particles/all/velocity/value",
+        "/particles/all/force/value",
+        "/particles/all/box/edges/value",
+    )
+    prefix = {
+        "legacy_reference": _compare_h5_frame_subset(
+            case,
+            "legacy reference/checkpoint prefix",
+            reference_dir / TRAJECTORY_REL,
+            legacy_checkpoint_dir / TRAJECTORY_REL,
+            particle_datasets,
+            time_dataset="/particles/all/time",
+        ),
+        "bundled_producer": _compare_h5_frame_subset(
+            case,
+            "legacy/bundled checkpoint prefix",
+            legacy_checkpoint_dir / TRAJECTORY_REL,
+            bundled_producer_dir / TRAJECTORY_REL,
+            particle_datasets,
+            time_dataset="/particles/all/time",
+        ),
+    }
+    checkpoint_states = {
+        "legacy": _read_bussi_restart_state(
+            legacy_checkpoint_dir / RESTART_REL
+        ),
+        "bundled": _read_bussi_restart_state(
+            bundled_producer_dir / RESTART_REL
+        ),
+    }
+    if (
+        checkpoint_states["legacy"]["rng"]
+        != checkpoint_states["bundled"]["rng"]
+    ):
+        raise AssertionError(f"{case.name} checkpoint Bussi RNG state differs")
+    _assert_numeric_sequences_close(
+        f"{case.name} checkpoint Bussi lambda",
+        [checkpoint_states["legacy"]["lambda"]],
+        [checkpoint_states["bundled"]["lambda"]],
+        relative_tolerance=1.0e-6,
+        absolute_tolerance=1.0e-7,
+    )
+
+    continuation_dir = case_root / "continuation"
+    checkpoint = bundled_producer_dir / RESTART_REL
+    checkpoint_sha256 = _prepare_bussi_continuation(
+        bundled_producer_dir,
+        continuation_dir,
+        checkpoint,
+        thermostat_seed=13579,
+    )
+    continuation_metrics = _run_sponge(continuation_dir, "mdin.spg.toml")
+    mdout = _compare_bussi_mdout_suffix(case, reference_dir, continuation_dir)
+    suffix = _compare_h5_frame_subset(
+        case,
+        "continuous/restarted suffix",
+        reference_dir / TRAJECTORY_REL,
+        continuation_dir / TRAJECTORY_REL,
+        particle_datasets,
+        time_dataset="/particles/all/time",
+        tolerance_overrides=BUSSI_CONTINUATION_TOLERANCES,
+    )
+    payload_summary = {}
+    for quantity in ("velocity", "force"):
+        values = _h5_numeric_values(
+            continuation_dir / TRAJECTORY_REL,
+            f"/particles/all/{quantity}/value",
+        )
+        _require_finite_values(case, f"continuation {quantity}", values)
+        maximum_magnitude = max(abs(value) for value in values)
+        required_nonzero = quantity == "velocity"
+        if required_nonzero and maximum_magnitude <= 1.0e-6:
+            raise AssertionError(
+                f"{case.name} continuation {quantity} is trivial"
+            )
+        payload_summary[quantity] = {
+            "maximum_magnitude": maximum_magnitude,
+            "required_nonzero": required_nonzero,
+        }
+    final_states = {
+        "reference": _read_bussi_restart_state(reference_dir / RESTART_REL),
+        "continuation": _read_bussi_restart_state(
+            continuation_dir / RESTART_REL
+        ),
+    }
+    if final_states["reference"]["rng"] != final_states["continuation"]["rng"]:
+        raise AssertionError(f"{case.name} final Bussi RNG state differs")
+    _assert_numeric_sequences_close(
+        f"{case.name} final Bussi lambda",
+        [final_states["reference"]["lambda"]],
+        [final_states["continuation"]["lambda"]],
+        relative_tolerance=1.0e-6,
+        absolute_tolerance=1.0e-7,
+    )
+    reference_step_delta = (
+        final_states["reference"]["step"] - checkpoint_states["bundled"]["step"]
+    )
+    continuation_step_count = final_states["continuation"]["step"] + 1
+    if reference_step_delta != continuation_step_count:
+        raise AssertionError(
+            f"{case.name} continuation step-count mismatch: "
+            f"reference={reference_step_delta}, "
+            f"continuation={continuation_step_count}"
+        )
+    for dataset in (
+        "/particles/all/time",
+        "/particles/all/position/value",
+        "/particles/all/velocity/value",
+        "/particles/all/box/edges/value",
+    ):
+        reference_values = _h5_numeric_values(
+            reference_dir / RESTART_REL, dataset
+        )
+        continuation_values = _h5_numeric_values(
+            continuation_dir / RESTART_REL, dataset
+        )
+        relative_tolerance, absolute_tolerance = (
+            BUSSI_CONTINUATION_TOLERANCES.get(
+                dataset, _deterministic_tolerance(dataset)
+            )
+        )
+        _assert_numeric_sequences_close(
+            f"{case.name} final restart {dataset}",
+            reference_values,
+            continuation_values,
+            relative_tolerance=relative_tolerance,
+            absolute_tolerance=absolute_tolerance,
+        )
+
+    mutations = _run_bussi_mutation_controls(
+        case,
+        bundled_producer_dir,
+        checkpoint,
+        continuation_dir / RESTART_REL,
+        case_root / "mutations",
+    )
+    assertion = AssertionEvidence(
+        assertion_id="restart_bussi_continuation_equivalence",
+        evidence_level="E4",
+        details={
+            "method": "continuous_reference_vs_bundled_checkpoint_restart",
+            "producer_branch": "bundled",
+            "checkpoint_sha256": checkpoint_sha256,
+            "checkpoint_states": checkpoint_states,
+            "prefix": prefix,
+            "mdout": mdout,
+            "suffix": suffix,
+            "payload_summary": payload_summary,
+            "final_states": final_states,
+            "step_progression": {
+                "comparison": "completed_steps_after_checkpoint",
+                "reference": reference_step_delta,
+                "continuation": continuation_step_count,
+            },
+            "continuation_tolerances": BUSSI_CONTINUATION_TOLERANCES,
+            "thermostat_seed_overridden_by_restart": {
+                "producer": 20260714,
+                "continuation_mdin": 13579,
+            },
+            "mutations": mutations,
+        },
+    )
+    evidence = build_case_evidence(contracts, case, (assertion,))
+    metrics = {
+        "profile": PROFILE,
+        "case": case.name,
+        "contract_ids": list(case.contract_ids),
+        "assertion_ids": list(case.assertion_ids),
+        "evidence": [record.as_dict() for record in evidence],
+        "producer_metrics": producer_metrics,
+        "continuation_metrics": continuation_metrics,
+        "comparison": assertion.details,
+    }
+    metrics_path = case_root / "ab_metrics.json"
+    metrics_path.write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+    update_evidence_report(
+        _output_root() / "ab_evidence.json",
+        contracts,
+        case,
+        evidence,
+        {
+            "profile": PROFILE,
+            "restart_load_policy": case.restart_load_policy,
+            "producer_branch": "bundled",
+            "sponge_executable": str(_sponge_executable()),
+            "metrics_path": str(metrics_path),
+        },
+        EVIDENCE_RUN_ID,
+    )
+    print(f"\nBundled I/O A/B Bussi restart metrics: {metrics_path}")
 
 
 def _run_nhc_dynamic_restart_case(case: AbCase, contracts) -> None:

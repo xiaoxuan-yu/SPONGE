@@ -39,6 +39,24 @@ static void Test_Bussi_H5_Restart_State_Round_Trips()
     Require(target.e() == source.e());
 }
 
+static void Test_Bussi_H5_Restart_Requires_Lambda()
+{
+    BUSSI_THERMOSTAT_INFORMATION source;
+    source.is_initialized = 1;
+    source.lambda = 0.87f;
+    source.e.seed(12345);
+
+    SpongeH5MD::RestartDynamicState state;
+    std::string error;
+    Require(source.Export_H5_Restart_State(&state, &error));
+    state.thermostat_float_states["bussi_thermostat"].erase("lambda");
+
+    BUSSI_THERMOSTAT_INFORMATION target;
+    target.is_initialized = 1;
+    Require(!target.Apply_H5_Restart_State(state, &error));
+    Require(error.find("lambda") != std::string::npos);
+}
+
 static void Test_Pressure_Barostat_H5_Restart_State_Round_Trips()
 {
     PRESSURE_BASED_BAROSTAT_INFORMATION source;
@@ -75,6 +93,7 @@ static void Test_Pressure_Barostat_H5_Restart_State_Round_Trips()
 int main()
 {
     Test_Bussi_H5_Restart_State_Round_Trips();
+    Test_Bussi_H5_Restart_Requires_Lambda();
     Test_Pressure_Barostat_H5_Restart_State_Round_Trips();
     return 0;
 }
