@@ -1883,6 +1883,15 @@ void Main_Clear()
             md_info.output.h5_restart_finalize_elapsed_s, h5_finalize_total_s);
     }
 
+    const std::string h5_output_failure =
+        md_info.output.H5_Output_Failure_Summary();
+    if (!h5_output_failure.empty())
+    {
+        controller.Throw_SPONGE_Error(
+            spongeErrorValueErrorCommand, "Main_Clear",
+            ("H5 output failure isolation: " + h5_output_failure).c_str());
+    }
+
     controller.Final_Time_Summary(
         md_info.sys.steps, md_info.sys.speed_time_factor,
         md_info.sys.speed_unit_name.c_str(), md_info.mode);

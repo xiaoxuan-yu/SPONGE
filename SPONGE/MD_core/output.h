@@ -40,6 +40,7 @@ struct trajectory_output
     double h5_trajectory_finalize_elapsed_s = 0.0;
     double h5_observable_finalize_elapsed_s = 0.0;
     double h5_restart_finalize_elapsed_s = 0.0;
+    std::vector<std::string> h5_output_failures;
     char restart_name[CHAR_LENGTH_MAX];
     void Initial(CONTROLLER* controller, MD_INFORMATION* md_info);
     void Initial_H5_Trajectory(CONTROLLER* controller);
@@ -87,6 +88,9 @@ struct trajectory_output
                                      const char* file_name);
     void Finalize_H5_Trajectory(CONTROLLER* controller);
     void Finalize_H5_Observable(CONTROLLER* controller);
+    void Record_H5_Output_Failure(const char* family, const char* phase,
+                                  const std::string& reason);
+    std::string H5_Output_Failure_Summary() const;
     void Export_H5_Restart_File(
         CONTROLLER* controller, const float* nhc_coordinates = NULL,
         const float* nhc_velocities = NULL, std::size_t nhc_chain_length = 0,

@@ -284,6 +284,11 @@ OUTPUT_FAMILY_COMBINATIONS = (
     ("observable", "restart"),
     ("trajectory", "observable", "restart"),
 )
+OUTPUT_WRITER_FAILURE_POINTS = tuple(
+    (family, phase)
+    for family in ("trajectory", "observable", "restart")
+    for phase in ("append", "finalize")
+)
 
 INPUT_SEMANTIC_SPECS_BY_CASE = {
     "normal_core_h5_output": (
@@ -586,6 +591,8 @@ class AbCase:
     evolution_dt: float = 0.0
     output_families: tuple[str, ...] = ()
     legacy_output_mode: str = "coexist"
+    output_fault_family: str = ""
+    output_fault_phase: str = ""
 
 
 @dataclass
@@ -1978,6 +1985,7 @@ def _cases_for_profile() -> list[AbCase]:
     ]
     cases.extend(_chunk_boundary_cases())
     cases.extend(_output_family_cases())
+    cases.extend(_output_writer_failure_cases())
     cases.extend(_rerun_boundary_cases())
     cases.extend(_failure_cases())
     return cases
@@ -2046,6 +2054,33 @@ def _audit_output_family_cases(cases: list[AbCase]) -> dict[str, object]:
         "combination_count": len(OUTPUT_FAMILY_COMBINATIONS),
         "legacy_modes": ("suppressed", "coexist"),
     }
+
+
+def _output_writer_failure_cases() -> list[AbCase]:
+    cases = []
+    for family, phase in OUTPUT_WRITER_FAILURE_POINTS:
+        cases.append(
+            AbCase(
+                name=f"failure_output_{family}_{phase}_isolation",
+                fixture_case="tip3p_validation_generated",
+                legacy_subdir="generated_legacy",
+                bundled_subdir="generated_bundled",
+                mode="output_fault",
+                vds=False,
+                statistical_md=False,
+                restart_load_policy="structural",
+                contract_ids=("output.writer.failure_isolation",),
+                assertion_ids=("writer_failure_isolation",),
+                normal_step_limit=2,
+                normal_interval=1,
+                normal_dt=1.0e-3,
+                output_families=("trajectory", "observable", "restart"),
+                legacy_output_mode="suppressed",
+                output_fault_family=family,
+                output_fault_phase=phase,
+            )
+        )
+    return cases
 
 
 def _chunk_boundary_cases() -> list[AbCase]:
@@ -2712,6 +2747,9 @@ def test_legacy_and_bundled_ab_behavior(case: AbCase):
         return
     if case.mode == "output_family":
         _run_output_family_case(case, contracts)
+        return
+    if case.mode == "output_fault":
+        _run_output_writer_failure_case(case, contracts)
         return
     root = _output_root()
     case_root = root / case.name
@@ -5617,6 +5655,172 @@ def _run_restart_only_output_continuation(
     }
     shutil.rmtree(continuation)
     return result
+
+
+def _run_output_writer_failure_case(case: AbCase, contracts) -> None:
+    case_root = _output_root() / case.name
+    bundled_dir = _copy_case(case, "bundled", case.bundled_subdir, case_root)
+    _prepare_output_family_mdin(case, bundled_dir, branch="bundled")
+    outcome = _run_sponge_process(
+        bundled_dir,
+        _mdin_name(bundled_dir),
+        extra_env={
+            "SPONGE_H5_TEST_FAULT": (
+                f"{case.output_fault_family}:{case.output_fault_phase}"
+            )
+        },
+    )
+    combined = outcome.stdout + "\n" + outcome.stderr
+    expected_reason = (
+        f"injected H5 {case.output_fault_family} "
+        f"{case.output_fault_phase} failure"
+    )
+    if outcome.returncode == 0:
+        raise AssertionError(f"{case.name} swallowed the injected failure")
+    for token in (
+        "spongeErrorValueErrorCommand raised by Main_Clear",
+        "H5 output failure isolation",
+        f"family={case.output_fault_family}",
+        f"phase={case.output_fault_phase}",
+        expected_reason,
+    ):
+        if token not in combined:
+            raise AssertionError(
+                f"{case.name} has unstable failure diagnostics: missing {token!r}"
+            )
+
+    family_paths = {
+        "trajectory": bundled_dir / TRAJECTORY_REL,
+        "observable": bundled_dir / OBSERVABLE_REL,
+        "restart": bundled_dir / RESTART_REL,
+    }
+    files = {
+        family: _validate_writer_failure_file(
+            case,
+            family,
+            path,
+            failed=family == case.output_fault_family,
+            expected_reason=expected_reason,
+        )
+        for family, path in family_paths.items()
+    }
+    for path in family_paths.values():
+        temporary = path.with_name(path.name + ".tmp")
+        if temporary.exists():
+            raise AssertionError(f"{case.name} left temporary file {temporary}")
+
+    details = {
+        "fault_family": case.output_fault_family,
+        "fault_phase": case.output_fault_phase,
+        "exit_code": outcome.returncode,
+        "stable_reason": expected_reason,
+        "files": files,
+    }
+    assertions = (
+        AssertionEvidence(
+            assertion_id="writer_failure_isolation",
+            evidence_level="F1",
+            details=details,
+        ),
+    )
+    evidence = build_case_evidence(contracts, case, assertions)
+    metrics_path = case_root / "ab_metrics.json"
+    metrics_path.write_text(
+        json.dumps(
+            {
+                "profile": PROFILE,
+                "case": case.name,
+                "contract_ids": list(case.contract_ids),
+                "assertion_ids": list(case.assertion_ids),
+                "evidence": [record.as_dict() for record in evidence],
+                "comparison": details,
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    update_evidence_report(
+        _output_root() / "ab_evidence.json",
+        contracts,
+        case,
+        evidence,
+        {
+            "profile": PROFILE,
+            "sponge_executable": str(_sponge_executable()),
+            "metrics_path": str(metrics_path),
+        },
+        EVIDENCE_RUN_ID,
+    )
+
+
+def _validate_writer_failure_file(
+    case: AbCase,
+    family: str,
+    path: Path,
+    *,
+    failed: bool,
+    expected_reason: str,
+) -> dict[str, object]:
+    if not path.is_file():
+        raise AssertionError(f"{case.name} did not preserve {family} output")
+    paths = _h5_paths(path)
+    required = {
+        "/parameters/sponge/output/status",
+        "/parameters/sponge/output/frame_count",
+        "/parameters/sponge/output/last_complete_step",
+        "/parameters/sponge/output/last_complete_time",
+    }
+    missing = sorted(required - paths)
+    if missing:
+        raise AssertionError(
+            f"{case.name} {family} completion metadata is missing: {missing}"
+        )
+    status = _h5_string_values(path, "/parameters/sponge/output/status")[-1]
+    expected_status = "failed" if failed else "finalized"
+    if status != expected_status:
+        raise AssertionError(
+            f"{case.name} {family} status={status!r}, expected={expected_status!r}"
+        )
+    if failed:
+        error_path = "/parameters/sponge/output/error"
+        if error_path not in paths:
+            raise AssertionError(f"{case.name} {family} has no failure reason")
+        error = _h5_string_values(path, error_path)[-1]
+        if expected_reason not in error:
+            raise AssertionError(
+                f"{case.name} {family} failure reason differs: {error!r}"
+            )
+
+    frame_count = int(
+        _h5_numeric_values(path, "/parameters/sponge/output/frame_count")[-1]
+    )
+    stream_path = {
+        "trajectory": "/particles/all/step",
+        "observable": "/observables/all/step",
+        "restart": "/particles/all/step",
+    }[family]
+    stream = (
+        _h5_numeric_values(path, stream_path) if stream_path in paths else []
+    )
+    if not failed and frame_count != len(stream):
+        raise AssertionError(
+            f"{case.name} {family} completion count differs: "
+            f"metadata={frame_count}, stream={len(stream)}"
+        )
+    if failed and frame_count > len(stream):
+        raise AssertionError(
+            f"{case.name} {family} failed completion prefix exceeds stream"
+        )
+    if not failed and frame_count == 0:
+        raise AssertionError(
+            f"{case.name} unaffected {family} has no complete frames"
+        )
+    return {
+        "status": status,
+        "frame_count": frame_count,
+        "stream_count": len(stream),
+        "readable": True,
+    }
 
 
 def _assert_chunk_boundary_layout(
@@ -11385,11 +11589,20 @@ def _run_sponge(case_dir: Path, mdin_name: str) -> dict[str, object]:
     return _collect_metrics(case_dir, outcome.elapsed_s)
 
 
-def _run_sponge_process(case_dir: Path, mdin_name: str) -> ProcessOutcome:
+def _run_sponge_process(
+    case_dir: Path,
+    mdin_name: str,
+    *,
+    extra_env: dict[str, str] | None = None,
+) -> ProcessOutcome:
     start = time.perf_counter()
+    environment = os.environ.copy()
+    if extra_env:
+        environment.update(extra_env)
     result = subprocess.run(
         [_sponge_executable(), "-mdin", mdin_name],
         cwd=case_dir,
+        env=environment,
         text=True,
         capture_output=True,
         check=False,

@@ -86,6 +86,7 @@ from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
     INPUT_SEMANTIC_SPECS_BY_CASE,
     MDINFO_CONTRACT_KEYS,
     OUTPUT_FAMILY_COMBINATIONS,
+    OUTPUT_WRITER_FAILURE_POINTS,
     PROFILE_LIMITS,
     RERUN_INPUT_SEMANTIC_SPECS,
     SUPPORTED_TOPOLOGY_SCHEMA_VERSIONS,
@@ -416,6 +417,9 @@ def test_ab_production_harness_has_executable_contract_coverage():
         f"normal_output_family_{'_'.join(families)}_{legacy_mode}"
         for families in OUTPUT_FAMILY_COMBINATIONS
         for legacy_mode in ("suppressed", "coexist")
+    } | {
+        f"failure_output_{family}_{phase}_isolation"
+        for family, phase in OUTPUT_WRITER_FAILURE_POINTS
     }
     assert summary["status_counts"]["supported"] > 0
     assert contracts["output.vds.cross_process_append_resume"].status == (
@@ -459,6 +463,36 @@ def test_output_family_process_matrix_is_complete_and_mutation_guarded():
         _audit_output_family_cases(
             [case for case in cases if case is not removed]
         )
+
+
+def test_output_writer_failure_matrix_covers_append_and_finalize():
+    cases = [
+        case for case in _cases_for_profile() if case.mode == "output_fault"
+    ]
+    assert {
+        (case.output_fault_family, case.output_fault_phase) for case in cases
+    } == set(OUTPUT_WRITER_FAILURE_POINTS)
+    assert len(cases) == 6
+    assert all(
+        case.output_families == ("trajectory", "observable", "restart")
+        and case.legacy_output_mode == "suppressed"
+        and case.contract_ids == ("output.writer.failure_isolation",)
+        and case.assertion_ids == ("writer_failure_isolation",)
+        for case in cases
+    )
+    contract = load_contract_registry()["output.writer.failure_isolation"]
+    assert contract.minimum_evidence == "F1"
+    assert set(contract.case_ids) == {case.name for case in cases}
+    assert contract.assertion_ids == ("writer_failure_isolation",)
+
+    cmake = (REPO_ROOT / "CMakeLists.txt").read_text(encoding="utf-8")
+    guarded_definition = (
+        "if(SPONGE_BUILD_TESTS)\n"
+        "  target_compile_definitions(SPONGE PRIVATE "
+        "SPONGE_H5_TEST_FAULT_INJECTION=1)"
+    )
+    assert guarded_definition in cmake
+    assert cmake.count("SPONGE_H5_TEST_FAULT_INJECTION") == 1
 
 
 def test_structural_restart_uses_bundled_producer_e4_continuation():
@@ -991,7 +1025,7 @@ def test_failure_matrix_requires_exit_category_and_stable_tokens():
     cases = [
         case
         for case in _cases_for_profile()
-        if case.name.startswith("failure_")
+        if case.failure_mutation is not None
     ]
 
     assert {case.failure_mutation for case in cases} == {

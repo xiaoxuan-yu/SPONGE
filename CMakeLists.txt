@@ -32,6 +32,7 @@ include("${WARNING_FILE}")
 
 option(SPONGE_BUILD_TESTS "Build SPONGE unit tests" OFF)
 if(SPONGE_BUILD_TESTS)
+  target_compile_definitions(SPONGE PRIVATE SPONGE_H5_TEST_FAULT_INJECTION=1)
   enable_testing()
   add_subdirectory(tests)
 endif()

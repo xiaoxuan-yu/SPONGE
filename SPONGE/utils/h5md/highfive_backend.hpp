@@ -3,6 +3,7 @@
 #include <hdf5.h>
 
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <highfive/highfive.hpp>
 #include <numeric>
@@ -21,6 +22,9 @@ class HighFiveBackend : public WriterBackend
     {
         options_ = options;
         last_error_.clear();
+#ifdef SPONGE_H5_TEST_FAULT_INJECTION
+        test_fault_consumed_ = false;
+#endif
         try
         {
             const std::filesystem::path file_path(options.path);
@@ -80,6 +84,12 @@ class HighFiveBackend : public WriterBackend
     bool Finalize() override
     {
         if (!Ensure_File()) return false;
+#ifdef SPONGE_H5_TEST_FAULT_INJECTION
+        if (Test_Fault_Matches("finalize"))
+        {
+            return Inject_Test_Failure("finalize", "");
+        }
+#endif
         if (!Write_String(path::output_status, "finalized")) return false;
         status_ = FileStatus::finalized;
         return Flush();
@@ -385,6 +395,13 @@ class HighFiveBackend : public WriterBackend
                      std::size_t count)
     {
         if (!Ensure_File()) return false;
+#ifdef SPONGE_H5_TEST_FAULT_INJECTION
+        if (dataset_path.rfind("/parameters/sponge/output/", 0) != 0 &&
+            Test_Fault_Matches("append"))
+        {
+            return Inject_Test_Failure("append", dataset_path);
+        }
+#endif
         if (data == nullptr)
         {
             return Fail("append data pointer is null for dataset " +
@@ -612,11 +629,47 @@ class HighFiveBackend : public WriterBackend
         return false;
     }
 
+#ifdef SPONGE_H5_TEST_FAULT_INJECTION
+    std::string Test_Fault_Family() const
+    {
+        if (options_.schema_name == "sponge.restart.h5") return "restart";
+        if (options_.observable_only) return "observable";
+        return "trajectory";
+    }
+
+    bool Test_Fault_Matches(const char* phase) const
+    {
+        if (test_fault_consumed_) return false;
+        const char* configured = std::getenv("SPONGE_H5_TEST_FAULT");
+        if (configured == nullptr) return false;
+        return std::string(configured) == Test_Fault_Family() + ":" + phase;
+    }
+
+    bool Inject_Test_Failure(const char* phase, const std::string& dataset_path)
+    {
+        test_fault_consumed_ = true;
+        last_error_ =
+            "injected H5 " + Test_Fault_Family() + " " + phase + " failure";
+        if (!dataset_path.empty()) last_error_ += " at " + dataset_path;
+        status_ = FileStatus::failed;
+        const std::string reason = last_error_;
+        Write_String(path::output_status, "failed");
+        Write_String(path::output_error, reason);
+        Flush();
+        last_error_ = reason;
+        status_ = FileStatus::failed;
+        return false;
+    }
+#endif
+
     WriterOptions options_;
     std::unique_ptr<HighFive::File> file_;
     std::unordered_map<std::string, DatasetSpec> dataset_specs_;
     FileStatus status_ = FileStatus::closed;
     std::string last_error_;
+#ifdef SPONGE_H5_TEST_FAULT_INJECTION
+    bool test_fault_consumed_ = false;
+#endif
 };
 
 class HighFiveBackendFactory : public WriterBackendFactory

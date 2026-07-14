@@ -179,6 +179,17 @@
       "assertion_ids": ["output_family_process_matrix"]
     },
     {
+      "contract_id": "output.writer.failure_isolation",
+      "direction": "output",
+      "component": "writer_failure_isolation",
+      "status": "supported",
+      "minimum_evidence": "F1",
+      "legacy_surface": "process exit and independently finalized output sidecars",
+      "bundled_surface": "trajectory, observable, and restart append/finalize failure isolation",
+      "case_ids": ["failure_output_trajectory_append_isolation", "failure_output_trajectory_finalize_isolation", "failure_output_observable_append_isolation", "failure_output_observable_finalize_isolation", "failure_output_restart_append_isolation", "failure_output_restart_finalize_isolation"],
+      "assertion_ids": ["writer_failure_isolation"]
+    },
+    {
       "contract_id": "output.trajectory.vds_off",
       "direction": "output",
       "component": "trajectory_vds",
