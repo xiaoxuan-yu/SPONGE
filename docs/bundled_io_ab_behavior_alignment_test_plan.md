@@ -1747,7 +1747,34 @@ Acceptance:
 - Stage only the audited baseline paths and create exactly one PR-scoped commit
   authored by `Xiaoxuan Yu <xiaoxuan_yu@pku.edu.cn>`.
 
-## 54. Artifacts and Temporary-Space Policy
+## 54. PR 57: Non-Trivial REAXFF/EDIP Runtime Parity
+
+Repair the combined many-body runtime gate so its EDIP assertion exercises an
+interacting pair rather than the full-contract fixture's excluded pair outside
+the EDIP cutoff.
+
+- Rewrite only temporary test copies of the two rerun frames, using identical
+  float32 values in the legacy binary trajectory and bundled H5 trajectory.
+- Remove the same pair exclusion from legacy, native H5, and legacy-sidecar
+  input routes before execution, while retaining REAXFF and the complete
+  sidecar/pure-H5 route matrix.
+- Assert the prepared binary/H5 coordinates and exclusion ownership before
+  launching SPONGE; retain the existing finite, non-zero EDIP and REAXFF
+  checks, full mdout-column parity, H5 observable checks, and VDS off/on runs.
+- Keep the focused production `normal_edip_nonzero` energy/force gate as an
+  independent pure-H5 regression.
+
+Acceptance:
+
+- `test_h5_reaxff_edip_runtime_parity` passes with runtime smoke enabled and
+  reports finite non-zero EDIP and REAXFF values for every input/output route.
+- The focused production EDIP A/B case passes without sidecars and preserves
+  its non-zero energy and force comparison.
+- Static staged H5 bundle labels, formatting, and diff checks pass, followed
+  by exactly one PR-scoped commit authored by
+  `Xiaoxuan Yu <xiaoxuan_yu@pku.edu.cn>`.
+
+## 55. Artifacts and Temporary-Space Policy
 
 - Use `SPONGE_BUNDLED_IO_AB_RUN_ROOT` for all heavy runs.
 - Put production artifacts on the workspace filesystem rather than `/tmp`.
@@ -1757,7 +1784,7 @@ Acceptance:
 - Record artifact byte counts and enforce a configurable per-case quota.
 - Cleanup must only remove directories created by the current gate run.
 
-## 55. PR Completion Log
+## 56. PR Completion Log
 
 Append one row immediately after completing and committing each PR.
 
@@ -1821,3 +1848,4 @@ Append one row immediately after completing and committing each PR.
 | PR 54: Attested production promotion evidence | Complete | This commit | eight derived-evidence positive/negative guards; real 24-test comparator mutation hook; 150-test contract smoke; workflow YAML parse; execution-matrix CLI; Ruff; format; `git diff --check` | Production history is now derived from same-run contract, split CPU/GPU/MPI matrix, and comparator artifacts. Scheduled CPU jobs share one run ID and upload the comparator report. History records conservative scenario performance, source commit, and three SHA-256 provenance values; stale/conflicting IDs, incomplete evidence, failed mutation sessions, non-finite metrics, duplicates, and unattested handwritten rows fail. Promotion remains shadow pending three complete retry-free runs and cross-process VDS closure. |
 | PR 55: Clean source provenance gate | Complete | This commit | clean/mismatched/modified/untracked temporary-Git guards; real dirty-tree CLI rejection; 152-test contract smoke; Ruff; format; `git diff --check` | Production derivation now requires exact `HEAD`, an empty porcelain status including untracked files, and persisted `source_tree_state=clean`. The current worktree is correctly rejected before artifact loading, so its available RTX 4090 cannot be used to claim a commit-qualified PR 7c streak until the bundled I/O source baseline is tracked. |
 | PR 56: Track bundled I/O implementation baseline | Complete | This commit | fresh CPU `SPONGE` build; staged H5 bundle CTest labels; opt-in runtime smoke audit; 152-test contract smoke; schema examples; Ruff; `pixi lock --check`; `git diff --check` | The audited bundled I/O implementation, schemas, fixtures, examples, and tests are now tracked. Static/file-level gates pass; opt-in normal A/B and VDS terminal/resume pass. EDIP remains all-trivial in the manybody gate and dynamic NHC restart-load exits after initialization, so full behavioral equivalence and PR 7c promotion remain unproven. |
+| PR 57: Non-trivial REAXFF/EDIP runtime parity | Complete | This commit | focused production `normal_edip_nonzero` CPU A/B; runtime `test_h5_reaxff_edip_runtime_parity`; staged H5 bundle labels; formatting; `git diff --check` | The combined gate now gives legacy binary, bundled sidecar, and pure H5 routes the same interacting two-atom frames and empty pair exclusions. EDIP and REAXFF remain subject to finite non-zero assertions and full mdout/H5 observable parity across legacy output and bundled VDS off/on output. The independent dynamic NHC restart-load failure remains open. |

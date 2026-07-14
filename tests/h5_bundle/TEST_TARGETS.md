@@ -85,8 +85,11 @@ back trajectory-H5 and observable-only H5 observable streams, including frame
 metadata, mdout column metadata, and per-column values matched against the same
 case's `mdout.txt`. `test_h5_reaxff_edip_runtime_parity` separately runs
 REAXFF/EDIP bundled-with-sidecar and pure bundled native rerun cases without
-many-body scrub, compares legacy output and bundled output with VDS off/on, and
-verifies the many-body observable columns in H5 output.
+many-body scrub. Its temporary inputs replace the excluded, out-of-range atom
+pair with the same interacting two-atom frames in legacy binary and H5
+trajectory form, so both EDIP and REAXFF must be finite and non-zero. The test
+compares legacy output and bundled output with VDS off/on and verifies the
+many-body observable columns in H5 output.
 `test_h5_restart_load_runtime_closure` separately runs `input_h5_restart_load`
 policies that the broad matrix scrubs for stability: supported protocol
 sidecar, dynamic NHC, and full NHC+SITS paths must run; unsupported rerun NHC,

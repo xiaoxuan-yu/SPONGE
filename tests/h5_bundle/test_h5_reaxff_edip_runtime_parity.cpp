@@ -251,6 +251,74 @@ void Remove_Legacy_Sidecar_Directories(const std::filesystem::path& root)
     }
 }
 
+const std::vector<float>& Focused_EDIP_Positions()
+{
+    static const std::vector<float> positions = {
+        0.0f, 0.0f, 0.0f, 1.5f, 0.0f, 0.0f, 0.1f, 0.0f, 0.0f, 1.6f, 0.0f, 0.0f,
+    };
+    return positions;
+}
+
+void Write_Focused_EDIP_Legacy_Trajectory(const std::filesystem::path& path)
+{
+    if (!std::filesystem::exists(path))
+    {
+        return;
+    }
+    const auto& positions = Focused_EDIP_Positions();
+    std::ofstream out(path.c_str(), std::ios::binary | std::ios::trunc);
+    out.write(reinterpret_cast<const char*>(positions.data()),
+              static_cast<std::streamsize>(positions.size() * sizeof(float)));
+    if (!out.good())
+    {
+        throw TestFailure("failed to write focused EDIP trajectory " +
+                          path.string());
+    }
+}
+
+void Write_Focused_EDIP_H5_Trajectory(const std::filesystem::path& path)
+{
+    if (!std::filesystem::exists(path))
+    {
+        return;
+    }
+    HighFive::File file(path.string(), HighFive::File::ReadWrite);
+    auto dataset = file.getDataSet(SpongeH5MD::path::position_value);
+    const auto dimensions = dataset.getSpace().getDimensions();
+    REQUIRE_EQ(dimensions, std::vector<std::size_t>({2, 2, 3}));
+    const auto& positions = Focused_EDIP_Positions();
+    REQUIRE_TRUE(H5Dwrite(dataset.getId(), H5T_NATIVE_FLOAT, H5S_ALL, H5S_ALL,
+                          H5P_DEFAULT, positions.data()) >= 0);
+}
+
+void Remove_H5_Exclusions(const std::filesystem::path& path)
+{
+    if (!std::filesystem::exists(path))
+    {
+        return;
+    }
+    HighFive::File file(path.string(), HighFive::File::ReadWrite);
+    if (file.exist("/topology/exclusions"))
+    {
+        REQUIRE_TRUE(
+            H5Ldelete(file.getId(), "/topology/exclusions", H5P_DEFAULT) >= 0);
+    }
+}
+
+void Activate_Focused_EDIP_Interaction(const std::filesystem::path& root)
+{
+    Write_Focused_EDIP_Legacy_Trajectory(root / "traj.dat");
+    Write_Focused_EDIP_H5_Trajectory(root / "trajectory.spg.h5md");
+    Remove_H5_Exclusions(root / "topology.spgt.h5");
+
+    const auto sidecar_exclusions =
+        root / "legacy_sidecars" / "exclude_in_file" / "exclude.txt";
+    if (std::filesystem::exists(sidecar_exclusions))
+    {
+        Write_Text(sidecar_exclusions, "2 0\n0\n0\n");
+    }
+}
+
 void Require_No_Legacy_Sidecar_Directories(const std::filesystem::path& root)
 {
     for (const auto& entry :
@@ -276,10 +344,11 @@ PreparedCase Prepare_Rerun_Case(const std::filesystem::path& temp_root,
 
     std::string mdin = Read_Text(prepared.root / source_mdin);
     mdin = Remove_Key_Lines(
-        mdin, {"output_h5_trajectory_path", "output_h5_trajectory_vds",
-               "output_h5_restart_path", "output_h5_observable_path",
-               "rerun_start", "rerun_strip", "rerun_frame_limit",
-               "rerun_need_box_update", "input_h5_restart_load"});
+        mdin,
+        {"output_h5_trajectory_path", "output_h5_trajectory_vds",
+         "output_h5_restart_path", "output_h5_observable_path", "rerun_start",
+         "rerun_strip", "rerun_frame_limit", "rerun_need_box_update",
+         "input_h5_restart_load", "exclude_in_file"});
     Append_If_Missing(&mdin, "mdinfo", "mdinfo = \"mdinfo.txt\"");
     Append_If_Missing(&mdin, "mdout", "mdout = \"mdout.txt\"");
     Append_If_Missing(&mdin, "rerun_start", "rerun_start = 0");
@@ -317,7 +386,50 @@ PreparedCase Prepare_Rerun_Case(const std::filesystem::path& temp_root,
     prepared.h5_trajectory = output_paths.h5_trajectory;
     prepared.h5_observable = output_paths.h5_observable;
     Write_Text(prepared.mdin, mdin);
+    Activate_Focused_EDIP_Interaction(prepared.root);
     return prepared;
+}
+
+void Require_Focused_EDIP_Interaction(const PreparedCase& test_case)
+{
+    REQUIRE_TRUE(!Has_Key_Line(Read_Text(test_case.mdin), "exclude_in_file"));
+    const auto& expected = Focused_EDIP_Positions();
+
+    const auto legacy_trajectory = test_case.root / "traj.dat";
+    if (std::filesystem::exists(legacy_trajectory))
+    {
+        std::ifstream in(legacy_trajectory.c_str(), std::ios::binary);
+        std::vector<float> actual(expected.size());
+        in.read(reinterpret_cast<char*>(actual.data()),
+                static_cast<std::streamsize>(actual.size() * sizeof(float)));
+        REQUIRE_TRUE(in.good());
+        REQUIRE_EQ(actual, expected);
+    }
+
+    const auto h5_trajectory = test_case.root / "trajectory.spg.h5md";
+    if (std::filesystem::exists(h5_trajectory))
+    {
+        HighFive::File file(h5_trajectory.string(), HighFive::File::ReadOnly);
+        const auto dataset = file.getDataSet(SpongeH5MD::path::position_value);
+        std::vector<float> actual(expected.size());
+        REQUIRE_TRUE(H5Dread(dataset.getId(), H5T_NATIVE_FLOAT, H5S_ALL,
+                             H5S_ALL, H5P_DEFAULT, actual.data()) >= 0);
+        REQUIRE_EQ(actual, expected);
+    }
+
+    const auto topology = test_case.root / "topology.spgt.h5";
+    if (std::filesystem::exists(topology))
+    {
+        HighFive::File file(topology.string(), HighFive::File::ReadOnly);
+        REQUIRE_TRUE(!file.exist("/topology/exclusions"));
+    }
+
+    const auto sidecar_exclusions =
+        test_case.root / "legacy_sidecars" / "exclude_in_file" / "exclude.txt";
+    if (std::filesystem::exists(sidecar_exclusions))
+    {
+        REQUIRE_EQ(Read_Text(sidecar_exclusions), std::string("2 0\n0\n0\n"));
+    }
 }
 
 void Require_Manybody_Not_Scrubbed(const PreparedCase& test_case)
@@ -629,6 +741,9 @@ void Validate_Preparation()
     Require_Manybody_Not_Scrubbed(legacy);
     Require_Manybody_Not_Scrubbed(sidecar);
     Require_Manybody_Not_Scrubbed(pure);
+    Require_Focused_EDIP_Interaction(legacy);
+    Require_Focused_EDIP_Interaction(sidecar);
+    Require_Focused_EDIP_Interaction(pure);
     Require_No_Legacy_Sidecar_Directories(pure.root);
     REQUIRE_TRUE(Read_Text(legacy.mdin).find("[REAXFF]") != std::string::npos);
     REQUIRE_TRUE(Has_Key_Line(Read_Text(legacy.mdin), "EDIP_in_file"));
