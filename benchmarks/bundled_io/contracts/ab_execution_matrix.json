@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "promotion_state": "shadow",
+  "promotion_state": "candidate",
   "required_consecutive_production_runs": 3,
   "performance_budgets": {
     "maximum_runtime_ratio": 1.15,

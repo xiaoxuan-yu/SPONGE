@@ -3341,7 +3341,7 @@ def test_execution_matrix_enumerates_every_required_axis_and_risk_pair():
         "vds",
     }
     assert matrix.required_consecutive_production_runs == 3
-    assert matrix.promotion_state == "shadow"
+    assert matrix.promotion_state == "candidate"
     assert set(matrix.required_axes["feature_family"]) == {
         "core",
         "manybody",
@@ -3571,7 +3571,7 @@ def test_execution_matrix_rejects_removed_axis_and_unmapped_combination():
         )
 
 
-def test_current_execution_matrix_cannot_be_promoted_by_declarations_only():
+def test_candidate_execution_matrix_cannot_be_promoted_by_declarations_only():
     matrix = load_execution_matrix()
     decision = evaluate_promotion_readiness(
         matrix,
@@ -3581,7 +3581,7 @@ def test_current_execution_matrix_cannot_be_promoted_by_declarations_only():
     )
 
     assert decision.ready is False
-    assert any(
+    assert not any(
         "promotion_state is shadow" in item for item in decision.blockers
     )
     assert any(

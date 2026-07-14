@@ -644,7 +644,8 @@ test(bundled-io): power matrix statistics by replica
 - evaluator 对缺失 GPU、旧 registry、低证据等级、非有限 performance、retry、dirty
   source 或 VDS 误宣称均返回 blocker。
 - promotion 文案使用第 1 节限定结论，不出现“全功能等价”。
-- 如果三连证据未完成，本 PR 保持 `shadow`，不得为了完成计划强行提交 promotion。
+- candidate commit 在三连证据完成前不得合并或标记为 promoted；不得为了完成计划
+  伪造 history 或跳过失败 run。
 
 ### 唯一 commit
 
