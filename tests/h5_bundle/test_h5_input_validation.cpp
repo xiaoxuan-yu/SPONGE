@@ -160,11 +160,46 @@ static void Write_Restart_File(const std::filesystem::path& path,
     REQUIRE_TRUE(writer.Close());
 }
 
-static void Add_Unsupported_Dynamic_State(const std::filesystem::path& path)
+static void Add_Unsupported_Dynamic_State(const std::filesystem::path& path,
+                                          const std::string& module_name)
 {
     HighFive::File file(path.string(), HighFive::File::ReadWrite);
-    Write_Scalar(file, SpongeH5MD::Restart_Rng_State_Path("middle_langevin"),
+    Write_Scalar(file, SpongeH5MD::Restart_Rng_State_Path(module_name),
                  std::string("unsupported:philox_device_state"));
+}
+
+static void Add_Supported_Dynamic_State(const std::filesystem::path& path,
+                                        const std::string& module_name)
+{
+    HighFive::File file(path.string(), HighFive::File::ReadWrite);
+    if (module_name == "integrator_state")
+    {
+        Write_Scalar(file, SpongeH5MD::Restart_Integrator_State_Path("mode"),
+                     std::string("nvt"));
+        Write_Scalar(file, SpongeH5MD::Restart_Integrator_State_Path("step"),
+                     std::string("10"));
+        Write_Scalar(file, SpongeH5MD::Restart_Integrator_State_Path("time"),
+                     std::string("0.02"));
+        return;
+    }
+    Write_Scalar(file, SpongeH5MD::Restart_Rng_State_Path(module_name),
+                 std::string("serialized_rng_state"));
+    if (module_name == "bussi_thermostat")
+    {
+        Write_Float_Vector(
+            file,
+            SpongeH5MD::Restart_Thermostat_State_Path(module_name, "lambda"),
+            {0.87f});
+        return;
+    }
+    if (module_name == "pressure_based_barostat")
+    {
+        Write_Float_Vector(
+            file, SpongeH5MD::Restart_Barostat_State_Path(module_name, "g"),
+            {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f});
+        return;
+    }
+    throw TestFailure("unknown supported dynamic state module: " + module_name);
 }
 
 static void Add_Unsupported_Protocol_State(const std::filesystem::path& path)
@@ -394,6 +429,32 @@ static void Test_Validates_Dynamic_Load_When_Dynamic_State_Is_Present()
     std::filesystem::remove_all(dir);
 }
 
+static void Test_Recognizes_Each_Supported_Dynamic_State_Module()
+{
+    for (const std::string& module_name :
+         {"integrator_state", "bussi_thermostat", "pressure_based_barostat"})
+    {
+        const auto dir = Unique_Temp_Path("h5_input_validation_" + module_name);
+        std::filesystem::create_directories(dir);
+        const auto topology = dir / "system.spgt.h5";
+        const auto protocol = dir / "protocol.spgp.h5";
+        const auto restart = dir / "restart.spgr.h5";
+
+        Write_Topology_Metadata(topology, 2);
+        Write_Protocol_Metadata(protocol, "top");
+        Write_Restart_File(restart, 2, false);
+        Add_Supported_Dynamic_State(restart, module_name);
+
+        auto plan = Make_Input_Plan(topology, protocol, restart);
+        plan.restart.load_policy =
+            SpongeH5InputContract::RestartLoadPolicy::dynamic;
+        Require_Valid(
+            SpongeH5InputValidation::Validate_Resolved_Input_Plan(plan));
+
+        std::filesystem::remove_all(dir);
+    }
+}
+
 static void Test_Rejects_Dynamic_Load_When_Dynamic_State_Is_Absent()
 {
     const auto dir = Unique_Temp_Path("h5_input_validation_dynamic_absent");
@@ -418,26 +479,36 @@ static void Test_Rejects_Dynamic_Load_When_Dynamic_State_Is_Absent()
 
 static void Test_Rejects_Dynamic_Load_When_Only_Unsupported_State_Is_Present()
 {
-    const auto dir =
-        Unique_Temp_Path("h5_input_validation_dynamic_unsupported");
-    std::filesystem::create_directories(dir);
-    const auto topology = dir / "system.spgt.h5";
-    const auto protocol = dir / "protocol.spgp.h5";
-    const auto restart = dir / "restart.spgr.h5";
+    const std::array<std::string, 3> modules = {"middle_langevin", "andersen",
+                                                "monte_carlo_barostat"};
+    const std::array<std::string, 3> diagnostics = {
+        "Middle Langevin Philox RNG state", "Andersen thermostat Philox RNG",
+        "Monte Carlo barostat C rand state"};
+    for (std::size_t index = 0; index < modules.size(); ++index)
+    {
+        const auto dir = Unique_Temp_Path(
+            "h5_input_validation_dynamic_unsupported_" + modules[index]);
+        std::filesystem::create_directories(dir);
+        const auto topology = dir / "system.spgt.h5";
+        const auto protocol = dir / "protocol.spgp.h5";
+        const auto restart = dir / "restart.spgr.h5";
 
-    Write_Topology_Metadata(topology, 2);
-    Write_Protocol_Metadata(protocol, "top");
-    Write_Restart_File(restart, 2, false);
-    Add_Unsupported_Dynamic_State(restart);
+        Write_Topology_Metadata(topology, 2);
+        Write_Protocol_Metadata(protocol, "top");
+        Write_Restart_File(restart, 2, false);
+        Add_Unsupported_Dynamic_State(restart, modules[index]);
 
-    auto plan = Make_Input_Plan(topology, protocol, restart);
-    plan.restart.load_policy =
-        SpongeH5InputContract::RestartLoadPolicy::dynamic;
-    Require_Invalid_Contains(
-        SpongeH5InputValidation::Validate_Resolved_Input_Plan(plan),
-        "unsupported payloads");
+        auto plan = Make_Input_Plan(topology, protocol, restart);
+        plan.restart.load_policy =
+            SpongeH5InputContract::RestartLoadPolicy::dynamic;
+        const auto result =
+            SpongeH5InputValidation::Validate_Resolved_Input_Plan(plan);
+        Require_Invalid_Contains(result, "unsupported payloads");
+        Require_Invalid_Contains(result, modules[index]);
+        Require_Invalid_Contains(result, diagnostics[index]);
 
-    std::filesystem::remove_all(dir);
+        std::filesystem::remove_all(dir);
+    }
 }
 
 static void Test_Validates_Protocol_Load_When_Sits_State_Is_Present()
@@ -577,6 +648,7 @@ int main()
             Test_Validates_H5md_Rerun_Trajectory_Metadata();
             Test_Rejects_Missing_Requested_Trajectory_Stream();
             Test_Validates_Dynamic_Load_When_Dynamic_State_Is_Present();
+            Test_Recognizes_Each_Supported_Dynamic_State_Module();
             Test_Rejects_Dynamic_Load_When_Dynamic_State_Is_Absent();
             Test_Rejects_Dynamic_Load_When_Only_Unsupported_State_Is_Present();
             Test_Validates_Protocol_Load_When_Sits_State_Is_Present();

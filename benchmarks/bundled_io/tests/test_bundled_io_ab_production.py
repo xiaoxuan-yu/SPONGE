@@ -668,6 +668,8 @@ def _cases_for_profile() -> list[AbCase]:
             restart_load_policy="dynamic",
             contract_ids=(
                 "input.restart_load.dynamic",
+                "input.restart.dynamic.integrator_state",
+                "input.restart.dynamic.nose_hoover_chain",
                 "input.bias.nhc",
                 "output.restart.dynamic_continuation",
             ),

@@ -458,6 +458,8 @@ def test_nhc_dynamic_restart_uses_one_checkpoint_and_e4_continuation():
     )
     expected_contracts = {
         "input.restart_load.dynamic",
+        "input.restart.dynamic.integrator_state",
+        "input.restart.dynamic.nose_hoover_chain",
         "input.bias.nhc",
         "output.restart.dynamic_continuation",
     }
@@ -477,6 +479,30 @@ def test_nhc_dynamic_restart_uses_one_checkpoint_and_e4_continuation():
         contracts["output.restart.dynamic_continuation"].minimum_evidence
         == "E4"
     )
+
+    deferred = {
+        "input.restart.dynamic.bussi_thermostat",
+        "input.restart.dynamic.pressure_based_barostat",
+    }
+    unsupported = {
+        "input.restart.dynamic.middle_langevin_rng",
+        "input.restart.dynamic.andersen_rng",
+        "input.restart.dynamic.monte_carlo_barostat_rng",
+    }
+    for contract_id in deferred:
+        contract = contracts[contract_id]
+        assert contract.status == "deferred"
+        assert contract.minimum_evidence == "E4"
+        assert contract.case_ids == ()
+        assert contract.assertion_ids == ()
+        assert contract.reason
+    for contract_id in unsupported:
+        contract = contracts[contract_id]
+        assert contract.status == "unsupported"
+        assert contract.minimum_evidence == "E4"
+        assert contract.case_ids == ()
+        assert contract.assertion_ids == ()
+        assert contract.reason
 
 
 def test_meta_protocol_full_restart_uses_one_checkpoint_and_e4_continuation():

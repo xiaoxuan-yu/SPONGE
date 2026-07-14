@@ -25,6 +25,15 @@ INVENTORY_SECTIONS = {
 }
 EVIDENCE_RANK = {"E0": 0, "E1": 1, "E2": 2, "E3": 3, "E4": 4}
 VALID_EVIDENCE_LEVELS = set(EVIDENCE_RANK) | {"F1"}
+DYNAMIC_RESTART_CONTRACT_STATUSES = {
+    "input.restart.dynamic.integrator_state": "supported",
+    "input.restart.dynamic.nose_hoover_chain": "supported",
+    "input.restart.dynamic.bussi_thermostat": "deferred",
+    "input.restart.dynamic.pressure_based_barostat": "deferred",
+    "input.restart.dynamic.middle_langevin_rng": "unsupported",
+    "input.restart.dynamic.andersen_rng": "unsupported",
+    "input.restart.dynamic.monte_carlo_barostat_rng": "unsupported",
+}
 
 
 @dataclass(frozen=True)
@@ -151,6 +160,7 @@ def validate_implementation_inventory(
 def validate_contract_registry(
     contracts: Mapping[str, ContractSpec], cases: Sequence[object]
 ) -> dict[str, object]:
+    _validate_dynamic_restart_contract_inventory(contracts)
     case_by_id: dict[str, object] = {}
     for case in cases:
         case_id = _case_id(case)
@@ -219,6 +229,37 @@ def validate_contract_registry(
                 )
 
     return registry_summary(contracts)
+
+
+def _validate_dynamic_restart_contract_inventory(
+    contracts: Mapping[str, ContractSpec],
+) -> None:
+    actual = {
+        contract_id
+        for contract_id in contracts
+        if contract_id.startswith("input.restart.dynamic.")
+    }
+    expected = set(DYNAMIC_RESTART_CONTRACT_STATUSES)
+    if actual != expected:
+        raise AssertionError(
+            "dynamic restart contract inventory differs: "
+            f"missing={sorted(expected - actual)}, "
+            f"unexpected={sorted(actual - expected)}"
+        )
+    mismatched = {
+        contract_id: {
+            "expected": expected_status,
+            "actual": contracts[contract_id].status,
+        }
+        for contract_id, expected_status in (
+            DYNAMIC_RESTART_CONTRACT_STATUSES.items()
+        )
+        if contracts[contract_id].status != expected_status
+    }
+    if mismatched:
+        raise AssertionError(
+            f"dynamic restart contract statuses differ: {mismatched}"
+        )
 
 
 def build_case_evidence(
@@ -492,6 +533,20 @@ def _report_coverage(
     }
     covered = sorted(supported.intersection(passed_contracts))
     missing = sorted(supported - passed_contracts)
+    status_coverage = {}
+    for status in sorted(VALID_STATUSES):
+        status_contracts = {
+            contract_id
+            for contract_id, spec in contracts.items()
+            if spec.status == status
+        }
+        evidenced = sorted(status_contracts.intersection(passed_contracts))
+        status_coverage[status] = {
+            "contract_count": len(status_contracts),
+            "contract_ids": sorted(status_contracts),
+            "evidenced_contract_count": len(evidenced),
+            "evidenced_contracts": evidenced,
+        }
     return {
         "supported_contract_count": len(supported),
         "covered_supported_contract_count": len(covered),
@@ -500,4 +555,5 @@ def _report_coverage(
         ),
         "covered_supported_contracts": covered,
         "missing_supported_contracts": missing,
+        "status_coverage": status_coverage,
     }

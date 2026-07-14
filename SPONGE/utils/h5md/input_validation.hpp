@@ -63,33 +63,71 @@ inline bool Requests_Protocol_State(
 inline bool Has_Supported_Dynamic_State(
     const SpongeH5MD::RestartDynamicState& state)
 {
-    return state.has_nose_hoover_chain ||
-           !state.integrator_state_text.empty() ||
-           state.rng_state_text.count("bussi_thermostat") != 0 ||
-           state.barostat_float_states.count("pressure_based_barostat") != 0;
+    const bool has_integrator_state =
+        state.integrator_state_text.count("mode") != 0 &&
+        state.integrator_state_text.count("step") != 0 &&
+        state.integrator_state_text.count("time") != 0 &&
+        !state.integrator_state_text.at("mode").empty() &&
+        !state.integrator_state_text.at("step").empty() &&
+        !state.integrator_state_text.at("time").empty();
+    const auto bussi_state =
+        state.thermostat_float_states.find("bussi_thermostat");
+    const bool has_bussi_state =
+        state.rng_state_text.count("bussi_thermostat") != 0 &&
+        bussi_state != state.thermostat_float_states.end() &&
+        bussi_state->second.count("lambda") != 0 &&
+        bussi_state->second.at("lambda").size() == 1;
+    const auto pressure_state =
+        state.barostat_float_states.find("pressure_based_barostat");
+    const bool has_pressure_state =
+        state.rng_state_text.count("pressure_based_barostat") != 0 &&
+        pressure_state != state.barostat_float_states.end() &&
+        pressure_state->second.count("g") != 0 &&
+        pressure_state->second.at("g").size() == 6;
+    return state.has_nose_hoover_chain || has_integrator_state ||
+           has_bussi_state || has_pressure_state;
 }
 
-inline bool Has_Unsupported_Dynamic_State(
+inline std::string Unsupported_Dynamic_State_Reason(
     const SpongeH5MD::RestartDynamicState& state)
 {
-    if (state.rng_state_text.count("middle_langevin") != 0 ||
-        state.rng_state_text.count("andersen") != 0 ||
-        state.rng_state_text.count("monte_carlo_barostat") != 0)
+    if (state.rng_state_text.count("middle_langevin") != 0)
     {
-        return true;
+        return "middle_langevin: Middle Langevin Philox RNG state cannot be "
+               "restored";
+    }
+    if (state.rng_state_text.count("andersen") != 0)
+    {
+        return "andersen: Andersen thermostat Philox RNG state cannot be "
+               "restored";
+    }
+    if (state.rng_state_text.count("monte_carlo_barostat") != 0)
+    {
+        return "monte_carlo_barostat: Monte Carlo barostat C rand state cannot "
+               "be restored";
+    }
+    for (const auto& module : state.rng_state_text)
+    {
+        if (module.first != "bussi_thermostat" &&
+            module.first != "pressure_based_barostat")
+        {
+            return "unsupported RNG dynamic state module: " + module.first;
+        }
     }
     for (const auto& module : state.thermostat_text_states)
     {
         if (module.first != "bussi_thermostat")
         {
-            return true;
+            return "unsupported thermostat dynamic state module: " +
+                   module.first;
         }
     }
     for (const auto& module : state.thermostat_float_states)
     {
         if (module.first != "bussi_thermostat")
         {
-            return true;
+            return "unsupported thermostat dynamic state module: " +
+                   module.first;
         }
     }
     for (const auto& module : state.barostat_text_states)
@@ -97,11 +135,12 @@ inline bool Has_Unsupported_Dynamic_State(
         if (module.first != "pressure_based_barostat" &&
             module.first != "monte_carlo_barostat")
         {
-            return true;
+            return "unsupported barostat dynamic state module: " + module.first;
         }
         if (module.first == "monte_carlo_barostat")
         {
-            return true;
+            return "monte_carlo_barostat: Monte Carlo barostat C rand state "
+                   "cannot be restored";
         }
     }
     for (const auto& module : state.barostat_float_states)
@@ -109,14 +148,21 @@ inline bool Has_Unsupported_Dynamic_State(
         if (module.first != "pressure_based_barostat" &&
             module.first != "monte_carlo_barostat")
         {
-            return true;
+            return "unsupported barostat dynamic state module: " + module.first;
         }
         if (module.first == "monte_carlo_barostat")
         {
-            return true;
+            return "monte_carlo_barostat: Monte Carlo barostat C rand state "
+                   "cannot be restored";
         }
     }
-    return false;
+    return "";
+}
+
+inline bool Has_Unsupported_Dynamic_State(
+    const SpongeH5MD::RestartDynamicState& state)
+{
+    return !Unsupported_Dynamic_State_Reason(state).empty();
 }
 
 inline bool Has_Supported_Metadynamics_Text_State(
@@ -263,13 +309,14 @@ inline ValidationResult Validate_Resolved_Input_Plan(
                 return With_Key(SpongeH5InputContract::kRestartPathKey,
                                 restart_reader.Last_Error());
             }
-            if (Has_Unsupported_Dynamic_State(dynamic_state))
+            const std::string unsupported_reason =
+                Unsupported_Dynamic_State_Reason(dynamic_state);
+            if (!unsupported_reason.empty())
             {
                 return With_Key(
                     SpongeH5InputContract::kRestartLoadKey,
-                    "requested dynamic state contains unsupported payloads; "
-                    "Middle Langevin/Andersen Philox RNG and Monte Carlo "
-                    "barostat C rand state cannot be restored yet");
+                    "requested dynamic state contains unsupported payloads: " +
+                        unsupported_reason);
             }
             if (!Has_Supported_Dynamic_State(dynamic_state))
             {

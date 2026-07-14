@@ -5,6 +5,7 @@ from dataclasses import replace
 import pytest
 
 from benchmarks.bundled_io.ab_contracts import (
+    DYNAMIC_RESTART_CONTRACT_STATUSES,
     AssertionEvidence,
     build_case_evidence,
     load_contract_registry,
@@ -46,10 +47,24 @@ def test_real_registry_and_case_matrix_are_symmetric():
 
     assert summary["contract_count"] == len(contracts)
     assert summary["status_counts"] == {
-        "deferred": 0,
-        "supported": 87,
-        "unsupported": 1,
+        "deferred": 2,
+        "supported": 89,
+        "unsupported": 4,
     }
+
+
+def test_dynamic_restart_inventory_rejects_a_missing_module_contract():
+    contracts = load_contract_registry()
+    removed = "input.restart.dynamic.andersen_rng"
+    broken = dict(contracts)
+    broken.pop(removed)
+
+    assert removed in DYNAMIC_RESTART_CONTRACT_STATUSES
+    with pytest.raises(
+        AssertionError,
+        match="dynamic restart contract inventory differs",
+    ):
+        validate_contract_registry(broken, _cases_for_profile())
 
 
 def test_removing_a_registered_case_fails_the_gate():
@@ -131,6 +146,9 @@ def test_evidence_report_merges_cases_and_recomputes_coverage(tmp_path):
     assert coverage["covered_supported_contract_count"] > 0
     assert coverage["missing_supported_contracts"]
     assert 0.0 < coverage["supported_coverage_fraction"] < 1.0
+    assert coverage["status_coverage"]["supported"]["contract_count"] == 89
+    assert coverage["status_coverage"]["deferred"]["contract_count"] == 2
+    assert coverage["status_coverage"]["unsupported"]["contract_count"] == 4
     with pytest.raises(AssertionError, match="missing supported contracts"):
         validate_complete_evidence_report(report_path, contracts, "unit-run")
 
@@ -182,3 +200,24 @@ def test_complete_report_requires_and_accepts_every_supported_contract(
     coverage = report["coverage"]
     assert coverage["supported_coverage_fraction"] == 1.0
     assert coverage["missing_supported_contracts"] == []
+    assert coverage["status_coverage"]["supported"] == {
+        "contract_count": 89,
+        "contract_ids": sorted(
+            contract_id
+            for contract_id, contract in contracts.items()
+            if contract.status == "supported"
+        ),
+        "evidenced_contract_count": 89,
+        "evidenced_contracts": sorted(
+            contract_id
+            for contract_id, contract in contracts.items()
+            if contract.status == "supported"
+        ),
+    }
+    assert (
+        coverage["status_coverage"]["deferred"]["evidenced_contract_count"] == 0
+    )
+    assert (
+        coverage["status_coverage"]["unsupported"]["evidenced_contract_count"]
+        == 0
+    )
