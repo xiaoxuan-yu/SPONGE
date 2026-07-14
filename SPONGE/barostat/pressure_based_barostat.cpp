@@ -189,7 +189,10 @@ void PRESSURE_BASED_BAROSTAT_INFORMATION::Initial(
     is_initialized = 1;
 
     controller->Step_Print_Initial("density", "%.4f");
-    controller->Step_Print_Initial("pressure", "%.2f");
+    if (controller->outputs_content.count("pressure") == 0)
+    {
+        controller->Step_Print_Initial("pressure", "%.2f");
+    }
     if (Isotropy == this->Anisotropic)
         controller->Step_Print_Initial("surface_tensor", "%.2f");
 

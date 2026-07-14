@@ -214,7 +214,10 @@ void MD_INFORMATION::trajectory_output::Initial(CONTROLLER* controller,
     }
     if (print_virial)
     {
-        controller->Step_Print_Initial("pressure", "%.2f");
+        if (!H5MD_Output_Key_Exists(controller, "pressure"))
+        {
+            controller->Step_Print_Initial("pressure", "%.2f");
+        }
         controller->Step_Print_Initial("Pxx", "%.2f");
         controller->Step_Print_Initial("Pyy", "%.2f");
         controller->Step_Print_Initial("Pzz", "%.2f");

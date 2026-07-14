@@ -342,13 +342,12 @@
       "contract_id": "input.restart.dynamic.pressure_based_barostat",
       "direction": "input",
       "component": "restart_dynamic_state",
-      "status": "deferred",
+      "status": "supported",
       "minimum_evidence": "E4",
       "legacy_surface": "pressure-based barostat RNG engine and six-component g state",
       "bundled_surface": "/parameters/restart/rng_state/pressure_based_barostat and /parameters/restart/barostat/pressure_based_barostat/g",
-      "case_ids": [],
-      "assertion_ids": [],
-      "reason": "State import/export and unit roundtrip exist, but process-level legacy/H5 continuation evidence is pending PR 62."
+      "case_ids": ["normal_pressure_barostat_dynamic_restart_continuation"],
+      "assertion_ids": ["restart_pressure_barostat_continuation_equivalence"]
     },
     {
       "contract_id": "input.restart.dynamic.middle_langevin_rng",

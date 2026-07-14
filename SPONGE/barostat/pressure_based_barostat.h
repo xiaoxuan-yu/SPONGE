@@ -141,19 +141,25 @@ inline bool PRESSURE_BASED_BAROSTAT_INFORMATION::Apply_H5_Restart_State(
         return false;
     }
     const auto rng_state = state.rng_state_text.find(module);
-    if (rng_state != state.rng_state_text.end())
+    if (rng_state == state.rng_state_text.end())
     {
-        std::istringstream rng(rng_state->second);
-        rng >> generator;
-        if (rng.fail())
+        if (error_message != nullptr)
         {
-            if (error_message != nullptr)
-            {
-                *error_message =
-                    "Failed to parse pressure-based barostat RNG state";
-            }
-            return false;
+            *error_message =
+                "Pressure-based barostat restart state is missing RNG state";
         }
+        return false;
+    }
+    std::istringstream rng(rng_state->second);
+    rng >> generator;
+    if (rng.fail())
+    {
+        if (error_message != nullptr)
+        {
+            *error_message =
+                "Failed to parse pressure-based barostat RNG state";
+        }
+        return false;
     }
     return true;
 }

@@ -29,7 +29,7 @@ DYNAMIC_RESTART_CONTRACT_STATUSES = {
     "input.restart.dynamic.integrator_state": "supported",
     "input.restart.dynamic.nose_hoover_chain": "supported",
     "input.restart.dynamic.bussi_thermostat": "supported",
-    "input.restart.dynamic.pressure_based_barostat": "deferred",
+    "input.restart.dynamic.pressure_based_barostat": "supported",
     "input.restart.dynamic.middle_langevin_rng": "unsupported",
     "input.restart.dynamic.andersen_rng": "unsupported",
     "input.restart.dynamic.monte_carlo_barostat_rng": "unsupported",

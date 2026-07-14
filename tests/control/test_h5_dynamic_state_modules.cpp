@@ -90,10 +90,29 @@ static void Test_Pressure_Barostat_H5_Restart_State_Round_Trips()
     Require(target.generator() == source.generator());
 }
 
+static void Test_Pressure_Barostat_H5_Restart_Requires_Rng()
+{
+    PRESSURE_BASED_BAROSTAT_INFORMATION source;
+    source.is_initialized = true;
+    source.g = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f};
+    source.generator.seed(24680);
+
+    SpongeH5MD::RestartDynamicState state;
+    std::string error;
+    Require(source.Export_H5_Restart_State(&state, &error));
+    state.rng_state_text.erase("pressure_based_barostat");
+
+    PRESSURE_BASED_BAROSTAT_INFORMATION target;
+    target.is_initialized = true;
+    Require(!target.Apply_H5_Restart_State(state, &error));
+    Require(error.find("RNG state") != std::string::npos);
+}
+
 int main()
 {
     Test_Bussi_H5_Restart_State_Round_Trips();
     Test_Bussi_H5_Restart_Requires_Lambda();
     Test_Pressure_Barostat_H5_Restart_State_Round_Trips();
+    Test_Pressure_Barostat_H5_Restart_Requires_Rng();
     return 0;
 }

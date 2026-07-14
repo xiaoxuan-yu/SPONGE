@@ -248,6 +248,17 @@ BUSSI_LAMBDA_DATASET = "/parameters/restart/thermostat/bussi_thermostat/lambda"
 BUSSI_CONTINUATION_TOLERANCES = {
     "/particles/all/velocity/value": (1.0e-5, 1.5e-4),
 }
+PRESSURE_BAROSTAT_RNG_DATASET = (
+    "/parameters/restart/rng_state/pressure_based_barostat"
+)
+PRESSURE_BAROSTAT_G_DATASET = (
+    "/parameters/restart/barostat/pressure_based_barostat/g"
+)
+PRESSURE_BAROSTAT_MDOUT_TOLERANCES = {
+    column: (2.0e-4, 1.0e-1)
+    for column in ("pressure", "Pxx", "Pyy", "Pzz", "Pxy", "Pxz", "Pyz")
+}
+PRESSURE_BAROSTAT_G_TOLERANCE = (5.0e-3, 1.0e-5)
 META_RESTART_ROOT = "/parameters/restart/bias/meta/meta"
 META_OBSERVABLE_ROOT = "/observables/all/metadynamics"
 
@@ -691,6 +702,20 @@ def _cases_for_profile() -> list[AbCase]:
             restart_load_policy="dynamic",
             contract_ids=("input.restart.dynamic.bussi_thermostat",),
             assertion_ids=("restart_bussi_continuation_equivalence",),
+        ),
+        AbCase(
+            name="normal_pressure_barostat_dynamic_restart_continuation",
+            fixture_case="tip3p_validation_generated",
+            legacy_subdir="generated_legacy",
+            bundled_subdir="generated_bundled",
+            mode="pressure_barostat_continuation",
+            vds=False,
+            statistical_md=False,
+            restart_load_policy="dynamic",
+            contract_ids=("input.restart.dynamic.pressure_based_barostat",),
+            assertion_ids=(
+                "restart_pressure_barostat_continuation_equivalence",
+            ),
         ),
         AbCase(
             name="normal_meta_protocol_full_restart_continuation",
@@ -2365,6 +2390,9 @@ def test_legacy_and_bundled_ab_behavior(case: AbCase):
     if case.mode == "bussi_continuation":
         _run_bussi_dynamic_restart_case(case, contracts)
         return
+    if case.mode == "pressure_barostat_continuation":
+        _run_pressure_barostat_dynamic_restart_case(case, contracts)
+        return
     if case.mode == "dynamic_continuation":
         _run_nhc_dynamic_restart_case(case, contracts)
         return
@@ -2847,24 +2875,36 @@ def _compare_h5_frame_subset(
     }
 
 
-def _compare_bussi_mdout_suffix(
-    case: AbCase, reference_dir: Path, continuation_dir: Path
+def _compare_dynamic_mdout_suffix(
+    case: AbCase,
+    module_label: str,
+    reference_dir: Path,
+    continuation_dir: Path,
+    *,
+    skip_initial_row: bool = False,
+    tolerance_overrides: dict[str, tuple[float, float]] | None = None,
 ) -> dict[str, object]:
     reference = _read_mdout(reference_dir / "mdout.txt")
     continuation = _read_mdout(continuation_dir / "mdout.txt")
     columns = _require_matching_mdout_columns(
-        reference, continuation, f"{case.name} Bussi continuation"
+        reference, continuation, f"{case.name} {module_label} continuation"
     )
     continuation_rows = continuation["rows"]
+    if skip_initial_row:
+        continuation_rows = continuation_rows[1:]
     reference_rows = reference["rows"][-len(continuation_rows) :]
     for column in columns:
         reference_values = [row[column] for row in reference_rows]
         continuation_values = [row[column] for row in continuation_rows]
         _require_finite_values(
-            case, f"Bussi mdout reference suffix {column}", reference_values
+            case,
+            f"{module_label} mdout reference suffix {column}",
+            reference_values,
         )
         _require_finite_values(
-            case, f"Bussi mdout continuation {column}", continuation_values
+            case,
+            f"{module_label} mdout continuation {column}",
+            continuation_values,
         )
         if column == "step":
             reference_origin = reference_values[0]
@@ -2875,11 +2915,11 @@ def _compare_bussi_mdout_suffix(
             continuation_values = [
                 value - continuation_origin for value in continuation_values
             ]
-        relative_tolerance, absolute_tolerance = _deterministic_tolerance(
-            column
-        )
+        relative_tolerance, absolute_tolerance = (
+            tolerance_overrides or {}
+        ).get(column, _deterministic_tolerance(column))
         _assert_numeric_sequences_close(
-            f"{case.name} Bussi mdout suffix {column}",
+            f"{case.name} {module_label} mdout suffix {column}",
             reference_values,
             continuation_values,
             relative_tolerance=relative_tolerance,
@@ -2889,6 +2929,8 @@ def _compare_bussi_mdout_suffix(
         "rows": len(continuation_rows),
         "columns": columns,
         "step_comparison": "relative_to_branch_start",
+        "skipped_initial_row": skip_initial_row,
+        "tolerance_overrides": tolerance_overrides or {},
     }
 
 
@@ -3098,7 +3140,9 @@ def _run_bussi_dynamic_restart_case(case: AbCase, contracts) -> None:
         thermostat_seed=13579,
     )
     continuation_metrics = _run_sponge(continuation_dir, "mdin.spg.toml")
-    mdout = _compare_bussi_mdout_suffix(case, reference_dir, continuation_dir)
+    mdout = _compare_dynamic_mdout_suffix(
+        case, "Bussi", reference_dir, continuation_dir
+    )
     suffix = _compare_h5_frame_subset(
         case,
         "continuous/restarted suffix",
@@ -3236,6 +3280,505 @@ def _run_bussi_dynamic_restart_case(case: AbCase, contracts) -> None:
         EVIDENCE_RUN_ID,
     )
     print(f"\nBundled I/O A/B Bussi restart metrics: {metrics_path}")
+
+
+def _write_pressure_barostat_mdin(
+    case_dir: Path, *, input_route: str, step_limit: int
+) -> None:
+    if input_route == "legacy":
+        input_lines = [
+            'default_in_file_prefix = "tip3p"',
+            'velocity_in_file = "initial_velocity.txt"',
+        ]
+    elif input_route == "bundled_initial":
+        input_lines = [
+            'input_h5_topology_path = "topology.spgt.h5"',
+            'input_h5_protocol_path = "protocol.spgp.h5"',
+            'input_h5_restart_path = "restart.spgr.h5"',
+            'input_h5_restart_load = "structural"',
+        ]
+    elif input_route == "bundled_dynamic":
+        input_lines = [
+            'input_h5_topology_path = "topology.spgt.h5"',
+            'input_h5_protocol_path = "protocol.spgp.h5"',
+            'input_h5_restart_path = "output/producer.spgr.h5"',
+            'input_h5_restart_load = "dynamic"',
+        ]
+    else:
+        raise AssertionError(
+            f"unknown pressure barostat input route: {input_route}"
+        )
+
+    lines = [
+        f'md_name = "bundled io ab pressure barostat {input_route}"',
+        'mode = "npt"',
+        f"step_limit = {step_limit}",
+        "dt = 0.0001",
+        "cutoff = 8.0",
+        *input_lines,
+        'thermostat = "berendsen_thermostat"',
+        'thermostat_mode = "berendsen_thermostat"',
+        "thermostat_tau = 0.1",
+        "target_temperature = 300.0",
+        'barostat = "andersen_barostat"',
+        'barostat_mode = "andersen_barostat"',
+        'barostat_isotropy = "isotropic"',
+        "barostat_tau = 0.1",
+        "barostat_update_interval = 1",
+        "target_pressure = 1000.0",
+        "print_pressure = true",
+        "print_zeroth_frame = 1",
+        "write_mdout_interval = 1",
+        "write_information_interval = 1",
+        "write_trajectory_interval = 1",
+        "write_restart_file_interval = 1",
+        'mdout = "mdout.txt"',
+        'mdinfo = "mdinfo.txt"',
+        'crd = "output/legacy.crd"',
+        'box = "output/legacy.box"',
+        'vel = "output/legacy.vel"',
+        'frc = "output/legacy.frc"',
+        'rst = "output/legacy_restart"',
+        f'output_h5_trajectory_path = "{TRAJECTORY_REL.as_posix()}"',
+        "output_h5_trajectory_vds = false",
+        "output_h5_trajectory_chunk_size = 4",
+        f'output_h5_observable_path = "{OBSERVABLE_REL.as_posix()}"',
+        f'output_h5_restart_path = "{RESTART_REL.as_posix()}"',
+    ]
+    (case_dir / "output").mkdir(parents=True, exist_ok=True)
+    (case_dir / "mdin.spg.toml").write_text(
+        "\n".join(lines) + "\n", encoding="utf-8"
+    )
+
+
+def _read_pressure_barostat_restart_state(path: Path) -> dict[str, object]:
+    rng = _h5_string_values(path, PRESSURE_BAROSTAT_RNG_DATASET)
+    g = _h5_numeric_values(path, PRESSURE_BAROSTAT_G_DATASET)
+    steps = _h5_numeric_values(path, "/particles/all/step")
+    times = _h5_numeric_values(path, "/particles/all/time")
+    if (
+        len(rng) != 1
+        or not rng[0].strip()
+        or len(g) != 6
+        or len(steps) != 1
+        or len(times) != 1
+        or not all(math.isfinite(value) for value in (*g, *steps, *times))
+    ):
+        raise AssertionError(f"invalid pressure barostat restart state: {path}")
+    return {
+        "rng": rng[0],
+        "g": g,
+        "step": int(steps[0]),
+        "time": times[0],
+        "sha256": _sha256_file(path),
+    }
+
+
+def _box_volume(box: Sequence[float]) -> float:
+    if len(box) != 9:
+        raise AssertionError(
+            f"box matrix must contain 9 values, got {len(box)}"
+        )
+    a, b, c, d, e, f, g, h, i = box
+    return abs(a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g))
+
+
+def _prepare_pressure_barostat_continuation(
+    source_dir: Path, destination: Path, checkpoint: Path
+) -> str:
+    if destination.exists():
+        shutil.rmtree(destination)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(source_dir, destination)
+    for relative_path in (TRAJECTORY_REL, OBSERVABLE_REL, RESTART_REL):
+        output = destination / relative_path
+        if output.exists():
+            output.unlink()
+    producer_copy = destination / "output/producer.spgr.h5"
+    shutil.copy2(checkpoint, producer_copy)
+    checkpoint_sha256 = _sha256_file(checkpoint)
+    if _sha256_file(producer_copy) != checkpoint_sha256:
+        raise AssertionError(
+            "pressure barostat checkpoint changed while copied"
+        )
+    _write_pressure_barostat_mdin(
+        destination, input_route="bundled_dynamic", step_limit=2
+    )
+    return checkpoint_sha256
+
+
+def _run_pressure_barostat_mutation_controls(
+    case: AbCase,
+    bundled_producer_dir: Path,
+    checkpoint: Path,
+    expected_restart: Path,
+    mutation_root: Path,
+) -> dict[str, object]:
+    outcomes = {}
+    for mutation, diagnostic in (
+        (
+            "corrupt_rng",
+            "Failed to parse pressure-based barostat RNG state",
+        ),
+        ("missing_g", "missing a valid g matrix"),
+        ("owner_mismatch", "current barostat is not pressure-based"),
+    ):
+        destination = mutation_root / mutation
+        _prepare_pressure_barostat_continuation(
+            bundled_producer_dir, destination, checkpoint
+        )
+        producer_copy = destination / "output/producer.spgr.h5"
+        if mutation == "owner_mismatch":
+            mdin = destination / "mdin.spg.toml"
+            text = mdin.read_text(encoding="utf-8").replace(
+                "andersen_barostat", "monte_carlo_barostat"
+            )
+            mdin.write_text(text, encoding="utf-8")
+        else:
+            with h5py.File(producer_copy, "r+") as restart:
+                if mutation == "corrupt_rng":
+                    _replace_h5_string_dataset(
+                        restart,
+                        PRESSURE_BAROSTAT_RNG_DATASET,
+                        "invalid_rng_state",
+                    )
+                else:
+                    del restart[PRESSURE_BAROSTAT_G_DATASET]
+        outcome = _run_sponge_process(destination, "mdin.spg.toml")
+        if outcome.returncode == 0 or diagnostic not in (
+            outcome.stdout + outcome.stderr
+        ):
+            raise AssertionError(
+                f"{case.name} {mutation} was not rejected with {diagnostic!r}"
+            )
+        outcomes[mutation] = {
+            "exit_code": outcome.returncode,
+            "diagnostic": diagnostic,
+        }
+
+    expected_state = _read_pressure_barostat_restart_state(expected_restart)
+    for mutation in ("swapped_g", "alternate_rng"):
+        destination = mutation_root / mutation
+        _prepare_pressure_barostat_continuation(
+            bundled_producer_dir, destination, checkpoint
+        )
+        producer_copy = destination / "output/producer.spgr.h5"
+        with h5py.File(producer_copy, "r+") as restart:
+            if mutation == "swapped_g":
+                values = restart[PRESSURE_BAROSTAT_G_DATASET][:]
+                restart[PRESSURE_BAROSTAT_G_DATASET][:] = values[::-1]
+            else:
+                _replace_h5_string_dataset(
+                    restart, PRESSURE_BAROSTAT_RNG_DATASET, "1"
+                )
+        _run_sponge(destination, "mdin.spg.toml")
+        candidate_state = _read_pressure_barostat_restart_state(
+            destination / RESTART_REL
+        )
+        expected_box = _h5_numeric_values(
+            expected_restart, "/particles/all/box/edges/value"
+        )
+        candidate_box = _h5_numeric_values(
+            destination / RESTART_REL, "/particles/all/box/edges/value"
+        )
+        if len(expected_box) != len(candidate_box):
+            raise AssertionError(
+                f"{case.name} {mutation} changed restart box shape"
+            )
+        maximum_box_delta = max(
+            abs(left - right)
+            for left, right in zip(expected_box, candidate_box)
+        )
+        rng_differs = candidate_state["rng"] != expected_state["rng"]
+        g_delta = max(
+            abs(left - right)
+            for left, right in zip(expected_state["g"], candidate_state["g"])
+        )
+        if maximum_box_delta <= 1.0e-7 or g_delta <= 1.0e-7:
+            raise AssertionError(
+                f"{case.name} {mutation} was not behaviorally observable"
+            )
+        if mutation == "alternate_rng" and not rng_differs:
+            raise AssertionError(
+                f"{case.name} alternate barostat RNG did not change final state"
+            )
+        outcomes[mutation] = {
+            "exit_code": 0,
+            "final_rng_differs": rng_differs,
+            "maximum_g_delta": g_delta,
+            "maximum_box_delta": maximum_box_delta,
+        }
+    return outcomes
+
+
+def _run_pressure_barostat_dynamic_restart_case(
+    case: AbCase, contracts
+) -> None:
+    case_root = _output_root() / case.name
+    setup_root = case_root / "setup"
+    legacy_template, bundled_producer_dir = _prepare_normal_tip3p_pair(
+        setup_root, 20260714
+    )
+    reference_dir = case_root / "reference"
+    legacy_checkpoint_dir = case_root / "legacy_checkpoint"
+    for destination in (reference_dir, legacy_checkpoint_dir):
+        if destination.exists():
+            shutil.rmtree(destination)
+        shutil.copytree(legacy_template, destination)
+
+    _write_pressure_barostat_mdin(
+        reference_dir, input_route="legacy", step_limit=8
+    )
+    _write_pressure_barostat_mdin(
+        legacy_checkpoint_dir, input_route="legacy", step_limit=6
+    )
+    _write_pressure_barostat_mdin(
+        bundled_producer_dir, input_route="bundled_initial", step_limit=6
+    )
+    producer_metrics = {
+        "reference": _run_sponge(reference_dir, "mdin.spg.toml"),
+        "legacy_checkpoint": _run_sponge(
+            legacy_checkpoint_dir, "mdin.spg.toml"
+        ),
+        "bundled_checkpoint": _run_sponge(
+            bundled_producer_dir, "mdin.spg.toml"
+        ),
+    }
+
+    particle_datasets = (
+        "/particles/all/step",
+        "/particles/all/time",
+        "/particles/all/position/value",
+        "/particles/all/velocity/value",
+        "/particles/all/force/value",
+        "/particles/all/box/edges/value",
+    )
+    prefix = {
+        "legacy_reference": _compare_h5_frame_subset(
+            case,
+            "legacy reference/checkpoint prefix",
+            reference_dir / TRAJECTORY_REL,
+            legacy_checkpoint_dir / TRAJECTORY_REL,
+            particle_datasets,
+            time_dataset="/particles/all/time",
+        ),
+        "bundled_producer": _compare_h5_frame_subset(
+            case,
+            "legacy/bundled checkpoint prefix",
+            legacy_checkpoint_dir / TRAJECTORY_REL,
+            bundled_producer_dir / TRAJECTORY_REL,
+            particle_datasets,
+            time_dataset="/particles/all/time",
+        ),
+    }
+    checkpoint_states = {
+        "legacy": _read_pressure_barostat_restart_state(
+            legacy_checkpoint_dir / RESTART_REL
+        ),
+        "bundled": _read_pressure_barostat_restart_state(
+            bundled_producer_dir / RESTART_REL
+        ),
+    }
+    if (
+        checkpoint_states["legacy"]["rng"]
+        != checkpoint_states["bundled"]["rng"]
+    ):
+        raise AssertionError(
+            f"{case.name} checkpoint pressure barostat RNG state differs"
+        )
+    _assert_numeric_sequences_close(
+        f"{case.name} checkpoint pressure barostat g",
+        checkpoint_states["legacy"]["g"],
+        checkpoint_states["bundled"]["g"],
+        relative_tolerance=1.0e-6,
+        absolute_tolerance=1.0e-8,
+    )
+
+    continuation_dir = case_root / "continuation"
+    checkpoint = bundled_producer_dir / RESTART_REL
+    checkpoint_sha256 = _prepare_pressure_barostat_continuation(
+        bundled_producer_dir, continuation_dir, checkpoint
+    )
+    continuation_metrics = _run_sponge(continuation_dir, "mdin.spg.toml")
+    mdout = _compare_dynamic_mdout_suffix(
+        case,
+        "pressure barostat",
+        reference_dir,
+        continuation_dir,
+        skip_initial_row=True,
+        tolerance_overrides=PRESSURE_BAROSTAT_MDOUT_TOLERANCES,
+    )
+    required_pressure_columns = {"pressure", "Pxx", "Pyy", "Pzz"}
+    if not required_pressure_columns.issubset(mdout["columns"]):
+        raise AssertionError(
+            f"{case.name} pressure tensor columns are incomplete"
+        )
+    suffix = _compare_h5_frame_subset(
+        case,
+        "continuous/restarted pressure suffix",
+        reference_dir / TRAJECTORY_REL,
+        continuation_dir / TRAJECTORY_REL,
+        particle_datasets,
+        time_dataset="/particles/all/time",
+    )
+    final_states = {
+        "reference": _read_pressure_barostat_restart_state(
+            reference_dir / RESTART_REL
+        ),
+        "continuation": _read_pressure_barostat_restart_state(
+            continuation_dir / RESTART_REL
+        ),
+    }
+    if final_states["reference"]["rng"] != final_states["continuation"]["rng"]:
+        raise AssertionError(f"{case.name} final pressure barostat RNG differs")
+    _assert_numeric_sequences_close(
+        f"{case.name} final pressure barostat g",
+        final_states["reference"]["g"],
+        final_states["continuation"]["g"],
+        relative_tolerance=PRESSURE_BAROSTAT_G_TOLERANCE[0],
+        absolute_tolerance=PRESSURE_BAROSTAT_G_TOLERANCE[1],
+    )
+    reference_step_delta = (
+        final_states["reference"]["step"] - checkpoint_states["bundled"]["step"]
+    )
+    continuation_step_count = final_states["continuation"]["step"] + 1
+    if reference_step_delta != continuation_step_count:
+        raise AssertionError(
+            f"{case.name} continuation step-count mismatch: "
+            f"reference={reference_step_delta}, "
+            f"continuation={continuation_step_count}"
+        )
+    for dataset in (
+        "/particles/all/time",
+        "/particles/all/position/value",
+        "/particles/all/velocity/value",
+        "/particles/all/box/edges/value",
+    ):
+        reference_values = _h5_numeric_values(
+            reference_dir / RESTART_REL, dataset
+        )
+        continuation_values = _h5_numeric_values(
+            continuation_dir / RESTART_REL, dataset
+        )
+        _require_finite_values(
+            case, f"final reference {dataset}", reference_values
+        )
+        _require_finite_values(
+            case, f"final continuation {dataset}", continuation_values
+        )
+        relative_tolerance, absolute_tolerance = _deterministic_tolerance(
+            dataset
+        )
+        _assert_numeric_sequences_close(
+            f"{case.name} final restart {dataset}",
+            reference_values,
+            continuation_values,
+            relative_tolerance=relative_tolerance,
+            absolute_tolerance=absolute_tolerance,
+        )
+
+    checkpoint_box = _h5_numeric_values(
+        checkpoint, "/particles/all/box/edges/value"
+    )
+    final_box = _h5_numeric_values(
+        continuation_dir / RESTART_REL, "/particles/all/box/edges/value"
+    )
+    box_delta = max(
+        abs(left - right) for left, right in zip(checkpoint_box, final_box)
+    )
+    checkpoint_volume = _box_volume(checkpoint_box)
+    final_volume = _box_volume(final_box)
+    volume_delta = abs(final_volume - checkpoint_volume)
+    g_delta = max(
+        abs(left - right)
+        for left, right in zip(
+            checkpoint_states["bundled"]["g"], final_states["continuation"]["g"]
+        )
+    )
+    if box_delta <= 1.0e-7 or volume_delta <= 1.0e-5 or g_delta <= 1.0e-7:
+        raise AssertionError(
+            f"{case.name} barostat box/g evolution is not observable"
+        )
+    evolution = {
+        "maximum_box_delta": box_delta,
+        "checkpoint_volume": checkpoint_volume,
+        "final_volume": final_volume,
+        "volume_delta": volume_delta,
+        "maximum_g_delta": g_delta,
+        "g_component_count": len(final_states["continuation"]["g"]),
+        "nonzero_g_component_count": sum(
+            abs(value) > 1.0e-12 for value in final_states["continuation"]["g"]
+        ),
+    }
+    if (
+        evolution["g_component_count"] != 6
+        or evolution["nonzero_g_component_count"] == 0
+    ):
+        raise AssertionError(
+            f"{case.name} does not exercise the six-value g state"
+        )
+
+    mutations = _run_pressure_barostat_mutation_controls(
+        case,
+        bundled_producer_dir,
+        checkpoint,
+        continuation_dir / RESTART_REL,
+        case_root / "mutations",
+    )
+    assertion = AssertionEvidence(
+        assertion_id="restart_pressure_barostat_continuation_equivalence",
+        evidence_level="E4",
+        details={
+            "method": "continuous_reference_vs_bundled_checkpoint_restart",
+            "producer_branch": "bundled",
+            "algorithm": "andersen_barostat",
+            "checkpoint_sha256": checkpoint_sha256,
+            "checkpoint_states": checkpoint_states,
+            "prefix": prefix,
+            "mdout": mdout,
+            "suffix": suffix,
+            "final_states": final_states,
+            "step_progression": {
+                "comparison": "completed_steps_after_checkpoint",
+                "reference": reference_step_delta,
+                "continuation": continuation_step_count,
+            },
+            "evolution": evolution,
+            "continuation_tolerances": {
+                "g": PRESSURE_BAROSTAT_G_TOLERANCE,
+                "mdout": PRESSURE_BAROSTAT_MDOUT_TOLERANCES,
+            },
+            "mutations": mutations,
+        },
+    )
+    evidence = build_case_evidence(contracts, case, (assertion,))
+    metrics = {
+        "profile": PROFILE,
+        "case": case.name,
+        "contract_ids": list(case.contract_ids),
+        "assertion_ids": list(case.assertion_ids),
+        "evidence": [record.as_dict() for record in evidence],
+        "producer_metrics": producer_metrics,
+        "continuation_metrics": continuation_metrics,
+        "comparison": assertion.details,
+    }
+    metrics_path = case_root / "ab_metrics.json"
+    metrics_path.write_text(json.dumps(metrics, indent=2), encoding="utf-8")
+    update_evidence_report(
+        _output_root() / "ab_evidence.json",
+        contracts,
+        case,
+        evidence,
+        {
+            "profile": PROFILE,
+            "restart_load_policy": case.restart_load_policy,
+            "producer_branch": "bundled",
+            "sponge_executable": str(_sponge_executable()),
+            "metrics_path": str(metrics_path),
+        },
+        EVIDENCE_RUN_ID,
+    )
+    print(f"\nBundled I/O A/B pressure restart metrics: {metrics_path}")
 
 
 def _run_nhc_dynamic_restart_case(case: AbCase, contracts) -> None:
