@@ -16,6 +16,7 @@ except ModuleNotFoundError:  # Python 3.10
     import tomli as tomllib
 
 from benchmarks.bundled_io.ab_contracts import (
+    AssertionEvidence,
     ContractSpec,
     audit_input_evolution_contracts,
     load_contract_registry,
@@ -49,6 +50,7 @@ from benchmarks.bundled_io.tests.test_bundled_io_ab_execution_matrix import (
     _runtime_keys,
 )
 from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
+    FAILURE_SEMANTICS,
     FOCUSED_CONSTRAINT_SIDECAR_FIXTURE,
     FOCUSED_CONSTRAINT_TYPED_FIXTURE,
     FOCUSED_CORE_TOPOLOGY_FIXTURE,
@@ -85,6 +87,8 @@ from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
     FOCUSED_VIRTUAL_ATOMS_PBC_FIXTURE,
     INPUT_SEMANTIC_SPECS_BY_CASE,
     MDINFO_CONTRACT_KEYS,
+    NONFINITE_PROPAGATION,
+    NORMAL_SUCCESS,
     OUTPUT_FAMILY_COMBINATIONS,
     OUTPUT_WRITER_FAILURE_POINTS,
     PROFILE_LIMITS,
@@ -95,10 +99,12 @@ from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
     _assert_constraint_projection_oracle,
     _assert_core_topology_payload_response,
     _assert_exclusion_coulomb_oracle,
+    _assert_finite_values,
     _assert_focused_improper_oracle,
     _assert_gb_force_oracle,
     _assert_nontrivial_equivalent_forces,
     _assert_nonzero_dt_evolution,
+    _assert_numeric_sequences_close,
     _assert_rerun_direct_payload,
     _assert_rerun_optional_presence,
     _assert_residue_com_res_virial_oracle,
@@ -110,13 +116,17 @@ from benchmarks.bundled_io.tests.test_bundled_io_ab_production import (
     _assert_sw_pair_three_body_oracle,
     _assert_tersoff_angular_oracle,
     _assert_virtual_atom_oracle,
+    _attach_finite_scan,
     _audit_output_family_cases,
+    _case_output_classification,
     _cases_for_profile,
     _expected_rerun_frame_indices,
     _h5_string_values,
     _insert_root_toml_keys,
     _parse_mdinfo_key_values,
     _restart_continuation_source,
+    _scan_success_outputs,
+    _summarize_finite_scans,
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -809,6 +819,92 @@ def test_rerun_optional_presence_oracle_rejects_one_sided_fields():
             h5_present=True,
             legacy_present=False,
         )
+
+
+@pytest.mark.parametrize("value", [float("nan"), float("inf"), -float("inf")])
+def test_normal_success_finite_scan_rejects_nonfinite_h5_values(
+    tmp_path, value
+):
+    output = tmp_path / "output"
+    output.mkdir()
+    trajectory = output / "ab.spg.h5md"
+    with h5py.File(trajectory, "w") as handle:
+        handle.create_dataset(
+            "/particles/all/position/value", data=[1.0, value]
+        )
+
+    with pytest.raises(AssertionError, match="contains non-finite value"):
+        _scan_success_outputs(tmp_path)
+    with pytest.raises(
+        AssertionError, match="normal-success comparison contains matching"
+    ):
+        _assert_numeric_sequences_close(
+            "matching mutation",
+            [value],
+            [value],
+            relative_tolerance=0.0,
+            absolute_tolerance=0.0,
+        )
+
+
+def test_normal_success_finite_scan_records_traceable_counts(tmp_path):
+    output = tmp_path / "output"
+    output.mkdir()
+    trajectory = output / "ab.spg.h5md"
+    with h5py.File(trajectory, "w") as handle:
+        handle.create_dataset("/particles/all/step", data=[1, 2])
+        handle.create_dataset("/particles/all/time", data=[0.1, 0.2])
+
+    scan = _scan_success_outputs(tmp_path)
+    summary = _summarize_finite_scans(scan)
+    assert scan["file_count"] == 1
+    assert scan["dataset_count"] == 2
+    assert scan["value_count"] == 4
+    assert summary == {
+        "classification": NORMAL_SUCCESS,
+        "run_directory_count": 1,
+        "file_count": 1,
+        "dataset_count": 2,
+        "value_count": 4,
+        "run_directories": [str(tmp_path.resolve())],
+    }
+    _assert_finite_values("focused oracle", [0.0, 1.0, -1.0])
+
+
+def test_case_output_classification_separates_functionality_and_failures():
+    normal = next(
+        case for case in _cases_for_profile() if case.failure_mutation is None
+    )
+    failure = next(
+        case
+        for case in _cases_for_profile()
+        if case.failure_mutation is not None
+    )
+    propagation = replace(
+        normal,
+        mode=NONFINITE_PROPAGATION,
+        failure_mutation=None,
+    )
+    assert _case_output_classification(normal) == NORMAL_SUCCESS
+    assert _case_output_classification(failure) == FAILURE_SEMANTICS
+    assert _case_output_classification(propagation) == NONFINITE_PROPAGATION
+
+    finite_scan = {
+        "classification": NORMAL_SUCCESS,
+        "run_directory_count": 1,
+        "file_count": 2,
+        "dataset_count": 3,
+        "value_count": 4,
+        "run_directories": ["/tmp/mutation"],
+    }
+    assertion = AssertionEvidence("mutation", "E3", {"oracle": "finite"})
+    enriched = _attach_finite_scan(normal, (assertion,), finite_scan)
+    assert enriched[0].details["finite_scan"] == finite_scan
+    assert enriched[0].details["output_classification"] == NORMAL_SUCCESS
+    with pytest.raises(
+        AssertionError, match="cannot attach normal-success finite evidence"
+    ):
+        _attach_finite_scan(propagation, (assertion,), finite_scan)
     with pytest.raises(
         AssertionError, match="optional field velocity presence"
     ):

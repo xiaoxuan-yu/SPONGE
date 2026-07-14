@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Sequence
@@ -594,6 +595,19 @@ class AbCase:
     legacy_output_mode: str = "coexist"
     output_fault_family: str = ""
     output_fault_phase: str = ""
+
+
+NORMAL_SUCCESS = "normal_success"
+FAILURE_SEMANTICS = "failure_semantics"
+NONFINITE_PROPAGATION = "nonfinite_propagation"
+
+
+def _case_output_classification(case: AbCase) -> str:
+    if case.failure_mutation is not None or case.mode == "output_fault":
+        return FAILURE_SEMANTICS
+    if case.mode == NONFINITE_PROPAGATION:
+        return NONFINITE_PROPAGATION
+    return NORMAL_SUCCESS
 
 
 @dataclass
@@ -2775,7 +2789,10 @@ def test_legacy_and_bundled_ab_behavior(case: AbCase):
         )
     contracts = load_contract_registry()
     validate_contract_registry(contracts, _cases_for_profile())
+    output_classification = _case_output_classification(case)
     if case.failure_mutation is not None:
+        if output_classification != FAILURE_SEMANTICS:
+            raise AssertionError(f"{case.name} failure case is misclassified")
         _run_failure_case(case, contracts)
         return
     if case.mode == "structural_continuation":
@@ -2800,8 +2817,15 @@ def test_legacy_and_bundled_ab_behavior(case: AbCase):
         _run_output_family_case(case, contracts)
         return
     if case.mode == "output_fault":
+        if output_classification != FAILURE_SEMANTICS:
+            raise AssertionError(f"{case.name} output fault is misclassified")
         _run_output_writer_failure_case(case, contracts)
         return
+    if output_classification != NORMAL_SUCCESS:
+        raise AssertionError(
+            f"{case.name} cannot emit supported functionality evidence as "
+            f"{output_classification}"
+        )
     root = _output_root()
     case_root = root / case.name
     runs = []
@@ -2978,6 +3002,7 @@ def _run_failure_case(case: AbCase, contracts) -> None:
         assertion_id="stable_failure_semantics",
         evidence_level="F1",
         details={
+            "output_classification": FAILURE_SEMANTICS,
             "mutation": case.failure_mutation,
             "branches": list(case.failure_branches),
             "outcomes": outcomes,
@@ -3074,7 +3099,13 @@ def _run_structural_restart_case(case: AbCase, contracts) -> None:
             "continuation": continuation,
         },
     )
-    evidence = build_case_evidence(contracts, case, (assertion,))
+    evidence, finite_scan = _build_success_case_evidence(
+        contracts,
+        case,
+        (assertion,),
+        producer_metrics,
+        continuation,
+    )
     metrics = {
         "profile": PROFILE,
         "case": case.name,
@@ -3083,6 +3114,7 @@ def _run_structural_restart_case(case: AbCase, contracts) -> None:
         "evidence": [record.as_dict() for record in evidence],
         "restart_load_policy": case.restart_load_policy,
         "producer_metrics": producer_metrics,
+        "finite_scan": finite_scan,
         "comparison": assertion.details,
     }
     metrics_path = case_root / "ab_metrics.json"
@@ -3652,7 +3684,13 @@ def _run_bussi_dynamic_restart_case(case: AbCase, contracts) -> None:
             "mutations": mutations,
         },
     )
-    evidence = build_case_evidence(contracts, case, (assertion,))
+    evidence, finite_scan = _build_success_case_evidence(
+        contracts,
+        case,
+        (assertion,),
+        producer_metrics,
+        continuation_metrics,
+    )
     metrics = {
         "profile": PROFILE,
         "case": case.name,
@@ -3661,6 +3699,7 @@ def _run_bussi_dynamic_restart_case(case: AbCase, contracts) -> None:
         "evidence": [record.as_dict() for record in evidence],
         "producer_metrics": producer_metrics,
         "continuation_metrics": continuation_metrics,
+        "finite_scan": finite_scan,
         "comparison": assertion.details,
     }
     metrics_path = case_root / "ab_metrics.json"
@@ -4151,7 +4190,13 @@ def _run_pressure_barostat_dynamic_restart_case(
             "mutations": mutations,
         },
     )
-    evidence = build_case_evidence(contracts, case, (assertion,))
+    evidence, finite_scan = _build_success_case_evidence(
+        contracts,
+        case,
+        (assertion,),
+        producer_metrics,
+        continuation_metrics,
+    )
     metrics = {
         "profile": PROFILE,
         "case": case.name,
@@ -4160,6 +4205,7 @@ def _run_pressure_barostat_dynamic_restart_case(
         "evidence": [record.as_dict() for record in evidence],
         "producer_metrics": producer_metrics,
         "continuation_metrics": continuation_metrics,
+        "finite_scan": finite_scan,
         "comparison": assertion.details,
     }
     metrics_path = case_root / "ab_metrics.json"
@@ -4221,7 +4267,13 @@ def _run_nhc_dynamic_restart_case(case: AbCase, contracts) -> None:
             "continuation": comparison,
         },
     )
-    evidence = build_case_evidence(contracts, case, (assertion,))
+    evidence, finite_scan = _build_success_case_evidence(
+        contracts,
+        case,
+        (assertion,),
+        producer_metrics,
+        continuation_metrics,
+    )
     metrics = {
         "profile": PROFILE,
         "case": case.name,
@@ -4231,6 +4283,7 @@ def _run_nhc_dynamic_restart_case(case: AbCase, contracts) -> None:
         "restart_load_policy": case.restart_load_policy,
         "producer_metrics": producer_metrics,
         "continuation_metrics": continuation_metrics,
+        "finite_scan": finite_scan,
         "comparison": assertion.details,
     }
     metrics_path = case_root / "ab_metrics.json"
@@ -4668,7 +4721,13 @@ def _run_meta_protocol_full_restart_case(case: AbCase, contracts) -> None:
             "continuation": comparison,
         },
     )
-    evidence = build_case_evidence(contracts, case, (assertion,))
+    evidence, finite_scan = _build_success_case_evidence(
+        contracts,
+        case,
+        (assertion,),
+        producer_metrics,
+        continuation_metrics,
+    )
     metrics = {
         "profile": PROFILE,
         "case": case.name,
@@ -4678,6 +4737,7 @@ def _run_meta_protocol_full_restart_case(case: AbCase, contracts) -> None:
         "restart_load_policy": case.restart_load_policy,
         "producer_metrics": producer_metrics,
         "continuation_metrics": continuation_metrics,
+        "finite_scan": finite_scan,
         "comparison": assertion.details,
     }
     metrics_path = case_root / "ab_metrics.json"
@@ -5284,6 +5344,7 @@ def _compare_meta_continuations(
 def _run_chunk_boundary_case(case: AbCase, contracts) -> None:
     case_root = _output_root() / case.name
     legacy_dir, bundled_dir = _prepare_case_pair(case, case_root, 20260709)
+    run_metrics = {}
     for branch, case_dir, mdin_name in (
         ("legacy", legacy_dir, "mdin.spg.toml"),
         ("bundled", bundled_dir, "mdin.bundled.spg.toml"),
@@ -5295,7 +5356,7 @@ def _run_chunk_boundary_case(case: AbCase, contracts) -> None:
             branch=branch,
             replica_seed=20260709,
         )
-        _run_sponge(case_dir, mdin_name)
+        run_metrics[branch] = _run_sponge(case_dir, mdin_name)
 
     run = AbRun(
         replica_index=0,
@@ -5361,13 +5422,17 @@ def _run_chunk_boundary_case(case: AbCase, contracts) -> None:
                 details=repair_details,
             )
         )
-    evidence = build_case_evidence(contracts, case, tuple(assertions))
+    evidence, finite_scan = _build_success_case_evidence(
+        contracts, case, tuple(assertions), run_metrics
+    )
     metrics = {
         "profile": PROFILE,
         "case": case.name,
         "contract_ids": list(case.contract_ids),
         "assertion_ids": list(case.assertion_ids),
         "evidence": [record.as_dict() for record in evidence],
+        "run_metrics": run_metrics,
+        "finite_scan": finite_scan,
         "comparison": details,
     }
     metrics_path = case_root / "ab_metrics.json"
@@ -5392,9 +5457,10 @@ def _run_chunk_boundary_case(case: AbCase, contracts) -> None:
 def _run_output_family_case(case: AbCase, contracts) -> None:
     case_root = _output_root() / case.name
     legacy_dir, bundled_dir = _prepare_case_pair(case, case_root, 20260709)
+    run_metrics = {}
     for branch, case_dir in (("legacy", legacy_dir), ("bundled", bundled_dir)):
         _prepare_output_family_mdin(case, case_dir, branch=branch)
-        _run_sponge(case_dir, _mdin_name(case_dir))
+        run_metrics[branch] = _run_sponge(case_dir, _mdin_name(case_dir))
 
     run = AbRun(
         replica_index=0,
@@ -5434,7 +5500,9 @@ def _run_output_family_case(case: AbCase, contracts) -> None:
             details=details,
         ),
     )
-    evidence = build_case_evidence(contracts, case, assertions)
+    evidence, finite_scan = _build_success_case_evidence(
+        contracts, case, assertions, run_metrics, continuation
+    )
     metrics_path = case_root / "ab_metrics.json"
     metrics_path.write_text(
         json.dumps(
@@ -5444,6 +5512,8 @@ def _run_output_family_case(case: AbCase, contracts) -> None:
                 "contract_ids": list(case.contract_ids),
                 "assertion_ids": list(case.assertion_ids),
                 "evidence": [record.as_dict() for record in evidence],
+                "run_metrics": run_metrics,
+                "finite_scan": finite_scan,
                 "comparison": details,
             },
             indent=2,
@@ -5694,6 +5764,7 @@ def _run_restart_only_output_continuation(
             f"{case.name} restart-only continuation failed with code "
             f"{outcome.returncode}\n{outcome.stdout}\n{outcome.stderr}"
         )
+    finite_scan = _scan_success_outputs(continuation)
     rows = _read_mdout(continuation / "mdout.txt")["rows"]
     if len(rows) != 1 or [row.get("step") for row in rows] != [1.0]:
         raise AssertionError(
@@ -5703,6 +5774,7 @@ def _run_restart_only_output_continuation(
         "exit_code": outcome.returncode,
         "mdout_rows": len(rows),
         "checkpoint_sha256": _sha256_file(checkpoint),
+        "finite_scan": finite_scan,
     }
     shutil.rmtree(continuation)
     return result
@@ -5761,6 +5833,7 @@ def _run_output_writer_failure_case(case: AbCase, contracts) -> None:
             raise AssertionError(f"{case.name} left temporary file {temporary}")
 
     details = {
+        "output_classification": FAILURE_SEMANTICS,
         "fault_family": case.output_fault_family,
         "fault_phase": case.output_fault_phase,
         "exit_code": outcome.returncode,
@@ -6110,7 +6183,7 @@ def _replica_seed(replica_index: int) -> int:
 def _prepare_case_pair(
     case: AbCase, case_root: Path, replica_seed: int
 ) -> tuple[Path, Path]:
-    if case.mode in {"normal", "chunk_boundary"}:
+    if case.mode in {"normal", "chunk_boundary", "output_family"}:
         if case.fixture_case == FOCUSED_CORE_TOPOLOGY_FIXTURE:
             return _prepare_focused_core_topology_pair(case_root)
         if case.fixture_case in {
@@ -6229,6 +6302,7 @@ def _prepare_case_pair(
     if "input.restart_load.absent" in case.contract_ids:
         _prepare_restart_absent_inputs(legacy_dir, bundled_dir)
         _validate_restart_absent_routes(legacy_dir, bundled_dir)
+    _prepare_full_contract_finite_rerun_frames(case, legacy_dir, bundled_dir)
     _prepare_rerun_trajectory_variant(case, bundled_dir)
     return legacy_dir, bundled_dir
 
@@ -6710,6 +6784,44 @@ def _prepare_rerun_trajectory_variant(case: AbCase, bundled_dir: Path) -> None:
             f"{destination_stream}/velocity",
             parents=True,
         )
+
+
+def _prepare_full_contract_finite_rerun_frames(
+    case: AbCase, legacy_dir: Path, bundled_dir: Path
+) -> None:
+    if case.fixture_case != "full_contract_rerun":
+        return
+    legacy_path = legacy_dir / "traj.dat"
+    payload = legacy_path.read_bytes()
+    if len(payload) != 2 * 2 * 3 * 4:
+        raise AssertionError(
+            f"{case.name} full-contract trajectory shape changed: "
+            f"bytes={len(payload)}"
+        )
+    legacy_values = [item[0] for item in struct.iter_unpack("f", payload)]
+    legacy_values[8] = legacy_values[2]
+    legacy_values[11] = legacy_values[5]
+    legacy_path.write_bytes(
+        struct.pack(f"{len(legacy_values)}f", *legacy_values)
+    )
+
+    trajectory_path = bundled_dir / "trajectory.spg.h5md"
+    with h5py.File(trajectory_path, "r+") as trajectory:
+        position = trajectory["/particles/all/position/value"]
+        if position.shape != (2, 2, 3):
+            raise AssertionError(
+                f"{case.name} bundled full-contract trajectory shape changed: "
+                f"{position.shape}"
+            )
+        position[1, :, 2] = position[0, :, 2]
+        bundled_values = [float(value) for value in position[...].flat]
+    _assert_numeric_sequences_close(
+        f"{case.name} finite full-contract trajectory synchronization",
+        legacy_values,
+        bundled_values,
+        relative_tolerance=0.0,
+        absolute_tolerance=0.0,
+    )
 
 
 def _prepare_normal_tip3p_pair(
@@ -11650,7 +11762,193 @@ def _run_sponge(case_dir: Path, mdin_name: str) -> dict[str, object]:
             f"SPONGE failed in {case_dir} with code {outcome.returncode}\n"
             f"[stdout]\n{outcome.stdout}\n[stderr]\n{outcome.stderr}"
         )
-    return _collect_metrics(case_dir, outcome.elapsed_s)
+    metrics = _collect_metrics(case_dir, outcome.elapsed_s)
+    metrics["finite_scan"] = _scan_success_outputs(case_dir)
+    return metrics
+
+
+def _scan_success_outputs(case_dir: Path) -> dict[str, object]:
+    files = []
+    dataset_count = 0
+    value_count = 0
+
+    mdout_paths = []
+    for candidate in (
+        case_dir / "mdout.txt",
+        *sorted(case_dir.glob("*.mdout")),
+    ):
+        if candidate.is_file() and candidate not in mdout_paths:
+            mdout_paths.append(candidate)
+    for path in mdout_paths:
+        mdout = _read_mdout(path)
+        values = [value for row in mdout["rows"] for value in row.values()]
+        _assert_finite_values(f"normal-success mdout {path}", values)
+        files.append(
+            {
+                "path": str(path.relative_to(case_dir)),
+                "kind": "mdout",
+                "dataset_count": len(mdout["columns"]),
+                "value_count": len(values),
+            }
+        )
+        dataset_count += len(mdout["columns"])
+        value_count += len(values)
+
+    output_dir = case_dir / "output"
+    h5_paths = []
+    if output_dir.is_dir():
+        h5_paths = sorted(
+            path
+            for path in output_dir.rglob("*")
+            if path.is_file() and path.suffix in {".h5", ".h5md"}
+        )
+    for path in h5_paths:
+        scanned = _scan_success_h5_file(case_dir, path)
+        files.append(scanned)
+        dataset_count += scanned["dataset_count"]
+        value_count += scanned["value_count"]
+
+    numeric_sidecars = []
+    if output_dir.is_dir():
+        numeric_sidecars = sorted(
+            path
+            for path in output_dir.rglob("*")
+            if path.is_file()
+            and path.suffix in {".crd", ".vel", ".frc", ".box"}
+        )
+    for path in numeric_sidecars:
+        if path.suffix == ".box":
+            values = [
+                float(token)
+                for token in path.read_text(encoding="utf-8").split()
+            ]
+        else:
+            payload = path.read_bytes()
+            if len(payload) % 4 != 0:
+                raise AssertionError(
+                    f"normal-success binary output is not float32-aligned: {path}"
+                )
+            values = [item[0] for item in struct.iter_unpack("f", payload)]
+        _assert_finite_values(f"normal-success sidecar {path}", values)
+        files.append(
+            {
+                "path": str(path.relative_to(case_dir)),
+                "kind": f"legacy_{path.suffix.removeprefix('.')}",
+                "dataset_count": 1,
+                "value_count": len(values),
+            }
+        )
+        dataset_count += 1
+        value_count += len(values)
+
+    if not files:
+        raise AssertionError(
+            f"normal-success run has no scannable outputs: {case_dir}"
+        )
+    return {
+        "scan_kind": "normal_success_finite_scan",
+        "run_directory": str(case_dir.resolve()),
+        "file_count": len(files),
+        "dataset_count": dataset_count,
+        "value_count": value_count,
+        "files": files,
+    }
+
+
+def _scan_success_h5_file(case_dir: Path, path: Path) -> dict[str, object]:
+    dataset_count = 0
+    value_count = 0
+    with h5py.File(path, "r") as handle:
+        numeric_datasets = []
+
+        def collect(name: str, item: object) -> None:
+            if isinstance(item, h5py.Dataset) and item.dtype.kind in "biuf":
+                numeric_datasets.append((name, item))
+
+        handle.visititems(collect)
+        for name, dataset in numeric_datasets:
+            payload = dataset[()]
+            values = payload.flat if hasattr(payload, "flat") else (payload,)
+            values = [float(value) for value in values]
+            _assert_finite_values(f"normal-success H5 {path}:{name}", values)
+            dataset_count += 1
+            value_count += len(values)
+    return {
+        "path": str(path.relative_to(case_dir)),
+        "kind": "h5",
+        "dataset_count": dataset_count,
+        "value_count": value_count,
+    }
+
+
+def _assert_finite_values(label: str, values: Sequence[float]) -> None:
+    for index, value in enumerate(values):
+        if not math.isfinite(value):
+            raise AssertionError(
+                f"{label} contains non-finite value at index {index}: {value}"
+            )
+
+
+def _summarize_finite_scans(*sources: object) -> dict[str, object]:
+    scans: dict[str, Mapping[str, object]] = {}
+
+    def collect(value: object) -> None:
+        if isinstance(value, Mapping):
+            if value.get("scan_kind") == "normal_success_finite_scan":
+                scans[str(value["run_directory"])] = value
+                return
+            for child in value.values():
+                collect(child)
+        elif isinstance(value, (list, tuple)):
+            for child in value:
+                collect(child)
+
+    for source in sources:
+        collect(source)
+    if not scans:
+        raise AssertionError("normal-success evidence has no finite scan")
+    ordered = [scans[key] for key in sorted(scans)]
+    return {
+        "classification": NORMAL_SUCCESS,
+        "run_directory_count": len(ordered),
+        "file_count": sum(int(scan["file_count"]) for scan in ordered),
+        "dataset_count": sum(int(scan["dataset_count"]) for scan in ordered),
+        "value_count": sum(int(scan["value_count"]) for scan in ordered),
+        "run_directories": [scan["run_directory"] for scan in ordered],
+    }
+
+
+def _attach_finite_scan(
+    case: AbCase,
+    assertions: Sequence[AssertionEvidence],
+    finite_scan: Mapping[str, object],
+) -> tuple[AssertionEvidence, ...]:
+    if _case_output_classification(case) != NORMAL_SUCCESS:
+        raise AssertionError(
+            f"{case.name} cannot attach normal-success finite evidence"
+        )
+    return tuple(
+        replace(
+            assertion,
+            details={
+                **dict(assertion.details),
+                "output_classification": NORMAL_SUCCESS,
+                "finite_scan": dict(finite_scan),
+            },
+        )
+        for assertion in assertions
+    )
+
+
+def _build_success_case_evidence(
+    contracts: Mapping[str, object],
+    case: AbCase,
+    assertions: Sequence[AssertionEvidence],
+    *scan_sources: object,
+) -> tuple[list[object], dict[str, object]]:
+    finite_scan = _summarize_finite_scans(*scan_sources)
+    enriched = _attach_finite_scan(case, assertions, finite_scan)
+    return build_case_evidence(contracts, case, enriched), finite_scan
 
 
 def _run_sponge_process(
@@ -11776,6 +12074,14 @@ def _vds_shard_count(wrapper_path: Path) -> int:
 def _compare_outputs(
     case: AbCase, runs: Sequence[AbRun]
 ) -> tuple[dict[str, object], tuple[AssertionEvidence, ...]]:
+    if _case_output_classification(case) != NORMAL_SUCCESS:
+        raise AssertionError(
+            f"{case.name} non-success case reached the success comparator"
+        )
+    finite_scan = _summarize_finite_scans(
+        [run.legacy_metrics for run in runs],
+        [run.bundled_metrics for run in runs],
+    )
     evidence = []
     if case.statistical_md:
         mdout_comparison = _compare_mdout_statistically(case, runs)
@@ -11833,6 +12139,8 @@ def _compare_outputs(
     comparison: dict[str, object] = {
         "mdout": mdout_comparison,
         "h5": h5_comparison,
+        "output_classification": NORMAL_SUCCESS,
+        "finite_scan": finite_scan,
     }
     if case.fixture_case == FOCUSED_SITS_TYPED_INACTIVE_FIXTURE:
         comparison["inactive_sits"] = _compare_sits_inactive_configuration(
@@ -11945,7 +12253,7 @@ def _compare_outputs(
                 details=qc_scf,
             )
         )
-    return comparison, tuple(evidence)
+    return comparison, _attach_finite_scan(case, evidence, finite_scan)
 
 
 def _compare_sits_inactive_configuration(run: AbRun) -> dict[str, object]:
@@ -17035,6 +17343,7 @@ def _compare_restart_continuation(
                 f"{outcome.returncode}\n[stdout]\n{outcome.stdout}\n"
                 f"[stderr]\n{outcome.stderr}"
             )
+        finite_scan = _scan_success_outputs(destination)
         trajectory_path = destination / continuation_trajectory
         restart_path = destination / continuation_restart
         if not trajectory_path.is_file() or not restart_path.is_file():
@@ -17048,6 +17357,7 @@ def _compare_restart_continuation(
             "restart": restart_path,
             "exit_code": outcome.returncode,
             "elapsed_s": outcome.elapsed_s,
+            "finite_scan": finite_scan,
         }
 
     _assert_restart_source_states_close(case, source_states)
@@ -17126,6 +17436,10 @@ def _compare_restart_continuation(
         "semantic_h5_datasets": {
             family: list(datasets)
             for family, datasets in semantic_datasets.items()
+        },
+        "finite_scans": {
+            branch: continuations[branch]["finite_scan"]
+            for branch in ("legacy", "bundled")
         },
         "end_status": {
             branch: {
@@ -17285,7 +17599,10 @@ def _assert_numeric_sequences_close(
                     f"{label} non-finite mismatch at index {index}: "
                     f"legacy={left_value}, bundled={right_value}"
                 )
-            continue
+            raise AssertionError(
+                f"{label} normal-success comparison contains matching "
+                f"non-finite values at index {index}: {left_value}"
+            )
         if not math.isclose(
             left_value,
             right_value,
