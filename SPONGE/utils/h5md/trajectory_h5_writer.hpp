@@ -17,7 +17,8 @@ class TrajectoryH5Writer
     explicit TrajectoryH5Writer(WriterBackend* backend) : writer_(backend) {}
 
     bool Open_Single_File(const SpongeH5OutputPlan::ResolvedOutputPlan& plan,
-                          const std::string& schema_version = "0")
+                          const std::string& schema_version =
+                              kCanonicalSchemaVersion)
     {
         if (!plan.trajectory.enabled || plan.trajectory.vds)
         {
@@ -67,7 +68,17 @@ class TrajectoryH5Writer
         {
             return false;
         }
+        if (!writer_.Set_String_Attribute(path::particles_all_time, "unit",
+                                          "ps"))
+        {
+            return false;
+        }
         if (!Create_Vector3_Frame_Dataset(path::position_value, atom_count))
+        {
+            return false;
+        }
+        if (!writer_.Set_String_Attribute(path::position_value, "unit",
+                                          "Angstrom"))
         {
             return false;
         }
@@ -85,6 +96,11 @@ class TrajectoryH5Writer
         {
             return false;
         }
+        if (!writer_.Set_String_Attribute(path::box_edges_value, "unit",
+                                          "Angstrom"))
+        {
+            return false;
+        }
         if (!writer_.Create_Hard_Link(path::particles_all_step,
                                       path::box_edges_step))
         {
@@ -98,6 +114,11 @@ class TrajectoryH5Writer
         if (include_velocity)
         {
             if (!Create_Vector3_Frame_Dataset(path::velocity_value, atom_count))
+            {
+                return false;
+            }
+            if (!writer_.Set_String_Attribute(path::velocity_value, "unit",
+                                              "Angstrom ps-1"))
             {
                 return false;
             }
@@ -118,6 +139,11 @@ class TrajectoryH5Writer
             {
                 return false;
             }
+            if (!writer_.Set_String_Attribute(
+                    path::force_value, "unit", "kcal mol-1 Angstrom-1"))
+            {
+                return false;
+            }
             if (!writer_.Create_Hard_Link(path::particles_all_step,
                                           path::force_step))
             {
@@ -130,6 +156,13 @@ class TrajectoryH5Writer
             }
         }
         return true;
+    }
+
+    bool Write_Topology_Compatibility(const std::string& topology_hash,
+                                      const std::string& atom_order_hash)
+    {
+        return writer_.Write_Topology_Compatibility(topology_hash,
+                                                    atom_order_hash);
     }
 
     bool Define_Observable_Stream(

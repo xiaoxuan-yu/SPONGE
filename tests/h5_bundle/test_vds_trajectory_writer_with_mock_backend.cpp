@@ -64,6 +64,8 @@ static void Test_Vds_Wrapper_And_Module_Virtual_Datasets()
     auto plan = Make_Vds_Plan();
 
     REQUIRE_TRUE(writer.Open(plan, "test"));
+    REQUIRE_TRUE(
+        writer.Write_Topology_Compatibility("top-hash", "order-hash"));
     REQUIRE_TRUE(writer.Define_Particle_Datasets(1, true, false));
     REQUIRE_TRUE(writer.Define_Observable_Stream({"temperature"}, {"TEMP"}));
     REQUIRE_TRUE(writer.Ensure_Nose_Hoover_Chain_Observables(2));
@@ -107,6 +109,10 @@ static void Test_Vds_Wrapper_And_Module_Virtual_Datasets()
                std::string("sponge.output.h5md"));
     REQUIRE_EQ(wrapper.strings.at(path::sponge_schema_version),
                std::string("test"));
+    REQUIRE_EQ(wrapper.strings.at(path::sponge_topology_hash),
+               std::string("top-hash"));
+    REQUIRE_EQ(wrapper.strings.at(path::sponge_atom_order_hash),
+               std::string("order-hash"));
     REQUIRE_TRUE(wrapper.virtual_datasets.count(path::position_value) != 0);
     REQUIRE_TRUE(wrapper.virtual_datasets.count(path::velocity_value) != 0);
     REQUIRE_TRUE(wrapper.virtual_datasets.count(path::force_value) == 0);
@@ -417,6 +423,10 @@ static void Test_Vds_Wrapper_And_Module_Virtual_Datasets()
                std::string("test"));
     REQUIRE_EQ(shard1.strings.at(path::sponge_schema_version),
                std::string("test"));
+    REQUIRE_EQ(shard0.strings.at(path::sponge_topology_hash),
+               std::string("top-hash"));
+    REQUIRE_EQ(shard1.strings.at(path::sponge_atom_order_hash),
+               std::string("order-hash"));
     REQUIRE_TRUE(shard0.datasets.count(path::force_value) == 0);
     REQUIRE_TRUE(shard1.datasets.count(path::force_value) == 0);
 }

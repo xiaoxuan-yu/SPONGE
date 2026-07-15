@@ -261,6 +261,14 @@ static void Test_HighFive_Backend_Basic_File_Layout()
     {
         HighFive::File file(file_path.string(), HighFive::File::ReadOnly);
         REQUIRE_TRUE(file.exist("/h5md"));
+        REQUIRE_TRUE(file.exist("/h5md/creator"));
+        auto creator = file.getGroup("/h5md/creator");
+        std::string creator_name;
+        std::string creator_version;
+        creator.getAttribute("name").read(creator_name);
+        creator.getAttribute("version").read(creator_version);
+        REQUIRE_EQ(creator_name, std::string("SPONGE"));
+        REQUIRE_EQ(creator_version, std::string(kSpongeWriterVersion));
         REQUIRE_TRUE(file.exist(path::sponge_schema_name));
         REQUIRE_TRUE(file.exist(path::sponge_schema_version));
         REQUIRE_EQ(Read_String(file, path::sponge_schema_name),

@@ -15,7 +15,7 @@ class RestartH5Writer
     explicit RestartH5Writer(WriterBackend* backend) : writer_(backend) {}
 
     bool Open(const SpongeH5OutputPlan::ResolvedOutputPlan& plan,
-              const std::string& schema_version = "0")
+              const std::string& schema_version = kCanonicalSchemaVersion)
     {
         if (!plan.restart.enabled)
         {
@@ -74,11 +74,21 @@ class RestartH5Writer
         {
             return false;
         }
+        if (!writer_.Set_String_Attribute(path::particles_all_time, "unit",
+                                          "ps"))
+        {
+            return false;
+        }
         if (!writer_.Create_Dataset(
                 {path::position_value,
                  DataType::float32,
                  {{0, atom_count, 3}, {1, atom_count, 3}, {1, atom_count, 3}},
                  true}))
+        {
+            return false;
+        }
+        if (!writer_.Set_String_Attribute(path::position_value, "unit",
+                                          "Angstrom"))
         {
             return false;
         }
@@ -96,6 +106,11 @@ class RestartH5Writer
                                      DataType::float32,
                                      {{0, 3, 3}, {1, 3, 3}, {1, 3, 3}},
                                      true}))
+        {
+            return false;
+        }
+        if (!writer_.Set_String_Attribute(path::box_edges_value, "unit",
+                                          "Angstrom"))
         {
             return false;
         }
@@ -117,6 +132,11 @@ class RestartH5Writer
                                           {1, atom_count, 3},
                                           {1, atom_count, 3}},
                                          true}))
+            {
+                return false;
+            }
+            if (!writer_.Set_String_Attribute(path::velocity_value, "unit",
+                                              "Angstrom ps-1"))
             {
                 return false;
             }

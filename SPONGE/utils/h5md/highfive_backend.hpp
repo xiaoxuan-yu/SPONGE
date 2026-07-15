@@ -364,6 +364,55 @@ class HighFiveBackend : public WriterBackend
         }
     }
 
+    bool Set_String_Attribute(const std::string& object_path,
+                              const std::string& name,
+                              const std::string& value) override
+    {
+        if (!Ensure_File()) return false;
+        try
+        {
+            if (!file_->exist(object_path))
+            {
+                return Fail("failed to set attribute on missing object " +
+                            object_path);
+            }
+            const hid_t object_id =
+                H5Oopen(file_->getId(), object_path.c_str(), H5P_DEFAULT);
+            if (object_id < 0)
+            {
+                return Fail("failed to inspect attribute target " + object_path);
+            }
+            const H5I_type_t object_type = H5Iget_type(object_id);
+            H5Oclose(object_id);
+            if (object_type == H5I_DATASET)
+            {
+                HighFive::DataSet dataset = file_->getDataSet(object_path);
+                if (dataset.hasAttribute(name)) dataset.deleteAttribute(name);
+                auto attribute = dataset.createAttribute<std::string>(
+                    name, HighFive::DataSpace::From(value));
+                attribute.write(value);
+            }
+            else if (object_type == H5I_GROUP)
+            {
+                HighFive::Group group = file_->getGroup(object_path);
+                if (group.hasAttribute(name)) group.deleteAttribute(name);
+                auto attribute = group.createAttribute<std::string>(
+                    name, HighFive::DataSpace::From(value));
+                attribute.write(value);
+            }
+            else
+            {
+                return Fail("unsupported attribute target " + object_path);
+            }
+            return true;
+        }
+        catch (const std::exception& err)
+        {
+            return Fail(std::string("failed to set string attribute ") + name +
+                        " on " + object_path + ": " + err.what());
+        }
+    }
+
     bool Set_Status(FileStatus status) override
     {
         status_ = status;

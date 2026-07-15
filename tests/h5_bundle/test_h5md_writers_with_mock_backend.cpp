@@ -984,6 +984,45 @@ static void Test_Writer_Open_Preconditions()
     }
 }
 
+static void Test_Canonical_Schema_Units_And_Topology_Compatibility()
+{
+    auto log = std::make_shared<BackendLog>();
+    MockBackend backend(log);
+    TrajectoryH5Writer writer(&backend);
+    auto plan = Make_Plan();
+
+    REQUIRE_TRUE(writer.Open_Single_File(plan));
+    REQUIRE_EQ(log->string_attributes.at(
+                   std::make_pair(std::string("/h5md/creator"), "name")),
+               std::string("SPONGE"));
+    REQUIRE_EQ(log->string_attributes.at(
+                   std::make_pair(std::string("/h5md/creator"), "version")),
+               std::string(kSpongeWriterVersion));
+    REQUIRE_EQ(log->strings[path::sponge_schema_version],
+               std::string(kCanonicalSchemaVersion));
+    REQUIRE_TRUE(writer.Define_Particle_Datasets(2, true, true));
+    REQUIRE_EQ(log->string_attributes.at(
+                   std::make_pair(path::particles_all_time, "unit")),
+               std::string("ps"));
+    REQUIRE_EQ(log->string_attributes.at(
+                   std::make_pair(path::position_value, "unit")),
+               std::string("Angstrom"));
+    REQUIRE_EQ(log->string_attributes.at(
+                   std::make_pair(path::box_edges_value, "unit")),
+               std::string("Angstrom"));
+    REQUIRE_EQ(log->string_attributes.at(
+                   std::make_pair(path::velocity_value, "unit")),
+               std::string("Angstrom ps-1"));
+    REQUIRE_EQ(log->string_attributes.at(
+                   std::make_pair(path::force_value, "unit")),
+               std::string("kcal mol-1 Angstrom-1"));
+    REQUIRE_TRUE(writer.Write_Topology_Compatibility("top-hash", "order-hash"));
+    REQUIRE_EQ(log->strings[path::sponge_topology_hash],
+               std::string("top-hash"));
+    REQUIRE_EQ(log->strings[path::sponge_atom_order_hash],
+               std::string("order-hash"));
+}
+
 int main()
 {
     return Run_Test([] {
@@ -1004,6 +1043,7 @@ int main()
         Test_Restart_Writer_Base_Layout_Paths();
         Test_Restart_Module_State_And_Legacy_Provenance();
         Test_Legacy_Provenance_On_Trajectory_And_Observable();
+        Test_Canonical_Schema_Units_And_Topology_Compatibility();
         Test_Writer_Open_Preconditions();
     });
 }

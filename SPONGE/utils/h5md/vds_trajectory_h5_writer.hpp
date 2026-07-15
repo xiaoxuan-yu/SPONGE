@@ -44,7 +44,7 @@ class VdsTrajectoryH5Writer
     }
 
     bool Open(const SpongeH5OutputPlan::ResolvedOutputPlan& plan,
-              const std::string& schema_version = "0")
+              const std::string& schema_version = kCanonicalSchemaVersion)
     {
         if (backend_factory_ == nullptr)
         {
@@ -101,6 +101,30 @@ class VdsTrajectoryH5Writer
         {
             return current_shard_writer_->Define_Particle_Datasets(
                 atom_count_, include_velocity_, include_force_);
+        }
+        return true;
+    }
+
+    bool Write_Topology_Compatibility(const std::string& topology_hash,
+                                      const std::string& atom_order_hash)
+    {
+        topology_hash_ = topology_hash;
+        atom_order_hash_ = atom_order_hash;
+        if (wrapper_writer_ == nullptr ||
+            !wrapper_writer_->Write_Topology_Compatibility(
+                topology_hash_, atom_order_hash_))
+        {
+            last_error_ = wrapper_writer_ == nullptr
+                              ? "VDS wrapper writer is not open"
+                              : wrapper_writer_->Last_Error();
+            return false;
+        }
+        if (current_shard_writer_ != nullptr &&
+            !current_shard_writer_->Write_Topology_Compatibility(
+                topology_hash_, atom_order_hash_))
+        {
+            last_error_ = current_shard_writer_->Last_Error();
+            return false;
         }
         return true;
     }
@@ -576,6 +600,13 @@ class VdsTrajectoryH5Writer
             last_error_ = current_shard_writer_->Last_Error();
             return false;
         }
+        if ((!topology_hash_.empty() || !atom_order_hash_.empty()) &&
+            !current_shard_writer_->Write_Topology_Compatibility(
+                topology_hash_, atom_order_hash_))
+        {
+            last_error_ = current_shard_writer_->Last_Error();
+            return false;
+        }
         if (particle_layout_defined_ &&
             !current_shard_writer_->Define_Particle_Datasets(
                 atom_count_, include_velocity_, include_force_))
@@ -1004,8 +1035,20 @@ class VdsTrajectoryH5Writer
             last_error_ = wrapper_writer_->Last_Error();
             return false;
         }
+        if (!wrapper_writer_->Set_String_Attribute(path::particles_all_time,
+                                                   "unit", "ps"))
+        {
+            last_error_ = wrapper_writer_->Last_Error();
+            return false;
+        }
         if (!write_vds(path::position_value, DataType::float32,
                        {atom_count_, 3}))
+        {
+            last_error_ = wrapper_writer_->Last_Error();
+            return false;
+        }
+        if (!wrapper_writer_->Set_String_Attribute(path::position_value, "unit",
+                                                   "Angstrom"))
         {
             last_error_ = wrapper_writer_->Last_Error();
             return false;
@@ -1023,6 +1066,12 @@ class VdsTrajectoryH5Writer
             return false;
         }
         if (!write_vds(path::box_edges_value, DataType::float32, {3, 3}))
+        {
+            last_error_ = wrapper_writer_->Last_Error();
+            return false;
+        }
+        if (!wrapper_writer_->Set_String_Attribute(path::box_edges_value, "unit",
+                                                   "Angstrom"))
         {
             last_error_ = wrapper_writer_->Last_Error();
             return false;
@@ -1047,6 +1096,12 @@ class VdsTrajectoryH5Writer
                 last_error_ = wrapper_writer_->Last_Error();
                 return false;
             }
+            if (!wrapper_writer_->Set_String_Attribute(
+                    path::velocity_value, "unit", "Angstrom ps-1"))
+            {
+                last_error_ = wrapper_writer_->Last_Error();
+                return false;
+            }
             if (!wrapper_writer_->Create_Hard_Link(path::particles_all_step,
                                                    path::velocity_step))
             {
@@ -1064,6 +1119,12 @@ class VdsTrajectoryH5Writer
         {
             if (!write_vds(path::force_value, DataType::float32,
                            {atom_count_, 3}))
+            {
+                last_error_ = wrapper_writer_->Last_Error();
+                return false;
+            }
+            if (!wrapper_writer_->Set_String_Attribute(
+                    path::force_value, "unit", "kcal mol-1 Angstrom-1"))
             {
                 last_error_ = wrapper_writer_->Last_Error();
                 return false;
@@ -1564,6 +1625,8 @@ class VdsTrajectoryH5Writer
     int chunk_size_ = SpongeH5OutputContract::kDefaultTrajectoryChunkSize;
     std::string shard_root_;
     std::string wrapper_path_;
+    std::string topology_hash_;
+    std::string atom_order_hash_;
 
     std::unique_ptr<WriterBackend> wrapper_backend_;
     std::unique_ptr<H5MDWriter> wrapper_writer_;

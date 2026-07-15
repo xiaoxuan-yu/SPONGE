@@ -129,6 +129,8 @@ struct BackendLog
     std::map<std::string, std::int64_t> append_counts;
     std::map<std::string, std::string> strings;
     std::map<std::string, std::vector<std::string>> string_arrays;
+    std::map<std::pair<std::string, std::string>, std::string>
+        string_attributes;
 };
 
 class MockBackend : public WriterBackend
@@ -244,6 +246,14 @@ class MockBackend : public WriterBackend
             return false;
         }
         log_->string_arrays[path] = values;
+        return true;
+    }
+
+    bool Set_String_Attribute(const std::string& object_path,
+                              const std::string& name,
+                              const std::string& value) override
+    {
+        log_->string_attributes[{object_path, name}] = value;
         return true;
     }
 

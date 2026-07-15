@@ -17,7 +17,7 @@ class ObservableH5Writer
     explicit ObservableH5Writer(WriterBackend* backend) : writer_(backend) {}
 
     bool Open(const SpongeH5OutputPlan::ResolvedOutputPlan& plan,
-              const std::string& schema_version = "0")
+              const std::string& schema_version = kCanonicalSchemaVersion)
     {
         if (!plan.observable.enabled)
         {
@@ -62,6 +62,11 @@ class ObservableH5Writer
                                      DataType::float64,
                                      {{0}, {0}, {0}},
                                      true}))
+        {
+            return false;
+        }
+        if (!writer_.Set_String_Attribute(path::observables_all_time, "unit",
+                                          "ps"))
         {
             return false;
         }

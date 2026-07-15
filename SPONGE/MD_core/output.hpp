@@ -13,6 +13,7 @@
 #include "utils/h5md/h5_structural_state.hpp"
 #include "utils/h5md/highfive_backend.hpp"
 #include "utils/h5md/output_route_helpers.hpp"
+#include "utils/h5md/topology_h5_reader.hpp"
 
 namespace
 {
@@ -110,6 +111,37 @@ bool Write_H5_Restart_Protocol_Sidecars_If_Present(
         {
             return false;
         }
+    }
+    return true;
+}
+
+template <typename Writer>
+bool Write_H5_Topology_Compatibility_If_Present(CONTROLLER* controller,
+                                                Writer* writer,
+                                                std::string* error)
+{
+    constexpr const char* input_key = "input_h5_topology_path";
+    if (writer == NULL || !controller->Command_Exist(input_key))
+    {
+        return true;
+    }
+    SpongeH5MD::TopologyH5Reader reader;
+    if (!reader.Open(controller->Command(input_key)))
+    {
+        if (error != NULL) *error = reader.Last_Error();
+        return false;
+    }
+    SpongeH5InputMetadata::TopologyMetadata metadata;
+    if (!reader.Read_Metadata(&metadata))
+    {
+        if (error != NULL) *error = reader.Last_Error();
+        return false;
+    }
+    if (!writer->Write_Topology_Compatibility(metadata.topology_hash,
+                                               metadata.atom_ordering_hash))
+    {
+        if (error != NULL) *error = writer->Last_Error();
+        return false;
     }
     return true;
 }
@@ -418,12 +450,22 @@ void MD_INFORMATION::trajectory_output::Initial_H5_Trajectory(
         h5_vds_backend_factory.reset(new SpongeH5MD::HighFiveBackendFactory());
         h5_vds_trajectory_writer.reset(new SpongeH5MD::VdsTrajectoryH5Writer(
             h5_vds_backend_factory.get()));
-        if (!h5_vds_trajectory_writer->Open(h5_output_plan, "0"))
+        if (!h5_vds_trajectory_writer->Open(h5_output_plan))
         {
             controller->Throw_SPONGE_Error(
                 spongeErrorValueErrorCommand,
                 "MD_INFORMATION::trajectory_output::Initial_H5_Trajectory",
                 h5_vds_trajectory_writer->Last_Error().c_str());
+        }
+        std::string topology_compatibility_error;
+        if (!Write_H5_Topology_Compatibility_If_Present(
+                controller, h5_vds_trajectory_writer.get(),
+                &topology_compatibility_error))
+        {
+            controller->Throw_SPONGE_Error(
+                spongeErrorValueErrorCommand,
+                "MD_INFORMATION::trajectory_output::Initial_H5_Trajectory",
+                topology_compatibility_error.c_str());
         }
         if (!h5_vds_trajectory_writer->Define_Particle_Datasets(
                 md_info->atom_numbers, h5_trajectory_velocity_enabled,
@@ -452,12 +494,22 @@ void MD_INFORMATION::trajectory_output::Initial_H5_Trajectory(
     h5_trajectory_backend.reset(new SpongeH5MD::HighFiveBackend());
     h5_trajectory_writer.reset(
         new SpongeH5MD::TrajectoryH5Writer(h5_trajectory_backend.get()));
-    if (!h5_trajectory_writer->Open_Single_File(h5_output_plan, "0"))
+    if (!h5_trajectory_writer->Open_Single_File(h5_output_plan))
     {
         controller->Throw_SPONGE_Error(
             spongeErrorValueErrorCommand,
             "MD_INFORMATION::trajectory_output::Initial_H5_Trajectory",
             h5_trajectory_writer->Last_Error().c_str());
+    }
+    std::string topology_compatibility_error;
+    if (!Write_H5_Topology_Compatibility_If_Present(
+            controller, h5_trajectory_writer.get(),
+            &topology_compatibility_error))
+    {
+        controller->Throw_SPONGE_Error(
+            spongeErrorValueErrorCommand,
+            "MD_INFORMATION::trajectory_output::Initial_H5_Trajectory",
+            topology_compatibility_error.c_str());
     }
     if (!h5_trajectory_writer->Define_Particle_Datasets(
             md_info->atom_numbers, h5_trajectory_velocity_enabled,
@@ -501,7 +553,7 @@ void MD_INFORMATION::trajectory_output::Initial_H5_Observable(
     h5_observable_backend.reset(new SpongeH5MD::HighFiveBackend());
     h5_observable_writer.reset(
         new SpongeH5MD::ObservableH5Writer(h5_observable_backend.get()));
-    if (!h5_observable_writer->Open(h5_output_plan, "0"))
+    if (!h5_observable_writer->Open(h5_output_plan))
     {
         controller->Throw_SPONGE_Error(
             spongeErrorValueErrorCommand,
@@ -1491,7 +1543,7 @@ void MD_INFORMATION::trajectory_output::Export_H5_Restart_File(
     Fill_H5MD_Box_Edges(md_info, box_edges);
     SpongeH5MD::HighFiveBackend backend;
     SpongeH5MD::RestartH5Writer writer(&backend);
-    if (!writer.Open(h5_output_plan, "0"))
+    if (!writer.Open(h5_output_plan))
     {
         controller->Throw_SPONGE_Error(
             spongeErrorValueErrorCommand,

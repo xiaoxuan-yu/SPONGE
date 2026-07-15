@@ -8,6 +8,14 @@
 
 namespace SpongeH5MD
 {
+#ifndef SPONGE_VERSION_STR
+#define SPONGE_VERSION_STR "unknown"
+#endif
+
+inline constexpr const char* kCanonicalSchemaVersion =
+    "xponge.legacy_to_bundle.v1";
+inline constexpr const char* kSpongeWriterVersion = SPONGE_VERSION_STR;
+
 enum class FileStatus
 {
     closed,
@@ -52,7 +60,7 @@ struct WriterOptions
 {
     std::string path;
     std::string schema_name = "sponge.output.h5md";
-    std::string schema_version = "0";
+    std::string schema_version = kCanonicalSchemaVersion;
     bool observable_only = false;
 };
 
@@ -84,6 +92,9 @@ class WriterBackend
                               const std::string& value) = 0;
     virtual bool Write_String_Array(const std::string& path,
                                     const std::vector<std::string>& values) = 0;
+    virtual bool Set_String_Attribute(const std::string& object_path,
+                                      const std::string& name,
+                                      const std::string& value) = 0;
     virtual bool Set_Status(FileStatus status) = 0;
 
     virtual FileStatus Status() const = 0;
@@ -179,6 +190,37 @@ class H5MDWriter
                backend_->Write_String_Array(path, values);
     }
 
+    bool Set_String_Attribute(const std::string& object_path,
+                              const std::string& name,
+                              const std::string& value)
+    {
+        return backend_ != nullptr &&
+               backend_->Set_String_Attribute(object_path, name, value);
+    }
+
+    bool Write_Topology_Compatibility(const std::string& topology_hash,
+                                      const std::string& atom_order_hash)
+    {
+        if (backend_ == nullptr)
+        {
+            return false;
+        }
+        constexpr const char* compatibility_root =
+            "/parameters/sponge/topology_compatibility";
+        constexpr const char* topology_hash_path =
+            "/parameters/sponge/topology_compatibility/topology_hash";
+        constexpr const char* atom_order_hash_path =
+            "/parameters/sponge/topology_compatibility/atom_order_hash";
+        if (!Ensure_Group(compatibility_root)) return false;
+        if (!topology_hash.empty() &&
+            !Write_String(topology_hash_path, topology_hash))
+        {
+            return false;
+        }
+        return atom_order_hash.empty() ||
+               Write_String(atom_order_hash_path, atom_order_hash);
+    }
+
     bool Set_Status(FileStatus status)
     {
         return backend_ != nullptr && backend_->Set_Status(status);
@@ -246,6 +288,16 @@ class H5MDWriter
     bool Initialize_Common_Layout()
     {
         if (!Ensure_Group("/h5md")) return false;
+        if (!Ensure_Group("/h5md/creator")) return false;
+        if (!Set_String_Attribute("/h5md/creator", "name", "SPONGE"))
+        {
+            return false;
+        }
+        if (!Set_String_Attribute("/h5md/creator", "version",
+                                  kSpongeWriterVersion))
+        {
+            return false;
+        }
         if (!options_.observable_only && !Ensure_Group("/particles"))
         {
             return false;
@@ -299,6 +351,12 @@ static constexpr const char* sponge_log = "/parameters/sponge/log";
 static constexpr const char* sponge_files = "/parameters/sponge/files";
 static constexpr const char* sponge_provenance =
     "/parameters/sponge/provenance";
+static constexpr const char* sponge_topology_compatibility =
+    "/parameters/sponge/topology_compatibility";
+static constexpr const char* sponge_topology_hash =
+    "/parameters/sponge/topology_compatibility/topology_hash";
+static constexpr const char* sponge_atom_order_hash =
+    "/parameters/sponge/topology_compatibility/atom_order_hash";
 static constexpr const char* output_status = "/parameters/sponge/output/status";
 static constexpr const char* output_frame_count =
     "/parameters/sponge/output/frame_count";
