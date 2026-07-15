@@ -1200,6 +1200,9 @@ void Main_Initial(int argc, char* argv[])
     md_info.output.Initial_H5_Metadynamics(&controller, meta.is_initialized);
     md_info.output.Initial_H5_Qc(&controller, qc.is_initialized);
     md_info.output.Initial_H5_Reaxff(&controller, reaxff.is_initialized);
+    md_info.output.Prepare_H5_Swmr_Layout(
+        &controller, meta.is_initialized ? meta.module_name : NULL,
+        qc.is_initialized);
     if (meta.is_initialized)
     {
         md_info.output.Write_H5_Metadynamics_Diagnostic_File(
@@ -1212,6 +1215,7 @@ void Main_Initial(int argc, char* argv[])
             &controller, meta.module_name, "direct_export",
             meta.write_directly_file_name);
     }
+    md_info.output.Start_H5_Swmr(&controller);
 }
 
 void Main_Calculate_Force()

@@ -31,6 +31,7 @@ class TrajectoryH5Writer
         options.schema_name = "sponge.output.h5md";
         options.schema_version = schema_version;
         options.observable_only = false;
+        options.swmr_compatible = true;
         if (!writer_.Open(options))
         {
             last_error_ = writer_.Last_Error();
@@ -254,13 +255,17 @@ class TrajectoryH5Writer
         {
             return Mark_Failed();
         }
+        if (!writer_.Flush())
+        {
+            return Mark_Failed();
+        }
         ++particle_frame_count_;
         if (!writer_.Write_Output_Completion(
                 static_cast<int64_t>(particle_frame_count_), step, time))
         {
             return Mark_Failed();
         }
-        return true;
+        return writer_.Flush() || Mark_Failed();
     }
 
     bool Append_Observable_Frame(
@@ -398,6 +403,7 @@ class TrajectoryH5Writer
     }
 
     bool Finalize() { return writer_.Finalize(); }
+    bool Start_Swmr_Write() { return writer_.Start_Swmr_Write(); }
     bool Flush() { return writer_.Flush(); }
     bool Close() { return writer_.Close(); }
 

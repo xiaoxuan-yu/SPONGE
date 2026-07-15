@@ -29,6 +29,7 @@ class ObservableH5Writer
         options.schema_name = "sponge.output.h5md";
         options.schema_version = schema_version;
         options.observable_only = true;
+        options.swmr_compatible = true;
         if (!writer_.Open(options))
         {
             last_error_ = writer_.Last_Error();
@@ -131,13 +132,17 @@ class ObservableH5Writer
                 return Mark_Failed();
             }
         }
+        if (!writer_.Flush())
+        {
+            return Mark_Failed();
+        }
         ++observable_frame_count_;
         if (!writer_.Write_Output_Completion(
                 static_cast<int64_t>(observable_frame_count_), step, time))
         {
             return Mark_Failed();
         }
-        return true;
+        return writer_.Flush() || Mark_Failed();
     }
 
     bool Ensure_Nose_Hoover_Chain_Observables(std::size_t chain_length)
@@ -252,6 +257,7 @@ class ObservableH5Writer
     }
 
     bool Finalize() { return writer_.Finalize(); }
+    bool Start_Swmr_Write() { return writer_.Start_Swmr_Write(); }
     bool Flush() { return writer_.Flush(); }
     bool Close() { return writer_.Close(); }
 

@@ -2,6 +2,7 @@
 
 #include <hdf5.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <highfive/highfive.hpp>
 #include <memory>
@@ -24,17 +25,70 @@ class TrajectoryH5Reader
 
     bool Open(const std::string& file_path, const std::string& particle_stream)
     {
-        last_error_.clear();
-        particle_stream_ = particle_stream.empty() ? "all" : particle_stream;
+        return Open_Impl(file_path, particle_stream, false);
+    }
+
+    bool Open_Swmr(const std::string& file_path)
+    {
+        return Open_Swmr(file_path, "all");
+    }
+
+    bool Open_Swmr(const std::string& file_path,
+                   const std::string& particle_stream)
+    {
+        return Open_Impl(file_path, particle_stream, true);
+    }
+
+    bool Refresh()
+    {
+        if (!Ensure_File()) return false;
         try
         {
-            file_.reset(
-                new HighFive::File(file_path, HighFive::File::ReadOnly));
+            for (const std::string& dataset_path : Refreshable_Datasets())
+            {
+                if (!Exists(dataset_path)) continue;
+                HighFive::DataSet dataset = file_->getDataSet(dataset_path);
+                if (H5Drefresh(dataset.getId()) < 0)
+                {
+                    return Fail("failed to refresh HDF5 dataset: " +
+                                dataset_path);
+                }
+            }
             return true;
         }
         catch (const std::exception& err)
         {
-            return Fail(std::string("failed to open H5MD trajectory file: ") +
+            return Fail(std::string("failed to refresh H5MD trajectory: ") +
+                        err.what());
+        }
+    }
+
+    bool Read_Committed_Frame_Count(std::int64_t* frame_count)
+    {
+        if (frame_count == nullptr)
+        {
+            return Fail("committed frame-count output pointer is null");
+        }
+        if (!Ensure_File()) return false;
+        try
+        {
+            if (!Exists(path::output_frame_count))
+            {
+                return Fail("committed frame-count dataset is missing");
+            }
+            const auto dims = Dimensions(path::output_frame_count);
+            if (dims.size() != 1 || dims[0] == 0)
+            {
+                return Fail("committed frame-count dataset is empty or invalid");
+            }
+            *frame_count = Read_Required_Single<std::int64_t>(
+                path::output_frame_count, {dims[0] - 1},
+                "committed frame count");
+            return true;
+        }
+        catch (const std::exception& err)
+        {
+            return Fail(std::string("failed to read committed frame count: ") +
                         err.what());
         }
     }
@@ -70,6 +124,13 @@ class TrajectoryH5Reader
                     result.atom_count = static_cast<std::int64_t>(dims[1]);
                 }
             }
+            if (swmr_read_)
+            {
+                std::int64_t committed = 0;
+                if (!Read_Committed_Frame_Count(&committed)) return false;
+                result.frame_count =
+                    std::min(result.frame_count, committed);
+            }
             *metadata = result;
             return true;
         }
@@ -97,6 +158,19 @@ class TrajectoryH5Reader
             if (frame_count == 0)
             {
                 return Fail("trajectory contains no frames");
+            }
+            if (swmr_read_)
+            {
+                std::int64_t committed = 0;
+                if (!Read_Committed_Frame_Count(&committed)) return false;
+                if (committed < 0 ||
+                    frame_index >= static_cast<std::size_t>(committed))
+                {
+                    std::ostringstream out;
+                    out << "trajectory frame index is not committed: "
+                        << frame_index << " >= " << committed;
+                    return Fail(out.str());
+                }
             }
             if (atom_count == 0)
             {
@@ -160,6 +234,41 @@ class TrajectoryH5Reader
     std::string Last_Error() const { return last_error_; }
 
    private:
+    bool Open_Impl(const std::string& file_path,
+                   const std::string& particle_stream, bool swmr_read)
+    {
+        last_error_.clear();
+        particle_stream_ = particle_stream.empty() ? "all" : particle_stream;
+        swmr_read_ = swmr_read;
+        try
+        {
+            const auto mode = swmr_read
+                                  ? HighFive::File::ReadOnly |
+                                        HighFive::File::ReadSWMR
+                                  : HighFive::File::ReadOnly;
+            file_.reset(new HighFive::File(file_path, mode));
+            return true;
+        }
+        catch (const std::exception& err)
+        {
+            return Fail(std::string("failed to open H5MD trajectory file: ") +
+                        err.what());
+        }
+    }
+
+    std::vector<std::string> Refreshable_Datasets() const
+    {
+        return {path::output_frame_count,
+                path::output_last_complete_step,
+                path::output_last_complete_time,
+                Particle_Step_Path(),
+                Particle_Time_Path(),
+                Position_Value_Path(),
+                Box_Edges_Value_Path(),
+                Velocity_Value_Path(),
+                Force_Value_Path()};
+    }
+
     bool Ensure_File()
     {
         if (file_ == nullptr)
@@ -385,5 +494,6 @@ class TrajectoryH5Reader
     std::unique_ptr<HighFive::File> file_;
     std::string last_error_;
     std::string particle_stream_ = "all";
+    bool swmr_read_ = false;
 };
 }  // namespace SpongeH5MD

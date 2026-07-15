@@ -701,7 +701,7 @@ static void Test_Trajectory_Observable_Missing_Value_Does_Not_Advance()
     REQUIRE_EQ(writer.Last_Error(),
                std::string("observable value is missing: temperature"));
     REQUIRE_EQ(log->status, FileStatus::open);
-    REQUIRE_TRUE(log->strings.count(path::output_error) == 0);
+    REQUIRE_EQ(log->strings[path::output_error], std::string(""));
 }
 
 static void Test_Observable_Missing_Value_Marks_Failed()

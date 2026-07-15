@@ -65,6 +65,10 @@ struct trajectory_output
     void Initial_H5_Metadynamics(CONTROLLER* controller, int is_initialized);
     void Initial_H5_Qc(CONTROLLER* controller, int is_initialized);
     void Initial_H5_Reaxff(CONTROLLER* controller, int is_initialized);
+    void Prepare_H5_Swmr_Layout(CONTROLLER* controller,
+                                const char* metadynamics_module_name,
+                                int qc_is_initialized);
+    void Start_H5_Swmr(CONTROLLER* controller);
     void Append_H5_Trajectory_Frame(CONTROLLER* controller);
     void Append_H5_Observable_Frame(CONTROLLER* controller);
     void Append_H5_Observable_Only_Frame(CONTROLLER* controller);

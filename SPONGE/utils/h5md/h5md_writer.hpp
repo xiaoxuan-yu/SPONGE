@@ -62,6 +62,7 @@ struct WriterOptions
     std::string schema_name = "sponge.output.h5md";
     std::string schema_version = kCanonicalSchemaVersion;
     bool observable_only = false;
+    bool swmr_compatible = false;
 };
 
 class WriterBackend
@@ -70,6 +71,7 @@ class WriterBackend
     virtual ~WriterBackend() = default;
 
     virtual bool Open(const WriterOptions& options) = 0;
+    virtual bool Start_Swmr_Write() { return false; }
     virtual bool Flush() = 0;
     virtual bool Close() = 0;
     virtual bool Finalize() = 0;
@@ -130,6 +132,10 @@ class H5MDWriter
     }
 
     bool Flush() { return backend_ != nullptr && backend_->Flush(); }
+    bool Start_Swmr_Write()
+    {
+        return backend_ != nullptr && backend_->Start_Swmr_Write();
+    }
     bool Close() { return backend_ != nullptr && backend_->Close(); }
     bool Finalize() { return backend_ != nullptr && backend_->Finalize(); }
 
@@ -317,7 +323,7 @@ class H5MDWriter
         {
             return false;
         }
-        return Set_Status(FileStatus::open) &&
+        return Set_Status(FileStatus::open) && Write_String(kOutputError, "") &&
                Write_Output_Completion(0, -1, 0.0);
     }
 

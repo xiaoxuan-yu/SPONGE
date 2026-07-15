@@ -207,6 +207,56 @@ static void Test_Trajectory_Reader_Reads_Vds_Wrapper()
     std::filesystem::remove_all(dir);
 }
 
+static void Test_Trajectory_Reader_Refreshes_Swmr_Frames()
+{
+    const auto dir = Unique_Temp_Path("trajectory_reader_swmr");
+    std::filesystem::create_directories(dir);
+    const auto file_path = dir / "live.spg.h5md";
+    const std::array<float, 9> box = {
+        10.0f, 0.0f, 0.0f, 0.0f, 20.0f, 0.0f, 0.0f, 0.0f, 30.0f,
+    };
+    const std::vector<float> position = {1.0f, 2.0f, 3.0f};
+
+    HighFiveBackend backend;
+    TrajectoryH5Writer writer(&backend);
+    Require_Writer(
+        writer.Open_Single_File(Make_Trajectory_Plan(file_path), "1"), writer,
+        "open SWMR trajectory writer");
+    Require_Writer(writer.Define_Particle_Datasets(1, false, false), writer,
+                   "define SWMR trajectory datasets");
+    Require_Writer(writer.Start_Swmr_Write(), writer, "start SWMR writer");
+
+    TrajectoryH5Reader reader;
+    Require_Reader(reader.Open_Swmr(file_path.string()), reader,
+                   "open SWMR trajectory reader");
+    std::int64_t committed = -1;
+    Require_Reader(reader.Read_Committed_Frame_Count(&committed), reader,
+                   "read initial committed frame count");
+    REQUIRE_EQ(committed, static_cast<std::int64_t>(0));
+
+    Require_Writer(writer.Append_Particle_Frame(10, 0.02, position.data(),
+                                                box.data()),
+                   writer, "publish SWMR trajectory frame");
+    Require_Reader(reader.Refresh(), reader, "refresh SWMR trajectory reader");
+    Require_Reader(reader.Read_Committed_Frame_Count(&committed), reader,
+                   "read refreshed committed frame count");
+    REQUIRE_EQ(committed, static_cast<std::int64_t>(1));
+
+    SpongeH5InputMetadata::TrajectoryMetadata metadata;
+    Require_Reader(reader.Read_Metadata(&metadata), reader,
+                   "read refreshed SWMR metadata");
+    REQUIRE_EQ(metadata.frame_count, static_cast<std::int64_t>(1));
+    RestartStructuralState frame;
+    Require_Reader(reader.Read_Frame(0, &frame), reader,
+                   "read refreshed SWMR frame");
+    REQUIRE_EQ(frame.step, static_cast<std::int64_t>(10));
+    Require_Float_Vector_Close(frame.position_xyz, position);
+
+    Require_Writer(writer.Finalize(), writer, "finalize SWMR writer");
+    Require_Writer(writer.Close(), writer, "close SWMR writer");
+    std::filesystem::remove_all(dir);
+}
+
 int main()
 {
     return Run_Test(
@@ -214,5 +264,6 @@ int main()
         {
             Test_Trajectory_Reader_Reads_Metadata_And_Frame();
             Test_Trajectory_Reader_Reads_Vds_Wrapper();
+            Test_Trajectory_Reader_Refreshes_Swmr_Frames();
         });
 }

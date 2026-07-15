@@ -22,6 +22,7 @@ class HighFiveBackend : public WriterBackend
     {
         options_ = options;
         last_error_.clear();
+        swmr_write_started_ = false;
 #ifdef SPONGE_H5_TEST_FAULT_INJECTION
         test_fault_consumed_ = false;
 #endif
@@ -33,14 +34,48 @@ class HighFiveBackend : public WriterBackend
             {
                 std::filesystem::create_directories(parent);
             }
-            file_.reset(
-                new HighFive::File(options.path, HighFive::File::Overwrite));
+            if (options.swmr_compatible)
+            {
+                HighFive::FileAccessProps access_props;
+                access_props.add(HighFive::FileVersionBounds(
+                    H5F_LIBVER_LATEST, H5F_LIBVER_LATEST));
+                file_.reset(new HighFive::File(
+                    options.path, HighFive::File::Overwrite,
+                    HighFive::FileCreateProps::Default(), access_props));
+            }
+            else
+            {
+                file_.reset(new HighFive::File(options.path,
+                                               HighFive::File::Overwrite));
+            }
             status_ = FileStatus::open;
             return true;
         }
         catch (const std::exception& err)
         {
             return Fail(std::string("failed to open HDF5 file: ") + err.what());
+        }
+    }
+
+    bool Start_Swmr_Write() override
+    {
+        if (!Ensure_File()) return false;
+        if (swmr_write_started_) return true;
+        if (!options_.swmr_compatible)
+        {
+            return Fail("HDF5 file was not opened with SWMR compatibility");
+        }
+        try
+        {
+            file_->flush();
+            file_->startSWMRWrite();
+            swmr_write_started_ = true;
+            return true;
+        }
+        catch (const std::exception& err)
+        {
+            return Fail(std::string("failed to start HDF5 SWMR write: ") +
+                        err.what());
         }
     }
 
@@ -71,6 +106,7 @@ class HighFiveBackend : public WriterBackend
             file_->flush();
             file_.reset();
             dataset_specs_.clear();
+            swmr_write_started_ = false;
             status_ = FileStatus::closed;
             return true;
         }
@@ -107,6 +143,12 @@ class HighFiveBackend : public WriterBackend
                 current += "/" + component;
                 if (!file_->exist(current))
                 {
+                    if (swmr_write_started_)
+                    {
+                        return Fail("cannot create group after SWMR write "
+                                    "started: " +
+                                    current);
+                    }
                     file_->createGroup(current);
                 }
             }
@@ -133,6 +175,11 @@ class HighFiveBackend : public WriterBackend
             {
                 dataset_specs_[spec.path] = Normalize_Spec(spec);
                 return true;
+            }
+            if (swmr_write_started_)
+            {
+                return Fail("cannot create dataset after SWMR write started: " +
+                            spec.path);
             }
             const DatasetSpec normalized = Normalize_Spec(spec);
             const std::vector<hsize_t> dims = To_HSize(normalized.shape.dims);
@@ -188,6 +235,12 @@ class HighFiveBackend : public WriterBackend
         }
         try
         {
+            if (swmr_write_started_)
+            {
+                return Fail("cannot create virtual dataset after SWMR write "
+                            "started: " +
+                            spec.path);
+            }
             if (!Ensure_Parent_Group(spec.path)) return false;
             Delete_If_Exists(spec.path);
 
@@ -284,6 +337,11 @@ class HighFiveBackend : public WriterBackend
         {
             if (!Ensure_Parent_Group(link_path)) return false;
             if (file_->exist(link_path)) return true;
+            if (swmr_write_started_)
+            {
+                return Fail("cannot create hard link after SWMR write started: " +
+                            link_path);
+            }
             if (!file_->exist(target))
             {
                 return Fail("hard-link target does not exist: " + target);
@@ -330,7 +388,17 @@ class HighFiveBackend : public WriterBackend
         try
         {
             if (!Ensure_Parent_Group(dataset_path)) return false;
-            Delete_If_Exists(dataset_path);
+            if (file_->exist(dataset_path))
+            {
+                file_->getDataSet(dataset_path).write(value);
+                return true;
+            }
+            if (swmr_write_started_)
+            {
+                return Fail("cannot create string dataset after SWMR write "
+                            "started: " +
+                            dataset_path);
+            }
             HighFive::DataSet dataset = file_->createDataSet<std::string>(
                 dataset_path, HighFive::DataSpace::From(value));
             dataset.write(value);
@@ -350,6 +418,28 @@ class HighFiveBackend : public WriterBackend
         try
         {
             if (!Ensure_Parent_Group(dataset_path)) return false;
+            if (file_->exist(dataset_path))
+            {
+                HighFive::DataSet dataset = file_->getDataSet(dataset_path);
+                if (dataset.getSpace().getDimensions() ==
+                    std::vector<std::size_t>{values.size()})
+                {
+                    dataset.write(values);
+                    return true;
+                }
+                if (swmr_write_started_)
+                {
+                    return Fail("cannot resize string-array dataset after SWMR "
+                                "write started: " +
+                                dataset_path);
+                }
+            }
+            else if (swmr_write_started_)
+            {
+                return Fail("cannot create string-array dataset after SWMR "
+                            "write started: " +
+                            dataset_path);
+            }
             Delete_If_Exists(dataset_path);
             HighFive::DataSpace space({values.size()});
             HighFive::DataSet dataset =
@@ -375,6 +465,11 @@ class HighFiveBackend : public WriterBackend
             {
                 return Fail("failed to set attribute on missing object " +
                             object_path);
+            }
+            if (swmr_write_started_)
+            {
+                return Fail("cannot modify attributes after SWMR write started: " +
+                            object_path + "@" + name);
             }
             const hid_t object_id =
                 H5Oopen(file_->getId(), object_path.c_str(), H5P_DEFAULT);
@@ -716,6 +811,7 @@ class HighFiveBackend : public WriterBackend
     std::unordered_map<std::string, DatasetSpec> dataset_specs_;
     FileStatus status_ = FileStatus::closed;
     std::string last_error_;
+    bool swmr_write_started_ = false;
 #ifdef SPONGE_H5_TEST_FAULT_INJECTION
     bool test_fault_consumed_ = false;
 #endif
