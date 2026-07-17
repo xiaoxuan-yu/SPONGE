@@ -235,8 +235,7 @@ class VdsTrajectoryH5Writer
         current_manifest_entry_.time_end = time;
         current_shard_frame_count_ += 1;
         total_trajectory_frame_count_ += 1;
-        return wrapper_writer_->Write_Output_Completion(
-            static_cast<int64_t>(total_trajectory_frame_count_), step, time);
+        return true;
     }
 
     bool Append_Observable_Frame(
@@ -489,66 +488,12 @@ class VdsTrajectoryH5Writer
             }
             return false;
         }
-        if (repair_applied_ && !Write_Repaired_Output_Completion())
+        if (!Publish_Completed_Prefix(allow_repair, true))
         {
             if (wrapper_writer_ != nullptr)
             {
                 wrapper_writer_->Mark_Failed(last_error_);
             }
-            return false;
-        }
-        if (!Materialize_Particle_Virtual_Datasets())
-        {
-            if (wrapper_writer_ != nullptr)
-            {
-                wrapper_writer_->Mark_Failed(last_error_);
-            }
-            return false;
-        }
-        if (!Materialize_Observable_Virtual_Datasets())
-        {
-            if (wrapper_writer_ != nullptr)
-            {
-                wrapper_writer_->Mark_Failed(last_error_);
-            }
-            return false;
-        }
-        if (!Materialize_Module_Virtual_Datasets())
-        {
-            if (wrapper_writer_ != nullptr)
-            {
-                wrapper_writer_->Mark_Failed(last_error_);
-            }
-            return false;
-        }
-        if (!Write_Manifest_To_Wrapper())
-        {
-            if (wrapper_writer_ != nullptr)
-            {
-                wrapper_writer_->Mark_Failed(last_error_);
-            }
-            return false;
-        }
-        if (!Write_Repair_Metadata(allow_repair))
-        {
-            if (wrapper_writer_ != nullptr)
-            {
-                wrapper_writer_->Mark_Failed(last_error_);
-            }
-            return false;
-        }
-        if (!wrapper_writer_->Write_String(path::output_vds_status,
-                                           "particle, observable, and module "
-                                           "virtual datasets materialized"))
-        {
-            last_error_ = wrapper_writer_->Last_Error();
-            wrapper_writer_->Mark_Failed(last_error_);
-            return false;
-        }
-        if (!wrapper_writer_->Finalize())
-        {
-            last_error_ = wrapper_writer_->Last_Error();
-            wrapper_writer_->Mark_Failed(last_error_);
             return false;
         }
         return true;
@@ -574,7 +519,13 @@ class VdsTrajectoryH5Writer
    private:
     bool Rotate_To_New_Shard(const int64_t step, const double time)
     {
+        const std::size_t manifest_size_before = manifest_.size();
         if (!Complete_Current_Shard(false))
+        {
+            return false;
+        }
+        if (manifest_.size() != manifest_size_before &&
+            !Publish_Completed_Prefix(false, false))
         {
             return false;
         }
@@ -831,7 +782,7 @@ class VdsTrajectoryH5Writer
         return true;
     }
 
-    bool Write_Repaired_Output_Completion()
+    bool Write_Published_Output_Completion()
     {
         if (wrapper_writer_ == nullptr)
         {
@@ -841,10 +792,18 @@ class VdsTrajectoryH5Writer
         int64_t frame_count = 0;
         int64_t last_step = -1;
         double last_time = 0.0;
+        if (manifest_.empty() ||
+            published_completion_manifest_count_ == manifest_.size())
+        {
+            return true;
+        }
         if (!manifest_.empty())
         {
             const auto& last_entry = manifest_.back();
-            frame_count = static_cast<int64_t>(total_trajectory_frame_count_);
+            for (const auto& entry : manifest_)
+            {
+                frame_count += entry.frame_count;
+            }
             last_step = last_entry.step_end;
             last_time = last_entry.time_end;
         }
@@ -854,6 +813,7 @@ class VdsTrajectoryH5Writer
             last_error_ = wrapper_writer_->Last_Error();
             return false;
         }
+        published_completion_manifest_count_ = manifest_.size();
         return true;
     }
 
@@ -871,6 +831,11 @@ class VdsTrajectoryH5Writer
         if (manifest_.empty())
         {
             return true;
+        }
+        if (published_manifest_count_ > manifest_.size())
+        {
+            last_error_ = "cannot retract an already published VDS shard";
+            return false;
         }
 
         std::vector<std::string> paths;
@@ -908,24 +873,26 @@ class VdsTrajectoryH5Writer
             return false;
         }
 
+        const std::size_t append_start = published_manifest_count_;
         const auto write_i64 =
             [&](const char* dataset_path, const std::vector<int64_t>& values)
         {
             if (!wrapper_writer_->Create_Dataset(
                     {dataset_path,
                      DataType::int64,
-                     {{0}, {values.size()}, {values.size()}},
+                     {{0}, {0}, {1}},
                      true}))
             {
                 last_error_ = wrapper_writer_->Last_Error();
                 return false;
             }
-            if (values.empty())
+            if (append_start >= values.size())
             {
                 return true;
             }
-            if (!wrapper_writer_->Append_Int64(dataset_path, values.data(),
-                                               values.size()))
+            if (!wrapper_writer_->Append_Int64(
+                    dataset_path, values.data() + append_start,
+                    values.size() - append_start))
             {
                 last_error_ = wrapper_writer_->Last_Error();
                 return false;
@@ -938,18 +905,19 @@ class VdsTrajectoryH5Writer
             if (!wrapper_writer_->Create_Dataset(
                     {dataset_path,
                      DataType::float64,
-                     {{0}, {values.size()}, {values.size()}},
+                     {{0}, {0}, {1}},
                      true}))
             {
                 last_error_ = wrapper_writer_->Last_Error();
                 return false;
             }
-            if (values.empty())
+            if (append_start >= values.size())
             {
                 return true;
             }
-            if (!wrapper_writer_->Append_Float64(dataset_path, values.data(),
-                                                 values.size()))
+            if (!wrapper_writer_->Append_Float64(
+                    dataset_path, values.data() + append_start,
+                    values.size() - append_start))
             {
                 last_error_ = wrapper_writer_->Last_Error();
                 return false;
@@ -957,13 +925,18 @@ class VdsTrajectoryH5Writer
             return true;
         };
 
-        return write_i64(path::shard_manifest_index, indices) &&
-               write_i64(path::shard_manifest_frame_start, frame_starts) &&
-               write_i64(path::shard_manifest_frame_count, frame_counts) &&
-               write_i64(path::shard_manifest_step_start, step_starts) &&
-               write_i64(path::shard_manifest_step_end, step_ends) &&
-               write_f64(path::shard_manifest_time_start, time_starts) &&
-               write_f64(path::shard_manifest_time_end, time_ends);
+        if (!write_i64(path::shard_manifest_index, indices) ||
+            !write_i64(path::shard_manifest_frame_start, frame_starts) ||
+            !write_i64(path::shard_manifest_frame_count, frame_counts) ||
+            !write_i64(path::shard_manifest_step_start, step_starts) ||
+            !write_i64(path::shard_manifest_step_end, step_ends) ||
+            !write_f64(path::shard_manifest_time_start, time_starts) ||
+            !write_f64(path::shard_manifest_time_end, time_ends))
+        {
+            return false;
+        }
+        published_manifest_count_ = manifest_.size();
+        return true;
     }
 
     std::vector<VirtualDatasetSource> Make_Particle_Vds_Sources(
@@ -1601,6 +1574,51 @@ class VdsTrajectoryH5Writer
                Materialize_Reaxff_Virtual_Datasets();
     }
 
+    bool Publish_Completed_Prefix(bool allow_repair, bool finalize)
+    {
+        if (wrapper_writer_ == nullptr)
+        {
+            last_error_ = "VDS wrapper is not open";
+            return false;
+        }
+        if (!Materialize_Particle_Virtual_Datasets() ||
+            !Materialize_Observable_Virtual_Datasets() ||
+            !Materialize_Module_Virtual_Datasets() ||
+            !Write_Manifest_To_Wrapper() ||
+            !Write_Published_Output_Completion())
+        {
+            return false;
+        }
+        if (finalize && !Write_Repair_Metadata(allow_repair))
+        {
+            return false;
+        }
+        const std::string status =
+            finalize ? "particle, observable, and module virtual datasets "
+                       "materialized"
+                     : "complete shard prefix published";
+        if (!wrapper_writer_->Write_String(path::output_vds_status, status))
+        {
+            last_error_ = wrapper_writer_->Last_Error();
+            return false;
+        }
+        if (finalize)
+        {
+            if (!wrapper_writer_->Finalize())
+            {
+                last_error_ = wrapper_writer_->Last_Error();
+                return false;
+            }
+            return true;
+        }
+        if (!wrapper_writer_->Flush())
+        {
+            last_error_ = wrapper_writer_->Last_Error();
+            return false;
+        }
+        return true;
+    }
+
     std::string Vds_Source_Path(const std::string& shard_path) const
     {
         const std::filesystem::path wrapper(wrapper_path_);
@@ -1658,6 +1676,8 @@ class VdsTrajectoryH5Writer
     std::size_t total_observable_frame_count_ = 0;
     bool repair_applied_ = false;
     std::size_t repaired_shard_count_ = 0;
+    std::size_t published_manifest_count_ = 0;
+    std::size_t published_completion_manifest_count_ = 0;
     std::string last_error_;
 };
 }  // namespace SpongeH5MD

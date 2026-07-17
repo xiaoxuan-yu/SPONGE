@@ -1842,6 +1842,29 @@ static void Test_Vds_Trajectory_Writer_With_Real_Backend()
                                             &spin_square_1));
         REQUIRE_TRUE(writer.Append_Reaxff_Frame(
             20, 0.2, {{"bond", 2.5}, {"angle", 4.5}}));
+
+        {
+            HighFive::File live_wrapper(wrapper_path.string(),
+                                        HighFive::File::ReadOnly);
+            const auto live_dims = live_wrapper.getDataSet(path::position_value)
+                                       .getSpace()
+                                       .getDimensions();
+            REQUIRE_EQ(live_dims[0], static_cast<std::size_t>(1));
+            const auto live_positions = Read_Flat_Dataset<float>(
+                live_wrapper.getDataSet(path::position_value));
+            REQUIRE_EQ(live_positions[0], 1.0f);
+            const auto live_manifest = Read_Int64_Vector(
+                live_wrapper, path::shard_manifest_frame_count);
+            REQUIRE_EQ(live_manifest.size(), static_cast<std::size_t>(1));
+            REQUIRE_EQ(live_manifest[0], static_cast<int64_t>(1));
+            const auto live_completion =
+                Read_Int64_Vector(live_wrapper, path::output_frame_count);
+            REQUIRE_EQ(live_completion.back(), static_cast<int64_t>(1));
+            REQUIRE_EQ(Read_String(live_wrapper, path::output_vds_status),
+                       std::string("complete shard prefix published"));
+            REQUIRE_EQ(Read_String(live_wrapper, path::output_status),
+                       std::string("open"));
+        }
         REQUIRE_TRUE(writer.Finalize());
     }
 

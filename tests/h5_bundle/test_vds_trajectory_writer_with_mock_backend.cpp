@@ -83,6 +83,19 @@ static void Test_Vds_Wrapper_And_Module_Virtual_Datasets()
     Append_Full_Frame(writer, 2);
     Append_Full_Frame(writer, 3);
 
+    REQUIRE_EQ(writer.Manifest().size(), static_cast<std::size_t>(1));
+    const auto& live_wrapper = *factory.logs[0];
+    REQUIRE_EQ(live_wrapper.datasets.at(path::position_value).shape.dims,
+               std::vector<std::size_t>({2, 1, 3}));
+    REQUIRE_EQ(live_wrapper.virtual_datasets.at(path::position_value).size(),
+               static_cast<std::size_t>(1));
+    REQUIRE_EQ(live_wrapper.string_arrays.at(path::shard_manifest_path).size(),
+               static_cast<std::size_t>(1));
+    REQUIRE_EQ(live_wrapper.strings.at(path::output_vds_status),
+               std::string("complete shard prefix published"));
+    REQUIRE_EQ(live_wrapper.append_counts.at(path::shard_manifest_index),
+               static_cast<int64_t>(1));
+
     REQUIRE_TRUE(writer.Finalize());
     REQUIRE_EQ(writer.Manifest().size(), static_cast<std::size_t>(2));
     REQUIRE_EQ(writer.Manifest()[0].frame_count, 2);

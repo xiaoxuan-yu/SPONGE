@@ -333,18 +333,27 @@ class HighFiveBackend : public WriterBackend
                           const std::string& link_path) override
     {
         if (!Ensure_File()) return false;
+        if (target == link_path) return true;
         try
         {
             if (!Ensure_Parent_Group(link_path)) return false;
-            if (file_->exist(link_path)) return true;
+            if (!file_->exist(target))
+            {
+                return Fail("hard-link target does not exist: " + target);
+            }
+            if (file_->exist(link_path))
+            {
+                if (swmr_write_started_) return true;
+                if (H5Ldelete(file_->getId(), link_path.c_str(), H5P_DEFAULT) <
+                    0)
+                {
+                    return Fail("failed to replace hard link: " + link_path);
+                }
+            }
             if (swmr_write_started_)
             {
                 return Fail("cannot create hard link after SWMR write started: " +
                             link_path);
-            }
-            if (!file_->exist(target))
-            {
-                return Fail("hard-link target does not exist: " + target);
             }
             const herr_t rc =
                 H5Lcreate_hard(file_->getId(), target.c_str(), file_->getId(),
