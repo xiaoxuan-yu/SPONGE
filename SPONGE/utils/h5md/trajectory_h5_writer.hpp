@@ -255,17 +255,12 @@ class TrajectoryH5Writer
         {
             return Mark_Failed();
         }
-        if (!writer_.Flush())
-        {
-            return Mark_Failed();
-        }
         ++particle_frame_count_;
-        if (!writer_.Write_Output_Completion(
-                static_cast<int64_t>(particle_frame_count_), step, time))
-        {
-            return Mark_Failed();
-        }
-        return writer_.Flush() || Mark_Failed();
+        pending_particle_step_ = step;
+        pending_particle_time_ = time;
+        particle_completion_pending_ = true;
+        dirty_ = true;
+        return true;
     }
 
     bool Append_Observable_Frame(
@@ -295,6 +290,7 @@ class TrajectoryH5Writer
             }
         }
         ++observable_frame_count_;
+        dirty_ = true;
         return true;
     }
 
@@ -310,8 +306,8 @@ class TrajectoryH5Writer
                                         std::size_t chain_length)
     {
         ModuleH5MappingWriter module_writer(&writer_);
-        return module_writer.Append_Nose_Hoover_Chain_Frame(
-            step, time, coordinates, velocities, chain_length);
+        return Mark_Dirty_If(module_writer.Append_Nose_Hoover_Chain_Frame(
+            step, time, coordinates, velocities, chain_length));
     }
 
     bool Ensure_Sits_Nk_Observable(const std::string& module_name,
@@ -326,8 +322,8 @@ class TrajectoryH5Writer
                               const float* values, std::size_t k_count)
     {
         ModuleH5MappingWriter module_writer(&writer_);
-        return module_writer.Append_Sits_Nk_Frame(step, time, module_name,
-                                                  values, k_count);
+        return Mark_Dirty_If(module_writer.Append_Sits_Nk_Frame(
+            step, time, module_name, values, k_count));
     }
 
     bool Ensure_Metadynamics_Scalars()
@@ -340,8 +336,8 @@ class TrajectoryH5Writer
                                           double meta, double rbias, double rct)
     {
         ModuleH5MappingWriter module_writer(&writer_);
-        return module_writer.Append_Metadynamics_Scalar_Frame(step, time, meta,
-                                                              rbias, rct);
+        return Mark_Dirty_If(module_writer.Append_Metadynamics_Scalar_Frame(
+            step, time, meta, rbias, rct));
     }
 
     bool Write_Metadynamics_Diagnostic(const std::string& name,
@@ -349,14 +345,14 @@ class TrajectoryH5Writer
                                        const std::string& text)
     {
         ModuleH5MappingWriter module_writer(&writer_);
-        return module_writer.Write_Metadynamics_Diagnostic(name, component,
-                                                           text);
+        return Mark_Dirty_If(
+            module_writer.Write_Metadynamics_Diagnostic(name, component, text));
     }
 
     bool Write_Qc_Scf_Output(const std::string& text)
     {
         ModuleH5MappingWriter module_writer(&writer_);
-        return module_writer.Write_Qc_Scf_Output(text);
+        return Mark_Dirty_If(module_writer.Write_Qc_Scf_Output(text));
     }
 
     bool Ensure_Qc_Observables(bool include_spin_square)
@@ -369,7 +365,8 @@ class TrajectoryH5Writer
                          const double* spin_square = nullptr)
     {
         ModuleH5MappingWriter module_writer(&writer_);
-        return module_writer.Append_Qc_Frame(step, time, energy, spin_square);
+        return Mark_Dirty_If(
+            module_writer.Append_Qc_Frame(step, time, energy, spin_square));
     }
 
     bool Ensure_Reaxff_Energy_Terms(const std::vector<std::string>& terms)
@@ -384,13 +381,13 @@ class TrajectoryH5Writer
         const std::map<std::string, double>& values_by_term)
     {
         ModuleH5MappingWriter module_writer(&writer_);
-        return module_writer.Append_Reaxff_Frame(step, time, reaxff_terms_,
-                                                 values_by_term);
+        return Mark_Dirty_If(module_writer.Append_Reaxff_Frame(
+            step, time, reaxff_terms_, values_by_term));
     }
 
     bool Write_Mdinfo_Text(const std::string& text)
     {
-        return writer_.Write_String(path::mdinfo_text, text);
+        return Mark_Dirty_If(writer_.Write_String(path::mdinfo_text, text));
     }
 
     bool Write_Legacy_Sidecar_Paths(const std::vector<std::string>& keys,
@@ -398,12 +395,37 @@ class TrajectoryH5Writer
     {
         if (!writer_.Ensure_Group(path::sponge_files)) return false;
         if (!writer_.Ensure_Group(path::legacy_sidecars)) return false;
-        return writer_.Write_String_Array(path::legacy_sidecar_keys, keys) &&
-               writer_.Write_String_Array(path::legacy_sidecar_paths, paths);
+        return Mark_Dirty_If(
+            writer_.Write_String_Array(path::legacy_sidecar_keys, keys) &&
+            writer_.Write_String_Array(path::legacy_sidecar_paths, paths));
     }
 
-    bool Finalize() { return writer_.Finalize(); }
-    bool Start_Swmr_Write() { return writer_.Start_Swmr_Write(); }
+    bool Publish()
+    {
+        if (!dirty_ && !particle_completion_pending_) return true;
+        if (!writer_.Flush()) return Mark_Failed();
+        if (particle_completion_pending_)
+        {
+            if (!writer_.Write_Output_Completion(
+                    static_cast<int64_t>(particle_frame_count_),
+                    pending_particle_step_, pending_particle_time_))
+            {
+                return Mark_Failed();
+            }
+            if (!writer_.Flush()) return Mark_Failed();
+            particle_completion_pending_ = false;
+        }
+        dirty_ = false;
+        return true;
+    }
+
+    bool Finalize() { return Publish() && writer_.Finalize(); }
+    bool Start_Swmr_Write()
+    {
+        if (!writer_.Start_Swmr_Write()) return false;
+        dirty_ = false;
+        return true;
+    }
     bool Flush() { return writer_.Flush(); }
     bool Close() { return writer_.Close(); }
 
@@ -420,6 +442,12 @@ class TrajectoryH5Writer
     }
 
    private:
+    bool Mark_Dirty_If(bool ok)
+    {
+        if (ok) dirty_ = true;
+        return ok;
+    }
+
     bool Create_Frame_Index_Dataset(const std::string& dataset_path,
                                     DataType type)
     {
@@ -456,6 +484,10 @@ class TrajectoryH5Writer
     std::size_t atom_count_ = 0;
     std::size_t particle_frame_count_ = 0;
     std::size_t observable_frame_count_ = 0;
+    int64_t pending_particle_step_ = -1;
+    double pending_particle_time_ = 0.0;
+    bool particle_completion_pending_ = false;
+    bool dirty_ = false;
     std::vector<std::string> observable_names_;
     std::vector<std::string> reaxff_terms_;
     std::string last_error_;

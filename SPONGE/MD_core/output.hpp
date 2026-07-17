@@ -1450,6 +1450,41 @@ void MD_INFORMATION::trajectory_output::Append_H5_Trajectory_Frame(
     }
 }
 
+void MD_INFORMATION::trajectory_output::Publish_H5_Output(
+    CONTROLLER* controller)
+{
+    if (CONTROLLER::MPI_rank != 0) return;
+    if (h5_trajectory_enabled && !h5_trajectory_vds_enabled &&
+        !h5_trajectory_writer->Publish())
+    {
+        const std::string reason = h5_trajectory_writer->Last_Error();
+        h5_trajectory_writer->Close();
+        h5_trajectory_enabled = false;
+        Record_H5_Output_Failure("trajectory", "publish", reason);
+    }
+    if (h5_observable_enabled && !h5_observable_writer->Publish())
+    {
+        const std::string reason = h5_observable_writer->Last_Error();
+        h5_observable_writer->Close();
+        h5_observable_enabled = false;
+        Record_H5_Output_Failure("observable", "publish", reason);
+    }
+    (void)controller;
+}
+
+void MD_INFORMATION::trajectory_output::Publish_Output(CONTROLLER* controller)
+{
+    Publish_H5_Output(controller);
+    std::string error_message;
+    if (!SpongeLegacyIO::OutputFlushCoordinator::Flush_Dirty(&error_message))
+    {
+        controller->Throw_SPONGE_Error(
+            spongeErrorValueErrorCommand,
+            "MD_INFORMATION::trajectory_output::Publish_Output",
+            error_message.c_str());
+    }
+}
+
 void MD_INFORMATION::trajectory_output::Finalize_H5_Trajectory(
     CONTROLLER* controller)
 {
@@ -1527,6 +1562,8 @@ void MD_INFORMATION::trajectory_output::Append_Crd_Traj_File(FILE* fp)
         {
             fwrite(&md_info->coordinate[0].x, sizeof(VECTOR),
                    md_info->atom_numbers, fp);
+            SpongeLegacyIO::OutputFlushCoordinator::Mark_Dirty(
+                fp, "coordinate trajectory");
         }
     }
 }
@@ -1545,6 +1582,8 @@ void MD_INFORMATION::trajectory_output::Append_Frc_Traj_File(FILE* fp)
         {
             fwrite(&md_info->force[0].x, sizeof(VECTOR), md_info->atom_numbers,
                    fp);
+            SpongeLegacyIO::OutputFlushCoordinator::Mark_Dirty(
+                fp, "force trajectory");
         }
     }
 }
@@ -1562,12 +1601,16 @@ void MD_INFORMATION::trajectory_output::Append_Vel_Traj_File(FILE* fp)
             {
                 fwrite(&md_info->velocity[0].x, sizeof(VECTOR),
                        md_info->atom_numbers, fp);
+                SpongeLegacyIO::OutputFlushCoordinator::Mark_Dirty(
+                    fp, "velocity trajectory");
             }
         }
         else
         {
             fwrite(&md_info->velocity[0].x, sizeof(VECTOR),
                    md_info->atom_numbers, fp);
+            SpongeLegacyIO::OutputFlushCoordinator::Mark_Dirty(
+                fp, "velocity trajectory");
         }
     }
 }
@@ -1586,6 +1629,8 @@ void MD_INFORMATION::trajectory_output::Append_Box_Traj_File(FILE* fp)
                     md_info->sys.box_length.x, md_info->sys.box_length.y,
                     md_info->sys.box_length.z, md_info->sys.box_angle.x,
                     md_info->sys.box_angle.y, md_info->sys.box_angle.z);
+            SpongeLegacyIO::OutputFlushCoordinator::Mark_Dirty(
+                fp, "box trajectory");
         }
     }
 }

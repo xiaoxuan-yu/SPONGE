@@ -1222,6 +1222,8 @@ void CLASSIC_SITS_INFORMATION::SITS_Write_Nk_Norm()
     if (nk_traj_file != NULL)
     {
         fwrite(nk_record_cpu, sizeof(float), k_numbers, nk_traj_file);
+        SpongeLegacyIO::OutputFlushCoordinator::Mark_Dirty(nk_traj_file,
+                                                            "SITS nk trajectory");
     }
 
     Open_File_Safely(&nk_rest_file, nk_rest_file_name, "w");

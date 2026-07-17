@@ -169,6 +169,7 @@ inline void CONTROLLER::Print_First_Line_To_Mdout(FILE* mdout)
         printf(
             "------------------------------------------------------------------"
             "------------------------------------------\n");
+        SpongeLegacyIO::OutputFlushCoordinator::Mark_Dirty(mdout, "mdout");
     }
     core_time.Start();
 }
@@ -200,4 +201,5 @@ inline void CONTROLLER::Print_To_Screen_And_Mdout(FILE* mdout)
     fprintf(stdout,
             "------------------------------------------------------------------"
             "------------------------------------------\n");
+    SpongeLegacyIO::OutputFlushCoordinator::Mark_Dirty(mdout, "mdout");
 }

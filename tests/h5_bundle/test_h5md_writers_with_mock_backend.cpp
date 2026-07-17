@@ -1,5 +1,6 @@
 #include "h5_bundle_test_common.hpp"
 
+#include "utils/control/legacy_output_flush.hpp"
 #include "utils/h5md/observable_h5_writer.hpp"
 #include "utils/h5md/restart_h5_writer.hpp"
 #include "utils/h5md/trajectory_h5_writer.hpp"
@@ -495,6 +496,69 @@ static void Test_Trajectory_Optional_Velocity_And_Force_Paths()
     REQUIRE_EQ(log->append_counts[path::box_edges_value], static_cast<int64_t>(9));
     REQUIRE_EQ(log->append_counts[path::velocity_value], static_cast<int64_t>(0));
     REQUIRE_EQ(log->append_counts[path::force_value], static_cast<int64_t>(0));
+}
+
+static void Test_Bundled_Writers_Publish_With_Unified_Flushes()
+{
+    {
+        auto log = std::make_shared<BackendLog>();
+        MockBackend backend(log);
+        TrajectoryH5Writer writer(&backend);
+        auto plan = Make_Plan();
+        REQUIRE_TRUE(writer.Open_Single_File(plan, "test"));
+        REQUIRE_TRUE(writer.Define_Particle_Datasets(1, false, false));
+        REQUIRE_TRUE(writer.Define_Observable_Stream({"energy"}, {"E"}));
+
+        float position[3] = {0, 1, 2};
+        float box[9] = {1, 0, 0, 0, 1, 0, 0, 0, 1};
+        REQUIRE_TRUE(writer.Append_Observable_Frame(
+            10, 0.5, {{"energy", -1.0}}));
+        REQUIRE_TRUE(writer.Append_Particle_Frame(10, 0.5, position, box));
+        REQUIRE_EQ(log->flush_calls, static_cast<int64_t>(0));
+        REQUIRE_EQ(log->append_counts[path::output_frame_count],
+                   static_cast<int64_t>(1));
+
+        REQUIRE_TRUE(writer.Publish());
+        REQUIRE_EQ(log->flush_calls, static_cast<int64_t>(2));
+        REQUIRE_EQ(log->append_counts[path::output_frame_count],
+                   static_cast<int64_t>(2));
+        REQUIRE_TRUE(writer.Publish());
+        REQUIRE_EQ(log->flush_calls, static_cast<int64_t>(2));
+    }
+    {
+        auto log = std::make_shared<BackendLog>();
+        MockBackend backend(log);
+        ObservableH5Writer writer(&backend);
+        auto plan = Make_Plan();
+        REQUIRE_TRUE(writer.Open(plan, "test"));
+        REQUIRE_TRUE(writer.Define_Observable_Stream({"energy"}, {"E"}));
+        REQUIRE_TRUE(writer.Append_Observable_Frame(
+            10, 0.5, {{"energy", -1.0}}));
+        REQUIRE_EQ(log->flush_calls, static_cast<int64_t>(0));
+
+        REQUIRE_TRUE(writer.Publish());
+        REQUIRE_EQ(log->flush_calls, static_cast<int64_t>(2));
+        REQUIRE_EQ(log->append_counts[path::output_frame_count],
+                   static_cast<int64_t>(2));
+    }
+}
+
+static void Test_Legacy_Output_Flush_Coordinator()
+{
+    FILE* file = std::tmpfile();
+    REQUIRE_TRUE(file != nullptr);
+    REQUIRE_TRUE(std::fputs("legacy frame\n", file) >= 0);
+    SpongeLegacyIO::OutputFlushCoordinator::Mark_Dirty(file, "test stream");
+    SpongeLegacyIO::OutputFlushCoordinator::Mark_Dirty(file, "test stream");
+    REQUIRE_EQ(SpongeLegacyIO::OutputFlushCoordinator::Dirty_Count(),
+               static_cast<std::size_t>(1));
+    std::string error_message;
+    REQUIRE_TRUE(
+        SpongeLegacyIO::OutputFlushCoordinator::Flush_Dirty(&error_message));
+    REQUIRE_TRUE(error_message.empty());
+    REQUIRE_EQ(SpongeLegacyIO::OutputFlushCoordinator::Dirty_Count(),
+               static_cast<std::size_t>(0));
+    REQUIRE_EQ(std::fclose(file), 0);
 }
 
 static void Test_Trajectory_And_Observable_Base_Layout_Paths()
@@ -1032,6 +1096,8 @@ int main()
         Test_Common_Layout_Roots_And_Output_Metadata();
         Test_Trajectory_Writer_Paths_And_Completion();
         Test_Trajectory_Optional_Velocity_And_Force_Paths();
+        Test_Bundled_Writers_Publish_With_Unified_Flushes();
+        Test_Legacy_Output_Flush_Coordinator();
         Test_Trajectory_And_Observable_Base_Layout_Paths();
         Test_Observable_Only_Writer();
         Test_Observable_Only_Module_Proxy_Paths();

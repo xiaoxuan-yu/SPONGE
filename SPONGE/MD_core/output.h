@@ -90,6 +90,8 @@ struct trajectory_output
                                                const char* file_name);
     void Write_H5_Qc_Scf_Output_File(CONTROLLER* controller,
                                      const char* file_name);
+    void Publish_Output(CONTROLLER* controller);
+    void Publish_H5_Output(CONTROLLER* controller);
     void Finalize_H5_Trajectory(CONTROLLER* controller);
     void Finalize_H5_Observable(CONTROLLER* controller);
     void Record_H5_Output_Failure(const char* family, const char* phase,

@@ -1872,6 +1872,7 @@ void Main_Print()
             nhc.Save_Restart_File();
         }
     }
+    md_info.output.Publish_Output(&controller);
 }
 
 void Main_Clear()

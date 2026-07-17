@@ -350,6 +350,8 @@ void NOSE_HOOVER_CHAIN_INFORMATION::Save_Trajectory_File()
             fprintf(f_crd_traj, "%f ", h_coordinate[i]);
         }
         fprintf(f_crd_traj, "\n");
+        SpongeLegacyIO::OutputFlushCoordinator::Mark_Dirty(
+            f_crd_traj, "Nose-Hoover coordinate trajectory");
     }
     if (is_initialized && f_vel_traj != NULL && CONTROLLER::MPI_rank == 0)
     {
@@ -358,5 +360,7 @@ void NOSE_HOOVER_CHAIN_INFORMATION::Save_Trajectory_File()
             fprintf(f_vel_traj, "%f ", h_velocity[i]);
         }
         fprintf(f_vel_traj, "\n");
+        SpongeLegacyIO::OutputFlushCoordinator::Mark_Dirty(
+            f_vel_traj, "Nose-Hoover velocity trajectory");
     }
 }

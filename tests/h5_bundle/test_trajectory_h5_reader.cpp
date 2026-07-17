@@ -237,6 +237,8 @@ static void Test_Trajectory_Reader_Refreshes_Swmr_Frames()
     Require_Writer(writer.Append_Particle_Frame(10, 0.02, position.data(),
                                                 box.data()),
                    writer, "publish SWMR trajectory frame");
+    Require_Writer(writer.Publish(), writer,
+                   "flush SWMR trajectory publication");
     Require_Reader(reader.Refresh(), reader, "refresh SWMR trajectory reader");
     Require_Reader(reader.Read_Committed_Frame_Count(&committed), reader,
                    "read refreshed committed frame count");

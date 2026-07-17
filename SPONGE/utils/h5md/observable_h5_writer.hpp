@@ -132,17 +132,12 @@ class ObservableH5Writer
                 return Mark_Failed();
             }
         }
-        if (!writer_.Flush())
-        {
-            return Mark_Failed();
-        }
         ++observable_frame_count_;
-        if (!writer_.Write_Output_Completion(
-                static_cast<int64_t>(observable_frame_count_), step, time))
-        {
-            return Mark_Failed();
-        }
-        return writer_.Flush() || Mark_Failed();
+        pending_observable_step_ = step;
+        pending_observable_time_ = time;
+        observable_completion_pending_ = true;
+        dirty_ = true;
+        return true;
     }
 
     bool Ensure_Nose_Hoover_Chain_Observables(std::size_t chain_length)
@@ -157,8 +152,8 @@ class ObservableH5Writer
                                         std::size_t chain_length)
     {
         ModuleH5MappingWriter module_writer(&writer_);
-        return module_writer.Append_Nose_Hoover_Chain_Frame(
-            step, time, coordinates, velocities, chain_length);
+        return Mark_Dirty_If(module_writer.Append_Nose_Hoover_Chain_Frame(
+            step, time, coordinates, velocities, chain_length));
     }
 
     bool Ensure_Sits_Nk_Observable(const std::string& module_name,
@@ -173,8 +168,8 @@ class ObservableH5Writer
                               const float* values, std::size_t k_count)
     {
         ModuleH5MappingWriter module_writer(&writer_);
-        return module_writer.Append_Sits_Nk_Frame(step, time, module_name,
-                                                  values, k_count);
+        return Mark_Dirty_If(module_writer.Append_Sits_Nk_Frame(
+            step, time, module_name, values, k_count));
     }
 
     bool Ensure_Metadynamics_Scalars()
@@ -187,8 +182,8 @@ class ObservableH5Writer
                                           double meta, double rbias, double rct)
     {
         ModuleH5MappingWriter module_writer(&writer_);
-        return module_writer.Append_Metadynamics_Scalar_Frame(step, time, meta,
-                                                              rbias, rct);
+        return Mark_Dirty_If(module_writer.Append_Metadynamics_Scalar_Frame(
+            step, time, meta, rbias, rct));
     }
 
     bool Write_Metadynamics_Diagnostic(const std::string& name,
@@ -196,14 +191,14 @@ class ObservableH5Writer
                                        const std::string& text)
     {
         ModuleH5MappingWriter module_writer(&writer_);
-        return module_writer.Write_Metadynamics_Diagnostic(name, component,
-                                                           text);
+        return Mark_Dirty_If(
+            module_writer.Write_Metadynamics_Diagnostic(name, component, text));
     }
 
     bool Write_Qc_Scf_Output(const std::string& text)
     {
         ModuleH5MappingWriter module_writer(&writer_);
-        return module_writer.Write_Qc_Scf_Output(text);
+        return Mark_Dirty_If(module_writer.Write_Qc_Scf_Output(text));
     }
 
     bool Ensure_Qc_Observables(bool include_spin_square)
@@ -216,7 +211,8 @@ class ObservableH5Writer
                          const double* spin_square = nullptr)
     {
         ModuleH5MappingWriter module_writer(&writer_);
-        return module_writer.Append_Qc_Frame(step, time, energy, spin_square);
+        return Mark_Dirty_If(
+            module_writer.Append_Qc_Frame(step, time, energy, spin_square));
     }
 
     bool Ensure_Reaxff_Energy_Terms(const std::vector<std::string>& terms)
@@ -231,13 +227,13 @@ class ObservableH5Writer
         const std::map<std::string, double>& values_by_term)
     {
         ModuleH5MappingWriter module_writer(&writer_);
-        return module_writer.Append_Reaxff_Frame(step, time, reaxff_terms_,
-                                                 values_by_term);
+        return Mark_Dirty_If(module_writer.Append_Reaxff_Frame(
+            step, time, reaxff_terms_, values_by_term));
     }
 
     bool Write_Mdinfo_Text(const std::string& text)
     {
-        return writer_.Write_String(path::mdinfo_text, text);
+        return Mark_Dirty_If(writer_.Write_String(path::mdinfo_text, text));
     }
 
     bool Write_Legacy_Sidecar_Paths(const std::vector<std::string>& keys,
@@ -245,19 +241,45 @@ class ObservableH5Writer
     {
         if (!writer_.Ensure_Group(path::sponge_files)) return false;
         if (!writer_.Ensure_Group(path::legacy_sidecars)) return false;
-        return writer_.Write_String_Array(path::legacy_sidecar_keys, keys) &&
-               writer_.Write_String_Array(path::legacy_sidecar_paths, paths);
+        return Mark_Dirty_If(
+            writer_.Write_String_Array(path::legacy_sidecar_keys, keys) &&
+            writer_.Write_String_Array(path::legacy_sidecar_paths, paths));
     }
 
     bool Write_Provenance_String(const std::string& name,
                                  const std::string& value)
     {
         if (!writer_.Ensure_Group(path::sponge_provenance)) return false;
-        return writer_.Write_String(Sponge_Provenance_Path(name), value);
+        return Mark_Dirty_If(
+            writer_.Write_String(Sponge_Provenance_Path(name), value));
     }
 
-    bool Finalize() { return writer_.Finalize(); }
-    bool Start_Swmr_Write() { return writer_.Start_Swmr_Write(); }
+    bool Publish()
+    {
+        if (!dirty_ && !observable_completion_pending_) return true;
+        if (!writer_.Flush()) return Mark_Failed();
+        if (observable_completion_pending_)
+        {
+            if (!writer_.Write_Output_Completion(
+                    static_cast<int64_t>(observable_frame_count_),
+                    pending_observable_step_, pending_observable_time_))
+            {
+                return Mark_Failed();
+            }
+            if (!writer_.Flush()) return Mark_Failed();
+            observable_completion_pending_ = false;
+        }
+        dirty_ = false;
+        return true;
+    }
+
+    bool Finalize() { return Publish() && writer_.Finalize(); }
+    bool Start_Swmr_Write()
+    {
+        if (!writer_.Start_Swmr_Write()) return false;
+        dirty_ = false;
+        return true;
+    }
     bool Flush() { return writer_.Flush(); }
     bool Close() { return writer_.Close(); }
 
@@ -273,6 +295,12 @@ class ObservableH5Writer
     }
 
    private:
+    bool Mark_Dirty_If(bool ok)
+    {
+        if (ok) dirty_ = true;
+        return ok;
+    }
+
     bool Mark_Failed()
     {
         const std::string reason = Last_Error();
@@ -282,6 +310,10 @@ class ObservableH5Writer
 
     H5MDWriter writer_;
     std::size_t observable_frame_count_ = 0;
+    int64_t pending_observable_step_ = -1;
+    double pending_observable_time_ = 0.0;
+    bool observable_completion_pending_ = false;
+    bool dirty_ = false;
     std::vector<std::string> observable_names_;
     std::vector<std::string> reaxff_terms_;
     std::string last_error_;

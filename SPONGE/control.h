@@ -188,6 +188,7 @@ struct CONTROLLER
 // 一些常用的控制函数
 #include "utils/control/error.hpp"
 #include "utils/control/h5_output_contract.hpp"
+#include "utils/control/legacy_output_flush.hpp"
 #include "utils/control/malloc_and_file.hpp"
 #include "utils/control/os.hpp"
 #include "utils/control/print.hpp"

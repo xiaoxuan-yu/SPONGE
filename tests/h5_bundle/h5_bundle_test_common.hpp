@@ -118,6 +118,7 @@ struct BackendLog
     bool fail_next_append = false;
     bool fail_next_virtual_dataset = false;
     bool fail_next_string_array = false;
+    std::int64_t flush_calls = 0;
     std::string fail_string_path;
     FileStatus status = FileStatus::closed;
     std::string opened_path;
@@ -148,7 +149,11 @@ class MockBackend : public WriterBackend
         return true;
     }
 
-    bool Flush() override { return true; }
+    bool Flush() override
+    {
+        ++log_->flush_calls;
+        return true;
+    }
 
     bool Close() override
     {
