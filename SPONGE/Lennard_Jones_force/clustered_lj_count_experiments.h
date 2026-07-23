@@ -164,6 +164,24 @@ void Launch_Clustered_Gmxpacked_Candidate_Leaf_Root_Child_Device_Counter_Emit(
     const int* root_child_task_sci_ids,
     const int* root_child_task_nodes);
 
+void Launch_Clustered_Gmxpacked_Candidate_Leaf_Root_Child_Device_Counter_Fused(
+    int collect_blocks, int builder_block_size, int candidate_sci_numbers,
+    const int* sci_supercluster_ids, const VECTOR* super_cluster_centers,
+    const VECTOR* super_cluster_sizes, const int* super_cluster_offsets,
+    const int* leaf_cluster_starts, const int* leaf_cluster_ends,
+    const int* leaf_all_local, LTMatrix3 cell, float cutoff,
+    const VECTOR* cluster_centers, const VECTOR* cluster_extents,
+    const unsigned int* cluster_valid_masks,
+    const unsigned int* cluster_local_masks, const uint64_t* node_prefixes,
+    const int* child_offsets, const int* parents, const int* internal_to_leaf,
+    const int* candidate_shift_ids, bool central_halfshell_culling,
+    bool use_morton_sfc, bool use_fast_node_overlap, int task_capacity,
+    const int* task_counter, int* task_work_cursor, int* probe_counts,
+    int* task_leaf_counts, int fused_record_capacity, int* fused_record_cursor,
+    int* fused_record_overflow, int* fused_task_ids, int* fused_leaf_ranks,
+    int* fused_leaf_ids, const int* root_child_task_sci_ids,
+    const int* root_child_task_nodes);
+
 void Launch_Clustered_Gmxpacked_Count_Fixed_Light_Dedicated(
     int candidate_sci_blocks, int builder_block_size,
     int candidate_sci_numbers, int cluster_size, int local_atom_numbers,

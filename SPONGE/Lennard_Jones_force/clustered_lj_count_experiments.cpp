@@ -1909,6 +1909,195 @@ static __global__ void Probe_Candidate_Leaf_Root_Child_Device_Counter_Subgroup(
 }
 
 template <bool kFastNodeOverlap>
+static __global__ void Fused_Candidate_Leaf_Root_Child_Device_Counter_Subgroup(
+    const int candidate_sci_numbers, const int* sci_supercluster_ids,
+    const VECTOR* super_cluster_centers, const VECTOR* super_cluster_sizes,
+    const int* super_cluster_offsets, const int* leaf_cluster_starts,
+    const int* leaf_cluster_ends, const int* leaf_all_local,
+    const LTMatrix3 cell, const float cutoff, const VECTOR* cluster_centers,
+    const VECTOR* cluster_extents, const unsigned int* cluster_valid_masks,
+    const unsigned int* cluster_local_masks, const uint64_t* node_prefixes,
+    const int* child_offsets, const int* parents, const int* internal_to_leaf,
+    const int* candidate_shift_ids, const bool central_halfshell_culling,
+    const bool use_morton_sfc, const int task_capacity,
+    const int* task_counter, int* task_work_cursor, int* probe_counts,
+    int* task_leaf_counts, const int fused_record_capacity,
+    int* fused_record_cursor, int* fused_record_overflow, int* fused_task_ids,
+    int* fused_leaf_ranks, int* fused_leaf_ids,
+    const int* root_child_task_sci_ids, const int* root_child_task_nodes)
+{
+    const int group_id = threadIdx.x / kFixedShiftCandidateLeafSubgroupSize;
+    const int sublane = threadIdx.x % kFixedShiftCandidateLeafSubgroupSize;
+    const int lane_id = threadIdx.x & (kClusteredBuilderWarpSize - 1);
+    const int subgroup_lane_base = lane_id - sublane;
+    const device_mask_t subgroup_mask =
+        (((device_mask_t)1 << kFixedShiftCandidateLeafSubgroupSize) - 1u)
+        << subgroup_lane_base;
+    (void)group_id;
+
+    while (true)
+    {
+        int logical_item = task_capacity;
+        if (sublane == 0)
+        {
+            logical_item = atomicAdd(task_work_cursor, 1);
+        }
+        logical_item =
+            deviceShfl(subgroup_mask, logical_item, subgroup_lane_base,
+                       kClusteredBuilderWarpSize);
+        const int task_count =
+            *task_counter < task_capacity ? *task_counter : task_capacity;
+        if (logical_item >= task_count)
+        {
+            break;
+        }
+
+        const int sci = root_child_task_sci_ids[logical_item];
+        if (sci < 0 || sci >= candidate_sci_numbers)
+        {
+            continue;
+        }
+
+        const int sci_base =
+            candidate_shift_ids == NULL ? sci / kClusteredShiftCount : sci;
+        const int candidate_shift_id =
+            candidate_shift_ids != NULL ? candidate_shift_ids[sci]
+                                        : (sci % kClusteredShiftCount);
+        const int super_i = sci_supercluster_ids[sci_base];
+        const VECTOR target_center = super_cluster_centers[super_i];
+        const VECTOR target_size = super_cluster_sizes[super_i];
+        const int cluster_i_start = super_cluster_offsets[super_i];
+        const int cluster_i_end = super_cluster_offsets[super_i + 1];
+        const VECTOR shifted_target_center =
+            target_center + Shift_Fractional_From_Id_Probe(candidate_shift_id);
+        const VECTOR shift_vec =
+            Shift_Vector_From_Id_Probe(candidate_shift_id, cell);
+        const float cutoff_sq = cutoff * cutoff;
+        const int cluster_i = cluster_i_start + sublane;
+        const bool lane_i_valid =
+            cluster_i < cluster_i_end && cluster_local_masks[cluster_i] != 0u;
+        const VECTOR center_i = lane_i_valid ? cluster_centers[cluster_i]
+                                             : VECTOR{0.0f, 0.0f, 0.0f};
+        const VECTOR extent_i = lane_i_valid ? cluster_extents[cluster_i]
+                                             : VECTOR{0.0f, 0.0f, 0.0f};
+        int count = 0;
+        int running_max_end = 0;
+
+        auto overlaps = [&](int node)
+        {
+            if constexpr (kFastNodeOverlap)
+            {
+                return Cornerstone_Node_Overlaps_Preshifted_Box_Probe(
+                    node_prefixes[node], shifted_target_center, target_size,
+                    use_morton_sfc);
+            }
+            else
+            {
+                return Cornerstone_Node_Overlaps_Shifted_Box_Probe(
+                    node_prefixes[node], target_center, target_size,
+                    candidate_shift_id, use_morton_sfc);
+            }
+        };
+
+        auto endpoint_leaf = [&](int leaf_j)
+        {
+            if (leaf_j < 0)
+            {
+                return;
+            }
+            if (central_halfshell_culling &&
+                candidate_shift_id == kClusteredCentralShiftId &&
+                leaf_all_local[leaf_j] != 0 &&
+                leaf_cluster_ends[leaf_j] <= cluster_i_start)
+            {
+                return;
+            }
+            if (!Leaf_Has_Fixed_Shift_Candidate_Overlap_Subgroup_Probe(
+                    cluster_i_start, leaf_cluster_starts[leaf_j],
+                    leaf_cluster_ends[leaf_j], candidate_shift_id, cutoff_sq,
+                    shift_vec, cluster_valid_masks, cluster_centers,
+                    cluster_extents, cluster_i, lane_i_valid, center_i,
+                    extent_i, subgroup_mask))
+            {
+                return;
+            }
+            if (sublane == 0)
+            {
+                const int rank = count;
+                count += 1;
+                running_max_end =
+                    IntMaxProbe(running_max_end, leaf_cluster_ends[leaf_j]);
+                const int record_idx = atomicAdd(fused_record_cursor, 1);
+                if (record_idx < fused_record_capacity)
+                {
+                    fused_task_ids[record_idx] = logical_item;
+                    fused_leaf_ranks[record_idx] = rank;
+                    fused_leaf_ids[record_idx] = leaf_j;
+                }
+                else if (fused_record_overflow != NULL)
+                {
+                    atomicAdd(fused_record_overflow, 1);
+                }
+            }
+        };
+        auto endpoint = [&](int node) { endpoint_leaf(internal_to_leaf[node]); };
+
+        constexpr int init_node = 0;
+        const int task_root_node = root_child_task_nodes[logical_item];
+        if (task_root_node == init_node)
+        {
+            endpoint(init_node);
+        }
+        else
+        {
+            int node = task_root_node;
+            bool backtrack = false;
+            while (true)
+            {
+                const bool is_leaf = child_offsets[node] == 0;
+                const bool descend = !backtrack && overlaps(node);
+                if (is_leaf && descend)
+                {
+                    endpoint(node);
+                }
+                if (!is_leaf && descend)
+                {
+                    node = child_offsets[node];
+                    backtrack = false;
+                }
+                else if (node == task_root_node)
+                {
+                    break;
+                }
+                else
+                {
+                    const int sibling_idx = (node - 1) % 8;
+                    if (sibling_idx < 7)
+                    {
+                        node += 1;
+                        backtrack = false;
+                    }
+                    else
+                    {
+                        node = parents[(node - 1) / 8];
+                        backtrack = true;
+                    }
+                }
+            }
+        }
+        if (sublane == 0 && task_leaf_counts != NULL)
+        {
+            task_leaf_counts[logical_item] = count;
+        }
+        if (sublane == 0 && probe_counts != NULL && count > 0)
+        {
+            atomicAdd(&probe_counts[sci], count);
+        }
+        (void)running_max_end;
+    }
+}
+
+template <bool kFastNodeOverlap>
 static __global__ void Build_Candidate_Leaf_Root_Child_Tasks(
     const int candidate_sci_numbers, const int* sci_supercluster_ids,
     const VECTOR* super_cluster_centers, const VECTOR* super_cluster_sizes,
@@ -3186,6 +3375,82 @@ void Launch_Clustered_Gmxpacked_Count_Fixed_Light_Probe(
     (void)probe_fragment_capacity;
     (void)probe_fragment_cursor;
     (void)probe_fragment_overflow_rows;
+#endif
+}
+
+void Launch_Clustered_Gmxpacked_Candidate_Leaf_Root_Child_Device_Counter_Fused(
+    int collect_blocks, int builder_block_size, int candidate_sci_numbers,
+    const int* sci_supercluster_ids, const VECTOR* super_cluster_centers,
+    const VECTOR* super_cluster_sizes, const int* super_cluster_offsets,
+    const int* leaf_cluster_starts, const int* leaf_cluster_ends,
+    const int* leaf_all_local, LTMatrix3 cell, float cutoff,
+    const VECTOR* cluster_centers, const VECTOR* cluster_extents,
+    const unsigned int* cluster_valid_masks,
+    const unsigned int* cluster_local_masks, const uint64_t* node_prefixes,
+    const int* child_offsets, const int* parents, const int* internal_to_leaf,
+    const int* candidate_shift_ids, bool central_halfshell_culling,
+    bool use_morton_sfc, bool use_fast_node_overlap, int task_capacity,
+    const int* task_counter, int* task_work_cursor, int* probe_counts,
+    int* task_leaf_counts, int fused_record_capacity, int* fused_record_cursor,
+    int* fused_record_overflow, int* fused_task_ids, int* fused_leaf_ranks,
+    int* fused_leaf_ids, const int* root_child_task_sci_ids,
+    const int* root_child_task_nodes)
+{
+#ifndef USE_CPU
+    auto* kernel =
+        use_fast_node_overlap
+            ? Fused_Candidate_Leaf_Root_Child_Device_Counter_Subgroup<true>
+            : Fused_Candidate_Leaf_Root_Child_Device_Counter_Subgroup<false>;
+    Launch_Device_Kernel(
+        kernel, collect_blocks, builder_block_size, 0, NULL,
+        candidate_sci_numbers, sci_supercluster_ids, super_cluster_centers,
+        super_cluster_sizes, super_cluster_offsets, leaf_cluster_starts,
+        leaf_cluster_ends, leaf_all_local, cell, cutoff, cluster_centers,
+        cluster_extents, cluster_valid_masks, cluster_local_masks,
+        node_prefixes, child_offsets, parents, internal_to_leaf,
+        candidate_shift_ids, central_halfshell_culling, use_morton_sfc,
+        task_capacity, task_counter, task_work_cursor, probe_counts,
+        task_leaf_counts, fused_record_capacity, fused_record_cursor,
+        fused_record_overflow, fused_task_ids, fused_leaf_ranks, fused_leaf_ids,
+        root_child_task_sci_ids, root_child_task_nodes);
+#else
+    (void)collect_blocks;
+    (void)builder_block_size;
+    (void)candidate_sci_numbers;
+    (void)sci_supercluster_ids;
+    (void)super_cluster_centers;
+    (void)super_cluster_sizes;
+    (void)super_cluster_offsets;
+    (void)leaf_cluster_starts;
+    (void)leaf_cluster_ends;
+    (void)leaf_all_local;
+    (void)cell;
+    (void)cutoff;
+    (void)cluster_centers;
+    (void)cluster_extents;
+    (void)cluster_valid_masks;
+    (void)cluster_local_masks;
+    (void)node_prefixes;
+    (void)child_offsets;
+    (void)parents;
+    (void)internal_to_leaf;
+    (void)candidate_shift_ids;
+    (void)central_halfshell_culling;
+    (void)use_morton_sfc;
+    (void)use_fast_node_overlap;
+    (void)task_capacity;
+    (void)task_counter;
+    (void)task_work_cursor;
+    (void)probe_counts;
+    (void)task_leaf_counts;
+    (void)fused_record_capacity;
+    (void)fused_record_cursor;
+    (void)fused_record_overflow;
+    (void)fused_task_ids;
+    (void)fused_leaf_ranks;
+    (void)fused_leaf_ids;
+    (void)root_child_task_sci_ids;
+    (void)root_child_task_nodes;
 #endif
 }
 

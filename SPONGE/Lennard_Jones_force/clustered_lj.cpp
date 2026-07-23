@@ -293,6 +293,12 @@ static bool Clustered_Fixed_Shift_Candidate_Leaf_Queue2_Count_Enabled()
         "SPONGE_CLUSTERED_FIXED_SHIFT_CANDIDATE_LEAF_QUEUE2_COUNT");
 }
 
+static bool Clustered_Fixed_Shift_Candidate_Leaf_Queue2_Fused_Enabled()
+{
+    return Clustered_Gmxpacked_Env_Flag_Enabled(
+        "SPONGE_CLUSTERED_FIXED_SHIFT_CANDIDATE_LEAF_QUEUE2_FUSED");
+}
+
 static int Clustered_Fixed_Shift_Candidate_Leaf_Queue2_Device_Blocks()
 {
     const char* value = std::getenv(
@@ -5197,6 +5203,20 @@ static __global__ void Scatter_Candidate_Leaves_From_Onepass(
             candidate_leaf_prev_running_max_ends[candidate_idx] =
                 onepass_prev_running_max_ends[index];
         }
+    }
+}
+
+static __global__ void Scatter_Candidate_Leaves_From_Queue2_Task_Records(
+    const int record_numbers, const int* task_leaf_offsets,
+    const int* record_task_ids, const int* record_leaf_ranks,
+    const int* record_leaf_ids, int* candidate_leaf_ids)
+{
+    SIMPLE_DEVICE_FOR(record_idx, record_numbers)
+    {
+        const int task_idx = record_task_ids[record_idx];
+        const int rank = record_leaf_ranks[record_idx];
+        const int write_idx = task_leaf_offsets[task_idx] + rank;
+        candidate_leaf_ids[write_idx] = record_leaf_ids[record_idx];
     }
 }
 
@@ -28329,6 +28349,9 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
     const bool use_fixed_shift_candidate_leaf_queue2_count =
         fixed_shift_candidates && fixed_shift_leaf_screening &&
         Clustered_Fixed_Shift_Candidate_Leaf_Queue2_Count_Enabled();
+    const bool use_fixed_shift_candidate_leaf_queue2_fused =
+        use_fixed_shift_candidate_leaf_queue2_count &&
+        Clustered_Fixed_Shift_Candidate_Leaf_Queue2_Fused_Enabled();
     const bool request_fixed_shift_count_metadata =
         use_fixed_shift_candidate_leaf_onepass &&
         !use_fixed_shift_candidate_leaf_queue2_count &&
@@ -28946,6 +28969,132 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                 deviceMemset(d_candidate_leaf_queue2_task_leaf_counts, 0,
                              sizeof(int) * h_queue2_tasks);
             }
+            int candidate_leaf_numbers_by_task = 0;
+            bool candidate_leaf_queue2_fused_used = false;
+            int h_queue2_emit_overflow = 0;
+            if (use_fixed_shift_candidate_leaf_queue2_fused && h_queue2_tasks > 0)
+            {
+                const int fused_record_capacity =
+                    Candidate_Leaf_Onepass_Target_Capacity(
+                        candidate_sci_numbers, candidate_leaf_capacity,
+                        candidate_leaf_onepass_high_water,
+                        candidate_leaf_onepass_record_capacity, false);
+                Reserve_Candidate_Leaf_Onepass_Scratch(
+                    this, fused_record_capacity, false);
+                Reserve_Device_Int_Buffer(2, &d_candidate_leaf_onepass_cursor,
+                                          &candidate_leaf_onepass_cursor_capacity);
+                deviceMemset(d_candidate_leaf_onepass_cursor, 0,
+                             sizeof(int) * 2);
+                deviceMemset(d_candidate_leaf_queue2_task_work_cursor, 0,
+                             sizeof(int));
+                {
+                    ClusteredGmxpackedRecordBuilderStageTimer stage_timer(
+                        "candidate-leaf-queue2-device-fused",
+                        record_builder_stage_timers, false);
+                    Launch_Clustered_Gmxpacked_Candidate_Leaf_Root_Child_Device_Counter_Fused(
+                        Clustered_Fixed_Shift_Candidate_Leaf_Queue2_Device_Blocks(),
+                        kClusteredBuilderBlockSize, candidate_sci_numbers,
+                        candidate_sci_supercluster_ids, d_super_cluster_centers,
+                        d_super_cluster_sizes, d_super_cluster_offsets,
+                        d_leaf_cluster_starts, d_leaf_cluster_ends,
+                        d_leaf_all_local, cell, build_cutoff, d_cluster_centers,
+                        d_cluster_extents, d_cluster_valid_masks,
+                        d_cluster_local_masks,
+                        rawPtr(cornerstone_state->octree.prefixes),
+                        rawPtr(cornerstone_state->octree.childOffsets),
+                        rawPtr(cornerstone_state->octree.parents),
+                        rawPtr(cornerstone_state->octree.internalToLeaf),
+                        candidate_shift_ids, central_candidate_halfshell_culling,
+                        use_morton_sfc,
+                        Clustered_Fixed_Shift_Candidate_Leaf_Nodebox_Opt_Enabled(),
+                        candidate_leaf_queue2_task_capacity,
+                        d_candidate_leaf_queue2_task_counter,
+                        d_candidate_leaf_queue2_task_work_cursor,
+                        d_sci_candidate_leaf_counts,
+                        d_candidate_leaf_queue2_task_leaf_counts,
+                        fused_record_capacity, d_candidate_leaf_onepass_cursor,
+                        d_candidate_leaf_onepass_cursor + 1,
+                        d_candidate_leaf_onepass_sci_ids,
+                        d_candidate_leaf_onepass_ranks,
+                        d_candidate_leaf_onepass_leaf_ids,
+                        d_candidate_leaf_queue2_task_sci_ids,
+                        d_candidate_leaf_queue2_task_nodes);
+                }
+                int h_fused_cursor[2] = {0, 0};
+                deviceMemcpy(h_fused_cursor, d_candidate_leaf_onepass_cursor,
+                             sizeof(int) * 2, deviceMemcpyDeviceToHost);
+                h_queue2_emit_overflow = h_fused_cursor[1];
+                if (h_fused_cursor[1] == 0 &&
+                    h_fused_cursor[0] <= fused_record_capacity)
+                {
+                    candidate_leaf_numbers = Exclusive_Scan_Counts(
+                        this, candidate_sci_numbers, d_sci_candidate_leaf_counts,
+                        d_sci_candidate_leaf_offsets);
+                    candidate_leaf_numbers_by_task = Exclusive_Scan_Counts(
+                        this, h_queue2_tasks,
+                        d_candidate_leaf_queue2_task_leaf_counts,
+                        d_candidate_leaf_queue2_task_leaf_offsets);
+                    if (candidate_leaf_numbers == h_fused_cursor[0] &&
+                        candidate_leaf_numbers_by_task == h_fused_cursor[0])
+                    {
+                        candidate_leaf_queue2_count_used = true;
+                        candidate_leaf_queue2_fused_used = true;
+                        candidate_leaf_onepass_high_water = IntMax(
+                            candidate_leaf_onepass_high_water,
+                            candidate_leaf_numbers);
+                        if (candidate_leaf_numbers > 0)
+                        {
+                            Reserve_Device_Int_Buffer(candidate_leaf_numbers,
+                                                      &d_sci_candidate_leaf_ids,
+                                                      &candidate_leaf_capacity);
+                            {
+                                ClusteredGmxpackedRecordBuilderStageTimer
+                                    stage_timer(
+                                        "candidate-leaf-queue2-fused-scatter",
+                                        record_builder_stage_timers, false);
+                                Launch_Device_Kernel(
+                                    Scatter_Candidate_Leaves_From_Queue2_Task_Records,
+                                    (candidate_leaf_numbers +
+                                     CONTROLLER::device_max_thread - 1) /
+                                        CONTROLLER::device_max_thread,
+                                    CONTROLLER::device_max_thread, 0, NULL,
+                                    candidate_leaf_numbers,
+                                    d_candidate_leaf_queue2_task_leaf_offsets,
+                                    d_candidate_leaf_onepass_sci_ids,
+                                    d_candidate_leaf_onepass_ranks,
+                                    d_candidate_leaf_onepass_leaf_ids,
+                                    d_sci_candidate_leaf_ids);
+                            }
+                            candidate_leaf_onepass_used = true;
+                        }
+                    }
+                    else
+                    {
+                        h_queue2_emit_overflow = 1;
+                    }
+                }
+                else
+                {
+                    candidate_leaf_onepass_overflow_count += 1;
+                    const int required_capacity =
+                        h_fused_cursor[0] > 0 ? h_fused_cursor[0]
+                                              : fused_record_capacity + 1;
+                    candidate_leaf_onepass_high_water = IntMax(
+                        candidate_leaf_onepass_high_water, required_capacity);
+                }
+                if (!candidate_leaf_queue2_fused_used)
+                {
+                    deviceMemset(d_sci_candidate_leaf_counts, 0,
+                                 sizeof(int) * candidate_sci_numbers);
+                    if (h_queue2_tasks > 0)
+                    {
+                        deviceMemset(d_candidate_leaf_queue2_task_leaf_counts, 0,
+                                     sizeof(int) * h_queue2_tasks);
+                    }
+                }
+            }
+            if (!candidate_leaf_queue2_fused_used)
+            {
             deviceMemset(d_candidate_leaf_queue2_task_work_cursor, 0,
                          sizeof(int));
             {
@@ -28978,7 +29127,7 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
             candidate_leaf_numbers = Exclusive_Scan_Counts(
                 this, candidate_sci_numbers, d_sci_candidate_leaf_counts,
                 d_sci_candidate_leaf_offsets);
-            const int candidate_leaf_numbers_by_task =
+            candidate_leaf_numbers_by_task =
                 h_queue2_tasks > 0
                     ? Exclusive_Scan_Counts(
                           this, h_queue2_tasks,
@@ -29027,24 +29176,28 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                 }
                 candidate_leaf_onepass_used = true;
             }
+            }
             if (record_builder_summary_trace)
             {
-                int h_queue2_emit_overflow = 0;
-                deviceMemcpy(&h_queue2_emit_overflow,
-                             d_candidate_leaf_queue2_task_overflow, sizeof(int),
-                             deviceMemcpyDeviceToHost);
+                if (!candidate_leaf_queue2_fused_used)
+                {
+                    deviceMemcpy(&h_queue2_emit_overflow,
+                                 d_candidate_leaf_queue2_task_overflow, sizeof(int),
+                                 deviceMemcpyDeviceToHost);
+                }
                 fprintf(stderr,
                         "[clustered candidate leaf queue2 count] step=%d "
                         "candidate_sci=%d leaves=%d tasks=%d capacity=%d "
                         "task_overflow=%d emit_overflow=%d task_leaves=%d "
-                        "depth=%d blocks=%d\n",
+                        "depth=%d blocks=%d fused=%d\n",
                         md_info.sys.steps, candidate_sci_numbers,
                         candidate_leaf_numbers, h_queue2_tasks,
                         candidate_leaf_queue2_task_capacity,
                         h_queue2_task_overflow, h_queue2_emit_overflow,
                         candidate_leaf_numbers_by_task,
                         task_split_depth,
-                        Clustered_Fixed_Shift_Candidate_Leaf_Queue2_Device_Blocks());
+                        Clustered_Fixed_Shift_Candidate_Leaf_Queue2_Device_Blocks(),
+                        candidate_leaf_queue2_fused_used ? 1 : 0);
                 fflush(stderr);
             }
         }

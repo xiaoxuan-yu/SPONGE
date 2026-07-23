@@ -58,7 +58,27 @@ SPONGE_CLUSTERED_GMXPACKED_INNER_ACTIVE_CACHED_FILL=1
 SPONGE_CLUSTERED_GMXPACKED_PAIR_SHIFT_REFRESH_BLOCK_SIZE=128
 ```
 
-For DNA_COU peak checks, add `SPONGE_CLUSTERED_GMXPACKED_FULL_DENSE_PADDING=1`.
+For DNA_COU peak checks, add both DNA-specific gates:
+
+```sh
+SPONGE_CLUSTERED_GMXPACKED_FULL_DENSE_PADDING=1
+SPONGE_CLUSTERED_GMXPACKED_FORCE_SCI_SPLIT2_PROBE=1
+```
+
+The force SCI split2 gate is default-off and AB-table-only. Do not add it to
+the shared water environment; wat160k and wat600k already use the LJ-combination
+fast path. Its NCU, NSYS, 10000-step, and 50000-step validation is recorded in
+`docs/gmxpacked-dna-force-sci-work-split-probe-20260710.md`.
+
+For DNA NPT only, add the default-off virial specialization gate:
+
+```sh
+SPONGE_CLUSTERED_GMXPACKED_VIRIAL_SCI_SPLIT2_PROBE=1
+```
+
+Do not add it to the locked NVE path, NVT, or either water system. The full NCU
+diff, DNA NPT end-to-end result, and public SPONGE comparison are recorded in
+`docs/gmxpacked-dna-npt-virial-sci-split2-20260723.md`.
 
 ## 2026-07-09 current peak recheck
 

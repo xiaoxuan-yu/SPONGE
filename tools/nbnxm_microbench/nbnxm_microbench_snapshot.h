@@ -212,7 +212,8 @@ struct SpongeGmxpackedForceOnlySnapshotHeader
     uint32_t j_group_size = 4u;
     uint32_t force_storage_sorted = 1u;
     uint32_t use_lj_comb = 1u;
-    uint32_t reserved0 = 0u;
+    // 0 means the packed triangular LJ table. Nonzero means full matrix stride.
+    uint32_t lj_type_matrix_stride = 0u;
     uint32_t reserved1 = 0u;
     uint64_t cluster_numbers = 0u;
     uint64_t super_cluster_numbers = 0u;

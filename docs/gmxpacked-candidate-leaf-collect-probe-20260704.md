@@ -664,3 +664,78 @@ env only in the later combined stack with cooperative fixed-light count, cached
 inner-active fill, and refresh block 128. Keep the table above as the traceable
 negative result for the intermediate queue2-only production integration stage;
 do not use it as the current peak-env recommendation.
+
+### 2026-07-09 Probe/Emit Fuse Experiment
+
+After the current peak-env nsys split showed wat600k queue2 probe+emit at about
+`514.660 + 368.126 ms` over a 10000-step run, the first fused experiment tested
+whether removing the second root-child traversal pays off. The implementation is
+gated by:
+
+```text
+SPONGE_CLUSTERED_FIXED_SHIFT_CANDIDATE_LEAF_QUEUE2_FUSED=1
+```
+
+The fused kernel keeps the sorted task order invariant: it records
+`(task_idx, local_leaf_rank, leaf_id)` during the count traversal, scans both
+the per-sci and per-task counts, then scatters with `task_leaf_offsets`. This
+intentionally preserves the ordering contract that downstream dedup/count code
+relies on. If the temporary record buffer overflows, or the sci/task scan totals
+do not match the fused record cursor, the path clears the scratch counts and
+falls back to the existing queue2 probe+emit path.
+
+Wat600k 1000-step, peak env, alternating 3 rounds:
+
+```text
+/tmp/sponge-probe-emit-fuse-20260709/wat600k
+```
+
+| mode | runs | speed mean | speed min-max | wall mean | Calculate_Force mean |
+|---|---:|---:|---:|---:|---:|
+| queue2 baseline | 3 | 45.088894 ns/day | 44.720234-45.273972 | 1.918195 s | 1.710170 s |
+| queue2 fused | 3 | 46.245899 ns/day | 45.837807-46.667191 | 1.870242 s | 1.655510 s |
+
+Observed delta: fused is `+2.57%` by speed and saves about `54.7 ms` in
+`Calculate_Force` per 1000 steps for this sample.
+
+Nsys 1000-step kernel split:
+
+| mode | probe | emit | fused | fused scatter | probe/emit/fused group |
+|---|---:|---:|---:|---:|---:|
+| queue2 baseline | 61.771 ms | 42.683 ms | n/a | n/a | 104.454 ms |
+| queue2 fused | n/a | n/a | 44.298 ms | 0.707 ms | 45.005 ms |
+
+The kernel-level result matches the e2e signal: the fused path removes about
+`59.4 ms` per 1000 steps from this group, while keeping the task build, task
+sort, sci scan, and task scan in place. The remaining two probe/emit directions
+are still valid and should be kept separate from this fuse result:
+
+- finer task granularity beyond root-child/depth-2 tasks;
+- real subgroup-parallel traversal where lanes share node/child control work,
+  instead of only helping at endpoint screening.
+
+10000-step e2e validation with the same fused gate:
+
+```text
+/tmp/sponge-probe-emit-fuse-e2e10000-20260709
+```
+
+Environment: current peak env plus
+`SPONGE_CLUSTERED_FIXED_SHIFT_CANDIDATE_LEAF_QUEUE2_FUSED=1`. DNA additionally
+used `SPONGE_CLUSTERED_GMXPACKED_FULL_DENSE_PADDING=1`.
+
+| system | speed | wall | Calculate_Force | stderr |
+|---|---:|---:|---:|---|
+| wat160k | 149.064377 ns/day | 5.796733 s | 4.979652 s | empty |
+| wat600k | 48.225800 ns/day | 17.917513 s | 15.661341 s | empty |
+| dna_cou | 298.562500 ns/day | 5.788312 s | 3.873791 s | AB-table fallback warning only |
+
+All three runs were finite with no NaN/inf. Compared with the previous single
+run current-peak check in `/tmp/sponge-current-peak-recheck-20260709`, the fused
+gate measured:
+
+| system | previous peak speed | fused speed | speed delta |
+|---|---:|---:|---:|
+| wat160k | 144.195648 ns/day | 149.064377 ns/day | +3.38% |
+| wat600k | 46.822659 ns/day | 48.225800 ns/day | +3.00% |
+| dna_cou | 295.798553 ns/day | 298.562500 ns/day | +0.93% |
