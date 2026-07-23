@@ -112,6 +112,9 @@ static VECTOR Wrap_To_Box_Fractional(VECTOR crd, LTMatrix3 rcell,
 //   SPONGE_CLUSTERED_GMXPACKED_VIRIAL_SCI_SPLIT2_PROBE
 //                                               partitions each virial-only
 //                                               AB-table SCI across two CTAs
+//   SPONGE_CLUSTERED_GMXPACKED_ENERGY_VIRIAL_SCI_SPLIT2_PROBE
+//                                               partitions each energy+virial
+//                                               AB-table SCI across two CTAs
 //   SPONGE_CLUSTERED_GMXPACKED_ASSUME_SCI_SHIFT skips per-pair shift words in
 //                                               full-local fast gmxpacked mode
 //                                               and uses SCI shift directly
@@ -256,6 +259,12 @@ static bool Clustered_Gmxpacked_Virial_Sci_Split2_Probe_Enabled()
 {
     return Env_Flag_Enabled(
         "SPONGE_CLUSTERED_GMXPACKED_VIRIAL_SCI_SPLIT2_PROBE");
+}
+
+static bool Clustered_Gmxpacked_Energy_Virial_Sci_Split2_Probe_Enabled()
+{
+    return Env_Flag_Enabled(
+        "SPONGE_CLUSTERED_GMXPACKED_ENERGY_VIRIAL_SCI_SPLIT2_PROBE");
 }
 
 static __host__ __device__ __forceinline__ int
@@ -3564,11 +3573,11 @@ Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb_ForceOnly_Warp_Record_Device(
                   "gmxpacked SCI work partition count must be positive");
     static_assert(
         sci_work_parts == 1 ||
-            (!need_energy && !total_output &&
-             ((!need_virial && !compact_force_storage) ||
+            (!total_output &&
+             ((!need_energy && !need_virial && !compact_force_storage) ||
               (need_virial && compact_force_storage))),
         "gmxpacked SCI work partitioning requires force-only atom output or "
-        "virial-only compact output");
+        "virial compact output");
     constexpr int max_super_cluster_atoms =
         kClusteredClusterSize * kClusteredSuperClusterClusters;
 #ifdef USE_GPU
@@ -7913,6 +7922,8 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
                 Clustered_Gmxpacked_Force_Sci_Split2_Probe_Enabled();
             const bool requested_gmxpacked_virial_sci_work_split2_probe =
                 Clustered_Gmxpacked_Virial_Sci_Split2_Probe_Enabled();
+            const bool requested_gmxpacked_energy_virial_sci_work_split2_probe =
+                Clustered_Gmxpacked_Energy_Virial_Sci_Split2_Probe_Enabled();
             const bool requested_gmxpacked_assume_sci_shift =
                 Clustered_Gmxpacked_Assume_Sci_Shift_Enabled();
             const bool requested_gmxpacked_sci_shift_split =
@@ -8152,6 +8163,19 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
                 !use_gmxpacked_skip_i_writeback_probe &&
                 !use_gmxpacked_skip_j_writeback_probe &&
                 !use_gmxpacked_lj_ab_matrix && !need_atom_energy &&
+                need_virial;
+            const bool use_gmxpacked_energy_virial_sci_work_split2 =
+                requested_gmxpacked_energy_virial_sci_work_split2_probe &&
+                gmxpacked_fast_full_local_dense_compatible &&
+                use_gmxpacked_sci_shift_split &&
+                !use_gmxpacked_lj_comb_kernel &&
+                use_gmxpacked_compact_force_scratch &&
+                !use_gmxpacked_float4_sorted_force &&
+                !use_gmxpacked_raw_component_atomic_probe &&
+                !use_gmxpacked_staggered_atomic_probe &&
+                !use_gmxpacked_skip_i_writeback_probe &&
+                !use_gmxpacked_skip_j_writeback_probe &&
+                !use_gmxpacked_lj_ab_matrix && need_atom_energy &&
                 need_virial;
             static bool warned_gmxpacked_lj_ab_matrix_unavailable = false;
             if (requested_gmxpacked_lj_ab_matrix_probe &&
@@ -8458,6 +8482,7 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
             const bool use_gmxpacked_lj_ab_matrix = false;
             const bool use_gmxpacked_sci_work_split2 = false;
             const bool use_gmxpacked_virial_sci_work_split2 = false;
+            const bool use_gmxpacked_energy_virial_sci_work_split2 = false;
             const float2* gmxpacked_LJ_AB_table = d_LJ_AB_packed;
             const int gmxpacked_lj_ab_matrix_stride = atom_type_numbers;
             const uint64_t* gmxpacked_pair_shift_bits = NULL;
@@ -8618,7 +8643,8 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
                                 : sci_shift_flags;
                         const dim3 gmxpackedSciShiftSplitGridSize =
                             (use_gmxpacked_sci_work_split2 ||
-                             use_gmxpacked_virial_sci_work_split2)
+                             use_gmxpacked_virial_sci_work_split2 ||
+                             use_gmxpacked_energy_virial_sci_work_split2)
                                 ? dim3(static_cast<unsigned int>(
                                            clustered_layout
                                                .gmxpacked_sci_numbers) *
@@ -8761,14 +8787,32 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
                             }
                             if (need_atom_energy && need_virial)
                             {
-                                gmxpacked_fast_f =
-                                    CLUSTERED_GMXPACKED_SPLIT_FULL_DENSE_KERNEL(
-                                        true, true, false, true, true, false,
-                                        false, false, false);
-                                gmxpacked_slow_f =
-                                    CLUSTERED_GMXPACKED_SPLIT_FULL_DENSE_KERNEL(
-                                        true, true, false, true, false, false,
-                                        false, false, false);
+                                if (use_gmxpacked_energy_virial_sci_work_split2)
+                                {
+                                    gmxpacked_fast_f =
+                                        Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb_ForceOnly_Warp_Record_Device<
+                                            true, true, false, true, false,
+                                            true, true, true, VECTOR, false,
+                                            false, false, false, false, false,
+                                            2>;
+                                    gmxpacked_slow_f =
+                                        Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb_ForceOnly_Warp_Record_Device<
+                                            true, true, false, true, false,
+                                            true, true, false, VECTOR, false,
+                                            false, false, false, false, false,
+                                            2>;
+                                }
+                                else
+                                {
+                                    gmxpacked_fast_f =
+                                        CLUSTERED_GMXPACKED_SPLIT_FULL_DENSE_KERNEL(
+                                            true, true, false, true, true,
+                                            false, false, false, false);
+                                    gmxpacked_slow_f =
+                                        CLUSTERED_GMXPACKED_SPLIT_FULL_DENSE_KERNEL(
+                                            true, true, false, true, false,
+                                            false, false, false, false);
+                                }
                             }
                             else if (need_atom_energy)
                             {

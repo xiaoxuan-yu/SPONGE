@@ -76,9 +76,19 @@ For DNA NPT only, add the default-off virial specialization gate:
 SPONGE_CLUSTERED_GMXPACKED_VIRIAL_SCI_SPLIT2_PROBE=1
 ```
 
-Do not add it to the locked NVE path, NVT, or either water system. The full NCU
-diff, DNA NPT end-to-end result, and public SPONGE comparison are recorded in
-`docs/gmxpacked-dna-npt-virial-sci-split2-20260723.md`.
+Do not add this gate to the locked NVE path, NVT, or either water system. The
+virial-only full NCU diff, DNA NPT end-to-end result, and public SPONGE
+comparison are recorded in
+`docs/gmxpacked-dna-npt-virial-sci-split2-20260723.md`. The energy+virial
+specialization has a separate default-off gate for any DNA ensemble that
+emits full per-atom output:
+
+```sh
+SPONGE_CLUSTERED_GMXPACKED_ENERGY_VIRIAL_SCI_SPLIT2_PROBE=1
+```
+
+Do not add the energy+virial gate to either water system. Its validation is in
+`docs/gmxpacked-dna-energy-virial-sci-split2-20260723.md`.
 
 ## 2026-07-09 current peak recheck
 

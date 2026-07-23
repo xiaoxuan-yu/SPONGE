@@ -51,7 +51,7 @@ opt/gmxpacked-phase-b-force-kernel
 Latest committed head at handoff:
 
 ```text
-5888c4a Optimize gmxpacked refresh replay
+1e5561e Optimize gmxpacked DNA force and virial paths
 ```
 
 The worktree is intentionally dirty. Do not assume the current force-kernel
@@ -320,6 +320,31 @@ previous three-pair `+25.40%` result. wat160k and wat600k both completed final
 10000-step NPT guardrails; their part-1 kernel resource usage is byte-for-byte
 unchanged across the lb10 and shared-merge binaries. Full details and artifacts are in
 `docs/gmxpacked-dna-npt-virial-register-shared-20260723.md`.
+
+## DNA energy+virial split2 follow-up - 2026-07-23
+
+The full per-atom energy+virial specialization was the slowest direct-force
+variant in the new profile: 342.69 us, 17.83% achieved occupancy, and
+6,022,572 local-store spill sectors. A separate default-off gate now
+partitions this AB-table SCI work across two CTAs:
+
+```text
+SPONGE_CLUSTERED_GMXPACKED_ENERGY_VIRIAL_SCI_SPLIT2_PROBE=1
+```
+
+Final full NCU is 193.34 us (`-43.6%`), 29.12% achieved occupancy, 96
+registers/thread, and 3,392,467 spill sectors (`-43.7%`). The force, energy,
+and virial output layouts and consumers are unchanged.
+
+Existing 2000-step nsys data records only one fast and one slow energy+virial
+launch, so the normal sparse-output 10000-step difference is below reliable
+end-to-end attribution. With output every 10 steps, three paired DNA NPT runs
+improve by 2.33%. The water LJ-combination kernels do not satisfy this gate.
+Full details:
+
+```text
+docs/gmxpacked-dna-energy-virial-sci-split2-20260723.md
+```
 
 Single-kernel raw metrics:
 
