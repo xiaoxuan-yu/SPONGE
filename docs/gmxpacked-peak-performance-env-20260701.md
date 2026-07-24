@@ -63,12 +63,16 @@ For DNA_COU peak checks, add both DNA-specific gates:
 ```sh
 SPONGE_CLUSTERED_GMXPACKED_FULL_DENSE_PADDING=1
 SPONGE_CLUSTERED_GMXPACKED_FORCE_SCI_SPLIT2_PROBE=1
+SPONGE_CLUSTERED_GMXPACKED_FORCE_SCI_SPLIT3_CONTIGUOUS_PROBE=1
 ```
 
-The force SCI split2 gate is default-off and AB-table-only. Do not add it to
-the shared water environment; wat160k and wat600k already use the LJ-combination
-fast path. Its NCU, NSYS, 10000-step, and 50000-step validation is recorded in
-`docs/gmxpacked-dna-force-sci-work-split-probe-20260710.md`.
+The force SCI split2 and contiguous split3 gates are default-off and
+AB-table-only. When both are set, force-only dispatch selects contiguous
+split3. Do not add either flag to the shared water environment; wat160k and
+wat600k already use the LJ-combination fast path. Split2 evidence is recorded
+in `docs/gmxpacked-dna-force-sci-work-split-probe-20260710.md`; contiguous
+split3 evidence is in
+`docs/gmxpacked-dna-force-sci-split3-contiguous-20260723.md`.
 
 For DNA NPT only, add the default-off virial specialization gate:
 

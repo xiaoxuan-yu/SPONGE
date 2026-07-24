@@ -109,6 +109,10 @@ static VECTOR Wrap_To_Box_Fractional(VECTOR crd, LTMatrix3 rcell,
 //   SPONGE_CLUSTERED_GMXPACKED_FORCE_SCI_SPLIT2_PROBE
 //                                               partitions each force-only
 //                                               AB-table SCI across two CTAs
+//   SPONGE_CLUSTERED_GMXPACKED_FORCE_SCI_SPLIT3_CONTIGUOUS_PROBE
+//                                               partitions each force-only
+//                                               AB-table SCI into three
+//                                               contiguous CTA work ranges
 //   SPONGE_CLUSTERED_GMXPACKED_VIRIAL_SCI_SPLIT2_PROBE
 //                                               partitions each virial-only
 //                                               AB-table SCI across two CTAs
@@ -253,6 +257,13 @@ static bool Clustered_Gmxpacked_Force_Sci_Split2_Probe_Enabled()
 {
     return Env_Flag_Enabled(
         "SPONGE_CLUSTERED_GMXPACKED_FORCE_SCI_SPLIT2_PROBE");
+}
+
+static bool
+Clustered_Gmxpacked_Force_Sci_Split3_Contiguous_Probe_Enabled()
+{
+    return Env_Flag_Enabled(
+        "SPONGE_CLUSTERED_GMXPACKED_FORCE_SCI_SPLIT3_CONTIGUOUS_PROBE");
 }
 
 static bool Clustered_Gmxpacked_Virial_Sci_Split2_Probe_Enabled()
@@ -3526,7 +3537,8 @@ template <bool need_energy, bool need_virial, bool total_output,
           bool staggered_component_atomic_probe = false,
           bool skip_j_force_writeback_probe = false,
           bool skip_i_force_writeback_probe = false,
-          bool use_lj_ab_matrix = false, int sci_work_parts = 1>
+          bool use_lj_ab_matrix = false, int sci_work_parts = 1,
+          bool contiguous_sci_work = false>
 static __global__ __launch_bounds__(kClusteredClusterSize *
                                          kClusteredSuperClusterClusters,
                                      use_lj_comb
@@ -3569,6 +3581,8 @@ Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb_ForceOnly_Warp_Record_Device(
                   "runtime sci-shift gmxpacked specialization requires dense offsets");
     static_assert(!(sci_shift_only && runtime_sci_shift),
                   "runtime sci-shift is mutually exclusive with compile-time sci-shift-only");
+    static_assert(!contiguous_sci_work || sci_work_parts > 1,
+                  "contiguous SCI work requires multiple work parts");
     static_assert(sci_work_parts >= 1,
                   "gmxpacked SCI work partition count must be positive");
     static_assert(
@@ -3799,8 +3813,22 @@ Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb_ForceOnly_Warp_Record_Device(
 #undef CLUSTERED_GMXPACKED_CACHE_ACTIVE_I
     }
 
-    for (int packed_idx = sci_entry.cjpacked_begin + sci_work_part;
-         packed_idx < sci_entry.cjpacked_end; packed_idx += sci_work_parts)
+    const int packed_count =
+        sci_entry.cjpacked_end - sci_entry.cjpacked_begin;
+    const int packed_begin =
+        contiguous_sci_work
+            ? sci_entry.cjpacked_begin +
+                  packed_count * sci_work_part / sci_work_parts
+            : sci_entry.cjpacked_begin + sci_work_part;
+    const int packed_end =
+        contiguous_sci_work
+            ? sci_entry.cjpacked_begin +
+                  packed_count * (sci_work_part + 1) / sci_work_parts
+            : sci_entry.cjpacked_end;
+    constexpr int packed_stride =
+        contiguous_sci_work ? 1 : sci_work_parts;
+    for (int packed_idx = packed_begin; packed_idx < packed_end;
+         packed_idx += packed_stride)
     {
         const LJ_CLUSTERED_GMXPACKED_CJ* packed = cjpacked_entries + packed_idx;
         const unsigned int imask = packed->split[split].imask;
@@ -7920,6 +7948,8 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
                 Clustered_Gmxpacked_Force_Lj_Ab_Matrix_Probe_Enabled();
             const bool requested_gmxpacked_sci_work_split2_probe =
                 Clustered_Gmxpacked_Force_Sci_Split2_Probe_Enabled();
+            const bool requested_gmxpacked_sci_work_split3_contiguous_probe =
+                Clustered_Gmxpacked_Force_Sci_Split3_Contiguous_Probe_Enabled();
             const bool requested_gmxpacked_virial_sci_work_split2_probe =
                 Clustered_Gmxpacked_Virial_Sci_Split2_Probe_Enabled();
             const bool requested_gmxpacked_energy_virial_sci_work_split2_probe =
@@ -8138,8 +8168,7 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
                 !use_gmxpacked_skip_i_writeback_probe &&
                 !use_gmxpacked_skip_j_writeback_probe && !need_atom_energy &&
                 !need_virial && d_LJ_AB_matrix != NULL;
-            const bool use_gmxpacked_sci_work_split2 =
-                requested_gmxpacked_sci_work_split2_probe &&
+            const bool gmxpacked_force_sci_work_split_compatible =
                 gmxpacked_fast_full_local_dense_compatible &&
                 use_gmxpacked_sci_shift_split &&
                 !use_gmxpacked_lj_comb_kernel &&
@@ -8151,6 +8180,13 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
                 !use_gmxpacked_skip_j_writeback_probe &&
                 !use_gmxpacked_lj_ab_matrix && !need_atom_energy &&
                 !need_virial;
+            const bool use_gmxpacked_sci_work_split3_contiguous =
+                requested_gmxpacked_sci_work_split3_contiguous_probe &&
+                gmxpacked_force_sci_work_split_compatible;
+            const bool use_gmxpacked_sci_work_split2 =
+                requested_gmxpacked_sci_work_split2_probe &&
+                gmxpacked_force_sci_work_split_compatible &&
+                !use_gmxpacked_sci_work_split3_contiguous;
             const bool use_gmxpacked_virial_sci_work_split2 =
                 requested_gmxpacked_virial_sci_work_split2_probe &&
                 gmxpacked_fast_full_local_dense_compatible &&
@@ -8193,8 +8229,9 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
             }
             static bool warned_gmxpacked_sci_work_split2_unavailable = false;
             if (requested_gmxpacked_sci_work_split2_probe &&
-                !use_gmxpacked_sci_work_split2 && !need_atom_energy &&
-                !need_virial &&
+                !use_gmxpacked_sci_work_split2 &&
+                !use_gmxpacked_sci_work_split3_contiguous &&
+                !need_atom_energy && !need_virial &&
                 !warned_gmxpacked_sci_work_split2_unavailable)
             {
                 fprintf(stderr,
@@ -8204,6 +8241,23 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
                         "using one CTA per SCI\n");
                 fflush(stderr);
                 warned_gmxpacked_sci_work_split2_unavailable = true;
+            }
+            static bool
+                warned_gmxpacked_sci_work_split3_contiguous_unavailable =
+                    false;
+            if (requested_gmxpacked_sci_work_split3_contiguous_probe &&
+                !use_gmxpacked_sci_work_split3_contiguous &&
+                !need_atom_energy && !need_virial &&
+                !warned_gmxpacked_sci_work_split3_contiguous_unavailable)
+            {
+                fprintf(stderr,
+                        "[clustered gmxpacked SCI split3 contiguous] "
+                        "requested but requires force-only AB-table "
+                        "full-local-dense SCI-shift split without "
+                        "force/writeback probes; using the available "
+                        "force specialization\n");
+                fflush(stderr);
+                warned_gmxpacked_sci_work_split3_contiguous_unavailable = true;
             }
             const float2* gmxpacked_LJ_AB_table =
                 use_gmxpacked_lj_ab_matrix ? d_LJ_AB_matrix : d_LJ_AB_packed;
@@ -8228,12 +8282,12 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
                         "fused=%d float4=%d raw_component_atomic=%d "
                         "staggered_atomic=%d skip_i_writeback=%d "
                         "skip_j_writeback=%d lj_ab_matrix=%d "
-                        "sci_work_split2=%d "
+                        "sci_work_split2=%d sci_work_split3_contiguous=%d "
                         "use direct=%d lj_comb=%d fast=%d compact=%d "
                         "fused=%d float4=%d raw_component_atomic=%d "
                         "staggered_atomic=%d skip_i_writeback=%d "
                         "skip_j_writeback=%d lj_ab_matrix=%d "
-                        "sci_work_split2=%d "
+                        "sci_work_split2=%d sci_work_split3_contiguous=%d "
                         "layout cluster_size=%d super_clusters=%d "
                         "clusters=%d total_atoms=%d padded_atoms=%d "
                         "local_atoms=%d "
@@ -8277,6 +8331,9 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
                             : 0,
                         requested_gmxpacked_lj_ab_matrix_probe ? 1 : 0,
                         requested_gmxpacked_sci_work_split2_probe ? 1 : 0,
+                        requested_gmxpacked_sci_work_split3_contiguous_probe
+                            ? 1
+                            : 0,
                         use_gmxpacked_direct ? 1 : 0,
                         use_gmxpacked_lj_comb_kernel ? 1 : 0,
                         use_gmxpacked_fast_kernel ? 1 : 0,
@@ -8289,6 +8346,7 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
                         use_gmxpacked_skip_j_writeback_probe ? 1 : 0,
                         use_gmxpacked_lj_ab_matrix ? 1 : 0,
                         use_gmxpacked_sci_work_split2 ? 1 : 0,
+                        use_gmxpacked_sci_work_split3_contiguous ? 1 : 0,
                         clustered_layout.cluster_size,
                         clustered_layout.super_cluster_clusters,
                         clustered_layout.cluster_numbers,
@@ -8481,6 +8539,7 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
             const bool use_gmxpacked_float4_sorted_force = false;
             const bool use_gmxpacked_lj_ab_matrix = false;
             const bool use_gmxpacked_sci_work_split2 = false;
+            const bool use_gmxpacked_sci_work_split3_contiguous = false;
             const bool use_gmxpacked_virial_sci_work_split2 = false;
             const bool use_gmxpacked_energy_virial_sci_work_split2 = false;
             const float2* gmxpacked_LJ_AB_table = d_LJ_AB_packed;
@@ -8641,14 +8700,20 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
                                     !gmxpacked_sci_shift_split_has_unsafe
                                 ? NULL
                                 : sci_shift_flags;
+                        const unsigned int gmxpackedSciWorkParts =
+                            use_gmxpacked_sci_work_split3_contiguous
+                                ? 3u
+                                : ((use_gmxpacked_sci_work_split2 ||
+                                    use_gmxpacked_virial_sci_work_split2 ||
+                                    use_gmxpacked_energy_virial_sci_work_split2)
+                                       ? 2u
+                                       : 1u);
                         const dim3 gmxpackedSciShiftSplitGridSize =
-                            (use_gmxpacked_sci_work_split2 ||
-                             use_gmxpacked_virial_sci_work_split2 ||
-                             use_gmxpacked_energy_virial_sci_work_split2)
+                            gmxpackedSciWorkParts > 1u
                                 ? dim3(static_cast<unsigned int>(
                                            clustered_layout
                                                .gmxpacked_sci_numbers) *
-                                           2u,
+                                           gmxpackedSciWorkParts,
                                        1u, 1u)
                                 : gmxpackedGridSize;
                         if (use_gmxpacked_float4_sorted_force)
@@ -8747,7 +8812,13 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
                               ? CLUSTERED_GMXPACKED_SPLIT_FULL_DENSE_KERNEL(false, false, false, false, SCI_SHIFT_ONLY, false, true, false, false) \
                               : CLUSTERED_GMXPACKED_SPLIT_FULL_DENSE_KERNEL(false, false, false, false, SCI_SHIFT_ONLY, false, false, false, false)))))
                             auto gmxpacked_fast_f =
-                                use_gmxpacked_sci_work_split2
+                                use_gmxpacked_sci_work_split3_contiguous
+                                    ? Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb_ForceOnly_Warp_Record_Device<
+                                          false, false, false, false, false,
+                                          true, true, true, VECTOR, false,
+                                          false, false, false, false, false,
+                                          3, true>
+                                : use_gmxpacked_sci_work_split2
                                     ? Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb_ForceOnly_Warp_Record_Device<
                                           false, false, false, false, false,
                                           true, true, true, VECTOR, false,
@@ -8761,7 +8832,13 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
                                     : CLUSTERED_GMXPACKED_SPLIT_FULL_DENSE_FORCEONLY_KERNEL(
                                           true);
                             auto gmxpacked_slow_f =
-                                use_gmxpacked_sci_work_split2
+                                use_gmxpacked_sci_work_split3_contiguous
+                                    ? Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb_ForceOnly_Warp_Record_Device<
+                                          false, false, false, false, false,
+                                          true, true, false, VECTOR, false,
+                                          false, false, false, false, false,
+                                          3, true>
+                                : use_gmxpacked_sci_work_split2
                                     ? Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb_ForceOnly_Warp_Record_Device<
                                           false, false, false, false, false,
                                           true, true, false, VECTOR, false,

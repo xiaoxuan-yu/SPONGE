@@ -5378,7 +5378,8 @@ template <bool need_energy, bool need_virial, bool total_output,
           bool dense_no_exclusion_fast = false,
           bool attribution_force_all_i = false,
           bool attribution_no_cutoff_branch = false,
-          bool oracle_cutoff_sidecar = false, int sci_work_parts = 1>
+          bool oracle_cutoff_sidecar = false, int sci_work_parts = 1,
+          bool contiguous_sci_work = false>
 __global__ __launch_bounds__(kClusterSize * kSuperClusterClusters,
                              total_output
                                  ? ((need_energy && need_virial) ? 12 : 14)
@@ -5403,6 +5404,8 @@ void SpongeProductionGmxpackedReplayKernel(
     static_assert(sci_work_parts == 1 ||
                       (!need_energy && !need_virial && !total_output),
                   "SCI work partitioning is force-only");
+    static_assert(!contiguous_sci_work || sci_work_parts > 1,
+                  "contiguous SCI work requires multiple work parts");
     static_assert(!virial_from_shift ||
                       (need_virial && total_output && sci_shift_only),
                   "shift-force virial replay requires fixed-shift total virial");
@@ -5514,8 +5517,22 @@ void SpongeProductionGmxpackedReplayKernel(
         output_buf;
     float fshift_component = 0.0f;
 
-    for (int packed_idx = sci_entry.cjpacked_begin + sci_work_part;
-         packed_idx < sci_entry.cjpacked_end; packed_idx += sci_work_parts)
+    const int packed_count =
+        sci_entry.cjpacked_end - sci_entry.cjpacked_begin;
+    const int packed_begin =
+        contiguous_sci_work
+            ? sci_entry.cjpacked_begin +
+                  packed_count * sci_work_part / sci_work_parts
+            : sci_entry.cjpacked_begin + sci_work_part;
+    const int packed_end =
+        contiguous_sci_work
+            ? sci_entry.cjpacked_begin +
+                  packed_count * (sci_work_part + 1) / sci_work_parts
+            : sci_entry.cjpacked_end;
+    constexpr int packed_stride =
+        contiguous_sci_work ? 1 : sci_work_parts;
+    for (int packed_idx = packed_begin; packed_idx < packed_end;
+         packed_idx += packed_stride)
     {
         const SpongeGmxpackedCjPOD* packed = cjpacked_entries + packed_idx;
         unsigned int imask = packed->split[split].imask;
@@ -10498,7 +10515,7 @@ void RunSpongeProductionGmxpacked(
         {
             SpongeProductionGmxpackedReplayKernel<
                 false, false, false, true, true, float4, false, false, false,
-                false, false, false, false, false, false, 3>
+                false, false, false, false, false, false, 3, true>
                 <<<sci_split3_grid, block>>>(
                     sci_numbers, cluster_numbers, d_cluster_offsets,
                     d_cluster_valid_masks, d_cluster_local_masks,
@@ -10515,7 +10532,7 @@ void RunSpongeProductionGmxpacked(
         {
             SpongeProductionGmxpackedReplayKernel<
                 false, false, false, true, false, float4, false, false, false,
-                false, false, false, false, false, false, 3>
+                false, false, false, false, false, false, 3, true>
                 <<<sci_split3_grid, block>>>(
                     sci_numbers, cluster_numbers, d_cluster_offsets,
                     d_cluster_valid_masks, d_cluster_local_masks,

@@ -158,11 +158,14 @@ Accepted default-off DNA gate:
 
 ```text
 SPONGE_CLUSTERED_GMXPACKED_FORCE_SCI_SPLIT2_PROBE=1
+SPONGE_CLUSTERED_GMXPACKED_FORCE_SCI_SPLIT3_CONTIGUOUS_PROBE=1
 ```
 
-It requires force-only AB-table, full-local-dense, SCI-shift-split dispatch and
-is mutually exclusive with compact/float4 output, AB matrix, and writeback
-probes. Water gate traces remain `lj_comb=1, sci_work_split2=0`.
+The contiguous split3 follow-up supersedes split2 when both flags are set. It
+requires force-only AB-table, full-local-dense, SCI-shift-split dispatch and is
+mutually exclusive with compact/float4 output, AB matrix, and writeback probes.
+Water gate traces remain `lj_comb=1, sci_work_split2=0,
+sci_work_split3_contiguous=0`.
 
 AB/BA production results against the current mainline binary:
 
@@ -174,6 +177,13 @@ AB/BA production results against the current mainline binary:
 Use the split2 flag together with full-dense padding for DNA peak checks. Keep
 it out of the shared water peak environment. Full evidence and artifact paths:
 `docs/gmxpacked-dna-force-sci-work-split-probe-20260710.md`.
+
+The 2026-07-23 contiguous split3 refinement restores the force tolerance that
+the earlier interleaved split3 failed. Production full NCU improves
+104.22 -> 89.12 us, six-pair DNA NVT speed improves 2.61%, and three-pair DNA
+NPT speed improves 2.08%. Enable it after split2 in the DNA peak environment.
+Full evidence:
+`docs/gmxpacked-dna-force-sci-split3-contiguous-20260723.md`.
 
 ## Recent Collect Decision
 
