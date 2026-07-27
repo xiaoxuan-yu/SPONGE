@@ -16223,6 +16223,53 @@ int main(int argc, char** argv)
                                  pair.global_i, pair.global_j,
                                  pair.shift_id);
                 }
+                for (const auto& occurrence :
+                     result.first_duplicate_occurrences)
+                {
+                    std::fprintf(
+                        stderr,
+                        "duplicate_source=(%d,%d,shift=%d sci=%zu "
+                        "packed=%zu split=%d jm=%d i_local=%d "
+                        "cluster_i=%d cluster_j=%d sci_shift=%d "
+                        "pair_shift=%d exclusion=%d imask=0x%08x "
+                        "exclusion_hash=0x%016llx)\n",
+                        occurrence.pair.global_i,
+                        occurrence.pair.global_j,
+                        occurrence.pair.shift_id,
+                        occurrence.sci_index,
+                        occurrence.packed_index,
+                        occurrence.split,
+                        occurrence.jm,
+                        occurrence.i_local,
+                        occurrence.cluster_i,
+                        occurrence.cluster_j,
+                        occurrence.sci_shift_id,
+                        occurrence.pair_shift_id,
+                        occurrence.exclusion_index,
+                        occurrence.imask,
+                        static_cast<unsigned long long>(
+                            occurrence.exclusion_hash));
+                }
+                for (const auto& source :
+                     result.duplicate_source_summaries)
+                {
+                    std::fprintf(
+                        stderr,
+                        "duplicate_source_summary=(sci=%zu packed=%zu "
+                        "split=%d jm=%d i_local=%d cluster_i=%d "
+                        "cluster_j=%d sci_shift=%d pair_shift=%d "
+                        "exclusion=%d imask=0x%08x "
+                        "exclusion_hash=0x%016llx accepted=%zu "
+                        "duplicate=%zu)\n",
+                        source.sci_index, source.packed_index,
+                        source.split, source.jm, source.i_local,
+                        source.cluster_i, source.cluster_j,
+                        source.sci_shift_id, source.pair_shift_id,
+                        source.exclusion_index, source.imask,
+                        static_cast<unsigned long long>(
+                            source.exclusion_hash),
+                        source.accepted_pairs, source.duplicate_pairs);
+                }
                 for (const auto& pair : result.first_missing)
                 {
                     std::fprintf(stderr, "missing=(%d,%d,shift=%d)\n",

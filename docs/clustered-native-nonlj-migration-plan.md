@@ -3491,6 +3491,58 @@ inactive experiment routes. Further cleanup must not remove the runtime
 overflow/capacity and generation guards, and microbench-only scheduling
 variants remain available for isolated experiments.
 
+#### Dynamic image dedup and small-box skin guard - 2026-07-27
+
+The cleanup baseline was committed as
+`5842a28 feat: consolidate clustered LJ and SITS paths`. The subsequent
+pair-oracle audit identified the skin-6 duplicates precisely: fixed SCI image
+records such as shift 10 can normalize to the same current per-pair shift as
+the central SCI. Build-time SCI aggregation cannot remove these records
+because their fixed images are needed across coordinate updates.
+
+The production payload now stores two eight-bit current-image ownership masks
+plus a format marker in the previously unused high bits of each 64-bit
+per-CJ/JM pair-shift word. Old snapshots without the marker retain all lanes.
+During pair-shift refresh, only lanes whose current shift differs from their
+fixed SCI shift enter the dedup proof. A deterministic competing SCI wins only
+when it resolves to the same current shift and its valid/local/exclusion
+coverage is a superset of the lane being removed. Force-only/full LJ,
+soft-LJ, fused SITS and custom pairwise consumers all apply the same mask;
+SITS sparse compaction preserves the word unchanged. The obsolete
+simple-refresh environment branch was removed rather than extended with a
+second implementation.
+
+The final skin-6 ALA2 snapshot matches the independent canonical oracle
+exactly:
+
+```text
+payload=138084 oracle=138084 duplicates=0 missing=0 extra=0
+```
+
+The pre-change full NCU profile of pair-shift refresh was `4.10 us`,
+39 registers/thread. The final noinline cold proof path measures `4.19 us`;
+the `0.09 us` delta is negligible at the end-to-end scale. Both CUDA targets
+and the CPU `SPONGE` target link successfully.
+
+This closes current-image duplication, but it does not qualify an arbitrarily
+wide small-box rebuild horizon. With the half-box fallback temporarily
+removed, default skin 10 had an exact zeroth-frame oracle but 10,000-step
+stability depended on synchronization/output cadence: one run was finite at
+`417.61 ns/day`, while unsynchronized repeats became non-finite. Therefore
+the geometric small-box guard remains production policy and reduces the
+28.50-Angstrom ALA2 box from clustered skin 10 to the independently qualified
+global skin 2. The final guarded 10,000-step run was finite at
+`247.48 ns/day` with `Calculate_Force=5.215 s`, within or above the previous
+`226.84-241.13 ns/day` band. Widening that horizon remains blocked on a
+separate rebuild-lifecycle proof; it must not be inferred from a step-zero
+pair oracle.
+
+The Python SITS validation command could not be rerun in this workspace
+because neither the pixi environment nor system Python contains `pytest`.
+This is an infrastructure gap, not a test pass; the final CUDA acceptance run
+must repeat the existing two-test SITS suite in the qualified test
+environment.
+
 ### Phase 3: center-neighbor many-body consumers
 
 1. Make grouped SCI metadata plus endpoint incidence a validated

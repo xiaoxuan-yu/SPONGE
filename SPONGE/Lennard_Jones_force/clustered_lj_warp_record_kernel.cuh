@@ -329,7 +329,10 @@ Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb_ForceOnly_Warp_Record_Device(
         const unsigned int packed_bit =                                      \
             base_mask << static_cast<unsigned int>(I);                      \
         if ((effective_mask & packed_bit) != 0u &&                          \
-            (active_i_mask & (1u << static_cast<unsigned int>(I))) != 0u)   \
+            (active_i_mask & (1u << static_cast<unsigned int>(I))) != 0u && \
+            (sci_shift_only || pair_shift_bits == NULL ||                  \
+             (Clustered_Get_Pair_Active_I_Mask(shift_bits, split) &        \
+              (1u << static_cast<unsigned int>(I))) != 0u))                \
         {                                                                   \
             const float4 r1_xq =                                            \
                 shared_i_xq[(I) * cluster_stride + i_lane];                 \

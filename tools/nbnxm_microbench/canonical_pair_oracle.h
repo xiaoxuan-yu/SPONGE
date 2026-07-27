@@ -30,6 +30,41 @@ struct CanonicalPair
     }
 };
 
+struct CanonicalPairOccurrence
+{
+    CanonicalPair pair;
+    size_t sci_index = 0;
+    size_t packed_index = 0;
+    int split = 0;
+    int jm = 0;
+    int i_local = 0;
+    int cluster_i = -1;
+    int cluster_j = -1;
+    int sci_shift_id = 13;
+    int pair_shift_id = 13;
+    int exclusion_index = 0;
+    unsigned int imask = 0;
+    uint64_t exclusion_hash = 0;
+};
+
+struct CanonicalPairSourceSummary
+{
+    size_t sci_index = 0;
+    size_t packed_index = 0;
+    int split = 0;
+    int jm = 0;
+    int i_local = 0;
+    int cluster_i = -1;
+    int cluster_j = -1;
+    int sci_shift_id = 13;
+    int pair_shift_id = 13;
+    int exclusion_index = 0;
+    unsigned int imask = 0;
+    uint64_t exclusion_hash = 0;
+    size_t accepted_pairs = 0;
+    size_t duplicate_pairs = 0;
+};
+
 struct CanonicalPairOracleResult
 {
     bool metadata_ready = false;
@@ -40,6 +75,8 @@ struct CanonicalPairOracleResult
     size_t missing_pairs = 0;
     size_t extra_pairs = 0;
     std::vector<CanonicalPair> first_duplicates;
+    std::vector<CanonicalPairOccurrence> first_duplicate_occurrences;
+    std::vector<CanonicalPairSourceSummary> duplicate_source_summaries;
     std::vector<CanonicalPair> first_missing;
     std::vector<CanonicalPair> first_extra;
     std::string failure_reason;

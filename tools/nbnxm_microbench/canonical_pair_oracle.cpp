@@ -4,6 +4,8 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <map>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -20,6 +22,12 @@ constexpr int kJGroupSize = 4;
 constexpr int kCentralShiftId = 13;
 constexpr int kPairShiftBits = 5;
 constexpr uint64_t kPairShiftMask = (1ull << kPairShiftBits) - 1ull;
+constexpr int kPairActiveMaskOffset =
+    kSuperClusterClusters * kPairShiftBits;
+constexpr int kPairActiveMarkerOffset =
+    kPairActiveMaskOffset + kWarpSplitCount * kSuperClusterClusters;
+constexpr uint64_t kPairActiveMarker =
+    1ull << kPairActiveMarkerOffset;
 
 struct Vec3d
 {
@@ -307,6 +315,28 @@ int PackedPairShiftId(
         kPairShiftMask);
 }
 
+unsigned int PackedPairActiveIMask(
+    const SpongeGmxpackedForceOnlySnapshot& snapshot, size_t packed_index,
+    int jm, int split)
+{
+    const size_t shift_word =
+        packed_index * static_cast<size_t>(kJGroupSize) +
+        static_cast<size_t>(jm);
+    if (shift_word >= snapshot.pair_shift_bits.size())
+    {
+        return 0u;
+    }
+    const uint64_t bits = snapshot.pair_shift_bits[shift_word];
+    if ((bits & kPairActiveMarker) == 0ull)
+    {
+        return (1u << kSuperClusterClusters) - 1u;
+    }
+    return static_cast<unsigned int>(
+        (bits >>
+         (kPairActiveMaskOffset + split * kSuperClusterClusters)) &
+        ((1ull << kSuperClusterClusters) - 1ull));
+}
+
 double PairDistanceSquared(Vec3d atom_i, Vec3d atom_j, int shift_id,
                            const Matrix3d& cell)
 {
@@ -321,6 +351,8 @@ bool DecodePayloadPairs(
     const SpongeGmxpackedForceOnlySnapshot& snapshot,
     const std::vector<Vec3d>& coordinates,
     std::unordered_map<CanonicalPair, size_t, PairHash>* pairs,
+    std::unordered_map<CanonicalPair, std::vector<CanonicalPairOccurrence>,
+                       PairHash>* occurrences,
     std::string* failure_reason)
 {
     if (pairs == nullptr || snapshot.header.cluster_size != kClusterSize ||
@@ -474,6 +506,15 @@ bool DecodePayloadPairs(
                                 {
                                     continue;
                                 }
+                                if ((PackedPairActiveIMask(
+                                         snapshot,
+                                         static_cast<size_t>(packed_index),
+                                         jm, split) &
+                                     (1u << static_cast<unsigned int>(
+                                          i_local))) == 0u)
+                                {
+                                    continue;
+                                }
                                 const int cluster_i =
                                     cluster_i_start + i_local;
                                 if (cluster_i < 0 ||
@@ -589,8 +630,36 @@ bool DecodePayloadPairs(
                                     }
                                     return false;
                                 }
-                                (*pairs)[NormalizePair(
-                                    global_i, global_j, shift_id)] += 1;
+                                const CanonicalPair pair = NormalizePair(
+                                    global_i, global_j, shift_id);
+                                (*pairs)[pair] += 1;
+                                if (occurrences != nullptr)
+                                {
+                                    uint64_t exclusion_hash =
+                                        1469598103934665603ull;
+                                    for (unsigned int pair_mask :
+                                         snapshot.excl[static_cast<size_t>(
+                                                           exclusion_index)]
+                                             .pair)
+                                    {
+                                        exclusion_hash ^= pair_mask;
+                                        exclusion_hash *= 1099511628211ull;
+                                    }
+                                    (*occurrences)[pair].push_back(
+                                        {pair,
+                                         sci_index,
+                                         static_cast<size_t>(packed_index),
+                                         split,
+                                         jm,
+                                         i_local,
+                                         cluster_i,
+                                         cluster_j,
+                                         sci.shift_id,
+                                         shift_id,
+                                         exclusion_index,
+                                         imask,
+                                         exclusion_hash});
+                                }
                             }
                         }
                     }
@@ -818,7 +887,11 @@ CanonicalPairOracleResult CompareCanonicalPairs(
     }
 
     std::unordered_map<CanonicalPair, size_t, PairHash> payload_counts;
+    std::unordered_map<CanonicalPair, std::vector<CanonicalPairOccurrence>,
+                       PairHash>
+        payload_occurrences;
     if (!DecodePayloadPairs(snapshot, coordinates, &payload_counts,
+                            &payload_occurrences,
                             &result.failure_reason))
     {
         return result;
@@ -864,6 +937,59 @@ CanonicalPairOracleResult CompareCanonicalPairs(
     result.missing_pairs = missing.size();
     result.extra_pairs = extra.size();
     result.first_duplicates = SortedExamples(duplicates, example_limit);
+    for (const CanonicalPair& pair : result.first_duplicates)
+    {
+        const auto occurrence = payload_occurrences.find(pair);
+        if (occurrence == payload_occurrences.end())
+        {
+            continue;
+        }
+        result.first_duplicate_occurrences.insert(
+            result.first_duplicate_occurrences.end(),
+            occurrence->second.begin(), occurrence->second.end());
+    }
+    using SourceKey =
+        std::tuple<size_t, size_t, int, int, int, int, int>;
+    std::map<SourceKey, CanonicalPairSourceSummary> source_summaries;
+    for (const auto& [pair, occurrences] : payload_occurrences)
+    {
+        const bool duplicate = payload_counts.at(pair) > 1;
+        for (const CanonicalPairOccurrence& occurrence : occurrences)
+        {
+            const SourceKey key = {
+                occurrence.sci_index, occurrence.packed_index,
+                occurrence.split, occurrence.jm, occurrence.i_local,
+                occurrence.cluster_i, occurrence.cluster_j};
+            auto [summary, inserted] = source_summaries.try_emplace(
+                key,
+                CanonicalPairSourceSummary{
+                    occurrence.sci_index,
+                    occurrence.packed_index,
+                    occurrence.split,
+                    occurrence.jm,
+                    occurrence.i_local,
+                    occurrence.cluster_i,
+                    occurrence.cluster_j,
+                    occurrence.sci_shift_id,
+                    occurrence.pair_shift_id,
+                    occurrence.exclusion_index,
+                    occurrence.imask,
+                    occurrence.exclusion_hash});
+            summary->second.accepted_pairs += 1;
+            if (duplicate)
+            {
+                summary->second.duplicate_pairs += 1;
+            }
+        }
+    }
+    for (const auto& [key, summary] : source_summaries)
+    {
+        (void)key;
+        if (summary.duplicate_pairs != 0)
+        {
+            result.duplicate_source_summaries.push_back(summary);
+        }
+    }
     result.first_missing = SortedExamples(missing, example_limit);
     result.first_extra = SortedExamples(extra, example_limit);
     result.matched = result.duplicate_payload_pairs == 0 &&

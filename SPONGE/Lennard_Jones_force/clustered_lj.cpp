@@ -127,12 +127,6 @@ static bool Clustered_Gmxpacked_Sorted_Cluster_Map_Enabled()
         "SPONGE_CLUSTERED_GMXPACKED_SORTED_CLUSTER_MAP");
 }
 
-static bool Clustered_Gmxpacked_Pair_Shift_Simple_Refresh_Enabled()
-{
-    return Clustered_Gmxpacked_Env_Flag_Enabled(
-        "SPONGE_CLUSTERED_GMXPACKED_PAIR_SHIFT_SIMPLE_REFRESH");
-}
-
 static bool Clustered_Gmxpacked_Full_Dense_Padding_Enabled()
 {
     return Clustered_Gmxpacked_Env_Flag_Enabled(
@@ -2039,134 +2033,6 @@ static __global__ void Refresh_Nbnxm_Pair_Shift_Bits(
             }
         }
         pair_shift_bits[packed_idx * kClusteredJGroupSize + jm] = shift_bits;
-    }
-}
-
-static __global__ void Refresh_Gmxpacked_Pair_Shift_Bits_Simple_Flags(
-    const int sci_numbers, const int* super_cluster_offsets,
-    const VECTOR* cluster_fractional_centers,
-    const VECTOR* cluster_fractional_extents,
-    const LJ_CLUSTERED_GMXPACKED_SCI* gmxpacked_sci,
-    const LJ_CLUSTERED_GMXPACKED_CJ* gmxpacked_cjpacked,
-    uint64_t* pair_shift_bits, int* sci_shift_only_safe,
-    int* sci_shift_safe_flags, int* sci_shift_safe_count)
-{
-    const int sci = blockIdx.x;
-    if (sci >= sci_numbers)
-    {
-        return;
-    }
-    if (threadIdx.x == 0 && sci_shift_safe_flags != NULL)
-    {
-        sci_shift_safe_flags[sci] = 1;
-    }
-    __syncthreads();
-
-    const LJ_CLUSTERED_GMXPACKED_SCI sci_entry = gmxpacked_sci[sci];
-    const int cluster_i_start =
-        super_cluster_offsets[sci_entry.supercluster_id];
-    const int cluster_i_end =
-        super_cluster_offsets[sci_entry.supercluster_id + 1];
-    const int active_cluster_count = cluster_i_end - cluster_i_start;
-    const int packed_count = sci_entry.cjpacked_end - sci_entry.cjpacked_begin;
-    const int total_records = packed_count * kClusteredJGroupSize;
-
-    __shared__ float4
-        shared_i_fractional_centers[kClusteredMaxSuperClusterClusters];
-    __shared__ float4
-        shared_i_fractional_extents[kClusteredMaxSuperClusterClusters];
-    if (threadIdx.x < active_cluster_count)
-    {
-        const int cluster_i = cluster_i_start + threadIdx.x;
-        const VECTOR fractional_center_i =
-            cluster_fractional_centers[cluster_i];
-        const VECTOR fractional_extent_i =
-            cluster_fractional_extents[cluster_i];
-        shared_i_fractional_centers[threadIdx.x] =
-            {fractional_center_i.x, fractional_center_i.y,
-             fractional_center_i.z, 0.0f};
-        shared_i_fractional_extents[threadIdx.x] =
-            {fractional_extent_i.x, fractional_extent_i.y,
-             fractional_extent_i.z, 0.0f};
-    }
-    __syncthreads();
-
-    for (int record = threadIdx.x; record < total_records; record += blockDim.x)
-    {
-        const int local_packed = record / kClusteredJGroupSize;
-        const int jm = record % kClusteredJGroupSize;
-        const int packed_idx = sci_entry.cjpacked_begin + local_packed;
-        const LJ_CLUSTERED_GMXPACKED_CJ packed = gmxpacked_cjpacked[packed_idx];
-        const int cluster_j = packed.cj[jm];
-
-        uint64_t shift_bits = 0ull;
-        if (cluster_j >= 0)
-        {
-            const unsigned int combined_imask =
-                ((packed.split[0].imask | packed.split[1].imask) >>
-                 Clustered_Jm_Imask_Shift(jm)) &
-                ((1u << kClusteredSuperClusterClusters) - 1u);
-            const VECTOR fractional_center_j =
-                cluster_fractional_centers[cluster_j];
-            VECTOR fractional_extent_j = {0.0f, 0.0f, 0.0f};
-            bool fractional_extent_j_ready = false;
-            for (int i_local = 0; i_local < active_cluster_count; i_local += 1)
-            {
-                int shift_id = kClusteredCentralShiftId;
-                if ((combined_imask &
-                     (1u << static_cast<unsigned int>(i_local))) != 0u)
-                {
-                    const float4 cached_fractional_center_i =
-                        shared_i_fractional_centers[i_local];
-                    const float4 cached_fractional_extent_i =
-                        shared_i_fractional_extents[i_local];
-                    const VECTOR fractional_center_i = {
-                        cached_fractional_center_i.x,
-                        cached_fractional_center_i.y,
-                        cached_fractional_center_i.z};
-                    shift_id =
-                        Determine_Clustered_Center_Pair_Shift_Id_From_Fractional(
-                            fractional_center_i, fractional_center_j);
-                    if (shift_id != sci_entry.shift_id)
-                    {
-                        if (!fractional_extent_j_ready)
-                        {
-                            fractional_extent_j =
-                                cluster_fractional_extents[cluster_j];
-                            fractional_extent_j_ready = true;
-                        }
-                        shift_id =
-                            Determine_Clustered_Pair_Shift_Id_From_Fractional(
-                                fractional_center_i, fractional_center_j,
-                                {cached_fractional_extent_i.x,
-                                 cached_fractional_extent_i.y,
-                                 cached_fractional_extent_i.z},
-                                fractional_extent_j, sci_entry.shift_id);
-                    }
-                    if (shift_id != sci_entry.shift_id)
-                    {
-                        if (sci_shift_only_safe != NULL)
-                        {
-                            atomicExch(sci_shift_only_safe, 0);
-                        }
-                        if (sci_shift_safe_flags != NULL)
-                        {
-                            atomicExch(sci_shift_safe_flags + sci, 0);
-                        }
-                    }
-                }
-                Clustered_Set_Pair_Shift_Id(&shift_bits, i_local, shift_id);
-            }
-        }
-        pair_shift_bits[packed_idx * kClusteredJGroupSize + jm] = shift_bits;
-    }
-    if (sci_shift_safe_flags != NULL && sci_shift_safe_count != NULL)
-    {
-        __syncthreads();
-        if (threadIdx.x == 0 && sci_shift_safe_flags[sci] != 0)
-        {
-            atomicAdd(sci_shift_safe_count, 1);
-        }
     }
 }
 
@@ -13539,44 +13405,23 @@ static void Refresh_Gmxpacked_Pair_Shift_Metadata(LJ_CLUSTER_LAYOUT* layout,
         deviceMemcpy(d_sci_shift_only_flag, &sci_shift_only_safe, sizeof(int),
                      deviceMemcpyHostToDevice);
     }
-    const bool use_simple_refresh =
-        Clustered_Gmxpacked_Pair_Shift_Simple_Refresh_Enabled() &&
-        !exact_sci_shift_flags;
     const int refresh_block_size =
         Clustered_Gmxpacked_Pair_Shift_Refresh_Block_Size();
-    if (use_simple_refresh)
-    {
-        Launch_Device_Kernel(Refresh_Gmxpacked_Pair_Shift_Bits_Simple_Flags,
-                             layout->gmxpacked_sci_numbers,
-                             refresh_block_size, 0, NULL,
-                             layout->gmxpacked_sci_numbers,
-                             layout->d_super_cluster_offsets,
-                             layout->d_cluster_fractional_centers,
-                             layout->d_cluster_fractional_extents,
-                             layout->d_gmxpacked_sci,
-                             layout->d_gmxpacked_cjpacked,
-                             layout->d_pair_shift_bits,
-                             d_sci_shift_only_flag, d_sci_shift_safe_flags,
-                             d_sci_shift_safe_count);
-    }
-    else
-    {
-        Launch_Device_Kernel(Refresh_Gmxpacked_Pair_Shift_Bits,
-                             layout->gmxpacked_sci_numbers,
-                             refresh_block_size, 0, NULL,
-                             layout->gmxpacked_sci_numbers,
-                             layout->d_super_cluster_offsets,
-                             layout->d_cluster_fractional_centers,
-                             layout->d_cluster_fractional_extents,
-                             layout->d_cluster_valid_masks,
-                             layout->d_cluster_local_masks,
-                             layout->d_gmxpacked_sci,
-                             layout->d_gmxpacked_cjpacked,
-                             layout->d_gmxpacked_exclusions,
-                             layout->d_pair_shift_bits,
-                             d_sci_shift_only_flag, d_sci_shift_safe_flags,
-                             d_sci_shift_safe_count, exact_sci_shift_flags);
-    }
+    Launch_Device_Kernel(Refresh_Gmxpacked_Pair_Shift_Bits,
+                         layout->gmxpacked_sci_numbers,
+                         refresh_block_size, 0, NULL,
+                         layout->gmxpacked_sci_numbers,
+                         layout->d_super_cluster_offsets,
+                         layout->d_cluster_fractional_centers,
+                         layout->d_cluster_fractional_extents,
+                         layout->d_cluster_valid_masks,
+                         layout->d_cluster_local_masks,
+                         layout->d_gmxpacked_sci,
+                         layout->d_gmxpacked_cjpacked,
+                         layout->d_gmxpacked_exclusions,
+                         layout->d_pair_shift_bits,
+                         d_sci_shift_only_flag, d_sci_shift_safe_flags,
+                         d_sci_shift_safe_count, exact_sci_shift_flags);
     if (d_sci_shift_only_flag != NULL)
     {
         deviceMemcpy(&sci_shift_only_safe, d_sci_shift_only_flag, sizeof(int),
@@ -24642,10 +24487,9 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
     if (minimum_box_face_height > 0.0f &&
         cutoff + rebuild_skin >= 0.5f * minimum_box_face_height)
     {
-        // A wide outer list can publish the same physical pair through more
-        // than one periodic image in a small box. Until the payload has an
-        // image-dedup contract, fall back to the ordinary neighbor skin. This
-        // leaves the large water performance cases unchanged.
+        // Dynamic image dedup makes the current payload unique, but a wide
+        // small-box outer horizon is not yet stable across rebuilds. Keep the
+        // production horizon at the independently qualified global skin.
         const float safe_skin =
             fmaxf(0.0f, fminf(rebuild_skin, md_info.nb.skin));
         if (safe_skin < rebuild_skin)

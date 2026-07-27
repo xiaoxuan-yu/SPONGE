@@ -18,7 +18,15 @@ constexpr int kClusteredCentralShiftId = 13;
 constexpr int kClusteredPairShiftBits = 5;
 constexpr uint64_t kClusteredPairShiftMask =
     (1ull << kClusteredPairShiftBits) - 1ull;
-static_assert(kClusteredSuperClusterClusters * kClusteredPairShiftBits <= 64,
+constexpr int kClusteredPairActiveMaskBits = kClusteredSuperClusterClusters;
+constexpr int kClusteredPairActiveMaskOffset =
+    kClusteredSuperClusterClusters * kClusteredPairShiftBits;
+constexpr int kClusteredPairActiveMarkerOffset =
+    kClusteredPairActiveMaskOffset +
+    kClusteredWarpSplitCount * kClusteredPairActiveMaskBits;
+constexpr uint64_t kClusteredPairActiveMarker =
+    1ull << kClusteredPairActiveMarkerOffset;
+static_assert(kClusteredPairActiveMarkerOffset < 64,
               "Clustered pair shift bit packing exceeds 64 bits.");
 
 struct CLUSTERED_GMXPACKED_PAIR_SHIFT_CACHE_KEY
@@ -301,6 +309,35 @@ __host__ __device__ __forceinline__ int Clustered_Get_Pair_Shift_Id(
         (packed_shift_bits >>
          (static_cast<uint64_t>(i_local) * kClusteredPairShiftBits)) &
         kClusteredPairShiftMask);
+}
+
+__host__ __device__ __forceinline__ void Clustered_Set_Pair_Active_I_Masks(
+    uint64_t* packed_shift_bits, unsigned int split_0_mask,
+    unsigned int split_1_mask)
+{
+    constexpr uint64_t active_mask =
+        (1ull << kClusteredPairActiveMaskBits) - 1ull;
+    *packed_shift_bits |=
+        kClusteredPairActiveMarker |
+        ((static_cast<uint64_t>(split_0_mask) & active_mask)
+         << kClusteredPairActiveMaskOffset) |
+        ((static_cast<uint64_t>(split_1_mask) & active_mask)
+         << (kClusteredPairActiveMaskOffset +
+             kClusteredPairActiveMaskBits));
+}
+
+__host__ __device__ __forceinline__ unsigned int
+Clustered_Get_Pair_Active_I_Mask(uint64_t packed_shift_bits, int split)
+{
+    if ((packed_shift_bits & kClusteredPairActiveMarker) == 0ull)
+    {
+        return (1u << kClusteredSuperClusterClusters) - 1u;
+    }
+    return static_cast<unsigned int>(
+        (packed_shift_bits >>
+         (kClusteredPairActiveMaskOffset +
+          split * kClusteredPairActiveMaskBits)) &
+        ((1ull << kClusteredPairActiveMaskBits) - 1ull));
 }
 
 // The caller guarantees that the I lane is locally owned. A ghost J lane is

@@ -973,7 +973,9 @@ __device__ __forceinline__ void Traverse_Clustered_Pairwise_Lane(
     {                                                                      \
         const unsigned int packed_bit =                                    \
             1u << static_cast<unsigned int>(jm * 8 + (I));                 \
-        if ((effective_mask & packed_bit) != 0u)                           \
+        if ((effective_mask & packed_bit) != 0u &&                         \
+            (Clustered_Get_Pair_Active_I_Mask(shift_bits, split) &        \
+             (1u << static_cast<unsigned int>(I))) != 0u)                 \
         {                                                                  \
             const int cache_index = (I) * 8 + i_lane;                      \
             const int atom_i = shared_i_atom_id[cache_index];              \
@@ -1040,7 +1042,10 @@ __device__ __forceinline__ void Traverse_Clustered_Pairwise_Lane(
             {
                 const unsigned int packed_bit =
                     1u << static_cast<unsigned int>(jm * 8 + i_local);
-                if ((effective_mask & packed_bit) == 0u)
+                if ((effective_mask & packed_bit) == 0u ||
+                    (Clustered_Get_Pair_Active_I_Mask(
+                         shift_bits, split) &
+                     (1u << static_cast<unsigned int>(i_local))) == 0u)
                 {
                     continue;
                 }

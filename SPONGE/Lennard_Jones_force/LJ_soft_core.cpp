@@ -492,6 +492,9 @@ static __global__ __launch_bounds__(
                         jm * super_cluster_clusters + i_local);
                 if ((effective_mask & pair_bit) == 0u ||
                     (active_i_mask &
+                     (1u << static_cast<unsigned int>(i_local))) == 0u ||
+                    (Clustered_Get_Pair_Active_I_Mask(
+                         shift_bits, split) &
                      (1u << static_cast<unsigned int>(i_local))) == 0u)
                 {
                     continue;

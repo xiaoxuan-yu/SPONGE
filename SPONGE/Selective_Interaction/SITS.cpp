@@ -655,7 +655,10 @@ static __global__ void SITS_Clustered_Gmxpacked_Direct_Device(
             {
                 const unsigned int packed_bit =
                     1u << (jm * kClusteredSuperClusterClusters + i_local);
-                if ((effective_mask & packed_bit) == 0u)
+                if ((effective_mask & packed_bit) == 0u ||
+                    (Clustered_Get_Pair_Active_I_Mask(
+                         shift_bits, split) &
+                     (1u << static_cast<unsigned int>(i_local))) == 0u)
                 {
                     continue;
                 }
