@@ -203,6 +203,25 @@ class Extractor:
 
 class Runner:
     @staticmethod
+    def _fresh_output_paths(case_dir, fresh_outputs):
+        case_dir = Path(case_dir).resolve()
+        paths = []
+        for output_name in fresh_outputs:
+            output_name = Path(output_name)
+            if output_name.is_absolute():
+                raise ValueError(
+                    f"Fresh output must be relative to the case directory: "
+                    f"{output_name}"
+                )
+            output_path = (case_dir / output_name).resolve()
+            if output_path != case_dir and case_dir not in output_path.parents:
+                raise ValueError(
+                    f"Fresh output escapes the case directory: {output_name}"
+                )
+            paths.append(output_path)
+        return paths
+
+    @staticmethod
     def run_command(
         cmd,
         *,
@@ -245,17 +264,49 @@ class Runner:
         extra_args=(),
         env=None,
         input_text=None,
+        fresh_outputs=(),
+        require_completion=False,
     ):
+        fresh_output_paths = Runner._fresh_output_paths(
+            case_dir, fresh_outputs
+        )
+        for output_path in fresh_output_paths:
+            if output_path.is_dir():
+                raise ValueError(
+                    f"Fresh output path is a directory: {output_path}"
+                )
+            output_path.unlink(missing_ok=True)
+
         cmd = [str(sponge_cmd or "SPONGE")]
         if mdin_name is not None:
             cmd.extend(["-mdin", mdin_name])
         cmd.extend(str(arg) for arg in extra_args)
         if mpi_np is not None:
             cmd = ["mpirun", "--oversubscribe", "-np", str(mpi_np)] + cmd
-        return Runner.run_command(
+        output = Runner.run_command(
             cmd,
             cwd=case_dir,
             timeout=timeout,
             env=env,
             input_text=input_text,
         )
+        if "spongeError" in output:
+            raise RuntimeError(
+                f"SPONGE reported an error despite a zero return code in "
+                f"{case_dir}"
+            )
+        if require_completion and "Stop Wall Time:" not in output:
+            raise RuntimeError(
+                f"SPONGE did not report normal completion in {case_dir}"
+            )
+        missing_outputs = [
+            str(path)
+            for path in fresh_output_paths
+            if not path.is_file() or path.stat().st_size == 0
+        ]
+        if missing_outputs:
+            raise RuntimeError(
+                "SPONGE did not create non-empty fresh output file(s): "
+                + ", ".join(missing_outputs)
+            )
+        return output

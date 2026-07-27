@@ -22,6 +22,7 @@ set(SPONGE_RUNTIME_SOURCES
     ${PROJECT_ROOT_DIR}/SPONGE/Domain_decomposition/Domain_decomposition.cpp
     ${PROJECT_ROOT_DIR}/SPONGE/neighbor_list/neighbor_list.cpp
     ${PROJECT_ROOT_DIR}/SPONGE/neighbor_list/full_neighbor_list.cpp
+    ${PROJECT_ROOT_DIR}/SPONGE/neighbor_list/clustered_spatial_view.cpp
     ${PROJECT_ROOT_DIR}/SPONGE/Lennard_Jones_force/clustered_lj.cpp
     ${PROJECT_ROOT_DIR}/SPONGE/Lennard_Jones_force/Lennard_Jones_force.cpp
     ${PROJECT_ROOT_DIR}/SPONGE/Lennard_Jones_force/LJ_soft_core.cpp

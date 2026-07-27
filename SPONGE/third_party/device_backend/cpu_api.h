@@ -14,7 +14,10 @@
 #define __global__
 #define __forceinline__ inline
 #define __noinline__
-#define __launch_bounds__(THREAD)
+#define __launch_bounds__(...)
+#define __shared__
+#define __syncthreads() ((void)0)
+#define __syncwarp(...) ((void)0)
 #if defined(_MSC_VER) && !defined(__restrict__)
 #define __restrict__ __restrict
 #endif
@@ -24,10 +27,77 @@
 #define deviceStreamDestroy(stream)
 #define deviceStreamSynchronize(stream)
 
+struct float2
+{
+    float x, y;
+};
+
 struct float4
 {
     float x, y, z, w;
 };
+struct cpu_builtin_dim3
+{
+    unsigned int x, y, z;
+};
+static constexpr cpu_builtin_dim3 threadIdx = {0u, 0u, 0u};
+static constexpr cpu_builtin_dim3 blockIdx = {0u, 0u, 0u};
+static constexpr cpu_builtin_dim3 blockDim = {1u, 1u, 1u};
+static constexpr cpu_builtin_dim3 gridDim = {1u, 1u, 1u};
+using device_mask_t = unsigned int;
+constexpr device_mask_t FULL_MASK = 1u;
+
+template <typename T>
+static inline T deviceShfl(device_mask_t, T value, int, int = 1)
+{
+    return value;
+}
+
+template <typename T>
+static inline T deviceShflDown(device_mask_t, T value, unsigned int, int = 1)
+{
+    return value;
+}
+
+static inline device_mask_t deviceBallot(device_mask_t, bool predicate)
+{
+    return predicate ? 1u : 0u;
+}
+
+static inline void deviceSyncWarp(device_mask_t) {}
+
+static inline unsigned int __ballot_sync(unsigned int, bool predicate)
+{
+    return predicate ? 1u : 0u;
+}
+
+static inline int __popc(unsigned int value)
+{
+    return __builtin_popcount(value);
+}
+
+static inline int __ffs(int value) { return __builtin_ffs(value); }
+
+static inline int __float_as_int(float value)
+{
+    union
+    {
+        float f;
+        int i;
+    } bits = {value};
+    return bits.i;
+}
+
+static inline float __int_as_float(int value)
+{
+    union
+    {
+        int i;
+        float f;
+    } bits = {value};
+    return bits.f;
+}
+
 float rnorm3df(float, float, float);
 float norm3df(float, float, float);
 float erfcxf(float);
@@ -35,6 +105,8 @@ float atomicAdd(float*, float);
 double atomicAdd(double*, double);
 int atomicAdd(int*, int);
 int atomicExch(int* address, int val);
+int atomicCAS(int* address, int compare, int val);
+int atomicMax(int* address, int val);
 enum deviceMemcpyKind
 {
     deviceMemcpyHostToHost,
@@ -63,7 +135,7 @@ struct dim3
         : x(ux), y(uy), z(uz) {};
 };
 
-#define warpSize 0
+#define warpSize 1
 
 #endif  // BASIC_BACKEND_H
 

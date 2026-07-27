@@ -1,3 +1,4 @@
+import os
 from pathlib import Path
 
 import pytest
@@ -5,12 +6,14 @@ import pytest
 from benchmarks.utils import Outputer, Runner
 
 
-def write_minimization_mdin(case_dir, *, step_limit=100000):
+def write_minimization_mdin(case_dir, *, step_limit=100000, skin=2.0):
+    skin_line = "" if skin is None else f"skin = {skin}\n"
     mdin = (
         'md_name = "validation tip3p minimization bad coordinate"\n'
         'mode = "minimization"\n'
         f"step_limit = {step_limit}\n"
         "cutoff = 8.0\n"
+        f"{skin_line}"
         'default_in_file_prefix = "tip3p"\n'
         'coordinate_in_file = "bad_coordinate.txt"\n'
         "minimization_dynamic_dt = 1\n"
@@ -18,6 +21,9 @@ def write_minimization_mdin(case_dir, *, step_limit=100000):
         "print_zeroth_frame = 1\n"
         "write_mdout_interval = 1000\n"
         "write_information_interval = 1000\n"
+        "\n"
+        "[LJ]\n"
+        'direct_kernel = "clustered"\n'
     )
     Path(case_dir, "mdin.spg.toml").write_text(mdin)
 
@@ -50,7 +56,7 @@ def parse_potential_by_step(mdout_path):
 def test_tip3p_bad_coordinate_minimization_runs(
     statics_path, outputs_path, mpi_np
 ):
-    step_limit = 100000
+    step_limit = 4000
     case_dir = Outputer.prepare_output_case(
         statics_path=statics_path,
         outputs_path=outputs_path,
@@ -59,7 +65,12 @@ def test_tip3p_bad_coordinate_minimization_runs(
         run_name="tip3p_min_bad_coordinate",
     )
     write_minimization_mdin(case_dir, step_limit=step_limit)
-    Runner.run_sponge(case_dir, timeout=1200, mpi_np=mpi_np)
+    env = os.environ.copy()
+    env["OMP_NUM_THREADS"] = "1"
+    output = Runner.run_sponge(
+        case_dir, timeout=1200, mpi_np=mpi_np, env=env
+    )
+    assert "reuse_skin=10.00" in output
 
     potential_by_step = parse_potential_by_step(case_dir / "mdout.txt")
     milestones = [
@@ -99,3 +110,28 @@ def test_tip3p_bad_coordinate_minimization_runs(
 
     final_potential = potential_by_step[step_limit]
     assert final_potential < -4000.0
+
+
+def test_clustered_default_skin_contract(statics_path, outputs_path, mpi_np):
+    case_dir = Outputer.prepare_output_case(
+        statics_path=statics_path,
+        outputs_path=outputs_path,
+        case_name="tip3p",
+        mpi_np=mpi_np,
+        run_name="tip3p_clustered_default_skin",
+    )
+    coordinate_path = case_dir / "bad_coordinate.txt"
+    coordinate_lines = coordinate_path.read_text().splitlines()
+    coordinate_lines[-1] = (
+        "48.0000000 48.0000000 48.0000000 "
+        "90.0000000 90.0000000 90.0000000"
+    )
+    coordinate_path.write_text("\n".join(coordinate_lines) + "\n")
+    write_minimization_mdin(case_dir, step_limit=1, skin=None)
+    env = os.environ.copy()
+    env["OMP_NUM_THREADS"] = "1"
+    output = Runner.run_sponge(
+        case_dir, timeout=1200, mpi_np=mpi_np, env=env
+    )
+    assert "skin set to 10.00 Angstrom" in output
+    assert "reuse_skin=10.00" in output

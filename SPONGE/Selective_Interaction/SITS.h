@@ -137,6 +137,19 @@ struct SITS_INFORMATION
     int local_atom_numbers = 0;
     int ghost_numbers = 0;
 
+    CLUSTERED_GMXPACKED_SCI* d_clustered_sparse_sci = NULL;
+    CLUSTERED_GMXPACKED_CJ* d_clustered_sparse_cjpacked = NULL;
+    uint64_t* d_clustered_sparse_pair_shift_bits = NULL;
+    int* d_clustered_sparse_counts = NULL;
+    int clustered_sparse_sci_capacity = 0;
+    int clustered_sparse_cjpacked_capacity = 0;
+    int clustered_sparse_pair_shift_capacity = 0;
+    int clustered_sparse_sci_numbers = 0;
+    int clustered_sparse_cjpacked_numbers = 0;
+    int clustered_sparse_selective_atom_end = -1;
+    long long clustered_sparse_provider_incarnation = -1;
+    long long clustered_sparse_payload_generation = -1;
+
     float pwwp_enhance_factor = 0.5;
     float h_factor = 1.0;
 
@@ -164,6 +177,16 @@ struct SITS_INFORMATION
         const float cutoff, const float pme_beta, const int need_energy,
         float* atom_energy_ww, const int need_pressure,
         LTMatrix3* atom_virial_ww, float* elect_atom_ene);
+
+    bool SITS_LJ_Direct_CF_Force_Clustered(
+        const int atom_numbers, const int local_atom_numbers,
+        const int solvent_numbers, const int ghost_numbers, const VECTOR* crd,
+        const float* charge, LENNARD_JONES_INFORMATION* lj_info,
+        VECTOR* md_frc, const LTMatrix3 cell, const LTMatrix3 rcell,
+        const float cutoff, const float pme_beta, const int need_energy,
+        float* atom_energy_ww, const int need_pressure,
+        LTMatrix3* atom_virial_ww, float* elect_atom_ene,
+        const char** failure_reason);
 
     void SITS_LJ_Soft_Core_Direct_CF_Force_With_Atom_Energy_And_Virial(
         const int atom_numbers, const int local_atom_numbers,

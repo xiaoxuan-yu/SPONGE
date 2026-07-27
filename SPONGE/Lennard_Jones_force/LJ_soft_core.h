@@ -229,6 +229,7 @@ struct LJ_SOFT_CORE
     float* d_sigma_of_dH_dlambda_direct = NULL;
 
     float cutoff = 10.0;
+    bool clustered_direct_requested = false;
     LJ_CLUSTERED_DIRECT_CACHE* clustered_direct_cache = NULL;
     VECTOR_LJ_SOFT_TYPE* crd_with_parameters = NULL;
     float h_LJ_long_energy = 0.0;
@@ -281,7 +282,8 @@ struct LJ_SOFT_CORE
                                     const int* d_excluded_numbers);
     bool Use_Clustered_Direct() const
     {
-        return clustered_direct_cache != NULL &&
+        return clustered_direct_requested &&
+               clustered_direct_cache != NULL &&
                clustered_direct_cache->Use_Clustered_Direct();
     }
 };

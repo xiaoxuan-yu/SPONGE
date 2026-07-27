@@ -3,38 +3,55 @@
 ## Worktree / Branch
 
 - Worktree: `/home/youmans/sidereus/SPONGE-mainline-nbnxm-gmxpacked`
-- Branch: `integrate-nbnxm-gmxpacked`
+- Branch: `opt/gmxpacked-phase-b-force-kernel`
 - Base commit: `a19bf5b` (master, `Merge pull request #1 from yuhaosimba/master`)
 
-## Policy (T11 Final, 2026-06-13)
+## Current Policy (2026-07-25 cleanup)
 
-The clustered PME direct path operates under a safe default / explicit opt-in policy.
-The **default production path** uses the base native clustered direct kernel
-(`Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb_Device`). No compact
-gmxpacked payload is built or dispatched by default.
+On GPU, regular and soft-core clustered PME direct LJ both use the compact
+gmxpacked payload. Selecting `[LJ] direct_kernel = "clustered"` dispatches
+gmxpacked without an environment opt-in. Missing payload or force scratch is a
+hard runtime error; there is no GPU native clustered fallback.
+
+CPU builds accept the same `direct_kernel = "clustered"` setting. Regular LJ
+uses the CPU clustered executor, and soft-core LJ uses its CPU clustered
+executor over the same host-built pair ownership and exclusion metadata.
+`legacy` remains selectable only as a temporary comparison oracle while the
+remaining migration gates below are closed.
+
+Excluded-list connectivity is authoritative for clustered molecule ownership.
+The builder forms connected components directly from the exclusion graph
+instead of assuming that residue/molecule ranges contain every excluded pair.
+This is required for inputs whose residue metadata is absent or finer grained
+than their bonded/excluded topology.
 
 ### Production Env Vars
 
 | Variable | Behavior |
 |---|---|
-| *(none)* | Default native clustered direct. No host-side payload conversion, no gmxpacked dispatch. |
-| `SPONGE_CLUSTERED_USE_GMXPACKED_DIRECT=1` | Explicit opt-in for gmxpacked production dispatch. Requires compact payload availability and is still suppressed by `SPONGE_CLUSTERED_GMXPACKED_FALLBACK_NATIVE=1`. |
-| `SPONGE_CLUSTERED_GMXPACKED_FALLBACK_NATIVE=1` | Forces native clustered dispatch even when `SPONGE_CLUSTERED_USE_GMXPACKED_DIRECT=1` is set. |
-| `SPONGE_CLUSTERED_DUMP_MICROBENCH=<prefix>` | Diagnostic/debug snapshot path. Builds compact payload and writes `.sponge_fulloutput.bin` for `NBNXM_MICROBENCH --kernel sponge --sponge-lj-mode comb-gmxpacked` replay. Does **not** enable gmxpacked production dispatch unless `SPONGE_CLUSTERED_USE_GMXPACKED_DIRECT=1` is also set. |
+| *(none)* | Clustered regular and soft-core LJ dispatch gmxpacked on GPU and the clustered CPU executors on CPU. |
+| `SPONGE_CLUSTERED_DUMP_MICROBENCH=<prefix>` | Writes `.sponge_fulloutput.bin` for retained `NBNXM_MICROBENCH --kernel sponge --sponge-lj-mode comb-gmxpacked` replay. It does not change production dispatch. |
 
-### Experimental Env Vars (Development Only)
+`SPONGE_CLUSTERED_USE_GMXPACKED_DIRECT` and
+`SPONGE_CLUSTERED_GMXPACKED_FALLBACK_NATIVE` are removed. Historical experiment
+notes may still show them in recorded command lines.
 
-These control alternate native-clustered kernel dispatch paths and are **not production defaults**:
+### Kernel variants
 
-| Variable | Effect |
-|---|---|
-| `SPONGE_CLUSTERED_USE_WARP_RECORD_FULL` | Selects the warp-record virial kernel variant within the native dispatch chain. |
-| `SPONGE_CLUSTERED_USE_WARP_RECORD_TOTAL_ONLY` | Selects the total-output variant of the warp-record kernel (requires `USE_WARP_RECORD_FULL`). |
-| `SPONGE_CLUSTERED_USE_GROUPED_VIRIAL` | Selects the grouped-clustered virial kernel (higher dispatch priority than warp-record). |
+Each retained regular-LJ and soft-LJ dispatch family exposes two output
+variants:
 
-All experimental flags are marked `[EXPERIMENTAL]` in `SPONGE/Lennard_Jones_force/Lennard_Jones_force.cpp`.
+- force-only;
+- full energy+virial.
 
-## Performance Numbers
+Energy-only and virial-only requests reuse the full kernel with runtime output
+masks. The former grouped-virial, warp-record virial-only, and total-output
+dispatch experiments have been removed.
+
+## Historical Performance Numbers
+
+The T4/T11 tables below describe the earlier native-default/opt-in phase. They
+are retained as experiment history, not as the current dispatch policy.
 
 ### T4 Pre-Kernel Baseline
 
@@ -64,14 +81,30 @@ All experimental flags are marked `[EXPERIMENTAL]` in `SPONGE/Lennard_Jones_forc
 | wat160k full | 0.228147 ms | 54.2% faster |
 | wat600k full | 1.005773 ms | 50.5% faster |
 
-### Key Observation
+### Historical Observation
 
 The gmxpacked direct kernel itself is fast (30-50% kernel-level improvement),
 but end-to-end wall regresses because compact primary payload is still built via
-host-side conversion/upload from the finalized native payload. The
-`SPONGE_CLUSTERED_USE_GMXPACKED_DIRECT=1` opt-in preserves this path for
-microbench analysis and future device-native compact builder integration, but
-the safe default avoids the host-conversion regression.
+host-side conversion/upload from the finalized native payload. Subsequent
+device-side builder work removed this result as a reason to keep a production
+native fallback.
+
+## Soft-Core GPU Result (RTX 4090, wat160k)
+
+The soft-core gmxpacked full kernel was optimized with an NCU-first loop. The
+final launch bound retains 96 registers per thread and 41.67% theoretical
+occupancy.
+
+| Variant | NCU duration | Registers/thread | Theoretical occupancy | Local spill requests |
+|---|---:|---:|---:|---:|
+| unconstrained | 4.00 ms | 155 | 25.00% | 0 |
+| 7 blocks/SM | 3.64 ms | 128 | 33.33% | 5,199,612 |
+| 10 blocks/SM (retained) | 3.44 ms | 96 | 41.67% | 17,152,810 |
+
+The retained version improves the NCU kernel duration by about 14%. A separate
+20-step run without the profiler measured 54.08 ms total kernel-launch time
+versus 64.55 ms for the 128-register version. The extra spill traffic remains
+cache-resident enough to win on this workload (`97.58%` L2 hit rate).
 
 ## T9 Blocker: Derived Compact `ATOM_GROUP`
 
@@ -94,14 +127,59 @@ consumers (SW, EDIP, EAM, TERSOFF, ReaxFF), and any consumer needing legacy
 clustered PME water fast path remains the only consumer that skips the legacy
 build entirely.
 
-## Cleanup Policy (T12, 2026-06-13)
+## Cleanup Policy
 
-- Experimental dispatch flags (`USE_WARP_RECORD_FULL`, `USE_WARP_RECORD_TOTAL_ONLY`, `USE_GROUPED_VIRIAL`) are marked `[EXPERIMENTAL]` in source with a policy comment block at the flag-definition site.
-- No code paths were removed; only documentation comments were added.
-- Production flags (`USE_GMXPACKED_DIRECT`, `GMXPACKED_FALLBACK_NATIVE`, `DUMP_MICROBENCH`) are kept and documented.
-- `nbnxm_microbench_snapshot.h` include in `Lennard_Jones_force.cpp` is marked `[DIAGNOSTIC DUMP ONLY]`.
-- No `Gromacs*POD` types are used outside `tools/nbnxm_microbench/`.
-- `clustered_lj.{h,cpp}` have zero dependency on `nbnxm_microbench_snapshot.h` or `Gromacs*POD` types.
+- Regular clustered native/reference kernels and production opt-in/fallback
+  flags are removed.
+- GPU soft-core clustered execution uses gmxpacked; its native clustered
+  executor is retained only for the CPU backend.
+- CPU regular and soft-core clustered executors are production alternatives to
+  the legacy non-clustered path.
+- Legacy non-clustered LJ remains temporarily available only for uncovered
+  features. It is not the correctness oracle at periodic boundaries and is not
+  the intended post-backport architecture.
+- Diagnostic snapshot export is kept.
+- Peak force-only and full-output specializations are kept.
+- Non-peak dispatch probes and standalone neighbor API scaffolding are removed.
+- `NBNXM_MICROBENCH` and its snapshot types remain isolated under `tools/`.
+
+## Correctness Evidence
+
+- A 256-atom soft-core fixture with exclusions crossing residue/molecule
+  metadata boundaries produces `potential = -634.03 kcal/mol` on clustered GPU
+  and legacy GPU after deriving ownership from the exclusion graph.
+- The regular clustered GPU path passes the analogous fixture at
+  `-633.72 kcal/mol`.
+- TIP3P clustered CPU and GPU agree (`-4501.68` and `-4501.75 kcal/mol`,
+  respectively); the remaining small difference from legacy (`-4499.57`) is
+  accumulation/ownership convention, not a missing large electrostatic term.
+- For 164,544 water atoms, clustered CPU and GPU produce
+  `LJ_soft_short = 17846.07 kcal/mol`. An independent periodic cell-list oracle
+  gives `17846.0747267`; legacy gives `19498.88` because it overcounts periodic
+  boundary pairs. The analogous regular-LJ legacy discrepancy is also present.
+
+Consequently, legacy equality is no longer a removal gate for periodic systems.
+The replacement validation gates are clustered CPU/GPU agreement plus an
+independent periodic pair oracle.
+
+## Current Removal Gates
+
+- The soft-core lambda-derivative path still calls the legacy neighbor-list
+  implementation. A gmxpacked/CPU-clustered dU/dlambda output must be added
+  before that consumer can be removed.
+- `LENNARD_JONES_NO_PBC_INFORMATION` still provides the force and optional
+  per-atom-energy fallback for non-periodic runs. It needs a clustered
+  replacement or an explicitly retained standalone implementation.
+- Other non-LJ `ATOM_GROUP` consumers listed in the T9 section still require
+  the grid neighbor list; removing LJ legacy must not remove their provider.
+- A one-thread 4000-step bad-coordinate minimization is finite with clustered
+  direct LJ and reaches below `-4100 kcal/mol`; legacy enters
+  NaN by step 100. Parallel CPU atomics change floating-point accumulation
+  order enough to move this deliberately pathological Adam trajectory between
+  basins, so parallel determinism remains a gate before making the CPU path the
+  unconditional default.
+- General defaults use `skin = 2.0`. Peak water benchmark inputs opt in to
+  `skin = 10.0` and `clustered_rebuild_skin = 10.0`.
 
 ## Commands
 
@@ -117,18 +195,11 @@ pixi run -e dev-cuda13 cmake --build build-dev-cuda13 --target SPONGE --parallel
 pixi run -e dev-cuda13 cmake --build build-dev-cuda13 --target NBNXM_MICROBENCH --parallel 8
 ```
 
-### Default Run (wat160k)
+### Clustered Gmxpacked Run (wat160k)
 
 ```sh
 cd benchmarks/performance/wat/SPONGE_water_160k
 ../../../../build-dev-cuda13/SPONGE -mdin mdin_pme_nve.clustered_dump.spg.toml
-```
-
-### Opt-In Gmxpacked Run
-
-```sh
-SPONGE_CLUSTERED_USE_GMXPACKED_DIRECT=1 \
-  ../../../../build-dev-cuda13/SPONGE -mdin mdin_pme_nve.clustered_dump.spg.toml
 ```
 
 ### Diagnostic Snapshot Dump
@@ -136,6 +207,19 @@ SPONGE_CLUSTERED_USE_GMXPACKED_DIRECT=1 \
 ```sh
 SPONGE_CLUSTERED_DUMP_MICROBENCH=/tmp/snapshot \
   ../../../../build-dev-cuda13/SPONGE -mdin mdin_pme_nve.clustered_dump.spg.toml
+```
+
+### NCU Soft-Core Full Kernel
+
+```sh
+pixi run -e dev-cuda13 ncu \
+  --kernel-name-base demangled \
+  --kernel-name 'regex:.*Nbnxm_Gmxpacked_Lennard_Jones_And_Direct_Coulomb_Soft_Core.*' \
+  --launch-count 1 \
+  --section SpeedOfLight --section MemoryWorkloadAnalysis \
+  --section SchedulerStats --section WarpStateStats \
+  --section LaunchStats --section Occupancy \
+  build-dev-cuda13/SPONGE -mdin mdin.clustered.spg.toml
 ```
 
 ### Microbench Replay

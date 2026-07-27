@@ -168,6 +168,9 @@ perf-reaxff = "python -X utf8 -m pytest benchmarks/performance/reaxff/tests -s -
 perf-remd = "python -X utf8 -m pytest benchmarks/performance/remd/tests -s --tb=short"
 perf-sits = "python -X utf8 -m pytest benchmarks/performance/sits/tests -s --tb=short"
 perf-sinkmeta = "python -X utf8 -m pytest benchmarks/performance/sinkmeta/tests -s --tb=short"
+clustered-lj-gate = { cmd = "python -X utf8 benchmarks/performance/clustered_lj/check_migration_gate.py --matrix {{ matrix }} --replays {{ replays }}", args = [{ arg = "matrix" }, { arg = "replays" }] }
+clustered-lj-matrix = { cmd = "python -X utf8 benchmarks/performance/clustered_lj/run_migration_matrix.py --baseline-bin {{ baseline }} --current-bin {{ current }} --environment {{ environment }} --baseline-environment {{ baseline_environment }} --output-root {{ output }}", args = [{ arg = "baseline" }, { arg = "current" }, { arg = "environment" }, { arg = "baseline_environment" }, { arg = "output" }] }
+clustered-lj-replays = { cmd = "python -X utf8 benchmarks/performance/clustered_lj/run_replay_matrix.py --spec {{ spec }} --output-root {{ output }}", args = [{ arg = "spec" }, { arg = "output" }] }
 format = "GITHOOK_MODIFY=1 GITHOOK_AUTO_ADD=0 GITHOOK_ALL=1 GITHOOK_FILES= python -X utf8 scripts/pre-commit"
 format-check = "GITHOOK_MODIFY=0 GITHOOK_AUTO_ADD=0 GITHOOK_ALL=1 GITHOOK_FILES= python -X utf8 scripts/pre-commit"
 package-conda = "python -X utf8 packaging/conda.py --env $PIXI_ENVIRONMENT_NAME --output-dir packaging/outputs"

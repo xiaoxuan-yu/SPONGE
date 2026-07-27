@@ -133,6 +133,7 @@ struct LENNARD_JONES_INFORMATION
     int ordered_layout_max_depth = 6;
     int ordered_layout_leaf_size = 32;
     int ordered_layout_min_residue_numbers = 256;
+    bool clustered_direct_requested = false;
     LJ_CLUSTERED_DIRECT_CACHE* clustered_direct_cache = NULL;
     VECTOR_LJ* crd_with_LJ_parameters = NULL;
 
@@ -156,8 +157,18 @@ struct LENNARD_JONES_INFORMATION
                                     const int* d_excluded_numbers);
     bool Use_Clustered_Direct() const
     {
-        return clustered_direct_cache != NULL &&
+        return clustered_direct_requested &&
+               clustered_direct_cache != NULL &&
                clustered_direct_cache->Use_Clustered_Direct();
+    }
+    void Enable_Clustered_Direct()
+    {
+        if (clustered_direct_cache != NULL)
+        {
+            clustered_direct_cache->layout.Enable_Clustered_Spatial_Service();
+            clustered_direct_requested =
+                clustered_direct_cache->Use_Clustered_Direct();
+        }
     }
     void Maybe_Apply_Ordered_Layout(CONTROLLER* controller,
                                     DOMAIN_INFORMATION* domain,

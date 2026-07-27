@@ -52,6 +52,7 @@ RESTRAIN_CV restrain_cv;
 META meta;
 LISTED_FORCES listed_forces;
 PAIRWISE_FORCE pairwise_force;
+LJ_CLUSTERED_DIRECT_CACHE* pairwise_clustered_cache = NULL;
 HARD_WALL hard_wall;
 SOFT_WALLS soft_walls;
 LENNARD_JONES_NO_PBC_INFORMATION LJ_NOPBC;
@@ -722,6 +723,13 @@ bool Main_Legacy_Neighbor_List_Trace_Enabled()
     return enabled != NULL && enabled[0] != '\0' && enabled[0] != '0';
 }
 
+bool Main_Custom_Pairwise_Clustered_Enabled()
+{
+    static const bool enabled = Main_Finite_Lifecycle_Probe_Env_Enabled(
+        "SPONGE_CUSTOM_PAIRWISE_CLUSTERED_NATIVE");
+    return enabled;
+}
+
 const char* Main_Neighbor_List_Update_Name(int update)
 {
     if (update == NEIGHBOR_LIST::FORCED_UPDATE)
@@ -744,10 +752,16 @@ Main_Legacy_Neighbor_List_Need Main_Get_Legacy_Neighbor_List_Need()
         return need;
     }
 
-    need.selective_direct = selective_interaction.Has_Direct_LJ_Coulomb();
+    const bool sits_clustered_direct =
+        selective_interaction.Has_SITS_Direct_LJ_Coulomb() &&
+        !selective_interaction.Has_REST2_Direct_LJ_Coulomb();
+    need.selective_direct =
+        selective_interaction.Has_Direct_LJ_Coulomb() &&
+        !sits_clustered_direct;
     need.clustered_direct_active =
-        !need.selective_direct &&
-        (lj.Use_Clustered_Direct() || lj_soft.Use_Clustered_Direct());
+        sits_clustered_direct ||
+        (!selective_interaction.Has_Direct_LJ_Coulomb() &&
+         (lj.Use_Clustered_Direct() || lj_soft.Use_Clustered_Direct()));
     need.direct_solvent_numbers = need.clustered_direct_active
                                       ? 0
                                       : solvent_lj.local_solvent_numbers;
@@ -757,7 +771,9 @@ Main_Legacy_Neighbor_List_Need Main_Get_Legacy_Neighbor_List_Need()
                                  lj_soft.is_initialized &&
                                  !lj_soft.Use_Clustered_Direct();
     need.solvent_lj_legacy = need.direct_solvent_numbers > 0;
-    need.pairwise_legacy = pairwise_force.is_initialized;
+    need.pairwise_legacy =
+        pairwise_force.is_initialized &&
+        !Main_Custom_Pairwise_Clustered_Enabled();
     need.reaxff_legacy = reaxff.is_initialized != 0;
     need.full_legacy = neighbor_list.is_needed_full;
     need.needed = need.selective_direct || need.lj_direct_legacy ||
@@ -1606,6 +1622,13 @@ void Main_Initial(int argc, char* argv[])
                    md_info.pbc.rcell, md_info.sys.box_length, md_info.nb.cutoff,
                    md_info.no_direct_interaction_virtual_atom_numbers);
         pairwise_force.Initial(&controller);
+        if (pairwise_force.is_initialized &&
+            Main_Custom_Pairwise_Clustered_Enabled())
+        {
+            pairwise_clustered_cache =
+                Acquire_Shared_LJ_Clustered_Direct_Cache(
+                    &controller, "clustered_spatial_service", false, true);
+        }
         nb14.Initial(&controller, lj.h_LJ_A, lj.h_LJ_B, lj.h_atom_LJ_type);
 
         selective_interaction.Initial(&controller, md_info.atom_numbers);
@@ -1618,6 +1641,11 @@ void Main_Initial(int argc, char* argv[])
         }
         selective_interaction.Check_Solvent(&controller, md_info.atom_numbers,
                                             solvent_lj.solvent_numbers);
+        if (selective_interaction.Has_SITS_Direct_LJ_Coulomb() &&
+            !selective_interaction.Has_REST2_Direct_LJ_Coulomb())
+        {
+            lj.Enable_Clustered_Direct();
+        }
     }
     else
     {
@@ -1817,31 +1845,70 @@ void Main_Calculate_Force()
                 md_info.need_pressure,
                 selective_interaction.Select_Atom_Virial_Tensor());
         }
+        const bool sits_clustered_direct =
+            selective_interaction.Has_SITS_Direct_LJ_Coulomb() &&
+            !selective_interaction.Has_REST2_Direct_LJ_Coulomb();
         const bool clustered_direct_active =
-            !selective_interaction.Has_Direct_LJ_Coulomb() &&
-            (lj.Use_Clustered_Direct() || lj_soft.Use_Clustered_Direct());
+            sits_clustered_direct ||
+            (!selective_interaction.Has_Direct_LJ_Coulomb() &&
+             (lj.Use_Clustered_Direct() || lj_soft.Use_Clustered_Direct()));
         const int direct_solvent_numbers =
             clustered_direct_active ? 0 : solvent_lj.local_solvent_numbers;
         if (selective_interaction.Has_Direct_LJ_Coulomb())
         {
-            selective_interaction
-                .LJ_Direct_CF_Force_With_Atom_Energy_And_Virial(
-                    md_info.atom_numbers, dd.atom_numbers,
-                    direct_solvent_numbers, dd.ghost_numbers, dd.crd,
-                    dd.d_charge, &lj, dd.frc, md_info.pbc.cell,
-                    md_info.pbc.rcell, neighbor_list.d_nl, md_info.nb.cutoff,
-                    pm.beta, md_info.need_potential, dd.d_energy,
-                    md_info.need_pressure, dd.d_virial,
+            if (sits_clustered_direct)
+            {
+                if (lj_soft.is_initialized)
+                {
+                    throw std::runtime_error(
+                        "clustered-native SITS soft-LJ is not yet available");
+                }
+                lj.LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
+                    md_info.atom_numbers, dd.atom_numbers, 0,
+                    dd.ghost_numbers, dd.crd, dd.d_charge, dd.frc,
+                    md_info.pbc.cell, md_info.pbc.rcell,
+                    neighbor_list.d_nl, pm.beta, md_info.need_potential,
+                    dd.d_energy, md_info.need_pressure, dd.d_virial,
                     pm.d_direct_atom_energy);
-            selective_interaction
-                .LJ_Soft_Core_Direct_CF_Force_With_Atom_Energy_And_Virial(
-                    md_info.atom_numbers, dd.atom_numbers,
-                    direct_solvent_numbers, dd.ghost_numbers, dd.crd,
-                    dd.d_charge, &lj_soft, dd.frc, md_info.pbc.cell,
-                    md_info.pbc.rcell, neighbor_list.d_nl, md_info.nb.cutoff,
-                    pm.beta, md_info.need_potential, dd.d_energy,
-                    md_info.need_pressure, dd.d_virial,
-                    pm.d_direct_atom_energy);
+                const char* failure_reason = NULL;
+                if (!selective_interaction.LJ_Direct_CF_Force_Clustered(
+                        md_info.atom_numbers, dd.atom_numbers,
+                        solvent_lj.local_solvent_numbers, dd.ghost_numbers,
+                        dd.crd, dd.d_charge, &lj, dd.frc,
+                        md_info.pbc.cell, md_info.pbc.rcell,
+                        md_info.nb.cutoff, pm.beta, md_info.need_potential,
+                        dd.d_energy, md_info.need_pressure, dd.d_virial,
+                        pm.d_direct_atom_energy, &failure_reason))
+                {
+                    throw std::runtime_error(
+                        std::string(
+                            "clustered-native SITS dispatch rejected the "
+                            "clustered payload: ") +
+                        (failure_reason == NULL ? "unknown SITS failure"
+                                                : failure_reason));
+                }
+            }
+            else
+            {
+                selective_interaction
+                    .LJ_Direct_CF_Force_With_Atom_Energy_And_Virial(
+                        md_info.atom_numbers, dd.atom_numbers,
+                        direct_solvent_numbers, dd.ghost_numbers, dd.crd,
+                        dd.d_charge, &lj, dd.frc, md_info.pbc.cell,
+                        md_info.pbc.rcell, neighbor_list.d_nl,
+                        md_info.nb.cutoff, pm.beta, md_info.need_potential,
+                        dd.d_energy, md_info.need_pressure, dd.d_virial,
+                        pm.d_direct_atom_energy);
+                selective_interaction
+                    .LJ_Soft_Core_Direct_CF_Force_With_Atom_Energy_And_Virial(
+                        md_info.atom_numbers, dd.atom_numbers,
+                        direct_solvent_numbers, dd.ghost_numbers, dd.crd,
+                        dd.d_charge, &lj_soft, dd.frc, md_info.pbc.cell,
+                        md_info.pbc.rcell, neighbor_list.d_nl,
+                        md_info.nb.cutoff, pm.beta, md_info.need_potential,
+                        dd.d_energy, md_info.need_pressure, dd.d_virial,
+                        pm.d_direct_atom_energy);
+            }
         }
         else
         {
@@ -1904,11 +1971,71 @@ void Main_Calculate_Force()
                                     md_info.pbc.rcell, dd.frc,
                                     md_info.need_potential, dd.d_energy,
                                     md_info.need_pressure, dd.d_virial);
-        pairwise_force.Compute_Force(
-            neighbor_list.d_nl, dd.crd, md_info.pbc.cell, md_info.pbc.rcell,
-            md_info.nb.cutoff, pm.beta, dd.d_charge, dd.frc,
-            md_info.need_potential, dd.d_energy, md_info.need_pressure,
-            dd.d_virial, pm.d_direct_atom_energy);
+        if (pairwise_force.is_initialized &&
+            Main_Custom_Pairwise_Clustered_Enabled())
+        {
+            LJ_CLUSTERED_DIRECT_CACHE* clustered_cache =
+                pairwise_clustered_cache;
+            if (clustered_cache == NULL && lj.Use_Clustered_Direct())
+            {
+                clustered_cache = lj.clustered_direct_cache;
+            }
+            if (clustered_cache == NULL && lj_soft.Use_Clustered_Direct())
+            {
+                clustered_cache = lj_soft.clustered_direct_cache;
+            }
+            if (clustered_cache != NULL)
+            {
+#ifdef USE_CPU
+                constexpr bool need_gmxpacked_payload = false;
+                constexpr bool runtime_gmxpacked_direct = false;
+#else
+                constexpr bool need_gmxpacked_payload = true;
+                constexpr bool runtime_gmxpacked_direct = true;
+#endif
+                clustered_cache->Build(
+                    dd.crd, md_info.pbc.cell, md_info.pbc.rcell,
+                    md_info.nb.cutoff, md_info.need_pressure != 0, false,
+                    need_gmxpacked_payload, false,
+                    runtime_gmxpacked_direct);
+            }
+            CLUSTERED_SPATIAL_VIEW clustered_view;
+            const char* clustered_failure_reason = NULL;
+            if (!Make_Clustered_Spatial_View_From_LJ_Cache(
+                    clustered_cache, &clustered_view,
+                    &clustered_failure_reason))
+            {
+                throw std::runtime_error(
+                    std::string("clustered-native custom pairwise dispatch "
+                                "requires a current clustered payload: ") +
+                    (clustered_failure_reason == NULL
+                         ? "unknown clustered-view failure"
+                         : clustered_failure_reason));
+            }
+            if (!pairwise_force.Compute_Force_Clustered(
+                    clustered_view, dd.crd, md_info.pbc.cell,
+                    md_info.pbc.rcell, md_info.nb.cutoff, pm.beta,
+                    dd.d_charge, dd.frc, md_info.need_potential, dd.d_energy,
+                    md_info.need_pressure, dd.d_virial,
+                    pm.d_direct_atom_energy, &clustered_failure_reason))
+            {
+                throw std::runtime_error(
+                    std::string("clustered-native custom pairwise dispatch "
+                                "rejected the clustered payload: ") +
+                    (clustered_failure_reason == NULL
+                         ? "unknown custom-pairwise failure"
+                         : clustered_failure_reason));
+            }
+        }
+        else
+        {
+            pairwise_force.Compute_Force(
+                neighbor_list.d_nl, dd.crd, md_info.pbc.cell,
+                md_info.pbc.rcell, md_info.nb.cutoff, pm.beta, dd.d_charge,
+                dd.frc, md_info.need_potential, dd.d_energy,
+                md_info.need_pressure, dd.d_virial,
+                pm.d_direct_atom_energy);
+        }
         angle.Angle_Force_With_Atom_Energy_And_Virial(
             dd.crd, md_info.pbc.cell, md_info.pbc.rcell, dd.frc,
             md_info.need_potential, dd.d_energy, md_info.need_pressure,
@@ -2070,8 +2197,12 @@ void Main_Refresh_Local_State(bool rebuild_dd)
                          dd.d_mass);
     Main_Update_Legacy_Neighbor_List_If_Needed(
         "Main_Refresh_Local_State", neighbor_list.FORCED_UPDATE);
+    const bool sits_clustered_direct =
+        selective_interaction.Has_SITS_Direct_LJ_Coulomb() &&
+        !selective_interaction.Has_REST2_Direct_LJ_Coulomb();
     const int clustered_direct_solvent_numbers =
-        (lj.Use_Clustered_Direct() || lj_soft.Use_Clustered_Direct())
+        (sits_clustered_direct || lj.Use_Clustered_Direct() ||
+         lj_soft.Use_Clustered_Direct())
             ? 0
             : solvent_lj.local_solvent_numbers;
     lj.Refresh_Clustered_Metadata(clustered_direct_solvent_numbers,
@@ -2088,6 +2219,13 @@ void Main_Refresh_Local_State(bool rebuild_dd)
                             dd.atom_local_label, dd.atom_local_id);
     pairwise_force.Get_Local(dd.atom_local, dd.atom_numbers, dd.ghost_numbers,
                              dd.atom_local_label, dd.atom_local_id);
+    if (pairwise_clustered_cache != NULL)
+    {
+        pairwise_clustered_cache->Refresh_Metadata(
+            dd.atom_numbers, dd.atom_numbers, dd.ghost_numbers,
+            dd.atom_local, dd.d_excluded_list_start, dd.d_excluded_list,
+            dd.d_excluded_numbers);
+    }
 
     angle.Get_Local(dd.atom_local, dd.atom_numbers, dd.ghost_numbers,
                     dd.atom_local_label, dd.atom_local_id);
@@ -2392,6 +2530,7 @@ void Main_Clear()
         md_info.sys.speed_unit_name.c_str(), md_info.mode);
 
     Release_Shared_LJ_Clustered_Direct_Cache();
+    pairwise_clustered_cache = NULL;
     controller.Clear();
 }
 

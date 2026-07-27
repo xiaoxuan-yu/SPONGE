@@ -10,17 +10,6 @@
 
 #ifndef USE_CPU
 
-static __host__ __device__ __forceinline__ VECTOR
-Wrap_Clustered_Center_Fractional_Replay(const VECTOR center,
-                                        const LTMatrix3 rcell)
-{
-    VECTOR frac = center * rcell;
-    frac.x -= floorf(frac.x);
-    frac.y -= floorf(frac.y);
-    frac.z -= floorf(frac.z);
-    return frac;
-}
-
 static __host__ __device__ __forceinline__ int
 Encode_Clustered_Pair_Shift_Id_Replay(int sx, int sy, int sz)
 {
@@ -31,30 +20,68 @@ Encode_Clustered_Pair_Shift_Id_Replay(int sx, int sy, int sz)
 }
 
 static __host__ __device__ __forceinline__ int
-Determine_Clustered_Pair_Shift_Id_Replay(const VECTOR center_i,
-                                         const VECTOR center_j,
-                                         const LTMatrix3 rcell)
+Determine_Clustered_Pair_Shift_Component_Replay(float dfrac,
+                                                float combined_fractional_extent,
+                                                int preferred_component)
 {
-    const VECTOR frac_i =
-        Wrap_Clustered_Center_Fractional_Replay(center_i, rcell);
-    const VECTOR frac_j =
-        Wrap_Clustered_Center_Fractional_Replay(center_j, rcell);
-    const VECTOR dfrac = frac_j - frac_i;
+    const int nearest = static_cast<int>(floorf(dfrac + 0.5f));
+    constexpr float image_boundary_tolerance = 1.0e-6f;
+    if (fabsf(fabsf(dfrac) - 0.5f) >
+        combined_fractional_extent + image_boundary_tolerance)
+    {
+        return nearest;
+    }
+    const int lower = static_cast<int>(floorf(dfrac));
+    const int upper = lower + 1;
+    return preferred_component == lower || preferred_component == upper
+               ? preferred_component
+               : nearest;
+}
+
+static __host__ __device__ __forceinline__ int
+Determine_Clustered_Center_Pair_Shift_Id_From_Fractional_Replay(
+    const VECTOR fractional_center_i, const VECTOR fractional_center_j)
+{
+    const VECTOR dfrac = fractional_center_j - fractional_center_i;
     return Encode_Clustered_Pair_Shift_Id_Replay(
         static_cast<int>(floorf(dfrac.x + 0.5f)),
         static_cast<int>(floorf(dfrac.y + 0.5f)),
         static_cast<int>(floorf(dfrac.z + 0.5f)));
 }
 
+static __host__ __device__ __forceinline__ int
+Determine_Clustered_Pair_Shift_Id_From_Fractional_Replay(
+    const VECTOR fractional_center_i, const VECTOR fractional_center_j,
+    const VECTOR fractional_extent_i, const VECTOR fractional_extent_j,
+    int preferred_shift_id)
+{
+    const VECTOR dfrac = fractional_center_j - fractional_center_i;
+    const int preferred_x = preferred_shift_id / 9 - 1;
+    const int preferred_y = (preferred_shift_id % 9) / 3 - 1;
+    const int preferred_z = preferred_shift_id % 3 - 1;
+    return Encode_Clustered_Pair_Shift_Id_Replay(
+        Determine_Clustered_Pair_Shift_Component_Replay(
+            dfrac.x, fractional_extent_i.x + fractional_extent_j.x,
+            preferred_x),
+        Determine_Clustered_Pair_Shift_Component_Replay(
+            dfrac.y, fractional_extent_i.y + fractional_extent_j.y,
+            preferred_y),
+        Determine_Clustered_Pair_Shift_Component_Replay(
+            dfrac.z, fractional_extent_i.z + fractional_extent_j.z,
+            preferred_z));
+}
+
 __global__ void Refresh_Gmxpacked_Pair_Shift_Bits(
     const int sci_numbers, const int* super_cluster_offsets,
-    const VECTOR* cluster_centers, const unsigned int* cluster_valid_masks,
+    const VECTOR* cluster_fractional_centers,
+    const VECTOR* cluster_fractional_extents,
+    const unsigned int* cluster_valid_masks,
     const unsigned int* cluster_local_masks,
     const LJ_CLUSTERED_GMXPACKED_SCI* gmxpacked_sci,
     const LJ_CLUSTERED_GMXPACKED_CJ* gmxpacked_cjpacked,
     const LJ_CLUSTERED_GMXPACKED_EXCLUSION* exclusion_entries,
-    const LTMatrix3 rcell, uint64_t* pair_shift_bits,
-    int* sci_shift_only_safe, int* sci_shift_safe_flags,
+    uint64_t* pair_shift_bits, int* sci_shift_only_safe,
+    int* sci_shift_safe_flags,
     int* sci_shift_safe_count, const bool exact_sci_shift_flags)
 {
     const int sci = blockIdx.x;
@@ -77,6 +104,26 @@ __global__ void Refresh_Gmxpacked_Pair_Shift_Bits(
     const int packed_count = sci_entry.cjpacked_end - sci_entry.cjpacked_begin;
     const int total_records = packed_count * kClusteredJGroupSize;
 
+    __shared__ float4
+        shared_i_fractional_centers[kClusteredSuperClusterClusters];
+    __shared__ float4
+        shared_i_fractional_extents[kClusteredSuperClusterClusters];
+    if (threadIdx.x < active_cluster_count)
+    {
+        const int cluster_i = cluster_i_start + threadIdx.x;
+        const VECTOR fractional_center_i =
+            cluster_fractional_centers[cluster_i];
+        const VECTOR fractional_extent_i =
+            cluster_fractional_extents[cluster_i];
+        shared_i_fractional_centers[threadIdx.x] =
+            {fractional_center_i.x, fractional_center_i.y,
+             fractional_center_i.z, 0.0f};
+        shared_i_fractional_extents[threadIdx.x] =
+            {fractional_extent_i.x, fractional_extent_i.y,
+             fractional_extent_i.z, 0.0f};
+    }
+    __syncthreads();
+
     for (int record = threadIdx.x; record < total_records; record += blockDim.x)
     {
         const int local_packed = record / kClusteredJGroupSize;
@@ -92,16 +139,43 @@ __global__ void Refresh_Gmxpacked_Pair_Shift_Bits(
                 ((packed.split[0].imask | packed.split[1].imask) >>
                  Clustered_Jm_Imask_Shift(jm)) &
                 ((1u << kClusteredSuperClusterClusters) - 1u);
-            const VECTOR center_j = cluster_centers[cluster_j];
+            const VECTOR fractional_center_j =
+                cluster_fractional_centers[cluster_j];
+            VECTOR fractional_extent_j = {0.0f, 0.0f, 0.0f};
+            bool fractional_extent_j_ready = false;
             for (int i_local = 0; i_local < active_cluster_count; i_local += 1)
             {
                 int shift_id = kClusteredCentralShiftId;
                 if ((combined_imask &
                      (1u << static_cast<unsigned int>(i_local))) != 0u)
                 {
-                    shift_id = Determine_Clustered_Pair_Shift_Id_Replay(
-                        cluster_centers[cluster_i_start + i_local], center_j,
-                        rcell);
+                    const float4 cached_fractional_center_i =
+                        shared_i_fractional_centers[i_local];
+                    const float4 cached_fractional_extent_i =
+                        shared_i_fractional_extents[i_local];
+                    const VECTOR fractional_center_i = {
+                        cached_fractional_center_i.x,
+                        cached_fractional_center_i.y,
+                        cached_fractional_center_i.z};
+                    shift_id =
+                        Determine_Clustered_Center_Pair_Shift_Id_From_Fractional_Replay(
+                            fractional_center_i, fractional_center_j);
+                    if (shift_id != sci_entry.shift_id)
+                    {
+                        if (!fractional_extent_j_ready)
+                        {
+                            fractional_extent_j =
+                                cluster_fractional_extents[cluster_j];
+                            fractional_extent_j_ready = true;
+                        }
+                        shift_id =
+                            Determine_Clustered_Pair_Shift_Id_From_Fractional_Replay(
+                                fractional_center_i, fractional_center_j,
+                                {cached_fractional_extent_i.x,
+                                 cached_fractional_extent_i.y,
+                                 cached_fractional_extent_i.z},
+                                fractional_extent_j, sci_entry.shift_id);
+                    }
                     if ((sci_shift_only_safe != NULL ||
                          sci_shift_safe_flags != NULL) &&
                         shift_id != sci_entry.shift_id)
@@ -254,6 +328,13 @@ Cornerstone_Node_Overlaps_Shifted_Box_Probe(KeyType prefix,
                        : cstone::hilbertIBox<KeyType>(start_key, level);
     const auto [node_center, node_size] =
         cstone::centerAndSize<KeyType>(node_ibox, unit_box);
+    constexpr float kFullPeriodicReach = 0.5f - 1.0e-6f;
+    if (target_size.x >= kFullPeriodicReach ||
+        target_size.y >= kFullPeriodicReach ||
+        target_size.z >= kFullPeriodicReach)
+    {
+        return true;
+    }
     const VECTOR shifted_center =
         target_center + Shift_Fractional_From_Id_Probe(shift_id);
     return cstone::overlap(node_center, node_size,
@@ -297,11 +378,19 @@ Cluster_Aabb_Overlaps_Shifted_CutoffSq_Probe(VECTOR center_i, VECTOR extent_i,
     return gap_x * gap_x + gap_y * gap_y + gap_z * gap_z <= cutoff_sq;
 }
 
+static __host__ __device__ __forceinline__ bool
+Valid_Lanes_Are_All_Local_Probe(unsigned int valid_mask,
+                                unsigned int local_mask)
+{
+    return valid_mask != 0u && (valid_mask & ~local_mask) == 0u;
+}
+
 static __device__ __forceinline__ bool
 Leaf_Has_Fixed_Shift_Candidate_Overlap_Subgroup_Probe(
     int cluster_i_start, int leaf_cluster_start, int leaf_cluster_end,
     int fixed_shift_id, float cutoff_sq, VECTOR shift_vec,
-    const unsigned int* cluster_valid_masks, const VECTOR* cluster_centers,
+    const unsigned int* cluster_valid_masks,
+    const unsigned int* cluster_local_masks, const VECTOR* cluster_centers,
     const VECTOR* cluster_extents, int cluster_i, bool lane_i_valid,
     VECTOR center_i, VECTOR extent_i, device_mask_t subgroup_mask)
 {
@@ -312,10 +401,12 @@ Leaf_Has_Fixed_Shift_Candidate_Overlap_Subgroup_Probe(
         bool lane_overlap = false;
         if (lane_i_valid && cluster_valid_masks[cluster_j] != 0u)
         {
-            const bool central_self_pair =
-                fixed_shift_id == kClusteredCentralShiftId &&
-                cluster_j >= cluster_i_start && cluster_i > cluster_j;
-            if (!central_self_pair)
+            const bool reverse_local_cluster_pair =
+                cluster_j >= cluster_i_start && cluster_i > cluster_j &&
+                Valid_Lanes_Are_All_Local_Probe(
+                    cluster_valid_masks[cluster_j],
+                    cluster_local_masks[cluster_j]);
+            if (!reverse_local_cluster_pair)
             {
                 lane_overlap = Cluster_Aabb_Overlaps_Shifted_CutoffSq_Probe(
                     center_i, extent_i, cluster_centers[cluster_j],
@@ -1139,7 +1230,8 @@ static __global__ void Probe_Count_Nbnxm_Payload_Fixed_Light(
             {
                 continue;
             }
-            if (local_mask_j != 0u && super_j < super_i)
+            if (Valid_Lanes_Are_All_Local_Probe(valid_mask_j, local_mask_j) &&
+                super_j < super_i)
             {
                 continue;
             }
@@ -1446,7 +1538,8 @@ static __global__ void Probe_Candidate_Leaf_Collect_Fixed_Shift_Subgroup(
             if (!Leaf_Has_Fixed_Shift_Candidate_Overlap_Subgroup_Probe(
                     cluster_i_start, leaf_cluster_starts[leaf_j],
                     leaf_cluster_ends[leaf_j], candidate_shift_id, cutoff_sq,
-                    shift_vec, cluster_valid_masks, cluster_centers,
+                    shift_vec, cluster_valid_masks, cluster_local_masks,
+                    cluster_centers,
                     cluster_extents, cluster_i, lane_i_valid, center_i, extent_i,
                     subgroup_mask))
             {
@@ -1839,7 +1932,8 @@ static __global__ void Probe_Candidate_Leaf_Root_Child_Device_Counter_Subgroup(
             if (!Leaf_Has_Fixed_Shift_Candidate_Overlap_Subgroup_Probe(
                     cluster_i_start, leaf_cluster_starts[leaf_j],
                     leaf_cluster_ends[leaf_j], candidate_shift_id, cutoff_sq,
-                    shift_vec, cluster_valid_masks, cluster_centers,
+                    shift_vec, cluster_valid_masks, cluster_local_masks,
+                    cluster_centers,
                     cluster_extents, cluster_i, lane_i_valid, center_i,
                     extent_i, subgroup_mask))
             {
@@ -2015,7 +2109,8 @@ static __global__ void Fused_Candidate_Leaf_Root_Child_Device_Counter_Subgroup(
             if (!Leaf_Has_Fixed_Shift_Candidate_Overlap_Subgroup_Probe(
                     cluster_i_start, leaf_cluster_starts[leaf_j],
                     leaf_cluster_ends[leaf_j], candidate_shift_id, cutoff_sq,
-                    shift_vec, cluster_valid_masks, cluster_centers,
+                    shift_vec, cluster_valid_masks, cluster_local_masks,
+                    cluster_centers,
                     cluster_extents, cluster_i, lane_i_valid, center_i,
                     extent_i, subgroup_mask))
             {
@@ -2295,7 +2390,8 @@ static __global__ void Emit_Candidate_Leaf_Root_Child_Device_Counter_Subgroup(
             if (!Leaf_Has_Fixed_Shift_Candidate_Overlap_Subgroup_Probe(
                     cluster_i_start, leaf_cluster_starts[leaf_j],
                     leaf_cluster_ends[leaf_j], candidate_shift_id, cutoff_sq,
-                    shift_vec, cluster_valid_masks, cluster_centers,
+                    shift_vec, cluster_valid_masks, cluster_local_masks,
+                    cluster_centers,
                     cluster_extents, cluster_i, lane_i_valid, center_i,
                     extent_i, subgroup_mask))
             {
@@ -2371,7 +2467,7 @@ static __global__ void Emit_Candidate_Leaf_Root_Child_Device_Counter_Subgroup(
     }
 }
 
-template <bool kDynamicWorkQueue, bool kSlimEmit, bool kCooperativePrune>
+template <bool kCooperativePrune>
 static __global__ void Dedicated_Count_Nbnxm_Payload_Fixed_Light(
     const int candidate_sci_numbers, const int cluster_size,
     const int local_atom_numbers, const float record_stream_cutoff,
@@ -2392,11 +2488,8 @@ static __global__ void Dedicated_Count_Nbnxm_Payload_Fixed_Light(
     int* cjpacked_group_counts, int* exclusion_counts,
     int* record_stream_source_rows,
     int* record_stream_source_counts_by_candidate,
-    int* dynamic_work_counter,
     const bool accumulate_record_stream_source_rows_by_candidate,
     LJ_CLUSTERED_GMXPACKED_COUNT_SOURCE_FRAGMENT* count_light_source_fragments,
-    LJ_CLUSTERED_GMXPACKED_COUNT_SOURCE_FRAGMENT_SLIM*
-        count_slim_source_fragments,
     const int count_source_fragment_capacity, int* count_source_fragment_cursor,
     int* count_source_fragment_overflow_rows)
 {
@@ -2449,21 +2542,9 @@ static __global__ void Dedicated_Count_Nbnxm_Payload_Fixed_Light(
         shared_exclusion_masks[kWarpsPerBlock][kCountSubgroups]
                               [kClusteredMaxSuperClusterClusters];
 
-    while (true)
-    {
-    if constexpr (kDynamicWorkQueue)
-    {
-        int dynamic_candidate_sci = candidate_sci_numbers;
-        if (lane_id == 0)
-        {
-            dynamic_candidate_sci = atomicAdd(dynamic_work_counter, 1);
-        }
-        candidate_sci =
-            deviceShfl(warp_mask, dynamic_candidate_sci, 0, warpSize);
-    }
     if (candidate_sci >= candidate_sci_numbers)
     {
-        break;
+        return;
     }
 
     if (lane_id == 0)
@@ -2646,7 +2727,8 @@ static __global__ void Dedicated_Count_Nbnxm_Payload_Fixed_Light(
             {
                 continue;
             }
-            if (local_mask_j != 0u && super_j < super_i)
+            if (Valid_Lanes_Are_All_Local_Probe(valid_mask_j, local_mask_j) &&
+                super_j < super_i)
             {
                 continue;
             }
@@ -2805,44 +2887,24 @@ static __global__ void Dedicated_Count_Nbnxm_Payload_Fixed_Light(
                     fragment_base + __popc(lower_source_rows);
                 if (fragment_idx < count_source_fragment_capacity)
                 {
-                    if constexpr (kSlimEmit)
-                    {
-                        LJ_CLUSTERED_GMXPACKED_COUNT_SOURCE_FRAGMENT_SLIM*
-                            fragment =
-                                count_slim_source_fragments + fragment_idx;
-                        fragment->sci_id = candidate_sci;
-                        fragment->shift_id = fixed_shift_id;
-                        fragment->supercluster_id = super_i;
-                        fragment->cluster_j = cluster_j;
-                        fragment->split_id = sublane;
-                        fragment->imask = split_local_imask;
-                        fragment->valid_mask_j = valid_mask_j;
-                        fragment->local_mask_j = local_mask_j;
-                        fragment->source_order = fragment_idx;
-                    }
-                    else
-                    {
-                        LJ_CLUSTERED_GMXPACKED_COUNT_SOURCE_FRAGMENT*
-                            fragment =
-                                count_light_source_fragments + fragment_idx;
-                        fragment->sci_id = candidate_sci;
-                        fragment->shift_id = fixed_shift_id;
-                        fragment->supercluster_id = super_i;
-                        fragment->cluster_j = cluster_j;
-                        fragment->split_id = sublane;
-                        fragment->imask = split_local_imask;
-                        fragment->valid_mask_j = valid_mask_j;
-                        fragment->local_mask_j = local_mask_j;
-                        fragment->source_order = fragment_idx;
+                    LJ_CLUSTERED_GMXPACKED_COUNT_SOURCE_FRAGMENT* fragment =
+                        count_light_source_fragments + fragment_idx;
+                    fragment->sci_id = candidate_sci;
+                    fragment->shift_id = fixed_shift_id;
+                    fragment->supercluster_id = super_i;
+                    fragment->cluster_j = cluster_j;
+                    fragment->split_id = sublane;
+                    fragment->imask = split_local_imask;
+                    fragment->valid_mask_j = valid_mask_j;
+                    fragment->local_mask_j = local_mask_j;
+                    fragment->source_order = fragment_idx;
 #pragma unroll
-                        for (int i_local = 0;
-                             i_local < kClusteredMaxSuperClusterClusters;
-                             i_local += 1)
-                        {
-                            fragment->exclusion_masks[i_local] =
-                                shared_exclusion_masks[warp_id][subgroup]
-                                                      [i_local];
-                        }
+                    for (int i_local = 0;
+                         i_local < kClusteredMaxSuperClusterClusters;
+                         i_local += 1)
+                    {
+                        fragment->exclusion_masks[i_local] =
+                            shared_exclusion_masks[warp_id][subgroup][i_local];
                     }
                 }
                 else
@@ -2887,11 +2949,6 @@ static __global__ void Dedicated_Count_Nbnxm_Payload_Fixed_Light(
         {
             atomicAdd(record_stream_source_rows, source_count);
         }
-    }
-    if constexpr (!kDynamicWorkQueue)
-    {
-        break;
-    }
     }
 }
 
@@ -3480,7 +3537,7 @@ void Launch_Clustered_Gmxpacked_Count_Fixed_Light_Dedicated(
     int* count_source_fragment_overflow_rows)
 {
 #ifndef USE_CPU
-    auto* kernel = Dedicated_Count_Nbnxm_Payload_Fixed_Light<false, false, false>;
+    auto* kernel = Dedicated_Count_Nbnxm_Payload_Fixed_Light<false>;
     Launch_Device_Kernel(
         kernel,
         candidate_sci_blocks, builder_block_size, 0, NULL,
@@ -3495,9 +3552,9 @@ void Launch_Clustered_Gmxpacked_Count_Fixed_Light_Dedicated(
         excluded_list_start, excluded_list, excluded_numbers,
         max_leaf_cluster_span, sci_shift_flags, cjpacked_group_counts,
         exclusion_counts, record_stream_source_rows,
-        record_stream_source_counts_by_candidate, NULL,
+        record_stream_source_counts_by_candidate,
         accumulate_record_stream_source_rows_by_candidate,
-        count_light_source_fragments, NULL, count_source_fragment_capacity,
+        count_light_source_fragments, count_source_fragment_capacity,
         count_source_fragment_cursor, count_source_fragment_overflow_rows);
 #else
     (void)candidate_sci_blocks;
@@ -3569,8 +3626,7 @@ void Launch_Clustered_Gmxpacked_Count_Fixed_Light_Dedicated_Cooperative(
     int* count_source_fragment_overflow_rows)
 {
 #ifndef USE_CPU
-    auto* kernel =
-        Dedicated_Count_Nbnxm_Payload_Fixed_Light<false, false, true>;
+    auto* kernel = Dedicated_Count_Nbnxm_Payload_Fixed_Light<true>;
     Launch_Device_Kernel(
         kernel,
         candidate_sci_blocks, builder_block_size, 0, NULL,
@@ -3585,9 +3641,9 @@ void Launch_Clustered_Gmxpacked_Count_Fixed_Light_Dedicated_Cooperative(
         excluded_list_start, excluded_list, excluded_numbers,
         max_leaf_cluster_span, sci_shift_flags, cjpacked_group_counts,
         exclusion_counts, record_stream_source_rows,
-        record_stream_source_counts_by_candidate, NULL,
+        record_stream_source_counts_by_candidate,
         accumulate_record_stream_source_rows_by_candidate,
-        count_light_source_fragments, NULL, count_source_fragment_capacity,
+        count_light_source_fragments, count_source_fragment_capacity,
         count_source_fragment_cursor, count_source_fragment_overflow_rows);
 #else
     (void)candidate_sci_blocks;
@@ -3633,187 +3689,7 @@ void Launch_Clustered_Gmxpacked_Count_Fixed_Light_Dedicated_Cooperative(
 #endif
 }
 
-void Launch_Clustered_Gmxpacked_Count_Fixed_Light_Dedicated_Dynamic(
-    int candidate_sci_blocks, int builder_block_size,
-    int candidate_sci_numbers, int cluster_size, int local_atom_numbers,
-    float record_stream_cutoff, LTMatrix3 cell, LTMatrix3 rcell,
-    const VECTOR* crd, const int* permutation, const int* cluster_offsets,
-    const int* leaf_cluster_starts, const int* leaf_cluster_ends,
-    const int* super_cluster_offsets, const int* cluster_to_supercluster,
-    const int* sci_supercluster_ids, const int* candidate_leaf_offsets,
-    const int* candidate_leaf_ids, int candidate_leaf_cluster_stride,
-    const int* candidate_leaf_prev_running_max_ends,
-    const unsigned int* candidate_leaf_reach_masks,
-    const unsigned int* cluster_valid_masks,
-    const unsigned int* cluster_local_masks, const VECTOR* cluster_centers,
-    const uint64_t* cluster_molecule_signatures,
-    const int* cluster_molecule_ids, const int* excluded_list_start,
-    const int* excluded_list, const int* excluded_numbers,
-    int max_leaf_cluster_span, int* sci_shift_flags,
-    int* cjpacked_group_counts, int* exclusion_counts,
-    int* record_stream_source_rows,
-    int* record_stream_source_counts_by_candidate,
-    bool accumulate_record_stream_source_rows_by_candidate,
-    LJ_CLUSTERED_GMXPACKED_COUNT_SOURCE_FRAGMENT* count_light_source_fragments,
-    int count_source_fragment_capacity, int* count_source_fragment_cursor,
-    int* count_source_fragment_overflow_rows, int* dynamic_work_counter)
-{
-#ifndef USE_CPU
-    auto* kernel = Dedicated_Count_Nbnxm_Payload_Fixed_Light<true, false, false>;
-    Launch_Device_Kernel(
-        kernel,
-        candidate_sci_blocks, builder_block_size, 0, NULL,
-        candidate_sci_numbers, cluster_size, local_atom_numbers,
-        record_stream_cutoff, cell, rcell, crd, permutation, cluster_offsets,
-        leaf_cluster_starts, leaf_cluster_ends, super_cluster_offsets,
-        cluster_to_supercluster, sci_supercluster_ids, candidate_leaf_offsets,
-        candidate_leaf_ids, candidate_leaf_cluster_stride,
-        candidate_leaf_prev_running_max_ends,
-        candidate_leaf_reach_masks, cluster_valid_masks, cluster_local_masks,
-        cluster_centers, cluster_molecule_signatures, cluster_molecule_ids,
-        excluded_list_start, excluded_list, excluded_numbers,
-        max_leaf_cluster_span, sci_shift_flags, cjpacked_group_counts,
-        exclusion_counts, record_stream_source_rows,
-        record_stream_source_counts_by_candidate, dynamic_work_counter,
-        accumulate_record_stream_source_rows_by_candidate,
-        count_light_source_fragments, NULL, count_source_fragment_capacity,
-        count_source_fragment_cursor, count_source_fragment_overflow_rows);
-#else
-    (void)candidate_sci_blocks;
-    (void)builder_block_size;
-    (void)candidate_sci_numbers;
-    (void)cluster_size;
-    (void)local_atom_numbers;
-    (void)record_stream_cutoff;
-    (void)cell;
-    (void)rcell;
-    (void)crd;
-    (void)permutation;
-    (void)cluster_offsets;
-    (void)leaf_cluster_starts;
-    (void)leaf_cluster_ends;
-    (void)super_cluster_offsets;
-    (void)cluster_to_supercluster;
-    (void)sci_supercluster_ids;
-    (void)candidate_leaf_offsets;
-    (void)candidate_leaf_ids;
-    (void)candidate_leaf_cluster_stride;
-    (void)candidate_leaf_prev_running_max_ends;
-    (void)candidate_leaf_reach_masks;
-    (void)cluster_valid_masks;
-    (void)cluster_local_masks;
-    (void)cluster_centers;
-    (void)cluster_molecule_signatures;
-    (void)cluster_molecule_ids;
-    (void)excluded_list_start;
-    (void)excluded_list;
-    (void)excluded_numbers;
-    (void)max_leaf_cluster_span;
-    (void)sci_shift_flags;
-    (void)cjpacked_group_counts;
-    (void)exclusion_counts;
-    (void)record_stream_source_rows;
-    (void)record_stream_source_counts_by_candidate;
-    (void)accumulate_record_stream_source_rows_by_candidate;
-    (void)count_light_source_fragments;
-    (void)count_source_fragment_capacity;
-    (void)count_source_fragment_cursor;
-    (void)count_source_fragment_overflow_rows;
-    (void)dynamic_work_counter;
-#endif
-}
-
-void Launch_Clustered_Gmxpacked_Count_Fixed_Light_Dedicated_Slim(
-    int candidate_sci_blocks, int builder_block_size,
-    int candidate_sci_numbers, int cluster_size, int local_atom_numbers,
-    float record_stream_cutoff, LTMatrix3 cell, LTMatrix3 rcell,
-    const VECTOR* crd, const int* permutation, const int* cluster_offsets,
-    const int* leaf_cluster_starts, const int* leaf_cluster_ends,
-    const int* super_cluster_offsets, const int* cluster_to_supercluster,
-    const int* sci_supercluster_ids, const int* candidate_leaf_offsets,
-    const int* candidate_leaf_ids, int candidate_leaf_cluster_stride,
-    const int* candidate_leaf_prev_running_max_ends,
-    const unsigned int* candidate_leaf_reach_masks,
-    const unsigned int* cluster_valid_masks,
-    const unsigned int* cluster_local_masks, const VECTOR* cluster_centers,
-    const uint64_t* cluster_molecule_signatures,
-    const int* cluster_molecule_ids, const int* excluded_list_start,
-    const int* excluded_list, const int* excluded_numbers,
-    int max_leaf_cluster_span, int* sci_shift_flags,
-    int* cjpacked_group_counts, int* exclusion_counts,
-    int* record_stream_source_rows,
-    int* record_stream_source_counts_by_candidate,
-    bool accumulate_record_stream_source_rows_by_candidate,
-    LJ_CLUSTERED_GMXPACKED_COUNT_SOURCE_FRAGMENT_SLIM*
-        count_slim_source_fragments,
-    int count_source_fragment_capacity, int* count_source_fragment_cursor,
-    int* count_source_fragment_overflow_rows)
-{
-#ifndef USE_CPU
-    auto* kernel = Dedicated_Count_Nbnxm_Payload_Fixed_Light<false, true, false>;
-    Launch_Device_Kernel(
-        kernel,
-        candidate_sci_blocks, builder_block_size, 0, NULL,
-        candidate_sci_numbers, cluster_size, local_atom_numbers,
-        record_stream_cutoff, cell, rcell, crd, permutation, cluster_offsets,
-        leaf_cluster_starts, leaf_cluster_ends, super_cluster_offsets,
-        cluster_to_supercluster, sci_supercluster_ids, candidate_leaf_offsets,
-        candidate_leaf_ids, candidate_leaf_cluster_stride,
-        candidate_leaf_prev_running_max_ends,
-        candidate_leaf_reach_masks, cluster_valid_masks, cluster_local_masks,
-        cluster_centers, cluster_molecule_signatures, cluster_molecule_ids,
-        excluded_list_start, excluded_list, excluded_numbers,
-        max_leaf_cluster_span, sci_shift_flags, cjpacked_group_counts,
-        exclusion_counts, record_stream_source_rows,
-        record_stream_source_counts_by_candidate, NULL,
-        accumulate_record_stream_source_rows_by_candidate,
-        NULL, count_slim_source_fragments, count_source_fragment_capacity,
-        count_source_fragment_cursor, count_source_fragment_overflow_rows);
-#else
-    (void)candidate_sci_blocks;
-    (void)builder_block_size;
-    (void)candidate_sci_numbers;
-    (void)cluster_size;
-    (void)local_atom_numbers;
-    (void)record_stream_cutoff;
-    (void)cell;
-    (void)rcell;
-    (void)crd;
-    (void)permutation;
-    (void)cluster_offsets;
-    (void)leaf_cluster_starts;
-    (void)leaf_cluster_ends;
-    (void)super_cluster_offsets;
-    (void)cluster_to_supercluster;
-    (void)sci_supercluster_ids;
-    (void)candidate_leaf_offsets;
-    (void)candidate_leaf_ids;
-    (void)candidate_leaf_cluster_stride;
-    (void)candidate_leaf_prev_running_max_ends;
-    (void)candidate_leaf_reach_masks;
-    (void)cluster_valid_masks;
-    (void)cluster_local_masks;
-    (void)cluster_centers;
-    (void)cluster_molecule_signatures;
-    (void)cluster_molecule_ids;
-    (void)excluded_list_start;
-    (void)excluded_list;
-    (void)excluded_numbers;
-    (void)max_leaf_cluster_span;
-    (void)sci_shift_flags;
-    (void)cjpacked_group_counts;
-    (void)exclusion_counts;
-    (void)record_stream_source_rows;
-    (void)record_stream_source_counts_by_candidate;
-    (void)accumulate_record_stream_source_rows_by_candidate;
-    (void)count_slim_source_fragments;
-    (void)count_source_fragment_capacity;
-    (void)count_source_fragment_cursor;
-    (void)count_source_fragment_overflow_rows;
-#endif
-}
-
-void Launch_Clustered_Gmxpacked_Record_Stream_Source_Materialize_From_Gmxpacked(
+  void Launch_Clustered_Gmxpacked_Record_Stream_Source_Materialize_From_Gmxpacked(
     int sci_numbers, int builder_block_size,
     const LJ_CLUSTERED_GMXPACKED_SCI* gmxpacked_sci,
     const LJ_CLUSTERED_GMXPACKED_CJ* gmxpacked_cjpacked,

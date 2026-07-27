@@ -28,6 +28,7 @@ if(NOT TARGET sponge_clustered_lj_count_experiments)
 endif()
 
 set(SOURCES ${PROJECT_ROOT_DIR}/tools/nbnxm_microbench/nbnxm_microbench.cu
+            ${PROJECT_ROOT_DIR}/tools/nbnxm_microbench/canonical_pair_oracle.cpp
             ${PROJECT_ROOT_DIR}/tools/nbnxm_microbench/gromacs_forceonly_replay.cu
             $<TARGET_OBJECTS:sponge_clustered_lj_count_experiments>)
 set(TARGET_LINKER_LANGUAGE "CXX")

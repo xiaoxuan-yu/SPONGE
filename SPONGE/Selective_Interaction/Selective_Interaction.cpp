@@ -66,6 +66,16 @@ bool SELECTIVE_INTERACTION::Has_Direct_LJ_Coulomb() const
            (sits.is_initialized && sits.selectively_applied);
 }
 
+bool SELECTIVE_INTERACTION::Has_SITS_Direct_LJ_Coulomb() const
+{
+    return sits.is_initialized && sits.selectively_applied;
+}
+
+bool SELECTIVE_INTERACTION::Has_REST2_Direct_LJ_Coulomb() const
+{
+    return rest2.is_initialized;
+}
+
 bool SELECTIVE_INTERACTION::Uses_SITS_Listed_Forces() const
 {
     return sits.is_initialized && sits.selectively_applied;
@@ -111,6 +121,31 @@ void SELECTIVE_INTERACTION::LJ_Direct_CF_Force_With_Atom_Energy_And_Virial(
             need_energy, atom_energy_ww, need_pressure, atom_virial_ww,
             elect_atom_ene);
     }
+}
+
+bool SELECTIVE_INTERACTION::LJ_Direct_CF_Force_Clustered(
+    const int atom_numbers, const int local_atom_numbers,
+    const int solvent_numbers, const int ghost_numbers, const VECTOR* crd,
+    const float* charge, LENNARD_JONES_INFORMATION* lj_info, VECTOR* md_frc,
+    const LTMatrix3 cell, const LTMatrix3 rcell, const float cutoff,
+    const float pme_beta, const int need_energy, float* atom_energy_ww,
+    const int need_pressure, LTMatrix3* atom_virial_ww,
+    float* elect_atom_ene, const char** failure_reason)
+{
+    if (!Has_SITS_Direct_LJ_Coulomb() || rest2.is_initialized)
+    {
+        if (failure_reason != NULL)
+        {
+            *failure_reason =
+                "clustered selective direct dispatch is SITS-only";
+        }
+        return false;
+    }
+    return sits.SITS_LJ_Direct_CF_Force_Clustered(
+        atom_numbers, local_atom_numbers, solvent_numbers, ghost_numbers, crd,
+        charge, lj_info, md_frc, cell, rcell, cutoff, pme_beta, need_energy,
+        atom_energy_ww, need_pressure, atom_virial_ww, elect_atom_ene,
+        failure_reason);
 }
 
 void SELECTIVE_INTERACTION::

@@ -3,6 +3,7 @@ mode = "nve"
 step_limit = 1
 dt = 0.001
 cutoff = 8.0
+skin = 10.0
 constrain_mode = "SETTLE"
 gromacs_top = "water_2x2x1.top"
 gromacs_gro = "water_npt_eq_2x2x1.gro"
@@ -24,3 +25,4 @@ print_detail = true
 
 [LJ]
 direct_kernel = "clustered"
+clustered_rebuild_skin = 10.0

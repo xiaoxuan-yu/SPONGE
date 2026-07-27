@@ -23,6 +23,8 @@ struct SELECTIVE_INTERACTION
     bool Is_Probe_Safe() const;
     bool Is_Selectively_Applied() const;
     bool Has_Direct_LJ_Coulomb() const;
+    bool Has_SITS_Direct_LJ_Coulomb() const;
+    bool Has_REST2_Direct_LJ_Coulomb() const;
     bool Uses_SITS_Listed_Forces() const;
 
     VECTOR* Select_Force();
@@ -37,6 +39,16 @@ struct SELECTIVE_INTERACTION
         const float cutoff, const float pme_beta, const int need_energy,
         float* atom_energy_ww, const int need_pressure,
         LTMatrix3* atom_virial_ww, float* elect_atom_ene);
+
+    bool LJ_Direct_CF_Force_Clustered(
+        const int atom_numbers, const int local_atom_numbers,
+        const int solvent_numbers, const int ghost_numbers, const VECTOR* crd,
+        const float* charge, LENNARD_JONES_INFORMATION* lj_info,
+        VECTOR* md_frc, const LTMatrix3 cell, const LTMatrix3 rcell,
+        const float cutoff, const float pme_beta, const int need_energy,
+        float* atom_energy_ww, const int need_pressure,
+        LTMatrix3* atom_virial_ww, float* elect_atom_ene,
+        const char** failure_reason);
 
     void LJ_Soft_Core_Direct_CF_Force_With_Atom_Energy_And_Virial(
         const int atom_numbers, const int local_atom_numbers,

@@ -123,6 +123,787 @@ static __global__ void Selective_Lennard_Jones_And_Direct_Coulomb_Device(
     }
 }
 
+static __host__ __device__ __forceinline__ VECTOR_LJ
+SITS_Make_Packed_LJ_Atom(const float4 xq, const int lj_type)
+{
+    VECTOR_LJ atom = {};
+    atom.crd = {xq.x, xq.y, xq.z};
+    atom.LJ_type = lj_type;
+    atom.charge = xq.w;
+    return atom;
+}
+
+struct SITS_CLUSTERED_PAIR_FORCE
+{
+    VECTOR force_i;
+    bool owner_is_i;
+    bool selective_owner;
+    float selective_factor;
+};
+
+template <bool full_output, bool store_j_force_direct,
+          bool correction_only = false>
+#ifdef USE_CPU
+static __host__ __forceinline__ SITS_CLUSTERED_PAIR_FORCE
+#else
+static __device__ __forceinline__ SITS_CLUSTERED_PAIR_FORCE
+#endif
+SITS_Store_Clustered_Pair(
+    const int atom_i, const int atom_j, const int global_i,
+    const int global_j, const bool j_is_local, const int selective_atom_end,
+    const VECTOR_LJ r1, const VECTOR_LJ r2, const VECTOR dr,
+    const float2 lj_ab, const float dr_abs, const float pme_beta,
+    const int* atom_sys_mark, const float pwwp_factor, VECTOR* frc,
+    VECTOR* frc_enhancing, float* atom_energy,
+    float* atom_energy_enhancing, LTMatrix3* atom_virial,
+    LTMatrix3* atom_virial_enhancing, float* atom_direct_cf_energy,
+    float* atom_ene_lj, const bool store_energy, const bool store_virial)
+{
+    const bool owner_is_i = !j_is_local || global_i < global_j;
+    const int owner = owner_is_i ? atom_i : atom_j;
+    const float owner_force_sign = owner_is_i ? 1.0f : -1.0f;
+    const float ij_factor = j_is_local ? 1.0f : 0.5f;
+    const bool selective_owner = owner < selective_atom_end;
+    float selective_factor = 0.0f;
+    if (selective_owner)
+    {
+        const int mark_sum =
+            atom_sys_mark[atom_i] + atom_sys_mark[atom_j];
+        selective_factor =
+            mark_sum == 0 ? 1.0f : (mark_sum == 1 ? pwwp_factor : 0.0f);
+    }
+
+    float force_abs = Get_LJ_Force(r1, r2, dr_abs, lj_ab.x, lj_ab.y);
+    force_abs -= Get_Direct_Coulomb_Force(r1, r2, dr_abs, pme_beta);
+    const VECTOR force_i = force_abs * dr;
+
+    if constexpr (!correction_only)
+    {
+        atomicAdd(frc + atom_i, force_i);
+        if (j_is_local && store_j_force_direct)
+        {
+            atomicAdd(frc + atom_j, -force_i);
+        }
+    }
+    if (selective_owner)
+    {
+        if constexpr (store_j_force_direct)
+        {
+            atomicAdd(frc_enhancing + owner,
+                      owner_force_sign * selective_factor * force_i);
+        }
+        else if (owner_is_i)
+        {
+            atomicAdd(frc_enhancing + owner,
+                      selective_factor * force_i);
+        }
+    }
+
+    if constexpr (full_output)
+    {
+        const float energy_lj =
+            ij_factor * Get_LJ_Energy(r1, r2, dr_abs, lj_ab.x, lj_ab.y);
+        const float energy_coulomb =
+            ij_factor *
+            Get_Direct_Coulomb_Energy(r1, r2, dr_abs, pme_beta);
+        if (store_energy)
+        {
+            if constexpr (!correction_only)
+            {
+                atomicAdd(atom_energy + owner,
+                          energy_lj +
+                              (selective_owner ? 0.0f : energy_coulomb));
+                atomicAdd(atom_direct_cf_energy + owner, energy_coulomb);
+                atomicAdd(atom_ene_lj + owner, energy_lj);
+            }
+            else if (selective_owner)
+            {
+                atomicAdd(atom_energy + owner, -energy_coulomb);
+            }
+            if (selective_owner)
+            {
+                atomicAdd(atom_energy_enhancing + owner,
+                          selective_factor *
+                              (energy_lj + energy_coulomb));
+            }
+        }
+        if (store_virial)
+        {
+            const LTMatrix3 virial0 =
+                Get_Virial_From_Force_Dis(force_i, dr);
+            if constexpr (!correction_only)
+            {
+                if (selective_owner)
+                {
+                    atomicAdd(atom_virial + owner,
+                              ij_factor * selective_factor * virial0);
+                }
+                else
+                {
+                    atomicAdd(atom_virial + owner, -ij_factor * virial0);
+                }
+            }
+            else if (selective_owner)
+            {
+                atomicAdd(atom_virial + owner,
+                          ij_factor * (selective_factor + 1.0f) *
+                              virial0);
+            }
+            if (selective_owner)
+            {
+                atomicAdd(atom_virial_enhancing + owner,
+                          ij_factor * selective_factor *
+                              selective_factor * virial0);
+            }
+        }
+    }
+    return SITS_CLUSTERED_PAIR_FORCE{
+        force_i, owner_is_i, selective_owner, selective_factor};
+}
+
+#ifdef USE_GPU
+static __device__ __forceinline__ float
+SITS_Reduce_Subgroup_Force_To_Component(float x, float y, float z,
+                                        const int component_lane)
+{
+#ifdef USE_CUDA
+    const unsigned int active_mask = __activemask();
+#endif
+    for (int delta = 4; delta >= 1; delta >>= 1)
+    {
+#ifdef USE_CUDA
+        x += __shfl_down_sync(active_mask, x, delta, 8);
+        y += __shfl_down_sync(active_mask, y, delta, 8);
+        z += __shfl_down_sync(active_mask, z, delta, 8);
+#else
+        x += __shfl_down(x, delta, 8);
+        y += __shfl_down(y, delta, 8);
+        z += __shfl_down(z, delta, 8);
+#endif
+    }
+#ifdef USE_CUDA
+    x = __shfl_sync(active_mask, x, 0, 8);
+    y = __shfl_sync(active_mask, y, 0, 8);
+    z = __shfl_sync(active_mask, z, 0, 8);
+#else
+    x = __shfl(x, 0, 8);
+    y = __shfl(y, 0, 8);
+    z = __shfl(z, 0, 8);
+#endif
+    return component_lane == 0 ? x : (component_lane == 1 ? y : z);
+}
+
+static __device__ __forceinline__ void SITS_Atomic_Add_Force_Component(
+    VECTOR* frc, const int atom_index, const int component,
+    const float value)
+{
+    float* force_component = reinterpret_cast<float*>(frc + atom_index);
+    atomicAdd(force_component + component, value);
+}
+
+static __device__ __forceinline__ bool
+SITS_Prune_Gmxpacked_Record_For_Selection(
+    const CLUSTERED_GMXPACKED_CJ source,
+    const CLUSTERED_GMXPACKED_SCI sci_entry, const int cluster_numbers,
+    const int selective_atom_end, const int* cluster_offsets,
+    const int* super_cluster_offsets, const int* sorted_atom_ids,
+    CLUSTERED_GMXPACKED_CJ* compact)
+{
+    *compact = source;
+    const int cluster_i_begin =
+        super_cluster_offsets[sci_entry.supercluster_id];
+    bool keep_record = false;
+    for (int split = 0; split < kClusteredWarpSplitCount; split += 1)
+    {
+        const unsigned int source_imask = source.split[split].imask;
+        unsigned int compact_imask = 0u;
+        for (int jm = 0; jm < kClusteredJGroupSize; jm += 1)
+        {
+            const int cluster_j = source.cj[jm];
+            bool selected_j = false;
+            if (cluster_j >= 0 && cluster_j < cluster_numbers)
+            {
+                const int j_lane_begin =
+                    split * kClusteredSplitJClusterSize;
+                const int j_lane_end =
+                    j_lane_begin + kClusteredSplitJClusterSize;
+                for (int j_lane = j_lane_begin;
+                     j_lane < j_lane_end; j_lane += 1)
+                {
+                    const int atom_j = sorted_atom_ids[
+                        cluster_offsets[cluster_j] + j_lane];
+                    selected_j = selected_j ||
+                                 (atom_j >= 0 &&
+                                  atom_j < selective_atom_end);
+                }
+            }
+            for (int i_local = 0;
+                 i_local < kClusteredSuperClusterClusters; i_local += 1)
+            {
+                const unsigned int packed_bit =
+                    1u << (jm * kClusteredSuperClusterClusters + i_local);
+                if ((source_imask & packed_bit) == 0u)
+                {
+                    continue;
+                }
+                const int cluster_i = cluster_i_begin + i_local;
+                bool selected_i = false;
+                if (cluster_i >= 0 && cluster_i < cluster_numbers)
+                {
+                    for (int i_lane = 0;
+                         i_lane < kClusteredClusterSize; i_lane += 1)
+                    {
+                        const int atom_i = sorted_atom_ids[
+                            cluster_offsets[cluster_i] + i_lane];
+                        selected_i = selected_i ||
+                                     (atom_i >= 0 &&
+                                      atom_i < selective_atom_end);
+                    }
+                }
+                if (selected_i || selected_j)
+                {
+                    compact_imask |= packed_bit;
+                }
+            }
+        }
+        compact->split[split].imask = compact_imask;
+        keep_record = keep_record || compact_imask != 0u;
+    }
+    return keep_record;
+}
+
+static __global__ void SITS_Build_Sparse_Gmxpacked_View_Device(
+    const int source_sci_numbers, const int cluster_numbers,
+    const int selective_atom_end, const int* cluster_offsets,
+    const int* super_cluster_offsets, const int* sorted_atom_ids,
+    const CLUSTERED_GMXPACKED_SCI* source_sci,
+    const CLUSTERED_GMXPACKED_CJ* source_cjpacked,
+    const uint64_t* source_pair_shift_bits,
+    CLUSTERED_GMXPACKED_SCI* compact_sci,
+    CLUSTERED_GMXPACKED_CJ* compact_cjpacked,
+    uint64_t* compact_pair_shift_bits, int* compact_counts)
+{
+    const int source_sci_index = static_cast<int>(blockIdx.x);
+    const int lane = static_cast<int>(threadIdx.x);
+    if (source_sci_index >= source_sci_numbers)
+    {
+        return;
+    }
+    __shared__ int kept_records;
+    __shared__ int compact_sci_index;
+    __shared__ int compact_cj_begin;
+    __shared__ int compact_write_cursor;
+    if (lane == 0)
+    {
+        kept_records = 0;
+        compact_sci_index = -1;
+        compact_cj_begin = 0;
+        compact_write_cursor = 0;
+    }
+    __syncthreads();
+
+    const CLUSTERED_GMXPACKED_SCI source_sci_entry =
+        source_sci[source_sci_index];
+    for (int packed_index = source_sci_entry.cjpacked_begin + lane;
+         packed_index < source_sci_entry.cjpacked_end;
+         packed_index += static_cast<int>(blockDim.x))
+    {
+        CLUSTERED_GMXPACKED_CJ pruned = {};
+        if (SITS_Prune_Gmxpacked_Record_For_Selection(
+                source_cjpacked[packed_index], source_sci_entry,
+                cluster_numbers, selective_atom_end, cluster_offsets,
+                super_cluster_offsets, sorted_atom_ids, &pruned))
+        {
+            atomicAdd(&kept_records, 1);
+        }
+    }
+    __syncthreads();
+    if (lane == 0 && kept_records > 0)
+    {
+        compact_sci_index = atomicAdd(compact_counts, 1);
+        compact_cj_begin = atomicAdd(compact_counts + 1, kept_records);
+        compact_write_cursor = compact_cj_begin;
+        CLUSTERED_GMXPACKED_SCI output_sci = source_sci_entry;
+        output_sci.cjpacked_begin = compact_cj_begin;
+        output_sci.cjpacked_end = compact_cj_begin + kept_records;
+        compact_sci[compact_sci_index] = output_sci;
+    }
+    __syncthreads();
+    if (kept_records == 0)
+    {
+        return;
+    }
+
+    for (int packed_index = source_sci_entry.cjpacked_begin + lane;
+         packed_index < source_sci_entry.cjpacked_end;
+         packed_index += static_cast<int>(blockDim.x))
+    {
+        CLUSTERED_GMXPACKED_CJ pruned = {};
+        if (!SITS_Prune_Gmxpacked_Record_For_Selection(
+                source_cjpacked[packed_index], source_sci_entry,
+                cluster_numbers, selective_atom_end, cluster_offsets,
+                super_cluster_offsets, sorted_atom_ids, &pruned))
+        {
+            continue;
+        }
+        const int compact_index = atomicAdd(&compact_write_cursor, 1);
+        compact_cjpacked[compact_index] = pruned;
+        for (int jm = 0; jm < kClusteredJGroupSize; jm += 1)
+        {
+            compact_pair_shift_bits[
+                compact_index * kClusteredJGroupSize + jm] =
+                source_pair_shift_bits[
+                    packed_index * kClusteredJGroupSize + jm];
+        }
+    }
+}
+
+#endif
+
+#ifndef USE_CPU
+template <typename T>
+static void SITS_Reserve_Sparse_Buffer(T** pointer, int* capacity,
+                                       const int required)
+{
+    if (required <= *capacity && *pointer != NULL)
+    {
+        return;
+    }
+    Free_Single_Device_Pointer(reinterpret_cast<void**>(pointer));
+    *capacity = 0;
+    if (required > 0)
+    {
+        Device_Malloc_Safely(reinterpret_cast<void**>(pointer),
+                             sizeof(T) * static_cast<size_t>(required));
+        *capacity = required;
+    }
+}
+
+static bool SITS_Ensure_Sparse_Gmxpacked_View(
+    SITS_INFORMATION* sits, const LJ_CLUSTERED_DIRECT_CACHE* cache,
+    const CLUSTERED_SPATIAL_VIEW& view, const int selective_atom_end)
+{
+    const LJ_CLUSTER_LAYOUT& layout = cache->layout;
+    if (sits->clustered_sparse_provider_incarnation ==
+            layout.provider_incarnation &&
+        sits->clustered_sparse_payload_generation ==
+            layout.gmxpacked_compact_payload_generation &&
+        sits->clustered_sparse_selective_atom_end == selective_atom_end)
+    {
+        return true;
+    }
+    sits->clustered_sparse_sci_numbers = 0;
+    sits->clustered_sparse_cjpacked_numbers = 0;
+    if (selective_atom_end <= 0 || view.gmxpacked_sci_numbers <= 0 ||
+        view.gmxpacked_cjpacked_numbers <= 0)
+    {
+        sits->clustered_sparse_provider_incarnation =
+            layout.provider_incarnation;
+        sits->clustered_sparse_payload_generation =
+            layout.gmxpacked_compact_payload_generation;
+        sits->clustered_sparse_selective_atom_end = selective_atom_end;
+        return true;
+    }
+
+    SITS_Reserve_Sparse_Buffer(
+        &sits->d_clustered_sparse_sci,
+        &sits->clustered_sparse_sci_capacity,
+        view.gmxpacked_sci_numbers);
+    SITS_Reserve_Sparse_Buffer(
+        &sits->d_clustered_sparse_cjpacked,
+        &sits->clustered_sparse_cjpacked_capacity,
+        view.gmxpacked_cjpacked_numbers);
+    SITS_Reserve_Sparse_Buffer(
+        &sits->d_clustered_sparse_pair_shift_bits,
+        &sits->clustered_sparse_pair_shift_capacity,
+        view.gmxpacked_cjpacked_numbers * kClusteredJGroupSize);
+    if (sits->d_clustered_sparse_counts == NULL)
+    {
+        Device_Malloc_Safely(
+            reinterpret_cast<void**>(&sits->d_clustered_sparse_counts),
+            sizeof(int) * 2);
+    }
+    deviceMemset(sits->d_clustered_sparse_counts, 0, sizeof(int) * 2);
+    const dim3 block_size(128u, 1u, 1u);
+    const dim3 grid_size(
+        static_cast<unsigned int>(view.gmxpacked_sci_numbers), 1u, 1u);
+    Launch_Device_Kernel(
+        SITS_Build_Sparse_Gmxpacked_View_Device, grid_size, block_size,
+        0, NULL, view.gmxpacked_sci_numbers, view.cluster_numbers,
+        selective_atom_end, view.cluster_offsets,
+        view.super_cluster_offsets, cache->d_sorted_atom_ids,
+        view.gmxpacked_sci, view.gmxpacked_cjpacked,
+        view.pair_shift_bits, sits->d_clustered_sparse_sci,
+        sits->d_clustered_sparse_cjpacked,
+        sits->d_clustered_sparse_pair_shift_bits,
+        sits->d_clustered_sparse_counts);
+    int compact_counts[2] = {0, 0};
+    deviceMemcpy(compact_counts, sits->d_clustered_sparse_counts,
+                 sizeof(compact_counts), deviceMemcpyDeviceToHost);
+    if (compact_counts[0] < 0 ||
+        compact_counts[0] > view.gmxpacked_sci_numbers ||
+        compact_counts[1] < 0 ||
+        compact_counts[1] > view.gmxpacked_cjpacked_numbers)
+    {
+        return false;
+    }
+    sits->clustered_sparse_sci_numbers = compact_counts[0];
+    sits->clustered_sparse_cjpacked_numbers = compact_counts[1];
+    sits->clustered_sparse_provider_incarnation =
+        layout.provider_incarnation;
+    sits->clustered_sparse_payload_generation =
+        layout.gmxpacked_compact_payload_generation;
+    sits->clustered_sparse_selective_atom_end = selective_atom_end;
+    return true;
+}
+#endif
+
+template <bool full_output, bool correction_only = false>
+static __global__ void SITS_Clustered_Gmxpacked_Direct_Device(
+    const int sci_numbers, const int packed_partitions,
+    const int cluster_numbers,
+    const int local_atom_numbers, const int selective_atom_end,
+    const int* cluster_offsets, const unsigned int* cluster_valid_masks,
+    const unsigned int* cluster_local_masks,
+    const int* super_cluster_offsets,
+    const CLUSTERED_GMXPACKED_SCI* sci_entries,
+    const CLUSTERED_GMXPACKED_CJ* cjpacked_entries,
+    const CLUSTERED_GMXPACKED_EXCLUSION* exclusion_entries,
+    const uint64_t* pair_shift_bits, const int* sorted_atom_ids,
+    const float4* sorted_xq, const int* sorted_lj_type,
+    const int* atom_local, const int* atom_sys_mark, const LTMatrix3 cell,
+    const float2* lj_ab_packed, const float cutoff, VECTOR* frc,
+    VECTOR* frc_enhancing, const float pme_beta, float* atom_energy,
+    float* atom_energy_enhancing, LTMatrix3* atom_virial,
+    LTMatrix3* atom_virial_enhancing, float* atom_direct_cf_energy,
+    float* atom_ene_lj, const float pwwp_factor, const bool store_energy,
+    const bool store_virial)
+{
+#ifdef USE_GPU
+    const int sci =
+        full_output
+            ? static_cast<int>(blockIdx.x)
+            : static_cast<int>(blockIdx.x) / packed_partitions;
+    const int packed_partition =
+        full_output
+            ? static_cast<int>(blockIdx.y)
+            : static_cast<int>(blockIdx.x) % packed_partitions;
+    const int i_lane = static_cast<int>(threadIdx.x);
+    const int j_lane = static_cast<int>(threadIdx.y);
+    if (sci >= sci_numbers || i_lane >= kClusteredClusterSize ||
+        j_lane >= kClusteredClusterSize)
+    {
+        return;
+    }
+    const CLUSTERED_GMXPACKED_SCI sci_entry = sci_entries[sci];
+    const int cluster_i_begin =
+        super_cluster_offsets[sci_entry.supercluster_id];
+    int cluster_i_end =
+        super_cluster_offsets[sci_entry.supercluster_id + 1];
+    if (cluster_i_end > cluster_numbers)
+    {
+        cluster_i_end = cluster_numbers;
+    }
+    const int split = j_lane / kClusteredSplitJClusterSize;
+    const int split_j_lane =
+        j_lane - split * kClusteredSplitJClusterSize;
+    const unsigned int i_lane_bit = 1u << i_lane;
+    const unsigned int j_lane_bit = 1u << j_lane;
+    const float cutoff_sq = cutoff * cutoff;
+
+    for (int packed_idx = sci_entry.cjpacked_begin + packed_partition;
+         packed_idx < sci_entry.cjpacked_end;
+         packed_idx += packed_partitions)
+    {
+        const CLUSTERED_GMXPACKED_CJ& packed =
+            cjpacked_entries[packed_idx];
+        const CLUSTERED_GMXPACKED_SPLIT& split_entry =
+            packed.split[split];
+        unsigned int pair_bits = 0xffffffffu;
+        if (split_entry.exclusion_index != 0)
+        {
+            pair_bits =
+                exclusion_entries[split_entry.exclusion_index]
+                    .pair[split_j_lane * kClusteredClusterSize + i_lane];
+        }
+        const unsigned int effective_mask =
+            split_entry.imask & pair_bits;
+        const int jm_begin =
+            full_output ? static_cast<int>(blockIdx.z) : 0;
+        const int jm_end =
+            full_output ? jm_begin + 1 : kClusteredJGroupSize;
+        for (int jm = jm_begin; jm < jm_end; jm += 1)
+        {
+            const int cluster_j = packed.cj[jm];
+            if (cluster_j < 0 ||
+                (cluster_valid_masks[cluster_j] & j_lane_bit) == 0u)
+            {
+                continue;
+            }
+            const int sorted_j = cluster_offsets[cluster_j] + j_lane;
+            const int atom_j = sorted_atom_ids[sorted_j];
+            const bool j_is_local =
+                (cluster_local_masks[cluster_j] & j_lane_bit) != 0u;
+            const VECTOR_LJ r2 = SITS_Make_Packed_LJ_Atom(
+                sorted_xq[sorted_j], sorted_lj_type[sorted_j]);
+            const uint64_t shift_bits =
+                pair_shift_bits[packed_idx * kClusteredJGroupSize + jm];
+            VECTOR force_j = {0.0f, 0.0f, 0.0f};
+            VECTOR force_j_enhancing = {0.0f, 0.0f, 0.0f};
+            for (int i_local = 0;
+                 i_local < cluster_i_end - cluster_i_begin; i_local += 1)
+            {
+                const unsigned int packed_bit =
+                    1u << (jm * kClusteredSuperClusterClusters + i_local);
+                if ((effective_mask & packed_bit) == 0u)
+                {
+                    continue;
+                }
+                const int cluster_i = cluster_i_begin + i_local;
+                if ((cluster_valid_masks[cluster_i] & i_lane_bit) == 0u ||
+                    (cluster_local_masks[cluster_i] & i_lane_bit) == 0u)
+                {
+                    continue;
+                }
+                const int sorted_i = cluster_offsets[cluster_i] + i_lane;
+                const int atom_i = sorted_atom_ids[sorted_i];
+                const int global_i = atom_local[atom_i];
+                const int global_j = atom_local[atom_j];
+                const VECTOR_LJ r1 = SITS_Make_Packed_LJ_Atom(
+                    sorted_xq[sorted_i], sorted_lj_type[sorted_i]);
+                const int shift_id =
+                    Clustered_Get_Pair_Shift_Id(shift_bits, i_local);
+                const VECTOR shift =
+                    Clustered_Shift_Vector_From_Id(shift_id, cell);
+                const VECTOR dr = (r2.crd - r1.crd) - shift;
+                const float dr2 = dr * dr;
+                if (dr2 <= 0.0f || dr2 >= cutoff_sq)
+                {
+                    continue;
+                }
+                const int pair_type =
+                    Get_LJ_Type(r1.LJ_type, r2.LJ_type);
+                const SITS_CLUSTERED_PAIR_FORCE stored =
+                    SITS_Store_Clustered_Pair<full_output, false,
+                                              correction_only>(
+                    atom_i, atom_j, global_i, global_j, j_is_local,
+                    selective_atom_end, r1, r2, dr,
+                    lj_ab_packed[pair_type], sqrtf(dr2), pme_beta,
+                    atom_sys_mark, pwwp_factor, frc, frc_enhancing,
+                    atom_energy, atom_energy_enhancing, atom_virial,
+                    atom_virial_enhancing, atom_direct_cf_energy,
+                    atom_ene_lj, store_energy, store_virial);
+                if (j_is_local)
+                {
+                    if constexpr (!correction_only)
+                    {
+                        force_j = force_j - stored.force_i;
+                    }
+                    if (stored.selective_owner && !stored.owner_is_i)
+                    {
+                        force_j_enhancing =
+                            force_j_enhancing -
+                            stored.selective_factor * stored.force_i;
+                    }
+                }
+            }
+            if (j_is_local)
+            {
+                if constexpr (!correction_only)
+                {
+                    const float reduced_force =
+                        SITS_Reduce_Subgroup_Force_To_Component(
+                            force_j.x, force_j.y, force_j.z, i_lane);
+                    if (i_lane < 3)
+                    {
+                        SITS_Atomic_Add_Force_Component(
+                            frc, atom_j, i_lane, reduced_force);
+                    }
+                }
+                if (atom_j < selective_atom_end)
+                {
+                    const float reduced_enhancing =
+                        SITS_Reduce_Subgroup_Force_To_Component(
+                            force_j_enhancing.x,
+                            force_j_enhancing.y,
+                            force_j_enhancing.z, i_lane);
+                    if (i_lane < 3)
+                    {
+                        SITS_Atomic_Add_Force_Component(
+                            frc_enhancing, atom_j, i_lane,
+                            reduced_enhancing);
+                    }
+                }
+            }
+        }
+    }
+#else
+    (void)sci_numbers;
+    (void)packed_partitions;
+    (void)cluster_numbers;
+    (void)local_atom_numbers;
+    (void)selective_atom_end;
+    (void)cluster_offsets;
+    (void)cluster_valid_masks;
+    (void)cluster_local_masks;
+    (void)super_cluster_offsets;
+    (void)sci_entries;
+    (void)cjpacked_entries;
+    (void)exclusion_entries;
+    (void)pair_shift_bits;
+    (void)sorted_atom_ids;
+    (void)sorted_xq;
+    (void)sorted_lj_type;
+    (void)atom_local;
+    (void)atom_sys_mark;
+    (void)cell;
+    (void)lj_ab_packed;
+    (void)cutoff;
+    (void)frc;
+    (void)frc_enhancing;
+    (void)pme_beta;
+    (void)atom_energy;
+    (void)atom_energy_enhancing;
+    (void)atom_virial;
+    (void)atom_virial_enhancing;
+    (void)atom_direct_cf_energy;
+    (void)atom_ene_lj;
+    (void)pwwp_factor;
+    (void)store_energy;
+    (void)store_virial;
+#endif
+}
+
+#ifdef USE_CPU
+template <bool full_output, bool correction_only = false>
+static void SITS_Clustered_Native_Direct(
+    const CLUSTERED_SPATIAL_VIEW& view, const int selective_atom_end,
+    const int* sorted_atom_ids, const float4* sorted_xq,
+    const int* sorted_lj_type, const int* atom_local,
+    const int* atom_sys_mark, const LTMatrix3 cell, const LTMatrix3 rcell,
+    const float* lj_a, const float* lj_b, const float cutoff, VECTOR* frc,
+    VECTOR* frc_enhancing, const float pme_beta, float* atom_energy,
+    float* atom_energy_enhancing, LTMatrix3* atom_virial,
+    LTMatrix3* atom_virial_enhancing, float* atom_direct_cf_energy,
+    float* atom_ene_lj, const float pwwp_factor, const bool store_energy,
+    const bool store_virial)
+{
+    const float cutoff_sq = cutoff * cutoff;
+#pragma omp parallel for schedule(dynamic)
+    for (int sci = 0; sci < view.sci_numbers; sci += 1)
+    {
+        const CLUSTERED_SCI sci_entry = view.sci[sci];
+        const int cluster_i_begin =
+            view.super_cluster_offsets[sci_entry.supercluster_id];
+        const int cluster_i_end =
+            view.super_cluster_offsets[sci_entry.supercluster_id + 1];
+        for (int cluster_i = cluster_i_begin; cluster_i < cluster_i_end;
+             cluster_i += 1)
+        {
+            const int i_local = cluster_i - cluster_i_begin;
+            for (int i_lane = 0; i_lane < view.cluster_size; i_lane += 1)
+            {
+                const unsigned int i_lane_bit = 1u << i_lane;
+                if ((view.cluster_valid_masks[cluster_i] & i_lane_bit) == 0u ||
+                    (view.cluster_local_masks[cluster_i] & i_lane_bit) == 0u)
+                {
+                    continue;
+                }
+                const int sorted_i =
+                    view.cluster_offsets[cluster_i] + i_lane;
+                const int atom_i = sorted_atom_ids[sorted_i];
+                const VECTOR_LJ r1 = SITS_Make_Packed_LJ_Atom(
+                    sorted_xq[sorted_i], sorted_lj_type[sorted_i]);
+                for (int packed_idx = sci_entry.cjpacked_begin;
+                     packed_idx < sci_entry.cjpacked_end; packed_idx += 1)
+                {
+                    const CLUSTERED_CJ_PACKED& packed =
+                        view.cjpacked[packed_idx];
+                    for (int jm = 0; jm < kClusteredJGroupSize; jm += 1)
+                    {
+                        const int cluster_j = packed.cj[jm];
+                        if (cluster_j < 0)
+                        {
+                            continue;
+                        }
+                        const unsigned int imask =
+                            Clustered_Jm_Imask(packed.imei[0], jm) |
+                            Clustered_Jm_Imask(packed.imei[1], jm);
+                        if ((imask & (1u << i_local)) == 0u)
+                        {
+                            continue;
+                        }
+                        const int exclusion_index =
+                            Clustered_First_Exclusion_Index(
+                                packed, jm, i_local);
+                        const uint64_t exclusion_mask =
+                            exclusion_index >= 0 &&
+                                    view.exclusion_mask_pool != NULL
+                                ? view.exclusion_mask_pool[exclusion_index]
+                                : 0ull;
+                        const VECTOR shift =
+                            Clustered_Shift_Vector_From_Id(
+                                sci_entry.shift_id, cell);
+                        for (int j_lane = 0; j_lane < view.cluster_size;
+                             j_lane += 1)
+                        {
+                            const unsigned int j_lane_bit = 1u << j_lane;
+                            if ((view.cluster_valid_masks[cluster_j] &
+                                 j_lane_bit) == 0u ||
+                                (exclusion_mask &
+                                 (1ull << (i_lane * view.cluster_size +
+                                           j_lane))) != 0ull)
+                            {
+                                continue;
+                            }
+                            const int sorted_j =
+                                view.cluster_offsets[cluster_j] + j_lane;
+                            const int atom_j = sorted_atom_ids[sorted_j];
+                            const bool j_is_local =
+                                (view.cluster_local_masks[cluster_j] &
+                                 j_lane_bit) != 0u;
+                            const int global_i = atom_local[atom_i];
+                            const int global_j = atom_local[atom_j];
+                            if (sci_entry.shift_id ==
+                                    kClusteredCentralShiftId &&
+                                cluster_i == cluster_j && j_is_local &&
+                                j_lane <= i_lane)
+                            {
+                                continue;
+                            }
+                            const VECTOR_LJ r2 = SITS_Make_Packed_LJ_Atom(
+                                sorted_xq[sorted_j],
+                                sorted_lj_type[sorted_j]);
+                            const VECTOR dr = (r2.crd - r1.crd) - shift;
+                            const float dr2 = dr * dr;
+                            if (dr2 <= 0.0f || dr2 >= cutoff_sq)
+                            {
+                                continue;
+                            }
+                            const int pair_type =
+                                Get_LJ_Type(r1.LJ_type, r2.LJ_type);
+                            const float2 lj_ab = {
+                                lj_a[pair_type], lj_b[pair_type]};
+                            SITS_Store_Clustered_Pair<full_output, true,
+                                                      correction_only>(
+                                atom_i, atom_j, global_i, global_j, j_is_local,
+                                selective_atom_end, r1, r2, dr,
+                                lj_ab, sqrtf(dr2), pme_beta,
+                                atom_sys_mark, pwwp_factor, frc,
+                                frc_enhancing, atom_energy,
+                                atom_energy_enhancing, atom_virial,
+                                atom_virial_enhancing,
+                                atom_direct_cf_energy, atom_ene_lj,
+                                store_energy, store_virial);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+#endif
+
 template <bool need_force, bool need_energy, bool need_virial,
           bool need_coulomb, bool need_du_dlambda>
 static __global__ void
@@ -1550,6 +2331,230 @@ void SITS_INFORMATION::SITS_LJ_Direct_CF_Force_With_Atom_Energy_And_Virial(
             pw_select.select_atom_virial_tensor[0], coulomb_atom_ene,
             pwwp_enhance_factor);
     }
+}
+
+bool SITS_INFORMATION::SITS_LJ_Direct_CF_Force_Clustered(
+    const int atom_numbers, const int local_atom_numbers,
+    const int solvent_numbers, const int ghost_numbers, const VECTOR* crd,
+    const float* charge, LENNARD_JONES_INFORMATION* lj_info, VECTOR* md_frc,
+    const LTMatrix3 cell, const LTMatrix3 rcell, const float cutoff,
+    const float pme_beta, const int need_potential, float* atom_energy,
+    const int need_pressure, LTMatrix3* atom_virial,
+    float* coulomb_atom_ene, const char** failure_reason)
+{
+    if (failure_reason != NULL)
+    {
+        *failure_reason = NULL;
+    }
+    if (!is_initialized || !selectively_applied || lj_info == NULL ||
+        !lj_info->is_initialized)
+    {
+        if (failure_reason != NULL)
+        {
+            *failure_reason =
+                "clustered SITS requires active selective regular LJ";
+        }
+        return false;
+    }
+    LJ_CLUSTERED_DIRECT_CACHE* cache = lj_info->clustered_direct_cache;
+    if (cache == NULL || !cache->Use_Clustered_Direct())
+    {
+        if (failure_reason != NULL)
+        {
+            *failure_reason =
+                "clustered SITS requires the regular-LJ clustered cache";
+        }
+        return false;
+    }
+    if (lj_info->d_LJ_AB_packed == NULL ||
+        cache->layout.d_atom_local == NULL || atom_sys_mark_local == NULL)
+    {
+        if (failure_reason != NULL)
+        {
+            *failure_reason =
+                "clustered SITS operator fields are unavailable";
+        }
+        return false;
+    }
+
+    if (!cache->Coordinate_Gather_Ready_For_Current_Step())
+    {
+#ifdef USE_CPU
+        cache->Build(crd, cell, rcell, cutoff, need_pressure != 0, false,
+                     false, false, false);
+#else
+        cache->Build(crd, cell, rcell, cutoff, need_pressure != 0, false,
+                     true, false, true);
+#endif
+        cache->Gather_Plain(
+            crd, charge, lj_info->crd_with_LJ_parameters_local,
+            cell, rcell, lj_info->d_LJ_AB_packed);
+    }
+
+    CLUSTERED_SPATIAL_VIEW view = {};
+    const char* view_failure_reason = NULL;
+    if (!Make_Clustered_Spatial_View_From_LJ_Cache(
+            cache, &view, &view_failure_reason))
+    {
+        if (failure_reason != NULL)
+        {
+            *failure_reason =
+                view_failure_reason != NULL
+                    ? view_failure_reason
+                    : "clustered SITS spatial view is unavailable";
+        }
+        return false;
+    }
+    CLUSTERED_SPATIAL_VIEW_REQUIREMENTS requirements;
+    requirements.local_atom_numbers = local_atom_numbers;
+    requirements.ghost_numbers = ghost_numbers;
+    requirements.cutoff = cutoff;
+    requirements.provider_incarnation =
+        cache->layout.provider_incarnation;
+    requirements.lease_epoch =
+        cache->layout.spatial_view_lease_epoch;
+    requirements.native_payload_generation =
+        cache->layout.native_payload_generation;
+    requirements.gmxpacked_payload_generation =
+        cache->layout.gmxpacked_compact_payload_generation;
+    requirements.geometry_generation =
+        cache->layout.geometry_generation;
+    requirements.require_all_local_atoms = true;
+#ifdef USE_CPU
+    requirements.require_backend = true;
+    requirements.backend = CLUSTERED_SPATIAL_BACKEND::CPU;
+    requirements.require_native_payload = true;
+#else
+    requirements.require_backend = true;
+#if defined(USE_CUDA)
+    requirements.backend = CLUSTERED_SPATIAL_BACKEND::CUDA;
+#else
+    requirements.backend = CLUSTERED_SPATIAL_BACKEND::HIP;
+#endif
+    requirements.require_same_producer_stream = true;
+    requirements.consumer_stream = NULL;
+    requirements.require_gmxpacked_payload = true;
+    requirements.require_pair_shift_metadata = true;
+    requirements.require_pair_shift_rcell = true;
+    requirements.pair_shift_rcell = rcell;
+#endif
+    if (!Clustered_Validate_Spatial_View(
+            view, requirements, &view_failure_reason))
+    {
+        if (failure_reason != NULL)
+        {
+            *failure_reason =
+                view_failure_reason != NULL
+                    ? view_failure_reason
+                    : "clustered SITS spatial view is invalid";
+        }
+        return false;
+    }
+    if (!cache->Coordinate_Gather_Ready_For_Current_Step())
+    {
+        if (failure_reason != NULL)
+        {
+            *failure_reason =
+                "clustered SITS coordinate gather is stale";
+        }
+        return false;
+    }
+
+    if (need_potential)
+    {
+        deviceMemset(classic_sits.d_bias, 0, sizeof(float));
+    }
+    if (atom_numbers == 0 || local_atom_numbers == 0)
+    {
+        return true;
+    }
+    const int selective_atom_end =
+        local_atom_numbers > solvent_numbers
+            ? local_atom_numbers - solvent_numbers
+            : 0;
+
+#ifdef USE_CPU
+    if (view.sci_numbers <= 0 || view.sci == NULL ||
+        view.cjpacked == NULL)
+    {
+        return true;
+    }
+    auto cpu_f = SITS_Clustered_Native_Direct<false, true>;
+    if (need_potential || need_pressure)
+    {
+        cpu_f = SITS_Clustered_Native_Direct<true, true>;
+    }
+    cpu_f(
+        view, selective_atom_end, cache->d_sorted_atom_ids,
+        cache->d_sorted_xq, cache->d_sorted_lj_type,
+        cache->layout.d_atom_local, atom_sys_mark_local, cell, rcell,
+        lj_info->d_LJ_A, lj_info->d_LJ_B, cutoff, md_frc,
+        pw_select.select_force[0], pme_beta, atom_energy,
+        pw_select.select_atom_energy[0], atom_virial,
+        pw_select.select_atom_virial_tensor[0], coulomb_atom_ene,
+        lj_info->d_LJ_energy_atom, pwwp_enhance_factor,
+        need_potential != 0, need_pressure != 0);
+#else
+    if (view.gmxpacked_sci_numbers <= 0 || view.gmxpacked_sci == NULL ||
+        view.gmxpacked_cjpacked == NULL ||
+        view.gmxpacked_exclusions == NULL || view.pair_shift_bits == NULL)
+    {
+        return true;
+    }
+    if (!SITS_Ensure_Sparse_Gmxpacked_View(
+            this, cache, view, selective_atom_end))
+    {
+        if (failure_reason != NULL)
+        {
+            *failure_reason =
+                "clustered SITS sparse gmxpacked view build failed";
+        }
+        return false;
+    }
+    if (clustered_sparse_sci_numbers <= 0 ||
+        clustered_sparse_cjpacked_numbers <= 0)
+    {
+        return true;
+    }
+    auto device_f =
+        SITS_Clustered_Gmxpacked_Direct_Device<false, true>;
+    if (need_potential || need_pressure)
+    {
+        device_f =
+            SITS_Clustered_Gmxpacked_Direct_Device<true, true>;
+    }
+    const dim3 block_size(
+        static_cast<unsigned int>(kClusteredClusterSize),
+        static_cast<unsigned int>(kClusteredClusterSize), 1u);
+    constexpr int packed_partitions = 8;
+    const dim3 grid_size =
+        (need_potential || need_pressure)
+            ? dim3(static_cast<unsigned int>(
+                       clustered_sparse_sci_numbers),
+                   static_cast<unsigned int>(packed_partitions),
+                   static_cast<unsigned int>(kClusteredJGroupSize))
+            : dim3(static_cast<unsigned int>(
+                       clustered_sparse_sci_numbers * packed_partitions),
+                   1u, 1u);
+    Launch_Device_Kernel(
+        device_f, grid_size, block_size, 0, NULL,
+        clustered_sparse_sci_numbers, packed_partitions,
+        view.cluster_numbers, local_atom_numbers, selective_atom_end,
+        view.cluster_offsets, view.cluster_valid_masks,
+        view.cluster_local_masks,
+        view.super_cluster_offsets, d_clustered_sparse_sci,
+        d_clustered_sparse_cjpacked, view.gmxpacked_exclusions,
+        d_clustered_sparse_pair_shift_bits, cache->d_sorted_atom_ids,
+        cache->d_sorted_xq, cache->d_sorted_lj_type,
+        cache->layout.d_atom_local, atom_sys_mark_local, cell,
+        lj_info->d_LJ_AB_packed, cutoff, md_frc,
+        pw_select.select_force[0], pme_beta, atom_energy,
+        pw_select.select_atom_energy[0], atom_virial,
+        pw_select.select_atom_virial_tensor[0], coulomb_atom_ene,
+        lj_info->d_LJ_energy_atom, pwwp_enhance_factor,
+        need_potential != 0, need_pressure != 0);
+#endif
+    return true;
 }
 
 void SITS_INFORMATION::

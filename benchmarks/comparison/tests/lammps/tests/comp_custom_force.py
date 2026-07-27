@@ -1,3 +1,4 @@
+import os
 import shutil
 from pathlib import Path
 
@@ -23,7 +24,14 @@ from benchmarks.comparison.tests.lammps.tests.utils import (
 
 
 def _run_sponge(sponge_dir: Path, mpi_np=None):
-    Runner.run_sponge(sponge_dir, mdin_name="mdin.spg.toml", mpi_np=mpi_np)
+    Runner.run_sponge(
+        sponge_dir,
+        mdin_name="mdin.spg.toml",
+        mpi_np=mpi_np,
+        sponge_cmd=os.environ.get("SPONGE_BIN", "SPONGE"),
+        fresh_outputs=("mdout.txt", "frc.dat"),
+        require_completion=True,
+    )
 
 
 def _validate_lammps_vs_sponge(

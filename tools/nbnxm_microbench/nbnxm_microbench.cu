@@ -15,11 +15,13 @@
 #include <numeric>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
 #include "Lennard_Jones_force/clustered_lj_count_experiments.h"
+#include "canonical_pair_oracle.h"
 #include "nbnxm_microbench_snapshot.h"
 
 int CONTROLLER::MPI_rank = 0;
@@ -43,6 +45,7 @@ using nbnxm_microbench::SpongeForceOnlySnapshot;
 using nbnxm_microbench::SpongeGmxpackedCjPOD;
 using nbnxm_microbench::SpongeGmxpackedExclusionPOD;
 using nbnxm_microbench::SpongeGmxpackedForceOnlySnapshot;
+using nbnxm_microbench::SpongeGmxpackedFullOutputSnapshot;
 using nbnxm_microbench::SpongeGmxpackedSciPOD;
 using nbnxm_microbench::SpongeGmxpackedSplitPOD;
 using nbnxm_microbench::SpongeSciPOD;
@@ -68,6 +71,18 @@ struct Vec3
     float y;
     float z;
 };
+
+struct DiffStats
+{
+    double max_abs = 0.0;
+    double max_scaled = 0.0;
+    double rms = 0.0;
+};
+
+DiffStats CompareFloatArrays(const std::vector<float>& actual,
+                             const std::vector<float>& reference);
+DiffStats CompareForceArrays(const std::vector<Float4POD>& actual,
+                             const std::vector<Float4POD>& reference);
 
 enum class SpongeGmxTransformMode
 {
@@ -148,6 +163,9 @@ struct LTMatrix3
     float a32;
     float a33;
 };
+
+DiffStats CompareVirialArrays(const std::vector<LTMatrix3>& actual,
+                              const std::vector<LTMatrix3POD>& reference);
 
 struct VectorLj
 {
@@ -5221,6 +5239,280 @@ __device__ inline void AtomicAddProductionForceComponent(ForceTarget* frc,
     atomicAdd(force_components + component, value);
 }
 
+// The default production-gmxpacked microbench path instantiates the production
+// warp-record evaluator below. These adapters preserve its helper contract
+// without linking the full Lennard_Jones_force host translation unit.
+static __host__ __device__ __forceinline__ int
+Clustered_Gmxpacked_Get_LJ_Type_MinMax(int a, int b)
+{
+    const int hi = a > b ? a : b;
+    const int lo = a > b ? b : a;
+    return (hi * (hi + 1) >> 1) + lo;
+}
+
+template <typename T>
+static __device__ __forceinline__ T Clustered_Load_ReadOnly(const T* ptr)
+{
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 350
+    return __ldg(ptr);
+#else
+    return *ptr;
+#endif
+}
+
+static __host__ __device__ __forceinline__ VECTOR
+Clustered_Shift_Vector_From_Id(int shift_id, LTMatrix3 cell)
+{
+    const Vec3 shift = ShiftVectorFromId(shift_id, cell);
+    return VECTOR(shift.x, shift.y, shift.z);
+}
+
+static __host__ __device__ __forceinline__ int
+Clustered_Get_Pair_Shift_Id(uint64_t packed_shift_bits, int i_local)
+{
+    return GetPairShiftId(packed_shift_bits, i_local);
+}
+
+template <bool enabled, int size>
+struct Clustered_Energy_Buffer
+{
+    float unused = 0.0f;
+
+    __device__ __forceinline__ float& operator[](int)
+    {
+        return unused;
+    }
+};
+
+template <int size>
+struct Clustered_Energy_Buffer<true, size>
+{
+    float values[size];
+
+    __device__ __forceinline__ void Clear()
+    {
+        for (int i = 0; i < size; ++i)
+        {
+            values[i] = 0.0f;
+        }
+    }
+
+    __device__ __forceinline__ float& operator[](int idx)
+    {
+        return values[idx];
+    }
+};
+
+template <bool total_output, bool need_energy, int size>
+struct Clustered_Full_Record_Output_Buffer;
+
+template <bool need_energy, int size>
+struct Clustered_Full_Record_Output_Buffer<false, need_energy, size>
+{
+    Clustered_Energy_Buffer<need_energy, size> energy_lj;
+    Clustered_Energy_Buffer<need_energy, size> energy_coulomb;
+    LTMatrix3 virial[size];
+
+    __device__ __forceinline__ Clustered_Full_Record_Output_Buffer(
+        bool store_energy, bool store_virial)
+    {
+        if constexpr (need_energy)
+        {
+            if (store_energy)
+            {
+                energy_lj.Clear();
+                energy_coulomb.Clear();
+            }
+        }
+        if (store_virial)
+        {
+            for (int i = 0; i < size; ++i)
+            {
+                virial[i] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+            }
+        }
+    }
+};
+
+template <bool need_energy, int size>
+struct Clustered_Full_Record_Output_Buffer<true, need_energy, size>
+{
+    float energy_lj_total;
+    float energy_coulomb_total;
+    LTMatrix3 virial_total;
+
+    __device__ __forceinline__ Clustered_Full_Record_Output_Buffer(
+        bool store_energy, bool store_virial)
+    {
+        if constexpr (need_energy)
+        {
+            if (store_energy)
+            {
+                energy_lj_total = 0.0f;
+                energy_coulomb_total = 0.0f;
+            }
+        }
+        if (store_virial)
+        {
+            virial_total = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+        }
+    }
+};
+
+static __device__ __forceinline__ unsigned int
+Clustered_Microbench_Subgroup_Mask(int lane, int subgroup_width)
+{
+    const unsigned int subgroup =
+        static_cast<unsigned int>(lane / subgroup_width);
+    const unsigned int width_mask =
+        (1u << static_cast<unsigned int>(subgroup_width)) - 1u;
+    return width_mask << (subgroup * static_cast<unsigned int>(subgroup_width));
+}
+
+static __device__ __forceinline__ float
+Reduce_Clustered_Subgroup_Vector_To_Component(float x, float y, float z,
+                                               int component_lane, int lane,
+                                               int subgroup_width)
+{
+    const unsigned int mask =
+        Clustered_Microbench_Subgroup_Mask(lane, subgroup_width);
+    for (int delta = subgroup_width >> 1; delta > 0; delta >>= 1)
+    {
+        x += __shfl_down_sync(mask, x, delta, subgroup_width);
+        y += __shfl_down_sync(mask, y, delta, subgroup_width);
+        z += __shfl_down_sync(mask, z, delta, subgroup_width);
+    }
+    const int leader = lane - lane % subgroup_width;
+    x = __shfl_sync(mask, x, leader, warpSize);
+    y = __shfl_sync(mask, y, leader, warpSize);
+    z = __shfl_sync(mask, z, leader, warpSize);
+    return component_lane == 0 ? x : (component_lane == 1 ? y : z);
+}
+
+static __device__ __forceinline__ float
+Reduce_Clustered_Warp_I_To_Component(float x, float y, float z, int i_lane,
+                                      int component_lane, int subgroup_width)
+{
+    for (int delta = warpSize >> 1; delta >= subgroup_width; delta >>= 1)
+    {
+        x += __shfl_down_sync(kFullMask, x, delta, warpSize);
+        y += __shfl_down_sync(kFullMask, y, delta, warpSize);
+        z += __shfl_down_sync(kFullMask, z, delta, warpSize);
+    }
+    x = __shfl_sync(kFullMask, x, i_lane, warpSize);
+    y = __shfl_sync(kFullMask, y, i_lane, warpSize);
+    z = __shfl_sync(kFullMask, z, i_lane, warpSize);
+    return component_lane == 0 ? x : (component_lane == 1 ? y : z);
+}
+
+static __device__ __forceinline__ void Clustered_Atomic_Add_Force_Component(
+    VECTOR* frc, int atom_index, int component, float value)
+{
+    float* force_component = reinterpret_cast<float*>(frc + atom_index);
+    atomicAdd(force_component + component, value);
+}
+
+static __device__ __forceinline__ float Reduce_Clustered_Warp_Float_Over_J(
+    float value, int subgroup_width)
+{
+    for (int delta = warpSize >> 1; delta >= subgroup_width; delta >>= 1)
+    {
+        value += __shfl_down_sync(kFullMask, value, delta, warpSize);
+    }
+    return value;
+}
+
+static __device__ __forceinline__ LTMatrix3
+Reduce_Clustered_Warp_Virial_Over_J(LTMatrix3 value, int subgroup_width)
+{
+    for (int delta = warpSize >> 1; delta >= subgroup_width; delta >>= 1)
+    {
+        value.a11 +=
+            __shfl_down_sync(kFullMask, value.a11, delta, warpSize);
+        value.a21 +=
+            __shfl_down_sync(kFullMask, value.a21, delta, warpSize);
+        value.a22 +=
+            __shfl_down_sync(kFullMask, value.a22, delta, warpSize);
+        value.a31 +=
+            __shfl_down_sync(kFullMask, value.a31, delta, warpSize);
+        value.a32 +=
+            __shfl_down_sync(kFullMask, value.a32, delta, warpSize);
+        value.a33 +=
+            __shfl_down_sync(kFullMask, value.a33, delta, warpSize);
+    }
+    return value;
+}
+
+static __device__ __forceinline__ float4 Pack_Clustered_Virial_Lo(
+    LTMatrix3 value)
+{
+    return PackVirialLo(value);
+}
+
+static __device__ __forceinline__ float2 Pack_Clustered_Virial_Hi(
+    LTMatrix3 value)
+{
+    return PackVirialHi(value);
+}
+
+static __device__ __forceinline__ LTMatrix3 Unpack_Clustered_Virial(
+    float4 lo, float2 hi)
+{
+    return UnpackVirial(lo, hi);
+}
+
+static __device__ __forceinline__ void atomicAdd(LTMatrix3* target,
+                                                  LTMatrix3 value)
+{
+    ::atomicAdd(&target->a11, value.a11);
+    ::atomicAdd(&target->a21, value.a21);
+    ::atomicAdd(&target->a22, value.a22);
+    ::atomicAdd(&target->a31, value.a31);
+    ::atomicAdd(&target->a32, value.a32);
+    ::atomicAdd(&target->a33, value.a33);
+}
+
+static __device__ __forceinline__ float atomicAdd(float* target, float value)
+{
+    return ::atomicAdd(target, value);
+}
+
+static __device__ __forceinline__ float Get_Clustered_LJ_Force_Abs(
+    float inv_r2, float inv_r6, float A, float B)
+{
+    return GetLjForceAbs(inv_r2, inv_r6, A, B);
+}
+
+static __device__ __forceinline__ float Get_Clustered_LJ_Energy(
+    float inv_r6, float A, float B)
+{
+    return GetLjEnergy(inv_r6, A, B);
+}
+
+static __device__ __forceinline__ float Get_Clustered_Direct_Coulomb_Energy(
+    float charge_product, float inv_r, float beta_dr)
+{
+    return GetDirectCoulombEnergy(charge_product, inv_r, beta_dr);
+}
+
+static __device__ __forceinline__ float
+Get_Clustered_Direct_Coulomb_Force_Abs_PME_Corr(
+    float charge_product, float inv_r, float inv_r2, float beta2_r2,
+    float beta3)
+{
+    return GetDirectCoulombForceAbsPmeCorrF(
+        charge_product, inv_r, inv_r2, beta2_r2, beta3);
+}
+
+#include "Lennard_Jones_force/clustered_lj_warp_record_kernel.cuh"
+
+static_assert(sizeof(SpongeGmxpackedSciPOD) ==
+              sizeof(LJ_CLUSTERED_GMXPACKED_SCI));
+static_assert(sizeof(SpongeGmxpackedCjPOD) ==
+              sizeof(LJ_CLUSTERED_GMXPACKED_CJ));
+static_assert(sizeof(SpongeGmxpackedExclusionPOD) ==
+              sizeof(LJ_CLUSTERED_GMXPACKED_EXCLUSION));
+
 template <typename ForceTarget>
 __device__ inline void StoreProductionForceComponent(ForceTarget* frc,
                                                      int atom,
@@ -5379,11 +5671,18 @@ template <bool need_energy, bool need_virial, bool total_output,
           bool attribution_force_all_i = false,
           bool attribution_no_cutoff_branch = false,
           bool oracle_cutoff_sidecar = false, int sci_work_parts = 1,
-          bool contiguous_sci_work = false>
+          bool contiguous_sci_work = false, bool fused_sits = false,
+          bool sits_correction_only = false>
 __global__ __launch_bounds__(kClusterSize * kSuperClusterClusters,
-                             total_output
-                                 ? ((need_energy && need_virial) ? 12 : 14)
-                                 : (need_virial ? (need_energy ? 6 : 7) : 9))
+                             use_lj_comb
+                                 ? (total_output
+                                        ? ((need_energy && need_virial) ? 12
+                                                                        : 14)
+                                        : 9)
+                                 : ((need_virial && !total_output &&
+                                     sci_work_parts > 1)
+                                        ? 10
+                                        : (total_output ? 12 : 13)))
 void SpongeProductionGmxpackedReplayKernel(
     int sci_numbers, int cluster_numbers, const int* cluster_offsets,
     const unsigned int* cluster_valid_masks,
@@ -5398,12 +5697,20 @@ void SpongeProductionGmxpackedReplayKernel(
     const float2* lj_ab_packed, float cutoff, ForceTarget* frc,
     float pme_beta, float* atom_energy, LTMatrix3* atom_virial,
     float* atom_direct_cf_energy, float* atom_lj_energy,
-    float3* shift_force)
+    float3* shift_force, bool store_energy = need_energy,
+    bool store_virial = need_virial,
+    ForceTarget* frc_enhancing = nullptr, int selective_atom_end = 0,
+    float pwwp_factor = 0.0f)
 {
+    static_assert(!sits_correction_only || fused_sits,
+                  "SITS correction-only replay requires the SITS output policy");
     static_assert(sci_work_parts > 0, "SCI work partition count must be positive");
     static_assert(sci_work_parts == 1 ||
-                      (!need_energy && !need_virial && !total_output),
-                  "SCI work partitioning is force-only");
+                      ((!need_energy && !need_virial && !total_output) ||
+                       (need_virial && !total_output &&
+                        compact_force_storage)),
+                  "SCI work partitioning requires force-only output or the "
+                  "packed-AB compact full path");
     static_assert(!contiguous_sci_work || sci_work_parts > 1,
                   "contiguous SCI work requires multiple work parts");
     static_assert(!virial_from_shift ||
@@ -5423,6 +5730,12 @@ void SpongeProductionGmxpackedReplayKernel(
     else
     {
         (void)sorted_lj_comb;
+    }
+    if constexpr (!fused_sits)
+    {
+        (void)frc_enhancing;
+        (void)selective_atom_end;
+        (void)pwwp_factor;
     }
     constexpr int max_super_cluster_atoms = kClusterSize * kSuperClusterClusters;
     constexpr int max_block_warps = 2;
@@ -5486,13 +5799,10 @@ void SpongeProductionGmxpackedReplayKernel(
     __shared__ float2 shared_total_virial_hi[max_block_warps];
     __shared__ float shared_total_energy_lj[max_block_warps];
     __shared__ float shared_total_energy_coulomb[max_block_warps];
-
-#define SPONGE_PROD_DECLARE_FCI(I) \
-    float fci_x_##I = 0.0f;        \
-    float fci_y_##I = 0.0f;        \
-    float fci_z_##I = 0.0f;
-    SPONGE_PROD_GMXPACKED_I_LIST(SPONGE_PROD_DECLARE_FCI)
-#undef SPONGE_PROD_DECLARE_FCI
+    __shared__ float4
+        shared_split_virial_lo[2][kSuperClusterClusters][kClusterSize];
+    __shared__ float2
+        shared_split_virial_hi[2][kSuperClusterClusters][kClusterSize];
 
     const int sorted_i = (cluster_i_start + j_lane) * kClusterSize + i_lane;
     float4 i_xq = sorted_xq[sorted_i];
@@ -5513,7 +5823,21 @@ void SpongeProductionGmxpackedReplayKernel(
     }
     __syncthreads();
 
-    ReplayFullOutputBuffer<total_output, need_energy, kSuperClusterClusters>
+    const auto process_packed = [&](auto energy_tag, auto virial_tag) {
+    constexpr bool compute_energy =
+        need_energy && decltype(energy_tag)::value;
+    constexpr bool compute_virial =
+        need_virial && decltype(virial_tag)::value;
+
+#define SPONGE_PROD_DECLARE_FCI(I) \
+    float fci_x_##I = 0.0f;        \
+    float fci_y_##I = 0.0f;        \
+    float fci_z_##I = 0.0f;
+    SPONGE_PROD_GMXPACKED_I_LIST(SPONGE_PROD_DECLARE_FCI)
+#undef SPONGE_PROD_DECLARE_FCI
+
+    ReplayFullOutputBuffer<total_output, compute_energy,
+                           kSuperClusterClusters>
         output_buf;
     float fshift_component = 0.0f;
 
@@ -5596,13 +5920,53 @@ void SpongeProductionGmxpackedReplayKernel(
         const float fij_x = frc_abs * dx;                                  \
         const float fij_y = frc_abs * dy;                                  \
         const float fij_z = frc_abs * dz;                                  \
-        fci_x_##I += fij_x;                                                \
-        fci_y_##I += fij_y;                                                \
-        fci_z_##I += fij_z;                                                \
-        fcj_x -= fij_x;                                                    \
-        fcj_y -= fij_y;                                                    \
-        fcj_z -= fij_z;                                                    \
-        if constexpr (need_virial && !virial_from_shift)                   \
+        if constexpr (!sits_correction_only)                               \
+        {                                                                  \
+            fci_x_##I += fij_x;                                            \
+            fci_y_##I += fij_y;                                            \
+            fci_z_##I += fij_z;                                            \
+            fcj_x -= fij_x;                                                \
+            fcj_y -= fij_y;                                                \
+            fcj_z -= fij_z;                                                \
+        }                                                                  \
+        if constexpr (fused_sits)                                          \
+        {                                                                  \
+            const int sorted_i_pair =                                      \
+                (cluster_i_start + (I)) * kClusterSize + i_lane;           \
+            const int atom_i_pair = sorted_atom_ids[sorted_i_pair];        \
+            const int atom_j_pair = sorted_atom_ids[sorted_j];             \
+            const int mark_sum =                                           \
+                (atom_i_pair < selective_atom_end ? 0 : 1) +              \
+                (atom_j_pair < selective_atom_end ? 0 : 1);               \
+            const float selective_factor =                                \
+                mark_sum == 0 ? 1.0f                                      \
+                              : (mark_sum == 1 ? pwwp_factor : 0.0f);      \
+            if (atom_i_pair >= 0 && atom_i_pair < selective_atom_end)      \
+            {                                                              \
+                AtomicAddProductionForceComponent(                         \
+                    frc_enhancing, atom_i_pair, 0,                         \
+                    selective_factor * fij_x);                             \
+                AtomicAddProductionForceComponent(                         \
+                    frc_enhancing, atom_i_pair, 1,                         \
+                    selective_factor * fij_y);                             \
+                AtomicAddProductionForceComponent(                         \
+                    frc_enhancing, atom_i_pair, 2,                         \
+                    selective_factor * fij_z);                             \
+            }                                                              \
+            if (atom_j_pair >= 0 && atom_j_pair < selective_atom_end)      \
+            {                                                              \
+                AtomicAddProductionForceComponent(                         \
+                    frc_enhancing, atom_j_pair, 0,                        \
+                    -selective_factor * fij_x);                            \
+                AtomicAddProductionForceComponent(                         \
+                    frc_enhancing, atom_j_pair, 1,                        \
+                    -selective_factor * fij_y);                            \
+                AtomicAddProductionForceComponent(                         \
+                    frc_enhancing, atom_j_pair, 2,                        \
+                    -selective_factor * fij_z);                            \
+            }                                                              \
+        }                                                                  \
+        if constexpr (compute_virial && !virial_from_shift)                \
         {                                                                  \
             if constexpr (total_output)                                    \
             {                                                              \
@@ -5623,7 +5987,7 @@ void SpongeProductionGmxpackedReplayKernel(
                 output_buf.virial[I].a33 -= fij_z * dz;                    \
             }                                                              \
         }                                                                  \
-        if constexpr (need_energy)                                         \
+        if constexpr (compute_energy)                                      \
         {                                                                  \
             const float pair_lj_energy = GetLjEnergy(inv_r6, c12, c6);    \
             const float pair_coulomb_energy =                              \
@@ -5759,23 +6123,27 @@ void SpongeProductionGmxpackedReplayKernel(
                 {                                                          \
                     SPONGE_PROD_GMXPACKED_I_LIST(SPONGE_PROD_COMPUTE_I)   \
                 }                                                          \
-                const float fcj_component =                                \
-                    ReduceSubgroupVecToComponent8(fcj_x, fcj_y, fcj_z,     \
-                                                   i_lane, lane);          \
-                if (i_lane < 3)                                            \
+                if constexpr (!sits_correction_only)                       \
                 {                                                          \
-                    const int force_index = compact_force_storage          \
-                                                ? sorted_j                 \
-                                                : sorted_atom_ids[sorted_j];\
-                    if constexpr (skip_force_writeback)                    \
+                    const float fcj_component =                            \
+                        ReduceSubgroupVecToComponent8(                      \
+                            fcj_x, fcj_y, fcj_z, i_lane, lane);             \
+                    if (i_lane < 3)                                        \
                     {                                                      \
-                        StoreProductionForceComponent(                     \
-                            frc, force_index, i_lane, fcj_component);      \
-                    }                                                      \
-                    else                                                   \
-                    {                                                      \
-                        AtomicAddProductionForceComponent(                 \
-                            frc, force_index, i_lane, fcj_component);      \
+                        const int force_index =                            \
+                            compact_force_storage                          \
+                                ? sorted_j                                 \
+                                : sorted_atom_ids[sorted_j];                \
+                        if constexpr (skip_force_writeback)                \
+                        {                                                  \
+                            StoreProductionForceComponent(                 \
+                                frc, force_index, i_lane, fcj_component);   \
+                        }                                                  \
+                        else                                               \
+                        {                                                  \
+                            AtomicAddProductionForceComponent(             \
+                                frc, force_index, i_lane, fcj_component);   \
+                        }                                                  \
                     }                                                      \
                 }                                                          \
             }                                                              \
@@ -5814,7 +6182,7 @@ void SpongeProductionGmxpackedReplayKernel(
                 AtomicAddProductionForceComponent(                         \
                     frc, force_index, split_j_lane, reduced_component);    \
             }                                                              \
-            if constexpr (need_virial && virial_from_shift)                \
+            if constexpr (compute_virial && virial_from_shift)             \
             {                                                              \
                 if (sci_entry.shift_id != kCentralShiftId)                 \
                 {                                                          \
@@ -5822,60 +6190,108 @@ void SpongeProductionGmxpackedReplayKernel(
                 }                                                          \
             }                                                              \
         }                                                                  \
-        if constexpr (need_virial && !total_output)                        \
+        if constexpr (compute_virial && !total_output)                     \
         {                                                                  \
-            LTMatrix3 reduced_virial = output_buf.virial[I];               \
-            reduced_virial =                                               \
-                ReduceWarpVirialOverJ(reduced_virial, kClusterSize);       \
-            if (lane < kClusterSize)                                       \
+            if (store_virial)                                              \
             {                                                              \
-                const int sorted_i_local =                                 \
-                    (cluster_i_start + (I)) * kClusterSize + i_lane;       \
-                const int atom_i = sorted_atom_ids[sorted_i_local];        \
-                if (atom_i >= 0)                                           \
+                LTMatrix3 reduced_virial = output_buf.virial[I];           \
+                reduced_virial =                                           \
+                    ReduceWarpVirialOverJ(reduced_virial, kClusterSize);   \
+                if constexpr (sci_work_parts == 2)                         \
                 {                                                          \
-                    AtomicAddVirial(atom_virial + atom_i, reduced_virial); \
+                    if (lane < kClusterSize)                               \
+                    {                                                      \
+                        shared_split_virial_lo[split][I][i_lane] =         \
+                            PackVirialLo(reduced_virial);                   \
+                        shared_split_virial_hi[split][I][i_lane] =         \
+                            PackVirialHi(reduced_virial);                   \
+                    }                                                      \
+                }                                                          \
+                else if (lane < kClusterSize)                              \
+                {                                                          \
+                    const int sorted_i_local =                             \
+                        (cluster_i_start + (I)) * kClusterSize + i_lane;   \
+                    const int atom_i = sorted_atom_ids[sorted_i_local];    \
+                    if (atom_i >= 0)                                       \
+                    {                                                      \
+                        AtomicAddVirial(atom_virial + atom_i,              \
+                                       reduced_virial);                    \
+                    }                                                      \
                 }                                                          \
             }                                                              \
         }                                                                  \
-        if constexpr (need_energy && !total_output)                        \
+        if constexpr (compute_energy && !total_output)                     \
         {                                                                  \
-            float reduced_lj = output_buf.energy_lj[I];                    \
-            float reduced_coulomb = output_buf.energy_coulomb[I];          \
-            reduced_lj = ReduceWarpFloatOverJ(reduced_lj, kClusterSize);   \
-            reduced_coulomb =                                              \
-                ReduceWarpFloatOverJ(reduced_coulomb, kClusterSize);       \
-            if (lane < kClusterSize)                                       \
+            if (store_energy)                                              \
             {                                                              \
-                const int sorted_i_local =                                 \
-                    (cluster_i_start + (I)) * kClusterSize + i_lane;       \
-                const int atom_i = sorted_atom_ids[sorted_i_local];        \
-                if (atom_i >= 0)                                           \
+                float reduced_lj = output_buf.energy_lj[I];                \
+                float reduced_coulomb = output_buf.energy_coulomb[I];      \
+                reduced_lj =                                               \
+                    ReduceWarpFloatOverJ(reduced_lj, kClusterSize);        \
+                reduced_coulomb =                                          \
+                    ReduceWarpFloatOverJ(reduced_coulomb, kClusterSize);   \
+                if (lane < kClusterSize)                                   \
                 {                                                          \
-                    atomicAdd(atom_energy + atom_i,                        \
-                              reduced_lj + reduced_coulomb);              \
-                    atomicAdd(atom_lj_energy + atom_i, reduced_lj);        \
-                    atomicAdd(atom_direct_cf_energy + atom_i,              \
-                              reduced_coulomb);                            \
+                    const int sorted_i_local =                             \
+                        (cluster_i_start + (I)) * kClusterSize + i_lane;   \
+                    const int atom_i = sorted_atom_ids[sorted_i_local];    \
+                    if (atom_i >= 0)                                       \
+                    {                                                      \
+                        atomicAdd(atom_energy + atom_i,                    \
+                                  reduced_lj + reduced_coulomb);          \
+                        atomicAdd(atom_lj_energy + atom_i, reduced_lj);    \
+                        atomicAdd(atom_direct_cf_energy + atom_i,          \
+                                  reduced_coulomb);                        \
+                    }                                                      \
                 }                                                          \
             }                                                              \
         }                                                                  \
     }
-    SPONGE_PROD_GMXPACKED_I_LIST(SPONGE_PROD_REDUCE_I)
+    if constexpr (!sits_correction_only)
+    {
+        SPONGE_PROD_GMXPACKED_I_LIST(SPONGE_PROD_REDUCE_I)
+    }
 #undef SPONGE_PROD_REDUCE_I
+
+    if constexpr (compute_virial && !total_output && sci_work_parts == 2)
+    {
+        if (store_virial)
+        {
+            __syncthreads();
+#define SPONGE_PROD_WRITE_MERGED_VIRIAL(I)                                \
+    if (split == 0 && lane < kClusterSize)                                 \
+    {                                                                       \
+        const int sorted_i_local =                                          \
+            (cluster_i_start + (I)) * kClusterSize + i_lane;                \
+        const int atom_i = sorted_atom_ids[sorted_i_local];                 \
+        if (atom_i >= 0)                                                    \
+        {                                                                   \
+            const LTMatrix3 merged_virial =                                 \
+                UnpackVirial(shared_split_virial_lo[0][I][i_lane],          \
+                             shared_split_virial_hi[0][I][i_lane]) +         \
+                UnpackVirial(shared_split_virial_lo[1][I][i_lane],          \
+                             shared_split_virial_hi[1][I][i_lane]);          \
+            AtomicAddVirial(atom_virial + atom_i, merged_virial);           \
+        }                                                                   \
+    }
+            SPONGE_PROD_GMXPACKED_I_LIST(
+                SPONGE_PROD_WRITE_MERGED_VIRIAL)
+#undef SPONGE_PROD_WRITE_MERGED_VIRIAL
+        }
+    }
 
     if constexpr (total_output)
     {
         LTMatrix3 reduced_total_virial = {0.0f, 0.0f, 0.0f,
                                           0.0f, 0.0f, 0.0f};
-        if constexpr (need_virial && !virial_from_shift)
+        if constexpr (compute_virial && !virial_from_shift)
         {
             reduced_total_virial =
                 ReduceWarpVirialAll(output_buf.virial_total);
         }
         float reduced_total_energy_lj = 0.0f;
         float reduced_total_energy_coulomb = 0.0f;
-        if constexpr (need_energy)
+        if constexpr (compute_energy)
         {
             reduced_total_energy_lj =
                 ReduceWarpFloatAll(output_buf.energy_lj_total);
@@ -5884,14 +6300,14 @@ void SpongeProductionGmxpackedReplayKernel(
         }
         if (lane == 0)
         {
-            if constexpr (need_virial && !virial_from_shift)
+            if constexpr (compute_virial && !virial_from_shift)
             {
                 shared_total_virial_lo[split] =
                     PackVirialLo(reduced_total_virial);
                 shared_total_virial_hi[split] =
                     PackVirialHi(reduced_total_virial);
             }
-            if constexpr (need_energy)
+            if constexpr (compute_energy)
             {
                 shared_total_energy_lj[split] = reduced_total_energy_lj;
                 shared_total_energy_coulomb[split] =
@@ -5901,7 +6317,7 @@ void SpongeProductionGmxpackedReplayKernel(
         __syncthreads();
         if (tid == 0)
         {
-            if constexpr (need_virial && !virial_from_shift)
+            if constexpr (compute_virial && !virial_from_shift)
             {
                 LTMatrix3 block_total_virial = UnpackVirial(
                     shared_total_virial_lo[0], shared_total_virial_hi[0]);
@@ -5914,7 +6330,7 @@ void SpongeProductionGmxpackedReplayKernel(
                 }
                 AtomicAddVirial(atom_virial, block_total_virial);
             }
-            if constexpr (need_energy)
+            if constexpr (compute_energy)
             {
                 float block_total_energy_lj = 0.0f;
                 float block_total_energy_coulomb = 0.0f;
@@ -5931,7 +6347,7 @@ void SpongeProductionGmxpackedReplayKernel(
             }
         }
     }
-    if constexpr (need_virial && virial_from_shift)
+    if constexpr (compute_virial && virial_from_shift)
     {
         if (sci_entry.shift_id != kCentralShiftId && split_j_lane < 3)
         {
@@ -5943,6 +6359,20 @@ void SpongeProductionGmxpackedReplayKernel(
                           reduced_fshift);
             }
         }
+    }
+    };
+
+    if constexpr (!need_energy && !need_virial)
+    {
+        process_packed(std::false_type{}, std::false_type{});
+    }
+    else if (store_energy)
+    {
+        process_packed(std::true_type{}, std::true_type{});
+    }
+    else
+    {
+        process_packed(std::false_type{}, std::true_type{});
     }
 
 #undef SPONGE_PROD_GMXPACKED_JM_LIST
@@ -6283,7 +6713,10 @@ struct Arguments
     int warmup = 50;
     int iters = 200;
     int refreshBlockSize = 128;
+    int sitsAtomEnd = -1;
+    float sitsPwwpFactor = 1.0f;
     bool analyze = false;
+    bool pairOracle = false;
     bool computeEnergy = false;
     bool computeVirial = false;
 };
@@ -6291,6 +6724,11 @@ struct Arguments
 enum class ProductionGmxpackedReplayMode
 {
     split,
+    fullOutputSciSplit2,
+    fullOutputSciSplit4,
+    fullOutputSciSplit8,
+    fusedSitsForceOnly,
+    sparseSitsForceOnly,
     compactForce,
     sortedForce,
     sortedForceSciSplit2,
@@ -6320,6 +6758,16 @@ const char* ProductionGmxpackedReplayModeName(
     {
         case ProductionGmxpackedReplayMode::split:
             return "split";
+        case ProductionGmxpackedReplayMode::fullOutputSciSplit2:
+            return "full-output-sci-split2";
+        case ProductionGmxpackedReplayMode::fullOutputSciSplit4:
+            return "full-output-sci-split4";
+        case ProductionGmxpackedReplayMode::fullOutputSciSplit8:
+            return "full-output-sci-split8";
+        case ProductionGmxpackedReplayMode::fusedSitsForceOnly:
+            return "fused-sits-force-only";
+        case ProductionGmxpackedReplayMode::sparseSitsForceOnly:
+            return "sparse-sits-force-only";
         case ProductionGmxpackedReplayMode::compactForce:
             return "compact-force";
         case ProductionGmxpackedReplayMode::sortedForce:
@@ -6369,6 +6817,11 @@ void PrintUsage(const char* argv0)
     std::fprintf(stderr,
                  "Usage: %s (--kernel sponge|gmx|builder | --builder) --snapshot PATH "
                  "[--sponge-lj-mode fulloutput|comb-gmxpacked|production-gmxpacked|"
+                 "production-gmxpacked-full-sci-split2|"
+                 "production-gmxpacked-full-sci-split4|"
+                 "production-gmxpacked-full-sci-split8|"
+                 "production-gmxpacked-fused-sits-force-only|"
+                 "production-gmxpacked-sparse-sits-force-only|"
                  "comb-gmxpacked-peratom|comb-gmxpacked-partial-reduce|"
                  "comb-gmxpacked-partial-reduce-specialized|"
                  "comb-gmxpacked-partial-reduce-threshold4|"
@@ -6402,8 +6855,9 @@ void PrintUsage(const char* argv0)
                  "production-gmxpacked-collect-screen-stats|"
                  "production-gmxpacked-collect-coop-screen-stats] "
                  "[--sponge-gmx-transform baseline] "
-                 "[--warmup N] [--iters N] [--refresh-block-size N] [--compute-energy] "
-                 "[--compute-virial] [--analyze]\n",
+                 "[--warmup N] [--iters N] [--refresh-block-size N] "
+                 "[--sits-atom-end N] [--sits-pwwp-factor X] [--compute-energy] "
+                 "[--compute-virial] [--analyze] [--pair-oracle]\n",
                  argv0);
 }
 
@@ -6471,9 +6925,22 @@ Arguments ParseArguments(int argc, char** argv)
         {
             args.refreshBlockSize = std::atoi(argv[++i]);
         }
+        else if (flag == "--sits-atom-end" && i + 1 < argc)
+        {
+            args.sitsAtomEnd = std::atoi(argv[++i]);
+        }
+        else if (flag == "--sits-pwwp-factor" && i + 1 < argc)
+        {
+            args.sitsPwwpFactor =
+                static_cast<float>(std::atof(argv[++i]));
+        }
         else if (flag == "--analyze")
         {
             args.analyze = true;
+        }
+        else if (flag == "--pair-oracle")
+        {
+            args.pairOracle = true;
         }
         else if (flag == "--compute-energy")
         {
@@ -6497,6 +6964,16 @@ Arguments ParseArguments(int argc, char** argv)
     if (args.refreshBlockSize <= 0 || args.refreshBlockSize > 1024)
     {
         std::fprintf(stderr, "--refresh-block-size must be in [1, 1024]\n");
+        std::exit(1);
+    }
+    if (args.sitsAtomEnd < -1)
+    {
+        std::fprintf(stderr, "--sits-atom-end must be non-negative\n");
+        std::exit(1);
+    }
+    if (!std::isfinite(args.sitsPwwpFactor))
+    {
+        std::fprintf(stderr, "--sits-pwwp-factor must be finite\n");
         std::exit(1);
     }
     return args;
@@ -9898,11 +10375,151 @@ std::vector<uint64_t> BuildGmxpackedOracleCutoffPassMasks(
     return pass_masks;
 }
 
+struct SparseSitsGmxpackedStream
+{
+    std::vector<SpongeGmxpackedSciPOD> sci;
+    std::vector<SpongeGmxpackedCjPOD> cjpacked;
+    std::vector<uint64_t> pair_shift_bits;
+    std::vector<int> sci_shift_safe_flags;
+    uint64_t source_tile_bits = 0;
+    uint64_t selected_tile_bits = 0;
+};
+
+SparseSitsGmxpackedStream BuildSparseSitsGmxpackedStream(
+    const SpongeGmxpackedForceOnlySnapshot& snapshot, int selective_atom_end)
+{
+    SparseSitsGmxpackedStream result;
+    const int cluster_numbers =
+        static_cast<int>(snapshot.header.cluster_numbers);
+    std::vector<unsigned int> selected_lane_masks(
+        static_cast<size_t>(std::max(cluster_numbers, 0)), 0u);
+    for (int cluster = 0; cluster < cluster_numbers; ++cluster)
+    {
+        unsigned int selected_mask = 0u;
+        for (int lane = 0; lane < kClusterSize; ++lane)
+        {
+            const size_t sorted =
+                static_cast<size_t>(cluster * kClusterSize + lane);
+            if (sorted >= snapshot.sorted_atom_ids.size())
+            {
+                continue;
+            }
+            const int atom = snapshot.sorted_atom_ids[sorted];
+            if (atom >= 0 && atom < selective_atom_end)
+            {
+                selected_mask |= 1u << static_cast<unsigned int>(lane);
+            }
+        }
+        selected_lane_masks[static_cast<size_t>(cluster)] = selected_mask;
+    }
+
+    result.sci.reserve(snapshot.sci.size());
+    result.cjpacked.reserve(snapshot.cjpacked.size());
+    result.pair_shift_bits.reserve(snapshot.pair_shift_bits.size());
+    result.sci_shift_safe_flags.reserve(snapshot.sci_shift_safe_flags.size());
+    for (size_t sci_index = 0; sci_index < snapshot.sci.size(); ++sci_index)
+    {
+        const SpongeGmxpackedSciPOD& source_sci = snapshot.sci[sci_index];
+        SpongeGmxpackedSciPOD compact_sci = source_sci;
+        compact_sci.cjpacked_begin =
+            static_cast<int>(result.cjpacked.size());
+        const int cluster_i_start =
+            source_sci.supercluster_id * kSuperClusterClusters;
+        for (int packed_index = source_sci.cjpacked_begin;
+             packed_index < source_sci.cjpacked_end; ++packed_index)
+        {
+            if (packed_index < 0 ||
+                static_cast<size_t>(packed_index) >= snapshot.cjpacked.size())
+            {
+                continue;
+            }
+            SpongeGmxpackedCjPOD compact_packed =
+                snapshot.cjpacked[static_cast<size_t>(packed_index)];
+            bool packed_selected = false;
+            for (int split = 0; split < kWarpSplitCount; ++split)
+            {
+                const unsigned int source_imask =
+                    compact_packed.split[split].imask;
+                result.source_tile_bits +=
+                    static_cast<uint64_t>(std::popcount(source_imask));
+                unsigned int selected_imask = 0u;
+                const unsigned int split_j_lane_mask =
+                    ((1u << kSplitJClusterSize) - 1u)
+                    << static_cast<unsigned int>(split *
+                                                  kSplitJClusterSize);
+                for (int jm = 0; jm < kJGroupSize; ++jm)
+                {
+                    const int cluster_j = compact_packed.cj[jm];
+                    const unsigned int selected_j_lanes =
+                        cluster_j >= 0 && cluster_j < cluster_numbers
+                            ? selected_lane_masks[
+                                  static_cast<size_t>(cluster_j)]
+                            : 0u;
+                    for (int i_local = 0;
+                         i_local < kSuperClusterClusters; ++i_local)
+                    {
+                        const unsigned int packed_bit =
+                            1u << static_cast<unsigned int>(
+                                jm * kSuperClusterClusters + i_local);
+                        if ((source_imask & packed_bit) == 0u)
+                        {
+                            continue;
+                        }
+                        const int cluster_i = cluster_i_start + i_local;
+                        const unsigned int selected_i_lanes =
+                            cluster_i >= 0 && cluster_i < cluster_numbers
+                                ? selected_lane_masks[
+                                      static_cast<size_t>(cluster_i)]
+                                : 0u;
+                        if (selected_i_lanes != 0u ||
+                            (selected_j_lanes & split_j_lane_mask) != 0u)
+                        {
+                            selected_imask |= packed_bit;
+                        }
+                    }
+                }
+                compact_packed.split[split].imask = selected_imask;
+                result.selected_tile_bits +=
+                    static_cast<uint64_t>(std::popcount(selected_imask));
+                packed_selected = packed_selected || selected_imask != 0u;
+            }
+            if (!packed_selected)
+            {
+                continue;
+            }
+            result.cjpacked.push_back(compact_packed);
+            for (int jm = 0; jm < kJGroupSize; ++jm)
+            {
+                const size_t shift_index =
+                    static_cast<size_t>(packed_index * kJGroupSize + jm);
+                result.pair_shift_bits.push_back(
+                    shift_index < snapshot.pair_shift_bits.size()
+                        ? snapshot.pair_shift_bits[shift_index]
+                        : 0ull);
+            }
+        }
+        compact_sci.cjpacked_end =
+            static_cast<int>(result.cjpacked.size());
+        if (compact_sci.cjpacked_begin == compact_sci.cjpacked_end)
+        {
+            continue;
+        }
+        result.sci.push_back(compact_sci);
+        result.sci_shift_safe_flags.push_back(
+            sci_index < snapshot.sci_shift_safe_flags.size()
+                ? snapshot.sci_shift_safe_flags[sci_index]
+                : 0);
+    }
+    return result;
+}
+
 void RunSpongeProductionGmxpacked(
     const SpongeGmxpackedForceOnlySnapshot& snapshot, int warmup, int iters,
     bool computeEnergy, bool computeVirial, const char* snapshotLabel,
     ProductionGmxpackedReplayMode replayMode =
-        ProductionGmxpackedReplayMode::split)
+        ProductionGmxpackedReplayMode::split,
+    const SpongeGmxpackedFullOutputSnapshot* fullOutputReference = nullptr,
+    int sitsAtomEnd = -1, float sitsPwwpFactor = 1.0f)
 {
     if (snapshot.header.cluster_size != kClusterSize ||
         snapshot.header.super_cluster_clusters != kSuperClusterClusters ||
@@ -9932,11 +10549,60 @@ void RunSpongeProductionGmxpacked(
         static_cast<int>(snapshot.header.cluster_numbers);
     const int total_atom_numbers =
         static_cast<int>(snapshot.header.total_atom_numbers);
+    const bool fusedSitsForceOnly =
+        replayMode == ProductionGmxpackedReplayMode::fusedSitsForceOnly;
+    const bool sparseSitsForceOnly =
+        replayMode == ProductionGmxpackedReplayMode::sparseSitsForceOnly;
+    const bool sitsForceOnly = fusedSitsForceOnly || sparseSitsForceOnly;
+    if (sitsForceOnly &&
+        (computeEnergy || computeVirial || sitsAtomEnd < 0 ||
+         sitsAtomEnd > total_atom_numbers))
+    {
+        std::fprintf(
+            stderr,
+            "fused SITS force-only replay requires force-only output and "
+            "--sits-atom-end in [0, %d]\n",
+            total_atom_numbers);
+        std::exit(1);
+    }
+    if (fullOutputReference != nullptr &&
+        (fullOutputReference->header.compute_energy !=
+             static_cast<uint32_t>(computeEnergy) ||
+         fullOutputReference->header.compute_virial !=
+             static_cast<uint32_t>(computeVirial) ||
+         fullOutputReference->header.total_output != 0u ||
+         fullOutputReference->header.force_soa != 0u ||
+         fullOutputReference->reference_force.size() !=
+             static_cast<size_t>(total_atom_numbers)))
+    {
+        std::fprintf(
+            stderr,
+            "production-gmxpacked full-output reference contract mismatch "
+            "(energy=%u/%u virial=%u/%u total_output=%u force_soa=%u "
+            "force_refs=%zu atoms=%d)\n",
+            fullOutputReference->header.compute_energy,
+            computeEnergy ? 1u : 0u,
+            fullOutputReference->header.compute_virial,
+            computeVirial ? 1u : 0u,
+            fullOutputReference->header.total_output,
+            fullOutputReference->header.force_soa,
+            fullOutputReference->reference_force.size(),
+            total_atom_numbers);
+        std::exit(1);
+    }
     const bool useLjComb = snapshot.header.use_lj_comb != 0u;
+    if (sparseSitsForceOnly && useLjComb)
+    {
+        std::fprintf(
+            stderr,
+            "sparse SITS force-only replay currently targets packed AB-table snapshots only\n");
+        std::exit(1);
+    }
     const bool compactForceOnly =
         replayMode == ProductionGmxpackedReplayMode::compactForce;
     const bool sortedForceOnly =
         replayMode == ProductionGmxpackedReplayMode::sortedForce ||
+        replayMode == ProductionGmxpackedReplayMode::sparseSitsForceOnly ||
         replayMode == ProductionGmxpackedReplayMode::sortedForceSciSplit2 ||
         replayMode == ProductionGmxpackedReplayMode::sortedForceSciSplit3 ||
         replayMode == ProductionGmxpackedReplayMode::sortedForceSciSplit4 ||
@@ -9998,6 +10664,10 @@ void RunSpongeProductionGmxpacked(
                       snapshot.sci_shift_safe_flags.end(),
                       [](int value) { return value != 0; }));
     const bool allSciSafe = safe_sci == snapshot.sci.size();
+    const SparseSitsGmxpackedStream sparse_sits_stream =
+        sparseSitsForceOnly
+            ? BuildSparseSitsGmxpackedStream(snapshot, sitsAtomEnd)
+            : SparseSitsGmxpackedStream{};
     if ((replayMode == ProductionGmxpackedReplayMode::safeOnly ||
          replayMode == ProductionGmxpackedReplayMode::specializedSafe ||
          replayMode == ProductionGmxpackedReplayMode::specializedSortedForce ||
@@ -10102,6 +10772,14 @@ void RunSpongeProductionGmxpacked(
         CopyVectorToDevice(snapshot.pair_shift_bits);
     int* d_sci_shift_safe_flags =
         CopyVectorToDevice(snapshot.sci_shift_safe_flags);
+    SpongeGmxpackedSciPOD* d_sparse_sits_sci =
+        CopyVectorToDevice(sparse_sits_stream.sci);
+    SpongeGmxpackedCjPOD* d_sparse_sits_cjpacked =
+        CopyVectorToDevice(sparse_sits_stream.cjpacked);
+    uint64_t* d_sparse_sits_pair_shift_bits =
+        CopyVectorToDevice(sparse_sits_stream.pair_shift_bits);
+    int* d_sparse_sits_sci_shift_safe_flags =
+        CopyVectorToDevice(sparse_sits_stream.sci_shift_safe_flags);
     int* d_sorted_atom_ids = CopyVectorToDevice(snapshot.sorted_atom_ids);
     std::vector<float4> sorted_xq(snapshot.sorted_xq.size());
     for (size_t i = 0; i < snapshot.sorted_xq.size(); ++i)
@@ -10133,7 +10811,12 @@ void RunSpongeProductionGmxpacked(
     float4* d_shiftvec = CopyVectorToDevice(shiftvec);
 
     float4* d_force_regular = nullptr;
+    float4* d_force_enhancing = nullptr;
     float3* d_force_compact = nullptr;
+    VECTOR* d_force_shared_production = nullptr;
+    const bool useSharedProductionForceOnly =
+        replayMode == ProductionGmxpackedReplayMode::split &&
+        !computeEnergy && !computeVirial;
     if (totalOutput || compactForceOnly || computeEnergy || computeVirial)
     {
         CheckCuda(cudaMalloc(reinterpret_cast<void**>(&d_force_compact),
@@ -10145,6 +10828,19 @@ void RunSpongeProductionGmxpacked(
         CheckCuda(cudaMalloc(reinterpret_cast<void**>(&d_force_regular),
                              sizeof(float4) * total_atom_numbers),
                   "cudaMalloc(force_regular)");
+    }
+    if (useSharedProductionForceOnly)
+    {
+        CheckCuda(
+            cudaMalloc(reinterpret_cast<void**>(&d_force_shared_production),
+                       sizeof(VECTOR) * total_atom_numbers),
+            "cudaMalloc(force_shared_production)");
+    }
+    if (sitsForceOnly)
+    {
+        CheckCuda(cudaMalloc(reinterpret_cast<void**>(&d_force_enhancing),
+                             sizeof(float4) * total_atom_numbers),
+                  "cudaMalloc(force_enhancing)");
     }
     float* d_atom_energy = nullptr;
     float* d_atom_direct_cf_energy = nullptr;
@@ -10184,6 +10880,21 @@ void RunSpongeProductionGmxpacked(
         static_cast<unsigned int>(sci_numbers * 3), 1, 1);
     const dim3 sci_split4_grid(
         static_cast<unsigned int>(sci_numbers * 4), 1, 1);
+    const dim3 sci_split8_grid(
+        static_cast<unsigned int>(sci_numbers * 8), 1, 1);
+    constexpr int sparse_sits_work_parts = 8;
+    const int sparse_sits_sci_numbers =
+        static_cast<int>(sparse_sits_stream.sci.size());
+    const size_t sparse_sits_safe_sci = static_cast<size_t>(
+        std::count_if(sparse_sits_stream.sci_shift_safe_flags.begin(),
+                      sparse_sits_stream.sci_shift_safe_flags.end(),
+                      [](int value) { return value != 0; }));
+    const bool sparse_sits_all_safe =
+        sparse_sits_safe_sci == sparse_sits_stream.sci.size();
+    const dim3 sparse_sits_grid(
+        static_cast<unsigned int>(sparse_sits_sci_numbers *
+                                  sparse_sits_work_parts),
+        1, 1);
     auto clearOutputs = [&]() {
         if (d_force_compact != nullptr)
         {
@@ -10196,6 +10907,19 @@ void RunSpongeProductionGmxpacked(
             CheckCuda(cudaMemset(d_force_regular, 0,
                                  sizeof(float4) * total_atom_numbers),
                       "cudaMemset(force_regular)");
+        }
+        if (d_force_enhancing != nullptr)
+        {
+            CheckCuda(cudaMemset(d_force_enhancing, 0,
+                                 sizeof(float4) * total_atom_numbers),
+                      "cudaMemset(force_enhancing)");
+        }
+        if (d_force_shared_production != nullptr)
+        {
+            CheckCuda(
+                cudaMemset(d_force_shared_production, 0,
+                           sizeof(VECTOR) * total_atom_numbers),
+                "cudaMemset(force_shared_production)");
         }
         if (d_atom_energy != nullptr)
         {
@@ -10248,12 +10972,83 @@ void RunSpongeProductionGmxpacked(
         }
     };
     auto launchForceOnlySplit = [&]() {
+        const auto* shared_sci =
+            reinterpret_cast<const LJ_CLUSTERED_GMXPACKED_SCI*>(d_sci);
+        const auto* shared_cjpacked =
+            reinterpret_cast<const LJ_CLUSTERED_GMXPACKED_CJ*>(d_cjpacked);
+        const auto* shared_excl =
+            reinterpret_cast<const LJ_CLUSTERED_GMXPACKED_EXCLUSION*>(d_excl);
+        if (safe_sci != 0 && useLjComb)
+        {
+            Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb_ForceOnly_Warp_Record_Device<
+                false, false, false, false, true, true, false, true>
+                <<<grid, block>>>(
+                    sci_numbers, kClusterSize, kSuperClusterClusters,
+                    cluster_numbers, d_cluster_offsets, d_cluster_valid_masks,
+                    d_cluster_local_masks, d_super_cluster_offsets, shared_sci,
+                    shared_cjpacked, shared_excl, nullptr,
+                    allSciSafe ? nullptr : d_sci_shift_safe_flags, 1,
+                    d_sorted_atom_ids, d_sorted_xq, d_sorted_lj_type,
+                    d_sorted_lj_comb, cell, d_lj_ab, snapshot.header.cutoff,
+                    d_force_shared_production, snapshot.header.pme_beta,
+                    nullptr, nullptr, nullptr, nullptr, false, false);
+        }
+        else if (safe_sci != 0)
+        {
+            Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb_ForceOnly_Warp_Record_Device<
+                false, false, false, false, false, true, false, true>
+                <<<grid, block>>>(
+                    sci_numbers, kClusterSize, kSuperClusterClusters,
+                    cluster_numbers, d_cluster_offsets, d_cluster_valid_masks,
+                    d_cluster_local_masks, d_super_cluster_offsets, shared_sci,
+                    shared_cjpacked, shared_excl, nullptr,
+                    allSciSafe ? nullptr : d_sci_shift_safe_flags, 1,
+                    d_sorted_atom_ids, d_sorted_xq, d_sorted_lj_type,
+                    d_sorted_lj_comb, cell, d_lj_ab, snapshot.header.cutoff,
+                    d_force_shared_production, snapshot.header.pme_beta,
+                    nullptr, nullptr, nullptr, nullptr, false, false);
+        }
+        if (safe_sci != snapshot.sci.size() && useLjComb)
+        {
+            Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb_ForceOnly_Warp_Record_Device<
+                false, false, false, false, true, true, false, false>
+                <<<grid, block>>>(
+                    sci_numbers, kClusterSize, kSuperClusterClusters,
+                    cluster_numbers, d_cluster_offsets, d_cluster_valid_masks,
+                    d_cluster_local_masks, d_super_cluster_offsets, shared_sci,
+                    shared_cjpacked, shared_excl, d_pair_shift_bits,
+                    safe_sci == 0 ? nullptr : d_sci_shift_safe_flags, 0,
+                    d_sorted_atom_ids, d_sorted_xq, d_sorted_lj_type,
+                    d_sorted_lj_comb, cell, d_lj_ab, snapshot.header.cutoff,
+                    d_force_shared_production, snapshot.header.pme_beta,
+                    nullptr, nullptr, nullptr, nullptr, false, false);
+        }
+        else if (safe_sci != snapshot.sci.size())
+        {
+            Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb_ForceOnly_Warp_Record_Device<
+                false, false, false, false, false, true, false, false>
+                <<<grid, block>>>(
+                    sci_numbers, kClusterSize, kSuperClusterClusters,
+                    cluster_numbers, d_cluster_offsets, d_cluster_valid_masks,
+                    d_cluster_local_masks, d_super_cluster_offsets, shared_sci,
+                    shared_cjpacked, shared_excl, d_pair_shift_bits, nullptr, 0,
+                    d_sorted_atom_ids, d_sorted_xq, d_sorted_lj_type,
+                    d_sorted_lj_comb, cell, d_lj_ab, snapshot.header.cutoff,
+                    d_force_shared_production, snapshot.header.pme_beta,
+                    nullptr, nullptr, nullptr, nullptr, false, false);
+        }
+        CheckCuda(cudaGetLastError(),
+                  "launch shared production-gmxpacked force-only");
+    };
+    auto launchForceOnlyFusedSits = [&]() {
         if (safe_sci != 0)
         {
             if (useLjComb)
             {
-                SpongeProductionGmxpackedReplayKernel<false, false, false,
-                                                      false, true, float4>
+                SpongeProductionGmxpackedReplayKernel<
+                    false, false, false, false, true, float4, false, true,
+                    false, false, false, false, false, false, false, 1, false,
+                    true>
                     <<<grid, block>>>(
                         sci_numbers, cluster_numbers, d_cluster_offsets,
                         d_cluster_valid_masks, d_cluster_local_masks,
@@ -10263,14 +11058,16 @@ void RunSpongeProductionGmxpacked(
                         d_sorted_lj_comb, cell, d_lj_ab,
                         snapshot.header.cutoff, d_force_regular,
                         snapshot.header.pme_beta, nullptr, nullptr, nullptr,
-                        nullptr, nullptr);
+                        nullptr, nullptr, false, false, d_force_enhancing,
+                        sitsAtomEnd, sitsPwwpFactor);
             }
             else
             {
-                SpongeProductionGmxpackedReplayKernel<false, false, false,
-                                                      false, true, float4,
-                                                      false, false>
-                    <<<grid, block>>>(
+                SpongeProductionGmxpackedReplayKernel<
+                    false, false, false, false, true, float4, false, false,
+                    false, false, false, false, false, false, false, 4, false,
+                    true>
+                    <<<sci_split4_grid, block>>>(
                         sci_numbers, cluster_numbers, d_cluster_offsets,
                         d_cluster_valid_masks, d_cluster_local_masks,
                         d_super_cluster_offsets, d_sci, d_cjpacked, d_excl,
@@ -10279,16 +11076,20 @@ void RunSpongeProductionGmxpacked(
                         d_sorted_lj_comb, cell, d_lj_ab,
                         snapshot.header.cutoff, d_force_regular,
                         snapshot.header.pme_beta, nullptr, nullptr, nullptr,
-                        nullptr, nullptr);
+                        nullptr, nullptr, false, false, d_force_enhancing,
+                        sitsAtomEnd, sitsPwwpFactor);
             }
-            CheckCuda(cudaGetLastError(), "launch production-gmxpacked fast");
+            CheckCuda(cudaGetLastError(),
+                      "launch production-gmxpacked fused SITS fast");
         }
         if (safe_sci != snapshot.sci.size())
         {
             if (useLjComb)
             {
-                SpongeProductionGmxpackedReplayKernel<false, false, false,
-                                                      false, false, float4>
+                SpongeProductionGmxpackedReplayKernel<
+                    false, false, false, false, false, float4, false, true,
+                    false, false, false, false, false, false, false, 1, false,
+                    true>
                     <<<grid, block>>>(
                         sci_numbers, cluster_numbers, d_cluster_offsets,
                         d_cluster_valid_masks, d_cluster_local_masks,
@@ -10299,14 +11100,16 @@ void RunSpongeProductionGmxpacked(
                         d_sorted_lj_comb, cell, d_lj_ab,
                         snapshot.header.cutoff, d_force_regular,
                         snapshot.header.pme_beta, nullptr, nullptr, nullptr,
-                        nullptr, nullptr);
+                        nullptr, nullptr, false, false, d_force_enhancing,
+                        sitsAtomEnd, sitsPwwpFactor);
             }
             else
             {
-                SpongeProductionGmxpackedReplayKernel<false, false, false,
-                                                      false, false, float4,
-                                                      false, false>
-                    <<<grid, block>>>(
+                SpongeProductionGmxpackedReplayKernel<
+                    false, false, false, false, false, float4, false, false,
+                    false, false, false, false, false, false, false, 4, false,
+                    true>
+                    <<<sci_split4_grid, block>>>(
                         sci_numbers, cluster_numbers, d_cluster_offsets,
                         d_cluster_valid_masks, d_cluster_local_masks,
                         d_super_cluster_offsets, d_sci, d_cjpacked, d_excl,
@@ -10316,9 +11119,11 @@ void RunSpongeProductionGmxpacked(
                         d_sorted_lj_comb, cell, d_lj_ab,
                         snapshot.header.cutoff, d_force_regular,
                         snapshot.header.pme_beta, nullptr, nullptr, nullptr,
-                        nullptr, nullptr);
+                        nullptr, nullptr, false, false, d_force_enhancing,
+                        sitsAtomEnd, sitsPwwpFactor);
             }
-            CheckCuda(cudaGetLastError(), "launch production-gmxpacked slow");
+            CheckCuda(cudaGetLastError(),
+                      "launch production-gmxpacked fused SITS slow");
         }
     };
     auto launchForceOnlyCompact = [&]() {
@@ -10582,6 +11387,60 @@ void RunSpongeProductionGmxpacked(
                     nullptr, nullptr, nullptr);
             CheckCuda(cudaGetLastError(),
                       "launch production-gmxpacked sorted sci-split4 slow");
+        }
+    };
+    auto launchSparseSitsCorrection = [&]() {
+        if (sparse_sits_sci_numbers == 0)
+        {
+            return;
+        }
+        if (sparse_sits_safe_sci != 0)
+        {
+            SpongeProductionGmxpackedReplayKernel<
+                false, false, false, false, true, float4, false, false,
+                false, false, false, false, false, false, false,
+                sparse_sits_work_parts, false, true, true>
+                <<<sparse_sits_grid, block>>>(
+                    sparse_sits_sci_numbers, cluster_numbers,
+                    d_cluster_offsets, d_cluster_valid_masks,
+                    d_cluster_local_masks, d_super_cluster_offsets,
+                    d_sparse_sits_sci, d_sparse_sits_cjpacked, d_excl,
+                    nullptr,
+                    sparse_sits_all_safe
+                        ? nullptr
+                        : d_sparse_sits_sci_shift_safe_flags,
+                    1, d_sorted_atom_ids, d_sorted_xq, d_sorted_lj_type,
+                    d_sorted_lj_comb, cell, d_lj_ab,
+                    snapshot.header.cutoff, d_force_regular,
+                    snapshot.header.pme_beta, nullptr, nullptr, nullptr,
+                    nullptr, nullptr, false, false, d_force_enhancing,
+                    sitsAtomEnd, sitsPwwpFactor);
+            CheckCuda(cudaGetLastError(),
+                      "launch sparse SITS correction fast");
+        }
+        if (sparse_sits_safe_sci != sparse_sits_stream.sci.size())
+        {
+            SpongeProductionGmxpackedReplayKernel<
+                false, false, false, false, false, float4, false, false,
+                false, false, false, false, false, false, false,
+                sparse_sits_work_parts, false, true, true>
+                <<<sparse_sits_grid, block>>>(
+                    sparse_sits_sci_numbers, cluster_numbers,
+                    d_cluster_offsets, d_cluster_valid_masks,
+                    d_cluster_local_masks, d_super_cluster_offsets,
+                    d_sparse_sits_sci, d_sparse_sits_cjpacked, d_excl,
+                    d_sparse_sits_pair_shift_bits,
+                    sparse_sits_safe_sci == 0
+                        ? nullptr
+                        : d_sparse_sits_sci_shift_safe_flags,
+                    0, d_sorted_atom_ids, d_sorted_xq, d_sorted_lj_type,
+                    d_sorted_lj_comb, cell, d_lj_ab,
+                    snapshot.header.cutoff, d_force_regular,
+                    snapshot.header.pme_beta, nullptr, nullptr, nullptr,
+                    nullptr, nullptr, false, false, d_force_enhancing,
+                    sitsAtomEnd, sitsPwwpFactor);
+            CheckCuda(cudaGetLastError(),
+                      "launch sparse SITS correction slow");
         }
     };
     auto launchForceOnlySortedOracleSidecar = [&]() {
@@ -11121,16 +11980,97 @@ void RunSpongeProductionGmxpacked(
         CheckCuda(cudaGetLastError(),
                   "launch production-gmxpacked specialized-shiftvec");
     };
+    auto launchSharedProductionFull = [&]() {
+        const auto* shared_sci =
+            reinterpret_cast<const LJ_CLUSTERED_GMXPACKED_SCI*>(d_sci);
+        const auto* shared_cjpacked =
+            reinterpret_cast<const LJ_CLUSTERED_GMXPACKED_CJ*>(d_cjpacked);
+        const auto* shared_excl =
+            reinterpret_cast<const LJ_CLUSTERED_GMXPACKED_EXCLUSION*>(d_excl);
+        VECTOR* shared_force = reinterpret_cast<VECTOR*>(d_force_compact);
+        if (safe_sci != 0 && useLjComb)
+        {
+            Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb_ForceOnly_Warp_Record_Device<
+                true, true, false, true, true, true, false, true>
+                <<<grid, block>>>(
+                    sci_numbers, kClusterSize, kSuperClusterClusters,
+                    cluster_numbers, d_cluster_offsets, d_cluster_valid_masks,
+                    d_cluster_local_masks, d_super_cluster_offsets, shared_sci,
+                    shared_cjpacked, shared_excl, nullptr,
+                    allSciSafe ? nullptr : d_sci_shift_safe_flags, 1,
+                    d_sorted_atom_ids, d_sorted_xq, d_sorted_lj_type,
+                    d_sorted_lj_comb, cell, d_lj_ab, snapshot.header.cutoff,
+                    shared_force, snapshot.header.pme_beta, d_atom_energy,
+                    d_atom_virial, d_atom_direct_cf_energy, d_atom_lj_energy,
+                    computeEnergy, computeVirial);
+        }
+        else if (safe_sci != 0)
+        {
+            Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb_ForceOnly_Warp_Record_Device<
+                true, true, false, true, false, true, false, true>
+                <<<grid, block>>>(
+                    sci_numbers, kClusterSize, kSuperClusterClusters,
+                    cluster_numbers, d_cluster_offsets, d_cluster_valid_masks,
+                    d_cluster_local_masks, d_super_cluster_offsets, shared_sci,
+                    shared_cjpacked, shared_excl, nullptr,
+                    allSciSafe ? nullptr : d_sci_shift_safe_flags, 1,
+                    d_sorted_atom_ids, d_sorted_xq, d_sorted_lj_type,
+                    d_sorted_lj_comb, cell, d_lj_ab, snapshot.header.cutoff,
+                    shared_force, snapshot.header.pme_beta, d_atom_energy,
+                    d_atom_virial, d_atom_direct_cf_energy, d_atom_lj_energy,
+                    computeEnergy, computeVirial);
+        }
+        if (safe_sci != snapshot.sci.size() && useLjComb)
+        {
+            Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb_ForceOnly_Warp_Record_Device<
+                true, true, false, true, true, true, false, false>
+                <<<grid, block>>>(
+                    sci_numbers, kClusterSize, kSuperClusterClusters,
+                    cluster_numbers, d_cluster_offsets, d_cluster_valid_masks,
+                    d_cluster_local_masks, d_super_cluster_offsets, shared_sci,
+                    shared_cjpacked, shared_excl, d_pair_shift_bits,
+                    safe_sci == 0 ? nullptr : d_sci_shift_safe_flags, 0,
+                    d_sorted_atom_ids, d_sorted_xq, d_sorted_lj_type,
+                    d_sorted_lj_comb, cell, d_lj_ab, snapshot.header.cutoff,
+                    shared_force, snapshot.header.pme_beta, d_atom_energy,
+                    d_atom_virial, d_atom_direct_cf_energy, d_atom_lj_energy,
+                    computeEnergy, computeVirial);
+        }
+        else if (safe_sci != snapshot.sci.size())
+        {
+            Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb_ForceOnly_Warp_Record_Device<
+                true, true, false, true, false, true, false, false>
+                <<<grid, block>>>(
+                    sci_numbers, kClusterSize, kSuperClusterClusters,
+                    cluster_numbers, d_cluster_offsets, d_cluster_valid_masks,
+                    d_cluster_local_masks, d_super_cluster_offsets, shared_sci,
+                    shared_cjpacked, shared_excl, d_pair_shift_bits, nullptr, 0,
+                    d_sorted_atom_ids, d_sorted_xq, d_sorted_lj_type,
+                    d_sorted_lj_comb, cell, d_lj_ab, snapshot.header.cutoff,
+                    shared_force, snapshot.header.pme_beta, d_atom_energy,
+                    d_atom_virial, d_atom_direct_cf_energy, d_atom_lj_energy,
+                    computeEnergy, computeVirial);
+        }
+        CheckCuda(cudaGetLastError(),
+                  "launch shared production-gmxpacked full");
+    };
     auto launchEnergyVirialKernel =
         [&]<bool needEnergy, bool needVirial, bool totalOutputKernel,
-            bool sciShiftOnly, bool virialFromShift, bool useLjCombKernel>(
+            bool sciShiftOnly, bool virialFromShift, bool useLjCombKernel,
+            int sciWorkParts = 1>(
             const uint64_t* pairShiftBits, const int* sciFlags,
             int sciSafeValue)
     {
         SpongeProductionGmxpackedReplayKernel<
             needEnergy, needVirial, totalOutputKernel, true, sciShiftOnly,
-            float3, virialFromShift, useLjCombKernel>
-            <<<grid, block>>>(
+            float3, virialFromShift, useLjCombKernel, false, false, false,
+            false, false, false, false, sciWorkParts, false>
+            <<<(sciWorkParts == 8
+                    ? sci_split8_grid
+                    : (sciWorkParts == 4
+                           ? sci_split4_grid
+                           : (sciWorkParts == 2 ? sci_split2_grid : grid))),
+                block>>>(
                 sci_numbers, cluster_numbers, d_cluster_offsets,
                 d_cluster_valid_masks, d_cluster_local_masks,
                 d_super_cluster_offsets, d_sci, d_cjpacked, d_excl,
@@ -11139,7 +12079,8 @@ void RunSpongeProductionGmxpacked(
                 d_lj_ab, snapshot.header.cutoff, d_force_compact,
                 snapshot.header.pme_beta, d_atom_energy, d_atom_virial,
                 d_atom_direct_cf_energy, d_atom_lj_energy,
-                virialFromShift ? d_shift_force : nullptr);
+                virialFromShift ? d_shift_force : nullptr, computeEnergy,
+                computeVirial);
     };
     auto launchEnergyVirialOneClass = [&](bool safeClass)
     {
@@ -11165,113 +12106,83 @@ void RunSpongeProductionGmxpacked(
             }
             return;
         }
-        if (useLjComb)
+        if (safeClass)
         {
-            if (computeEnergy && computeVirial)
+            if (useLjComb)
             {
-                if (safeClass)
+                launchEnergyVirialKernel
+                    .template operator()<true, true, false, true, false, true>(
+                        pairShiftBits, sciFlags, sciSafeValue);
+            }
+            else
+            {
+                if (replayMode ==
+                    ProductionGmxpackedReplayMode::fullOutputSciSplit8)
                 {
                     launchEnergyVirialKernel
                         .template operator()<true, true, false, true, false,
-                                               true>(
+                                               false, 8>(
+                            pairShiftBits, sciFlags, sciSafeValue);
+                }
+                else if (replayMode ==
+                         ProductionGmxpackedReplayMode::fullOutputSciSplit4)
+                {
+                    launchEnergyVirialKernel
+                        .template operator()<true, true, false, true, false,
+                                               false, 4>(
+                            pairShiftBits, sciFlags, sciSafeValue);
+                }
+                else
+                {
+                    launchEnergyVirialKernel
+                        .template operator()<true, true, false, true, false,
+                                               false, 2>(
+                            pairShiftBits, sciFlags, sciSafeValue);
+                }
+            }
+        }
+        else
+        {
+            if (useLjComb)
+            {
+                launchEnergyVirialKernel
+                    .template operator()<true, true, false, false, false, true>(
+                        pairShiftBits, sciFlags, sciSafeValue);
+            }
+            else
+            {
+                if (replayMode ==
+                    ProductionGmxpackedReplayMode::fullOutputSciSplit8)
+                {
+                    launchEnergyVirialKernel
+                        .template operator()<true, true, false, false, false,
+                                               false, 8>(
+                            pairShiftBits, sciFlags, sciSafeValue);
+                }
+                else if (replayMode ==
+                         ProductionGmxpackedReplayMode::fullOutputSciSplit4)
+                {
+                    launchEnergyVirialKernel
+                        .template operator()<true, true, false, false, false,
+                                               false, 4>(
                             pairShiftBits, sciFlags, sciSafeValue);
                 }
                 else
                 {
                     launchEnergyVirialKernel
                         .template operator()<true, true, false, false, false,
-                                               true>(
+                                               false, 2>(
                             pairShiftBits, sciFlags, sciSafeValue);
                 }
-            }
-            else if (computeEnergy)
-            {
-                if (safeClass)
-                {
-                    launchEnergyVirialKernel
-                        .template operator()<true, false, false, true, false,
-                                               true>(
-                            pairShiftBits, sciFlags, sciSafeValue);
-                }
-                else
-                {
-                    launchEnergyVirialKernel
-                        .template operator()<true, false, false, false, false,
-                                               true>(
-                            pairShiftBits, sciFlags, sciSafeValue);
-                }
-            }
-            else
-            {
-                if (safeClass)
-                {
-                    launchEnergyVirialKernel
-                        .template operator()<false, true, false, true, false,
-                                               true>(
-                            pairShiftBits, sciFlags, sciSafeValue);
-                }
-                else
-                {
-                    launchEnergyVirialKernel
-                        .template operator()<false, true, false, false, false,
-                                               true>(
-                            pairShiftBits, sciFlags, sciSafeValue);
-                }
-            }
-            return;
-        }
-        if (computeEnergy && computeVirial)
-        {
-            if (safeClass)
-            {
-                launchEnergyVirialKernel
-                    .template operator()<true, true, false, true, false, false>(
-                        pairShiftBits, sciFlags, sciSafeValue);
-            }
-            else
-            {
-                launchEnergyVirialKernel
-                    .template operator()<true, true, false, false, false,
-                                           false>(
-                        pairShiftBits, sciFlags, sciSafeValue);
-            }
-        }
-        else if (computeEnergy)
-        {
-            if (safeClass)
-            {
-                launchEnergyVirialKernel
-                    .template operator()<true, false, false, true, false,
-                                           false>(
-                        pairShiftBits, sciFlags, sciSafeValue);
-            }
-            else
-            {
-                launchEnergyVirialKernel
-                    .template operator()<true, false, false, false, false,
-                                           false>(
-                        pairShiftBits, sciFlags, sciSafeValue);
-            }
-        }
-        else
-        {
-            if (safeClass)
-            {
-                launchEnergyVirialKernel
-                    .template operator()<false, true, false, true, false,
-                                           false>(
-                        pairShiftBits, sciFlags, sciSafeValue);
-            }
-            else
-            {
-                launchEnergyVirialKernel
-                    .template operator()<false, true, false, false, false,
-                                           false>(
-                        pairShiftBits, sciFlags, sciSafeValue);
             }
         }
     };
     auto launchEnergyVirial = [&]() {
+        if (replayMode == ProductionGmxpackedReplayMode::split)
+        {
+            launchSharedProductionFull();
+            return;
+        }
         if (safe_sci != 0)
         {
             launchEnergyVirialOneClass(true);
@@ -11290,7 +12201,17 @@ void RunSpongeProductionGmxpacked(
         }
         else
         {
-            if (replayMode == ProductionGmxpackedReplayMode::specializedSafe)
+            if (sparseSitsForceOnly)
+            {
+                launchForceOnlySortedSciSplit4();
+                launchSparseSitsCorrection();
+            }
+            else if (fusedSitsForceOnly)
+            {
+                launchForceOnlyFusedSits();
+            }
+            else if (replayMode ==
+                     ProductionGmxpackedReplayMode::specializedSafe)
             {
                 launchForceOnlySpecialized();
             }
@@ -11417,6 +12338,245 @@ void RunSpongeProductionGmxpacked(
     CheckCuda(cudaEventElapsedTime(&total_ms, start, stop),
               "cudaEventElapsedTime");
     CheckCuda(cudaDeviceSynchronize(), "cudaDeviceSynchronize(timed)");
+
+    // Timed iterations intentionally accumulate into the same output buffers
+    // so memset cost is not charged to the kernel. Re-run once from zero for
+    // all correctness checks and reported observables.
+    clearOutputs();
+    launchKernel();
+    CheckCuda(cudaDeviceSynchronize(),
+              "cudaDeviceSynchronize(post_timing_validation)");
+
+    DiffStats full_output_force_stats = {};
+    DiffStats full_output_energy_stats = {};
+    DiffStats full_output_direct_energy_stats = {};
+    DiffStats full_output_lj_energy_stats = {};
+    DiffStats full_output_virial_stats = {};
+    bool full_output_reference_ok = true;
+    if (fullOutputReference != nullptr)
+    {
+        std::vector<float3> sorted_force(
+            static_cast<size_t>(total_atom_numbers));
+        CheckCuda(cudaMemcpy(sorted_force.data(), d_force_compact,
+                             sizeof(float3) * sorted_force.size(),
+                             cudaMemcpyDeviceToHost),
+                  "cudaMemcpy(full_output_force)");
+        std::vector<Float4POD> replay_force(
+            static_cast<size_t>(total_atom_numbers), Float4POD{});
+        for (int sorted_i = 0; sorted_i < total_atom_numbers; ++sorted_i)
+        {
+            const int atom_i =
+                snapshot.sorted_atom_ids[static_cast<size_t>(sorted_i)];
+            if (atom_i < 0 || atom_i >= total_atom_numbers)
+            {
+                continue;
+            }
+            Float4POD& force = replay_force[static_cast<size_t>(atom_i)];
+            force.x += sorted_force[static_cast<size_t>(sorted_i)].x;
+            force.y += sorted_force[static_cast<size_t>(sorted_i)].y;
+            force.z += sorted_force[static_cast<size_t>(sorted_i)].z;
+        }
+        full_output_force_stats = CompareForceArrays(
+            replay_force, fullOutputReference->reference_force);
+
+        if (computeEnergy)
+        {
+            std::vector<float> atom_energy(
+                static_cast<size_t>(scalar_output_numbers));
+            std::vector<float> direct_energy(
+                static_cast<size_t>(scalar_output_numbers));
+            std::vector<float> lj_energy(
+                static_cast<size_t>(scalar_output_numbers));
+            CheckCuda(cudaMemcpy(atom_energy.data(), d_atom_energy,
+                                 sizeof(float) * atom_energy.size(),
+                                 cudaMemcpyDeviceToHost),
+                      "cudaMemcpy(full_output_atom_energy)");
+            CheckCuda(cudaMemcpy(direct_energy.data(),
+                                 d_atom_direct_cf_energy,
+                                 sizeof(float) * direct_energy.size(),
+                                 cudaMemcpyDeviceToHost),
+                      "cudaMemcpy(full_output_direct_energy)");
+            CheckCuda(cudaMemcpy(lj_energy.data(), d_atom_lj_energy,
+                                 sizeof(float) * lj_energy.size(),
+                                 cudaMemcpyDeviceToHost),
+                      "cudaMemcpy(full_output_lj_energy)");
+            full_output_energy_stats = CompareFloatArrays(
+                atom_energy, fullOutputReference->reference_atom_energy);
+            full_output_direct_energy_stats = CompareFloatArrays(
+                direct_energy,
+                fullOutputReference->reference_direct_cf_energy);
+            full_output_lj_energy_stats = CompareFloatArrays(
+                lj_energy, fullOutputReference->reference_lj_energy);
+        }
+        if (computeVirial)
+        {
+            std::vector<LTMatrix3> atom_virial(
+                static_cast<size_t>(scalar_output_numbers));
+            CheckCuda(cudaMemcpy(atom_virial.data(), d_atom_virial,
+                                 sizeof(LTMatrix3) * atom_virial.size(),
+                                 cudaMemcpyDeviceToHost),
+                      "cudaMemcpy(full_output_atom_virial)");
+            full_output_virial_stats = CompareVirialArrays(
+                atom_virial,
+                fullOutputReference->reference_atom_virial);
+        }
+
+        constexpr double reference_tolerance = 2.0e-5;
+        full_output_reference_ok =
+            std::isfinite(full_output_force_stats.max_scaled) &&
+            full_output_force_stats.max_scaled <= reference_tolerance &&
+            (!computeEnergy ||
+             (std::isfinite(full_output_energy_stats.max_scaled) &&
+              std::isfinite(full_output_direct_energy_stats.max_scaled) &&
+              std::isfinite(full_output_lj_energy_stats.max_scaled) &&
+              full_output_energy_stats.max_scaled <= reference_tolerance &&
+              full_output_direct_energy_stats.max_scaled <=
+                  reference_tolerance &&
+              full_output_lj_energy_stats.max_scaled <=
+                  reference_tolerance)) &&
+            (!computeVirial ||
+             (std::isfinite(full_output_virial_stats.max_scaled) &&
+              full_output_virial_stats.max_scaled <= reference_tolerance));
+        std::printf(
+            "gmxpacked_fulloutput_reference matched=%u tolerance=%.3e "
+            "force_max_abs=%.6e force_max_scaled=%.6e force_rms=%.6e "
+            "energy_max_abs=%.6e energy_max_scaled=%.6e "
+            "direct_energy_max_abs=%.6e direct_energy_max_scaled=%.6e "
+            "lj_energy_max_abs=%.6e lj_energy_max_scaled=%.6e "
+            "virial_max_abs=%.6e virial_max_scaled=%.6e\n",
+            full_output_reference_ok ? 1u : 0u, reference_tolerance,
+            full_output_force_stats.max_abs,
+            full_output_force_stats.max_scaled,
+            full_output_force_stats.rms,
+            full_output_energy_stats.max_abs,
+            full_output_energy_stats.max_scaled,
+            full_output_direct_energy_stats.max_abs,
+            full_output_direct_energy_stats.max_scaled,
+            full_output_lj_energy_stats.max_abs,
+            full_output_lj_energy_stats.max_scaled,
+            full_output_virial_stats.max_abs,
+            full_output_virial_stats.max_scaled);
+    }
+
+    bool fused_sits_validation_ok = true;
+    double fused_sits_max_abs = 0.0;
+    double fused_sits_max_scaled = 0.0;
+    uint64_t fused_sits_unselected_nonzero = 0ull;
+    if (sitsForceOnly)
+    {
+        clearOutputs();
+        launchKernel();
+        CheckCuda(cudaDeviceSynchronize(),
+                  "cudaDeviceSynchronize(fused_sits_validation)");
+        std::vector<float4> ordinary_force(
+            static_cast<size_t>(total_atom_numbers));
+        std::vector<float4> enhancing_force(
+            static_cast<size_t>(total_atom_numbers));
+        CheckCuda(cudaMemcpy(ordinary_force.data(), d_force_regular,
+                             sizeof(float4) * ordinary_force.size(),
+                             cudaMemcpyDeviceToHost),
+                  "cudaMemcpy(fused_sits_ordinary_force)");
+        CheckCuda(cudaMemcpy(enhancing_force.data(), d_force_enhancing,
+                             sizeof(float4) * enhancing_force.size(),
+                             cudaMemcpyDeviceToHost),
+                  "cudaMemcpy(fused_sits_enhancing_force)");
+        for (int atom = 0; atom < total_atom_numbers; ++atom)
+        {
+            const float4 ordinary =
+                ordinary_force[static_cast<size_t>(atom)];
+            const float4 enhancing =
+                enhancing_force[static_cast<size_t>(atom)];
+            const float values[3] = {enhancing.x, enhancing.y, enhancing.z};
+            for (float value : values)
+            {
+                fused_sits_validation_ok =
+                    fused_sits_validation_ok && std::isfinite(value);
+            }
+            if (atom >= sitsAtomEnd &&
+                (enhancing.x != 0.0f || enhancing.y != 0.0f ||
+                 enhancing.z != 0.0f))
+            {
+                ++fused_sits_unselected_nonzero;
+            }
+            if (sitsAtomEnd == total_atom_numbers)
+            {
+                const float ordinary_values[3] = {
+                    ordinary.x, ordinary.y, ordinary.z};
+                for (int component = 0; component < 3; ++component)
+                {
+                    const double abs_diff = std::abs(
+                        static_cast<double>(values[component]) -
+                        static_cast<double>(ordinary_values[component]));
+                    const double scale = std::max(
+                        1.0,
+                        std::max(std::abs(
+                                     static_cast<double>(values[component])),
+                                 std::abs(static_cast<double>(
+                                     ordinary_values[component]))));
+                    fused_sits_max_abs =
+                        std::max(fused_sits_max_abs, abs_diff);
+                    fused_sits_max_scaled =
+                        std::max(fused_sits_max_scaled, abs_diff / scale);
+                }
+            }
+        }
+        constexpr double fused_sits_tolerance = 2.0e-5;
+        if (sparseSitsForceOnly)
+        {
+            clearOutputs();
+            launchForceOnlyFusedSits();
+            CheckCuda(cudaDeviceSynchronize(),
+                      "cudaDeviceSynchronize(sparse_sits_reference)");
+            std::vector<float4> fused_reference(
+                static_cast<size_t>(total_atom_numbers));
+            CheckCuda(cudaMemcpy(fused_reference.data(), d_force_enhancing,
+                                 sizeof(float4) * fused_reference.size(),
+                                 cudaMemcpyDeviceToHost),
+                      "cudaMemcpy(sparse_sits_fused_reference)");
+            for (int atom = 0; atom < total_atom_numbers; ++atom)
+            {
+                const float* candidate = reinterpret_cast<const float*>(
+                    &enhancing_force[static_cast<size_t>(atom)]);
+                const float* reference = reinterpret_cast<const float*>(
+                    &fused_reference[static_cast<size_t>(atom)]);
+                for (int component = 0; component < 3; ++component)
+                {
+                    const double abs_diff = std::abs(
+                        static_cast<double>(candidate[component]) -
+                        static_cast<double>(reference[component]));
+                    const double scale = std::max(
+                        1.0, std::max(std::abs(static_cast<double>(
+                                                  candidate[component])),
+                                      std::abs(static_cast<double>(
+                                          reference[component]))));
+                    fused_sits_max_abs =
+                        std::max(fused_sits_max_abs, abs_diff);
+                    fused_sits_max_scaled =
+                        std::max(fused_sits_max_scaled, abs_diff / scale);
+                }
+            }
+            clearOutputs();
+            launchKernel();
+            CheckCuda(cudaDeviceSynchronize(),
+                      "cudaDeviceSynchronize(sparse_sits_restore)");
+        }
+        fused_sits_validation_ok =
+            fused_sits_validation_ok &&
+            fused_sits_unselected_nonzero == 0ull &&
+            fused_sits_max_scaled <= fused_sits_tolerance;
+        std::printf(
+            "%s_sits_force_reference matched=%u all_selected=%u "
+            "tolerance=%.3e max_abs=%.6e max_scaled=%.6e "
+            "unselected_nonzero=%llu selected_end=%d pwwp_factor=%.6g\n",
+            sparseSitsForceOnly ? "sparse" : "fused",
+            fused_sits_validation_ok ? 1u : 0u,
+            sitsAtomEnd == total_atom_numbers ? 1u : 0u,
+            fused_sits_tolerance, fused_sits_max_abs,
+            fused_sits_max_scaled,
+            static_cast<unsigned long long>(
+                fused_sits_unselected_nonzero),
+            sitsAtomEnd, sitsPwwpFactor);
+    }
 
     bool device_validation_ok = true;
     if (use_device_sidecar)
@@ -11683,24 +12843,99 @@ void RunSpongeProductionGmxpacked(
         }
     }
     const bool sane =
-        device_validation_ok &&
+        device_validation_ok && full_output_reference_ok &&
+        fused_sits_validation_ok &&
         (!computeEnergy || (std::isfinite(host_energy) &&
                             std::isfinite(host_direct_energy) &&
                             std::isfinite(host_lj_energy))) &&
         (!computeVirial || (std::isfinite(host_virial.a11) &&
                             std::isfinite(host_virial.a22) &&
                             std::isfinite(host_virial.a33)));
+    const bool full_output_mode = computeEnergy || computeVirial;
+    int reported_sci_work_parts = 1;
+    bool reported_contiguous_sci_work = false;
+    if (full_output_mode && !useLjComb && !shiftVirialMode &&
+        replayMode != ProductionGmxpackedReplayMode::split)
+    {
+        reported_sci_work_parts =
+            replayMode == ProductionGmxpackedReplayMode::fullOutputSciSplit8
+                ? 8
+                : (replayMode ==
+                           ProductionGmxpackedReplayMode::fullOutputSciSplit4
+                       ? 4
+                       : 2);
+    }
+    else if (!full_output_mode &&
+             replayMode ==
+                 ProductionGmxpackedReplayMode::sortedForceSciSplit2)
+    {
+        reported_sci_work_parts = 2;
+    }
+    else if (!full_output_mode &&
+             replayMode ==
+                 ProductionGmxpackedReplayMode::sortedForceSciSplit3)
+    {
+        reported_sci_work_parts = 3;
+        reported_contiguous_sci_work = true;
+    }
+    else if (!full_output_mode &&
+             replayMode ==
+                 ProductionGmxpackedReplayMode::sortedForceSciSplit4)
+    {
+        reported_sci_work_parts = 4;
+    }
+    else if (!full_output_mode && fusedSitsForceOnly && !useLjComb)
+    {
+        reported_sci_work_parts = 4;
+    }
+    else if (!full_output_mode && sparseSitsForceOnly)
+    {
+        reported_sci_work_parts = sparse_sits_work_parts;
+    }
+    if (sparseSitsForceOnly)
+    {
+        const double selected_tile_percent =
+            sparse_sits_stream.source_tile_bits == 0
+                ? 0.0
+                : 100.0 *
+                      static_cast<double>(
+                          sparse_sits_stream.selected_tile_bits) /
+                      static_cast<double>(
+                          sparse_sits_stream.source_tile_bits);
+        std::printf(
+            "sparse_sits_stream sci=%zu/%zu cjpacked=%zu/%zu "
+            "tile_bits=%llu/%llu tile_pct=%.3f work_parts=%d\n",
+            sparse_sits_stream.sci.size(), snapshot.sci.size(),
+            sparse_sits_stream.cjpacked.size(), snapshot.cjpacked.size(),
+            static_cast<unsigned long long>(
+                sparse_sits_stream.selected_tile_bits),
+            static_cast<unsigned long long>(
+                sparse_sits_stream.source_tile_bits),
+            selected_tile_percent, sparse_sits_work_parts);
+    }
     std::printf(
         "kernel=sponge_production_gmxpacked snapshot=%s avg_ms=%.6f iters=%d "
-        "variant=%s lj_mode=%s launches_per_iter=%d sci=%d cjpacked=%zu "
+        "variant=%s implementation=%s output_mode=%s lj_mode=%s "
+        "sci_work_parts=%d "
+        "contiguous_sci_work=%u launches_per_iter=%d sci=%d cjpacked=%zu "
         "excl=%zu atoms=%d safe_sci=%zu unsafe_sci=%zu compute_energy=%u "
         "compute_virial=%u total_output=%u sanity=%s energy=%.6e "
         "direct_energy=%.6e "
         "lj_energy=%.6e virial_xx=%.6e virial_yy=%.6e virial_zz=%.6e\n",
         snapshotLabel, total_ms / static_cast<float>(iters), iters,
         ProductionGmxpackedReplayModeName(replayMode),
+        replayMode == ProductionGmxpackedReplayMode::split
+            ? "shared-production"
+            : "microbench-experimental",
+        full_output_mode ? "full" : "force-only",
         useLjComb ? "comb" : "packed-ab",
-        (replayMode == ProductionGmxpackedReplayMode::split ||
+        reported_sci_work_parts,
+        reported_contiguous_sci_work ? 1u : 0u,
+        replayMode == ProductionGmxpackedReplayMode::split
+            ? 1
+            : (sparseSitsForceOnly
+                   ? 2
+                   : ((replayMode == ProductionGmxpackedReplayMode::fusedSitsForceOnly ||
          replayMode == ProductionGmxpackedReplayMode::compactForce ||
          replayMode == ProductionGmxpackedReplayMode::sortedForce ||
          replayMode == ProductionGmxpackedReplayMode::sortedForceSciSplit2 ||
@@ -11723,7 +12958,7 @@ void RunSpongeProductionGmxpacked(
                            ProductionGmxpackedReplayMode::sortedForceDeviceSidecar
                        ? 2
                        : 1))
-            : 1,
+            : 1)),
         sci_numbers, snapshot.cjpacked.size(),
         snapshot.excl.size(), total_atom_numbers, safe_sci,
         snapshot.sci.size() - safe_sci, computeEnergy ? 1u : 0u,
@@ -11741,12 +12976,22 @@ void RunSpongeProductionGmxpacked(
     CheckCuda(cudaFree(d_shift_force), "cudaFree(shift_force)");
     CheckCuda(cudaFree(d_force_compact), "cudaFree(force_compact)");
     CheckCuda(cudaFree(d_force_regular), "cudaFree(force_regular)");
+    CheckCuda(cudaFree(d_force_enhancing), "cudaFree(force_enhancing)");
+    CheckCuda(cudaFree(d_force_shared_production),
+              "cudaFree(force_shared_production)");
     CheckCuda(cudaFree(d_shiftvec), "cudaFree(shiftvec)");
     CheckCuda(cudaFree(d_lj_ab), "cudaFree(lj_ab)");
     CheckCuda(cudaFree(d_sorted_lj_comb), "cudaFree(sorted_lj_comb)");
     CheckCuda(cudaFree(d_sorted_lj_type), "cudaFree(sorted_lj_type)");
     CheckCuda(cudaFree(d_sorted_xq), "cudaFree(sorted_xq)");
     CheckCuda(cudaFree(d_sorted_atom_ids), "cudaFree(sorted_atom_ids)");
+    CheckCuda(cudaFree(d_sparse_sits_sci_shift_safe_flags),
+              "cudaFree(sparse_sits_sci_shift_safe_flags)");
+    CheckCuda(cudaFree(d_sparse_sits_pair_shift_bits),
+              "cudaFree(sparse_sits_pair_shift_bits)");
+    CheckCuda(cudaFree(d_sparse_sits_cjpacked),
+              "cudaFree(sparse_sits_cjpacked)");
+    CheckCuda(cudaFree(d_sparse_sits_sci), "cudaFree(sparse_sits_sci)");
     CheckCuda(cudaFree(d_sci_shift_safe_flags),
               "cudaFree(sci_shift_safe_flags)");
     CheckCuda(cudaFree(d_pair_shift_bits), "cudaFree(pair_shift_bits)");
@@ -11759,6 +13004,10 @@ void RunSpongeProductionGmxpacked(
     CheckCuda(cudaFree(d_cluster_local_masks), "cudaFree(cluster_local_masks)");
     CheckCuda(cudaFree(d_cluster_valid_masks), "cudaFree(cluster_valid_masks)");
     CheckCuda(cudaFree(d_cluster_offsets), "cudaFree(cluster_offsets)");
+    if (fullOutputReference != nullptr && !full_output_reference_ok)
+    {
+        std::exit(2);
+    }
 }
 
 std::vector<Vec3> MakeVec3Vector(const std::vector<Float4POD>& values)
@@ -11837,11 +13086,45 @@ MakeProductionGmxpackedExclusionVector(
     return converted;
 }
 
+std::vector<::VECTOR> MakeRefreshFractionalCenters(
+    const std::vector<::VECTOR>& centers, const ::LTMatrix3& rcell)
+{
+    std::vector<::VECTOR> fractional(centers.size());
+    for (size_t i = 0; i < centers.size(); ++i)
+    {
+        ::VECTOR value = centers[i] * rcell;
+        value.x -= std::floor(value.x);
+        value.y -= std::floor(value.y);
+        value.z -= std::floor(value.z);
+        fractional[i] = value;
+    }
+    return fractional;
+}
+
+std::vector<::VECTOR> MakeRefreshFractionalExtents(
+    const std::vector<::VECTOR>& extents, const ::LTMatrix3& rcell)
+{
+    std::vector<::VECTOR> fractional(extents.size());
+    for (size_t i = 0; i < extents.size(); ++i)
+    {
+        const ::VECTOR value = extents[i];
+        fractional[i] = {
+            std::fabs(value.x * rcell.a11) +
+                std::fabs(value.y * rcell.a21) +
+                std::fabs(value.z * rcell.a31),
+            std::fabs(value.y * rcell.a22) +
+                std::fabs(value.z * rcell.a32),
+            std::fabs(value.z * rcell.a33)};
+    }
+    return fractional;
+}
+
 void RunSpongeProductionGmxpackedRefresh(
     const SpongeGmxpackedForceOnlySnapshot& snapshot, int warmup, int iters,
     const char* snapshotLabel, int refreshBlockSize)
 {
-    if (snapshot.cluster_centers.empty())
+    if (snapshot.cluster_centers.empty() ||
+        snapshot.cluster_extents.size() != snapshot.cluster_centers.size())
     {
         std::fprintf(stderr,
                      "production-gmxpacked-refresh requires a snapshot with "
@@ -11851,6 +13134,14 @@ void RunSpongeProductionGmxpackedRefresh(
     const int sci_numbers = static_cast<int>(snapshot.sci.size());
     std::vector<::VECTOR> cluster_centers =
         MakeProbeVector(snapshot.cluster_centers);
+    std::vector<::VECTOR> cluster_extents =
+        MakeProbeVector(snapshot.cluster_extents);
+    const ::LTMatrix3 rcell =
+        MakeProbeMatrix(InvertCellMatrix(MakeMatrix(snapshot.header.cell)));
+    std::vector<::VECTOR> cluster_fractional_centers =
+        MakeRefreshFractionalCenters(cluster_centers, rcell);
+    std::vector<::VECTOR> cluster_fractional_extents =
+        MakeRefreshFractionalExtents(cluster_extents, rcell);
     std::vector<LJ_CLUSTERED_GMXPACKED_SCI> gmxpacked_sci =
         MakeProductionGmxpackedSciVector(snapshot.sci);
     std::vector<LJ_CLUSTERED_GMXPACKED_CJ> gmxpacked_cjpacked =
@@ -11859,7 +13150,10 @@ void RunSpongeProductionGmxpackedRefresh(
         MakeProductionGmxpackedExclusionVector(snapshot.excl);
     int* d_super_cluster_offsets =
         CopyVectorToDevice(snapshot.super_cluster_offsets);
-    ::VECTOR* d_cluster_centers = CopyVectorToDevice(cluster_centers);
+    ::VECTOR* d_cluster_fractional_centers =
+        CopyVectorToDevice(cluster_fractional_centers);
+    ::VECTOR* d_cluster_fractional_extents =
+        CopyVectorToDevice(cluster_fractional_extents);
     unsigned int* d_cluster_valid_masks =
         CopyVectorToDevice(snapshot.cluster_valid_masks);
     unsigned int* d_cluster_local_masks =
@@ -11881,16 +13175,15 @@ void RunSpongeProductionGmxpackedRefresh(
     CheckCuda(cudaMalloc(reinterpret_cast<void**>(&d_sci_shift_safe_count),
                          sizeof(int)),
               "cudaMalloc(sci_shift_safe_count)");
-    const ::LTMatrix3 rcell =
-        MakeProbeMatrix(InvertCellMatrix(MakeMatrix(snapshot.header.cell)));
     auto launchKernel = [&]() {
         CheckCuda(cudaMemset(d_sci_shift_safe_count, 0, sizeof(int)),
                   "cudaMemset(sci_shift_safe_count)");
         Refresh_Gmxpacked_Pair_Shift_Bits<<<sci_numbers, refreshBlockSize>>>(
-            sci_numbers, d_super_cluster_offsets, d_cluster_centers,
+            sci_numbers, d_super_cluster_offsets,
+            d_cluster_fractional_centers, d_cluster_fractional_extents,
             d_cluster_valid_masks, d_cluster_local_masks, d_sci, d_cjpacked,
-            d_excl, rcell, d_pair_shift_bits, NULL, d_sci_shift_safe_flags,
-            d_sci_shift_safe_count, true);
+            d_excl, d_pair_shift_bits, NULL,
+            d_sci_shift_safe_flags, d_sci_shift_safe_count, true);
         CheckCuda(cudaGetLastError(), "launch production-gmxpacked-refresh");
     };
 
@@ -11938,7 +13231,10 @@ void RunSpongeProductionGmxpackedRefresh(
     CheckCuda(cudaFree(d_sci), "cudaFree(sci)");
     CheckCuda(cudaFree(d_cluster_local_masks), "cudaFree(cluster_local_masks)");
     CheckCuda(cudaFree(d_cluster_valid_masks), "cudaFree(cluster_valid_masks)");
-    CheckCuda(cudaFree(d_cluster_centers), "cudaFree(cluster_centers)");
+    CheckCuda(cudaFree(d_cluster_fractional_extents),
+              "cudaFree(cluster_fractional_extents)");
+    CheckCuda(cudaFree(d_cluster_fractional_centers),
+              "cudaFree(cluster_fractional_centers)");
     CheckCuda(cudaFree(d_super_cluster_offsets),
               "cudaFree(super_cluster_offsets)");
 }
@@ -11948,6 +13244,7 @@ void RunSpongeProductionGmxpackedRefreshRootChildQueue2(
     const char* snapshotLabel, int refreshBlockSize)
 {
     if (snapshot.cluster_centers.empty() ||
+        snapshot.cluster_extents.size() != snapshot.cluster_centers.size() ||
         snapshot.candidate_leaf_offsets.empty() ||
         snapshot.octree_prefixes.empty())
     {
@@ -11965,6 +13262,14 @@ void RunSpongeProductionGmxpackedRefreshRootChildQueue2(
 
     std::vector<::VECTOR> cluster_centers =
         MakeProbeVector(snapshot.cluster_centers);
+    std::vector<::VECTOR> cluster_extents =
+        MakeProbeVector(snapshot.cluster_extents);
+    const ::LTMatrix3 rcell =
+        MakeProbeMatrix(InvertCellMatrix(MakeMatrix(snapshot.header.cell)));
+    std::vector<::VECTOR> cluster_fractional_centers =
+        MakeRefreshFractionalCenters(cluster_centers, rcell);
+    std::vector<::VECTOR> cluster_fractional_extents =
+        MakeRefreshFractionalExtents(cluster_extents, rcell);
     std::vector<LJ_CLUSTERED_GMXPACKED_SCI> gmxpacked_sci =
         MakeProductionGmxpackedSciVector(snapshot.sci);
     std::vector<LJ_CLUSTERED_GMXPACKED_CJ> gmxpacked_cjpacked =
@@ -11978,7 +13283,10 @@ void RunSpongeProductionGmxpackedRefreshRootChildQueue2(
 
     int* d_super_cluster_offsets =
         CopyVectorToDevice(snapshot.super_cluster_offsets);
-    ::VECTOR* d_cluster_centers = CopyVectorToDevice(cluster_centers);
+    ::VECTOR* d_cluster_fractional_centers =
+        CopyVectorToDevice(cluster_fractional_centers);
+    ::VECTOR* d_cluster_fractional_extents =
+        CopyVectorToDevice(cluster_fractional_extents);
     unsigned int* d_cluster_valid_masks =
         CopyVectorToDevice(snapshot.cluster_valid_masks);
     unsigned int* d_cluster_local_masks =
@@ -12025,8 +13333,6 @@ void RunSpongeProductionGmxpackedRefreshRootChildQueue2(
                          sizeof(int) * taskCapacity),
               "cudaMalloc(root_child_task_nodes)");
 
-    const ::LTMatrix3 rcell =
-        MakeProbeMatrix(InvertCellMatrix(MakeMatrix(snapshot.header.cell)));
     constexpr int taskBuildBlockSize = 128;
     const int taskBuildItems = candidate_sci_numbers * 8;
     const int taskBuildBlocks =
@@ -12036,10 +13342,11 @@ void RunSpongeProductionGmxpackedRefreshRootChildQueue2(
         CheckCuda(cudaMemset(d_sci_shift_safe_count, 0, sizeof(int)),
                   "cudaMemset(sci_shift_safe_count)");
         Refresh_Gmxpacked_Pair_Shift_Bits<<<sci_numbers, refreshBlockSize>>>(
-            sci_numbers, d_super_cluster_offsets, d_cluster_centers,
+            sci_numbers, d_super_cluster_offsets,
+            d_cluster_fractional_centers, d_cluster_fractional_extents,
             d_cluster_valid_masks, d_cluster_local_masks, d_sci, d_cjpacked,
-            d_excl, rcell, d_pair_shift_bits, NULL, d_sci_shift_safe_flags,
-            d_sci_shift_safe_count, true);
+            d_excl, d_pair_shift_bits, NULL,
+            d_sci_shift_safe_flags, d_sci_shift_safe_count, true);
         CheckCuda(cudaGetLastError(), "launch production-gmxpacked-refresh");
 
         CheckCuda(cudaMemset(d_task_counter, 0, sizeof(int)),
@@ -12127,7 +13434,10 @@ void RunSpongeProductionGmxpackedRefreshRootChildQueue2(
     CheckCuda(cudaFree(d_sci), "cudaFree(sci)");
     CheckCuda(cudaFree(d_cluster_local_masks), "cudaFree(cluster_local_masks)");
     CheckCuda(cudaFree(d_cluster_valid_masks), "cudaFree(cluster_valid_masks)");
-    CheckCuda(cudaFree(d_cluster_centers), "cudaFree(cluster_centers)");
+    CheckCuda(cudaFree(d_cluster_fractional_extents),
+              "cudaFree(cluster_fractional_extents)");
+    CheckCuda(cudaFree(d_cluster_fractional_centers),
+              "cudaFree(cluster_fractional_centers)");
     CheckCuda(cudaFree(d_super_cluster_offsets),
               "cudaFree(super_cluster_offsets)");
 }
@@ -13263,12 +14573,6 @@ SpongeForceOnlySnapshot ExtractPayloadFromFullOutputSnapshot(
     return payload;
 }
 
-struct DiffStats
-{
-    double max_abs = 0.0;
-    double rms = 0.0;
-};
-
 DiffStats CompareFloatArrays(const std::vector<float>& actual,
                              const std::vector<float>& reference)
 {
@@ -13285,6 +14589,10 @@ DiffStats CompareFloatArrays(const std::vector<float>& actual,
         const double diff = static_cast<double>(actual[i]) -
                             static_cast<double>(reference[i]);
         stats.max_abs = std::max(stats.max_abs, std::fabs(diff));
+        stats.max_scaled = std::max(
+            stats.max_scaled,
+            std::fabs(diff) /
+                (1.0 + std::fabs(static_cast<double>(reference[i]))));
         sum_sq += diff * diff;
     }
     stats.rms = std::sqrt(sum_sq / static_cast<double>(actual.size()));
@@ -13310,6 +14618,14 @@ DiffStats CompareForceArrays(const std::vector<Float4POD>& actual,
         const double dz = static_cast<double>(actual[i].z) - reference[i].z;
         stats.max_abs =
             std::max({stats.max_abs, std::fabs(dx), std::fabs(dy), std::fabs(dz)});
+        stats.max_scaled = std::max(
+            {stats.max_scaled,
+             std::fabs(dx) /
+                 (1.0 + std::fabs(static_cast<double>(reference[i].x))),
+             std::fabs(dy) /
+                 (1.0 + std::fabs(static_cast<double>(reference[i].y))),
+             std::fabs(dz) /
+                 (1.0 + std::fabs(static_cast<double>(reference[i].z)))});
         sum_sq += dx * dx + dy * dy + dz * dz;
     }
     stats.rms = std::sqrt(sum_sq / denom);
@@ -13338,9 +14654,18 @@ DiffStats CompareVirialArrays(const std::vector<LTMatrix3>& actual,
             static_cast<double>(actual[i].a32) - reference[i].a32,
             static_cast<double>(actual[i].a33) - reference[i].a33,
         };
-        for (double diff : diffs)
+        const std::array<double, 6> reference_values = {
+            reference[i].a11, reference[i].a21, reference[i].a22,
+            reference[i].a31, reference[i].a32, reference[i].a33,
+        };
+        for (size_t component = 0; component < diffs.size(); ++component)
         {
+            const double diff = diffs[component];
             stats.max_abs = std::max(stats.max_abs, std::fabs(diff));
+            stats.max_scaled = std::max(
+                stats.max_scaled,
+                std::fabs(diff) /
+                    (1.0 + std::fabs(reference_values[component])));
             sum_sq += diff * diff;
         }
     }
@@ -14797,10 +16122,121 @@ int main(int argc, char** argv)
     }
     if (args.kernel == "sponge")
     {
+        SpongeGmxpackedFullOutputSnapshot gmxpackedFullOutputSnapshot;
+        if (nbnxm_microbench::ReadSpongeGmxpackedFullOutputSnapshot(
+                args.snapshot, &gmxpackedFullOutputSnapshot))
+        {
+            if (args.pairOracle)
+            {
+                const nbnxm_microbench::CanonicalPairOracleResult result =
+                    nbnxm_microbench::CompareCanonicalPairs(
+                        gmxpackedFullOutputSnapshot.payload);
+                std::printf(
+                    "canonical_pair_oracle metadata_ready=%d matched=%d "
+                    "payload=%zu oracle=%zu duplicates=%zu missing=%zu "
+                    "extra=%zu\n",
+                    result.metadata_ready ? 1 : 0, result.matched ? 1 : 0,
+                    result.payload_pair_count, result.oracle_pair_count,
+                    result.duplicate_payload_pairs, result.missing_pairs,
+                    result.extra_pairs);
+                if (!result.failure_reason.empty())
+                {
+                    std::fprintf(stderr, "pair oracle failure: %s\n",
+                                 result.failure_reason.c_str());
+                }
+                return result.matched ? 0 : 2;
+            }
+            if (args.analyze)
+            {
+                AnalyzeSpongeProductionGmxpackedSnapshot(
+                    gmxpackedFullOutputSnapshot.payload);
+                return 0;
+            }
+            if (args.spongeLjMode == "fulloutput" ||
+                args.spongeLjMode == "production-gmxpacked" ||
+                args.spongeLjMode ==
+                    "production-gmxpacked-full-sci-split2" ||
+                args.spongeLjMode ==
+                    "production-gmxpacked-full-sci-split4" ||
+                args.spongeLjMode ==
+                    "production-gmxpacked-full-sci-split8")
+            {
+                const ProductionGmxpackedReplayMode replay_mode =
+                    args.spongeLjMode ==
+                            "production-gmxpacked-full-sci-split8"
+                        ? ProductionGmxpackedReplayMode::fullOutputSciSplit8
+                        : (args.spongeLjMode ==
+                                   "production-gmxpacked-full-sci-split4"
+                               ? ProductionGmxpackedReplayMode::
+                                     fullOutputSciSplit4
+                               : (args.spongeLjMode ==
+                                          "production-gmxpacked-full-sci-split2"
+                                      ? ProductionGmxpackedReplayMode::
+                                            fullOutputSciSplit2
+                                      : ProductionGmxpackedReplayMode::split));
+                RunSpongeProductionGmxpacked(
+                    gmxpackedFullOutputSnapshot.payload, args.warmup,
+                    args.iters,
+                    gmxpackedFullOutputSnapshot.header.compute_energy != 0u,
+                    gmxpackedFullOutputSnapshot.header.compute_virial != 0u,
+                    "native-gmxpacked-fulloutput",
+                    replay_mode,
+                    &gmxpackedFullOutputSnapshot);
+                return 0;
+            }
+            std::fprintf(
+                stderr,
+                "gmxpacked full-output snapshots support sponge-lj-mode "
+                "fulloutput|production-gmxpacked|"
+                "production-gmxpacked-full-sci-split2|"
+                "production-gmxpacked-full-sci-split4|"
+                "production-gmxpacked-full-sci-split8 only, got %s\n",
+                args.spongeLjMode.c_str());
+            return 1;
+        }
+
         SpongeGmxpackedForceOnlySnapshot productionGmxpackedSnapshot;
         if (nbnxm_microbench::ReadSpongeGmxpackedForceOnlySnapshot(
                 args.snapshot, &productionGmxpackedSnapshot))
         {
+            if (args.pairOracle)
+            {
+                const nbnxm_microbench::CanonicalPairOracleResult result =
+                    nbnxm_microbench::CompareCanonicalPairs(
+                        productionGmxpackedSnapshot);
+                std::printf(
+                    "canonical_pair_oracle metadata_ready=%d matched=%d "
+                    "payload=%zu oracle=%zu duplicates=%zu missing=%zu "
+                    "extra=%zu\n",
+                    result.metadata_ready ? 1 : 0, result.matched ? 1 : 0,
+                    result.payload_pair_count, result.oracle_pair_count,
+                    result.duplicate_payload_pairs, result.missing_pairs,
+                    result.extra_pairs);
+                if (!result.failure_reason.empty())
+                {
+                    std::fprintf(stderr, "pair oracle failure: %s\n",
+                                 result.failure_reason.c_str());
+                }
+                for (const auto& pair : result.first_duplicates)
+                {
+                    std::fprintf(stderr, "duplicate=(%d,%d,shift=%d)\n",
+                                 pair.global_i, pair.global_j,
+                                 pair.shift_id);
+                }
+                for (const auto& pair : result.first_missing)
+                {
+                    std::fprintf(stderr, "missing=(%d,%d,shift=%d)\n",
+                                 pair.global_i, pair.global_j,
+                                 pair.shift_id);
+                }
+                for (const auto& pair : result.first_extra)
+                {
+                    std::fprintf(stderr, "extra=(%d,%d,shift=%d)\n",
+                                 pair.global_i, pair.global_j,
+                                 pair.shift_id);
+                }
+                return result.matched ? 0 : 2;
+            }
             if (args.analyze)
             {
                 AnalyzeSpongeProductionGmxpackedSnapshot(
@@ -14818,6 +16254,28 @@ int main(int argc, char** argv)
                     productionGmxpackedSnapshot, args.warmup, args.iters,
                     args.computeEnergy, args.computeVirial,
                     "native-production-gmxpacked");
+                return 0;
+            }
+            if (args.spongeLjMode ==
+                "production-gmxpacked-fused-sits-force-only")
+            {
+                RunSpongeProductionGmxpacked(
+                    productionGmxpackedSnapshot, args.warmup, args.iters,
+                    args.computeEnergy, args.computeVirial,
+                    "native-production-gmxpacked-fused-sits-force-only",
+                    ProductionGmxpackedReplayMode::fusedSitsForceOnly,
+                    nullptr, args.sitsAtomEnd, args.sitsPwwpFactor);
+                return 0;
+            }
+            if (args.spongeLjMode ==
+                "production-gmxpacked-sparse-sits-force-only")
+            {
+                RunSpongeProductionGmxpacked(
+                    productionGmxpackedSnapshot, args.warmup, args.iters,
+                    args.computeEnergy, args.computeVirial,
+                    "native-production-gmxpacked-sparse-sits-force-only",
+                    ProductionGmxpackedReplayMode::sparseSitsForceOnly,
+                    nullptr, args.sitsAtomEnd, args.sitsPwwpFactor);
                 return 0;
             }
             if (args.spongeLjMode == "production-gmxpacked-compact-force")
@@ -15185,6 +16643,14 @@ int main(int argc, char** argv)
                          "comb-gmxpacked-partial-reduce-threshold4|"
                          "comb-gmxpacked-central-direct-partial-reduce only, got %s\n",
                          args.spongeLjMode.c_str());
+            return 1;
+        }
+        if (args.pairOracle)
+        {
+            std::fprintf(
+                stderr,
+                "--pair-oracle requires a SPONGE gmxpacked snapshot: %s\n",
+                args.snapshot.c_str());
             return 1;
         }
         SpongeClusteredFullOutputSnapshot fullOutputSnapshot;

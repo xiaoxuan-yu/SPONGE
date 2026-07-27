@@ -5,6 +5,7 @@
 
 #include "../common.h"
 #include "../control.h"
+#include "../neighbor_list/clustered_spatial_view.h"
 #ifndef USE_CPU
 #include "../third_party/cornerstone_octree/include/cstone/cuda/device_vector.h"
 #include "../third_party/cornerstone_octree/include/cstone/execution.hpp"
@@ -29,156 +30,20 @@ struct LJ_CORNERSTONE_STATE
 #endif
 };
 
-constexpr int kClusteredClusterSize = 8;
-constexpr int kClusteredSuperClusterClusters = 8;
-constexpr int kClusteredWarpSplitCount = 2;
-constexpr int kClusteredSplitJClusterSize =
-    kClusteredClusterSize / kClusteredWarpSplitCount;
-constexpr int kClusteredJGroupSize = kClusteredSplitJClusterSize;
-constexpr int kClusteredGmxpackedExclusionPairCount =
-    kClusteredSplitJClusterSize * kClusteredClusterSize;
-constexpr int kClusteredShiftCount = 27;
-constexpr int kClusteredCentralShiftId = 13;
-constexpr int kClusteredPairShiftBits = 5;
-constexpr uint64_t kClusteredPairShiftMask =
-    (1ull << kClusteredPairShiftBits) - 1ull;
-static_assert(kClusteredSuperClusterClusters * kClusteredPairShiftBits <= 64,
-              "Clustered pair shift bit packing exceeds 64 bits.");
-
-__host__ __device__ __forceinline__ VECTOR Clustered_Shift_Vector_From_Id(
-    int shift_id, LTMatrix3 cell)
-{
-    const int sx = shift_id / 9 - 1;
-    const int sy = (shift_id % 9) / 3 - 1;
-    const int sz = shift_id % 3 - 1;
-    return VECTOR(static_cast<float>(sx), static_cast<float>(sy),
-                  static_cast<float>(sz)) *
-           cell;
-}
-
-struct LJ_CLUSTERED_SCI
-{
-    int supercluster_id = 0;
-    int shift_id = kClusteredCentralShiftId;
-    int cjpacked_begin = 0;
-    int cjpacked_end = 0;
-};
-
-struct LJ_CLUSTERED_IMEI
-{
-    unsigned int imask = 0u;
-    int excl_ind[kClusteredJGroupSize * kClusteredSuperClusterClusters];
-};
-
-struct LJ_CLUSTERED_CJ_PACKED
-{
-    int cj[kClusteredJGroupSize];
-    LJ_CLUSTERED_IMEI imei[kClusteredWarpSplitCount];
-};
-
-struct LJ_CLUSTERED_GMXPACKED_SCI
-{
-    int supercluster_id = 0;
-    int shift_id = kClusteredCentralShiftId;
-    int cjpacked_begin = 0;
-    int cjpacked_end = 0;
-};
-
-struct LJ_CLUSTERED_GMXPACKED_SPLIT
-{
-    unsigned int imask = 0u;
-    int exclusion_index = 0;
-};
-
-struct LJ_CLUSTERED_GMXPACKED_CJ
-{
-    int cj[kClusteredJGroupSize] = { -1, -1, -1, -1 };
-    LJ_CLUSTERED_GMXPACKED_SPLIT split[kClusteredWarpSplitCount] = {};
-};
-static_assert(sizeof(LJ_CLUSTERED_GMXPACKED_CJ) == 32,
-              "Unexpected clustered gmxpacked cj size.");
-
-struct LJ_CLUSTERED_GMXPACKED_EXCLUSION
-{
-    unsigned int pair[kClusteredGmxpackedExclusionPairCount] = {};
-};
-static_assert(sizeof(LJ_CLUSTERED_GMXPACKED_EXCLUSION) ==
-                  sizeof(unsigned int) * kClusteredGmxpackedExclusionPairCount,
-              "Unexpected clustered gmxpacked exclusion size.");
-
 #ifndef USE_CPU
 __global__ void Refresh_Gmxpacked_Pair_Shift_Bits(
     int sci_numbers, const int* super_cluster_offsets,
-    const VECTOR* cluster_centers, const unsigned int* cluster_valid_masks,
+    const VECTOR* cluster_fractional_centers,
+    const VECTOR* cluster_fractional_extents,
+    const unsigned int* cluster_valid_masks,
     const unsigned int* cluster_local_masks,
     const LJ_CLUSTERED_GMXPACKED_SCI* gmxpacked_sci,
     const LJ_CLUSTERED_GMXPACKED_CJ* gmxpacked_cjpacked,
     const LJ_CLUSTERED_GMXPACKED_EXCLUSION* exclusion_entries,
-    LTMatrix3 rcell, uint64_t* pair_shift_bits, int* sci_shift_only_safe,
+    uint64_t* pair_shift_bits, int* sci_shift_only_safe,
     int* sci_shift_safe_flags, int* sci_shift_safe_count,
     bool exact_sci_shift_flags);
 #endif
-
-// Future production-owned gmxpacked record-stream contract. Hook this stream
-// after cornerstone-sorted atoms already have cluster/supercluster/
-// candidate-leaf, shift, and exclusion metadata, but before finalized native
-// LJ_CLUSTERED_SCI / LJ_CLUSTERED_CJ_PACKED materialization and before
-// Build_Gmxpacked_Payload(). This path must consume candidate-stage metadata
-// directly and must not accept finalized native CJ payload as input.
-struct LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE
-{
-    int sci_id = -1;
-    int shift_id = kClusteredCentralShiftId;
-    int supercluster_id = -1;
-    int cluster_j = -1;
-    int split_id = 0;
-    unsigned int imask = 0u;
-    unsigned int valid_mask_j = 0u;
-    unsigned int local_mask_j = 0u;
-    unsigned int pair_exclusion_words[kClusteredGmxpackedExclusionPairCount] = {};
-    int source_order = 0;
-};
-
-struct LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_AGGREGATE
-{
-    int sci_id = -1;
-    int shift_id = kClusteredCentralShiftId;
-    int supercluster_id = -1;
-    int cluster_j = -1;
-    unsigned int split_imask[kClusteredWarpSplitCount] = {};
-    unsigned int valid_mask_j = 0u;
-    unsigned int local_mask_j = 0u;
-    unsigned int pair_exclusion_words[kClusteredWarpSplitCount]
-                                      [kClusteredGmxpackedExclusionPairCount] = {};
-    int source_order_begin = 0;
-    int source_order_end = 0;
-};
-
-struct LJ_CLUSTERED_J_ENTRY
-{
-    int supercluster_id = 0;
-    int shift_id = kClusteredCentralShiftId;
-    int cluster_j = -1;
-    unsigned int imask[kClusteredWarpSplitCount] = {};
-    int excl_ind[kClusteredWarpSplitCount * kClusteredSuperClusterClusters] = {};
-};
-
-constexpr int kClusteredWarpRecordPairExclBytes =
-    kClusteredSplitJClusterSize * kClusteredClusterSize;
-
-struct LJ_CLUSTERED_WARP_J_RECORD
-{
-    int cluster_j = -1;
-    int sorted_j_base = 0;
-    int pair_shift_index = -1;
-    unsigned char valid_mask = 0u;
-    unsigned char imask = 0u;
-    unsigned char local_mask = 0u;
-    unsigned char j_lane_base = 0u;
-    unsigned char pair_excl[kClusteredWarpRecordPairExclBytes] = {};
-};
-static_assert(sizeof(LJ_CLUSTERED_WARP_J_RECORD) == 48,
-              "Unexpected clustered warp-record size.");
 
 struct LJ_CLUSTERED_LEGACY_NEIGHBOR_VIEW_REQUEST
 {
@@ -197,79 +62,6 @@ struct LJ_CLUSTERED_LEGACY_NEIGHBOR_VIEW_REQUEST
     const int* d_excluded_list = NULL;
     const int* d_excluded_numbers = NULL;
 };
-
-__host__ __device__ __forceinline__ unsigned int
-Clustered_Split_Valid_Mask(int split)
-{
-    return ((1u << kClusteredSplitJClusterSize) - 1u)
-           << (split * kClusteredSplitJClusterSize);
-}
-
-__host__ __device__ __forceinline__ unsigned int Clustered_Jm_Imask_Shift(int jm)
-{
-    return static_cast<unsigned int>(jm * kClusteredSuperClusterClusters);
-}
-
-__host__ __device__ __forceinline__ unsigned int
-Clustered_Jm_Imask(const LJ_CLUSTERED_IMEI& imei, int jm)
-{
-    return (imei.imask >> Clustered_Jm_Imask_Shift(jm)) &
-           ((1u << kClusteredSuperClusterClusters) - 1u);
-}
-
-__host__ __device__ __forceinline__ int& Clustered_Exclusion_Index_Ref(
-    LJ_CLUSTERED_IMEI& imei, int jm, int i_local)
-{
-    return imei.excl_ind[jm * kClusteredSuperClusterClusters + i_local];
-}
-
-__host__ __device__ __forceinline__ int Clustered_Exclusion_Index(
-    const LJ_CLUSTERED_IMEI& imei, int jm, int i_local)
-{
-    return imei.excl_ind[jm * kClusteredSuperClusterClusters + i_local];
-}
-
-__host__ __device__ __forceinline__ unsigned int
-Clustered_Combined_Imask(const LJ_CLUSTERED_CJ_PACKED& packed)
-{
-    return packed.imei[0].imask | packed.imei[1].imask;
-}
-
-__host__ __device__ __forceinline__ void Clustered_Set_Pair_Shift_Id(
-    uint64_t* packed_shift_bits, int i_local, int shift_id)
-{
-    const uint64_t shift_mask =
-        kClusteredPairShiftMask
-        << (static_cast<uint64_t>(i_local) * kClusteredPairShiftBits);
-    *packed_shift_bits =
-        (*packed_shift_bits & ~shift_mask) |
-        ((static_cast<uint64_t>(shift_id) & kClusteredPairShiftMask)
-         << (static_cast<uint64_t>(i_local) * kClusteredPairShiftBits));
-}
-
-__host__ __device__ __forceinline__ int Clustered_Get_Pair_Shift_Id(
-    uint64_t packed_shift_bits, int i_local)
-{
-    return static_cast<int>(
-        (packed_shift_bits >>
-         (static_cast<uint64_t>(i_local) * kClusteredPairShiftBits)) &
-        kClusteredPairShiftMask);
-}
-
-__host__ __device__ __forceinline__ int Clustered_First_Exclusion_Index(
-    const LJ_CLUSTERED_CJ_PACKED& packed, int jm, int i_local)
-{
-    for (int split = 0; split < kClusteredWarpSplitCount; split += 1)
-    {
-        const int exclusion_index =
-            Clustered_Exclusion_Index(packed.imei[split], jm, i_local);
-        if (exclusion_index >= 0)
-        {
-            return exclusion_index;
-        }
-    }
-    return -1;
-}
 
 struct LJ_CLUSTER_LAYOUT
 {
@@ -317,10 +109,6 @@ struct LJ_CLUSTER_LAYOUT
     int gmxpacked_cjpacked_numbers = 0;
     int gmxpacked_exclusion_numbers = 0;
     int gmxpacked_split_exclusion_numbers = 0;
-    int gmxpacked_delta_sci_numbers = 0;
-    int gmxpacked_delta_cjpacked_numbers = 0;
-    int gmxpacked_delta_exclusion_numbers = 0;
-    int gmxpacked_delta_split_exclusion_numbers = 0;
     int gmxpacked_record_stream_source_numbers = 0;
     int gmxpacked_record_stream_aggregate_numbers = 0;
     float gmxpacked_inner_active_guard_cutoff = -1.0f;
@@ -336,6 +124,8 @@ struct LJ_CLUSTER_LAYOUT
     int gmxpacked_pair_shift_metadata_sci_numbers = 0;
     int gmxpacked_pair_shift_metadata_cjpacked_numbers = 0;
     int gmxpacked_pair_shift_metadata_exclusion_numbers = 0;
+    long long gmxpacked_pair_shift_metadata_payload_generation = -1;
+    long long gmxpacked_pair_shift_metadata_geometry_generation = -1;
     int gmxpacked_pair_shift_safe_sci_numbers = 0;
     int gmxpacked_pair_shift_unsafe_sci_numbers = 0;
     LTMatrix3 gmxpacked_pair_shift_metadata_rcell = {};
@@ -343,18 +133,30 @@ struct LJ_CLUSTER_LAYOUT
     int candidate_leaf_cluster_stride = 0;
     int exclusion_pool_numbers = 0;
     bool grouped_sci_ready = false;
+    bool gmxpacked_grouped_sci_ready = false;
+    bool gmxpacked_endpoint_incidence_ready = false;
+    long long gmxpacked_endpoint_incidence_provider_incarnation = -1;
+    long long gmxpacked_endpoint_incidence_payload_generation = -1;
+    int gmxpacked_endpoint_incidence_sci_numbers = 0;
+    int gmxpacked_endpoint_incidence_cjpacked_numbers = 0;
+    int gmxpacked_endpoint_incidence_super_cluster_numbers = 0;
+    int gmxpacked_endpoint_incidence_reference_numbers = 0;
+    int gmxpacked_endpoint_incidence_offset_tail = 0;
     bool gmxpacked_incremental_source_offsets_ready = false;
     bool gmxpacked_incremental_source_cache_ready = false;
     bool gmxpacked_outer_source_anchor_ready = false;
     bool stable_target_layout_anchor_ready = false;
     bool gmxpacked_inner_active_anchor_ready = false;
     bool gmxpacked_inner_active_source_imasks_ready = false;
-    bool gmxpacked_inner_active_compact_base_imasks_ready = false;
     int gmxpacked_inner_active_source_imask_numbers = 0;
-    int gmxpacked_inner_active_compact_base_imask_numbers = 0;
     int gmxpacked_inner_active_source_rows_baseline = 0;
     long long gmxpacked_inner_active_anchor_generation = 0;
     long long gmxpacked_inner_active_source_generation = 0;
+    long long provider_incarnation = 1;
+    long long spatial_view_lease_epoch = 0;
+    long long native_payload_generation = 0;
+    long long gmxpacked_compact_payload_generation = 0;
+    long long geometry_generation = 0;
     long long gmxpacked_compact_payload_anchor_generation = -1;
     long long gmxpacked_compact_payload_source_generation = -1;
     long long gmxpacked_current_source_anchor_generation = 0;
@@ -381,6 +183,8 @@ struct LJ_CLUSTER_LAYOUT
     int cluster_local_mask_capacity = 0;
     int cluster_center_capacity = 0;
     int cluster_extent_capacity = 0;
+    int cluster_fractional_center_capacity = 0;
+    int cluster_fractional_extent_capacity = 0;
     int cluster_radius_capacity = 0;
     int leaf_capacity = 0;
     int leaf_cluster_start_capacity = 0;
@@ -418,6 +222,12 @@ struct LJ_CLUSTER_LAYOUT
     int candidate_shift_capacity = 0;
     int grouped_sci_offset_capacity = 0;
     int grouped_sci_id_capacity = 0;
+    int gmxpacked_grouped_sci_offset_capacity = 0;
+    int gmxpacked_grouped_sci_id_capacity = 0;
+    int gmxpacked_endpoint_incidence_offset_capacity = 0;
+    int gmxpacked_endpoint_incidence_reference_capacity = 0;
+    int gmxpacked_endpoint_incidence_key_capacity = 0;
+    int gmxpacked_endpoint_incidence_error_capacity = 0;
     int cached_crd_capacity = 0;
     int rebuild_flag_capacity = 0;
     int nbnxm_sci_capacity = 0;
@@ -425,10 +235,6 @@ struct LJ_CLUSTER_LAYOUT
     int gmxpacked_sci_capacity = 0;
     int gmxpacked_cjpacked_capacity = 0;
     int gmxpacked_exclusion_capacity = 0;
-    int gmxpacked_delta_sci_capacity = 0;
-    int gmxpacked_delta_cjpacked_capacity = 0;
-    int gmxpacked_delta_exclusion_capacity = 0;
-    int gmxpacked_delta_pair_shift_capacity = 0;
     int gmxpacked_record_stream_source_capacity = 0;
     int gmxpacked_record_stream_aggregate_capacity = 0;
     int gmxpacked_incremental_source_offset_capacity = 0;
@@ -466,8 +272,6 @@ struct LJ_CLUSTER_LAYOUT
     int gmxpacked_outer_source_anchor_crd_capacity = 0;
     int gmxpacked_inner_active_anchor_crd_capacity = 0;
     int gmxpacked_inner_active_source_imask_capacity = 0;
-    int gmxpacked_inner_active_compact_base_imask_capacity = 0;
-    int gmxpacked_inner_active_compact_delta_source_flag_capacity = 0;
 
     int* d_sort_permutation = NULL;
     uint64_t* d_sort_keys = NULL;
@@ -476,8 +280,6 @@ struct LJ_CLUSTER_LAYOUT
     VECTOR* d_gmxpacked_outer_source_anchor_crd = NULL;
     VECTOR* d_gmxpacked_inner_active_anchor_crd = NULL;
     unsigned int* d_gmxpacked_inner_active_source_imasks = NULL;
-    unsigned int* d_gmxpacked_inner_active_compact_base_imasks = NULL;
-    int* d_gmxpacked_inner_active_compact_delta_source_flags = NULL;
     int* d_need_rebuild = NULL;
     const int* d_atom_local = NULL;
     int* d_global_atom_to_molecule = NULL;
@@ -488,6 +290,8 @@ struct LJ_CLUSTER_LAYOUT
     unsigned int* d_cluster_local_masks = NULL;
     VECTOR* d_cluster_centers = NULL;
     VECTOR* d_cluster_extents = NULL;
+    VECTOR* d_cluster_fractional_centers = NULL;
+    VECTOR* d_cluster_fractional_extents = NULL;
     float* d_cluster_radii = NULL;
     uint64_t* d_cluster_molecule_signatures = NULL;
     int* d_cluster_molecule_ids = NULL;
@@ -542,6 +346,13 @@ struct LJ_CLUSTER_LAYOUT
     int* d_candidate_shift_ids = NULL;
     int* d_grouped_sci_offsets = NULL;
     int* d_grouped_sci_ids = NULL;
+    int* d_gmxpacked_grouped_sci_offsets = NULL;
+    int* d_gmxpacked_grouped_sci_ids = NULL;
+    int* d_gmxpacked_endpoint_incidence_offsets = NULL;
+    CLUSTERED_GMXPACKED_ENDPOINT_REFERENCE*
+        d_gmxpacked_endpoint_incidence_references = NULL;
+    uint64_t* d_gmxpacked_endpoint_incidence_keys = NULL;
+    int* d_gmxpacked_endpoint_incidence_error = NULL;
     int* d_cjpacked_counts = NULL;
     int* d_exclusion_counts = NULL;
     int* d_exclusion_offsets = NULL;
@@ -555,10 +366,6 @@ struct LJ_CLUSTER_LAYOUT
     LJ_CLUSTERED_GMXPACKED_SCI* d_gmxpacked_sci = NULL;
     LJ_CLUSTERED_GMXPACKED_CJ* d_gmxpacked_cjpacked = NULL;
     LJ_CLUSTERED_GMXPACKED_EXCLUSION* d_gmxpacked_exclusions = NULL;
-    LJ_CLUSTERED_GMXPACKED_SCI* d_gmxpacked_delta_sci = NULL;
-    LJ_CLUSTERED_GMXPACKED_CJ* d_gmxpacked_delta_cjpacked = NULL;
-    LJ_CLUSTERED_GMXPACKED_EXCLUSION* d_gmxpacked_delta_exclusions = NULL;
-    uint64_t* d_gmxpacked_delta_pair_shift_bits = NULL;
     LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_SOURCE*
         d_gmxpacked_record_stream_sources = NULL;
     LJ_CLUSTERED_GMXPACKED_RECORD_STREAM_AGGREGATE*
@@ -610,6 +417,7 @@ struct LJ_CLUSTER_LAYOUT
 
     void Initial(CONTROLLER* controller, const char* module_name,
                  bool ordered_layout_enabled = false);
+    void Enable_Clustered_Spatial_Service();
     void Refresh_Metadata(int local_atom_numbers, int direct_local_atom_numbers,
                           int ghost_numbers,
                           const int* d_atom_local,
@@ -621,6 +429,22 @@ struct LJ_CLUSTER_LAYOUT
                bool prefer_full_warp_record, bool need_gmxpacked_payload,
                bool need_aux_clustered_metadata,
                bool runtime_gmxpacked_direct_requested);
+    void Retire_Spatial_Provider_Lifetime()
+    {
+        gmxpacked_endpoint_incidence_ready = false;
+        gmxpacked_endpoint_incidence_provider_incarnation = -1;
+        gmxpacked_endpoint_incidence_payload_generation = -1;
+        gmxpacked_endpoint_incidence_sci_numbers = 0;
+        gmxpacked_endpoint_incidence_cjpacked_numbers = 0;
+        gmxpacked_endpoint_incidence_super_cluster_numbers = 0;
+        gmxpacked_endpoint_incidence_reference_numbers = 0;
+        gmxpacked_endpoint_incidence_offset_tail = 0;
+        provider_incarnation += 1;
+        spatial_view_lease_epoch += 1;
+        native_payload_generation += 1;
+        gmxpacked_compact_payload_generation += 1;
+        geometry_generation += 1;
+    }
     void Clear();
 
     bool Use_Clustered_Direct() const { return enabled; }
@@ -636,28 +460,28 @@ struct LJ_CLUSTERED_DIRECT_CACHE
     TIME_RECORDER* gmxpacked_kernel_launch_time_recorder = NULL;
     TIME_RECORDER* gmxpacked_sorted_force_scatter_time_recorder = NULL;
     TIME_RECORDER* gmxpacked_full_output_snapshot_time_recorder = NULL;
-    bool gmxpacked_sorted_force_clean = false;
-    bool gmxpacked_sorted_force_clean_float4 = false;
-    int gmxpacked_sorted_force_clean_capacity = 0;
     int coordinate_gather_step = -1;
     int coordinate_gather_count_this_step = 0;
     long long coordinate_gather_count_total = 0;
 
-    int scratch_capacity = 0;
+    int sorted_atom_ids_capacity = 0;
     int* d_sorted_atom_ids = NULL;
+    int sorted_xq_capacity = 0;
     float4* d_sorted_xq = NULL;
+    int sorted_lj_type_capacity = 0;
     int* d_sorted_lj_type = NULL;
+    int sorted_cluster_ids_capacity = 0;
     int* d_sorted_cluster_ids = NULL;
+    int sorted_lj_comb_capacity = 0;
     float2* d_sorted_lj_comb = NULL;
+    int sorted_frc_capacity = 0;
     VECTOR* d_sorted_frc = NULL;
-    float4* d_sorted_frc4 = NULL;
-    float* d_sorted_frc_x = NULL;
-    float* d_sorted_frc_y = NULL;
-    float* d_sorted_frc_z = NULL;
+    int sorted_soft_crd_capacity = 0;
     VECTOR_LJ_SOFT_TYPE* d_sorted_soft_crd = NULL;
 
     void Initial(CONTROLLER* controller, const char* module_name,
-                 bool ordered_layout_enabled = false);
+                 bool ordered_layout_enabled = false,
+                 bool clustered_spatial_service_requested = false);
     void Refresh_Metadata(int local_atom_numbers, int direct_local_atom_numbers,
                           int ghost_numbers,
                           const int* d_atom_local,
@@ -674,7 +498,8 @@ struct LJ_CLUSTERED_DIRECT_CACHE
                       LTMatrix3 rcell, const float2* lj_ab_packed = NULL);
     void Gather_Plain(const VECTOR_LJ* src, LTMatrix3 cell, LTMatrix3 rcell,
                       const float2* lj_ab_packed = NULL);
-    void Gather_Soft_Core(const VECTOR_LJ_SOFT_TYPE* src);
+    void Gather_Soft_Core(const VECTOR_LJ_SOFT_TYPE* src, LTMatrix3 cell,
+                          LTMatrix3 rcell);
     bool Coordinate_Gather_Ready_For_Current_Step() const;
     void Clear();
 
@@ -683,8 +508,13 @@ struct LJ_CLUSTERED_DIRECT_CACHE
 
 LJ_CLUSTERED_DIRECT_CACHE* Acquire_Shared_LJ_Clustered_Direct_Cache(
     CONTROLLER* controller, const char* module_name,
-    bool ordered_layout_enabled = false);
+    bool ordered_layout_enabled = false,
+    bool clustered_spatial_service_requested = false);
 void Release_Shared_LJ_Clustered_Direct_Cache();
+
+bool Make_Clustered_Spatial_View_From_LJ_Cache(
+    const LJ_CLUSTERED_DIRECT_CACHE* cache, CLUSTERED_SPATIAL_VIEW* view,
+    const char** failure_reason = NULL);
 
 void Compare_Gmxpacked_Record_Stream_Focus_Pair_Forces(
     LJ_CLUSTERED_DIRECT_CACHE* cache, const float2* d_LJ_AB_packed,

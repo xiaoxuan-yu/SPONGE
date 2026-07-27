@@ -18,7 +18,11 @@ Equivalent inputs are valid if they keep:
 - `[LJ] direct_kernel = "clustered"`
 - `step_limit = 10000`
 - `cutoff = 8.0`
-- default clustered `skin = 10.0`
+- explicit `skin = 10.0`
+- explicit `[LJ] clustered_rebuild_skin = 10.0`
+
+The general runtime default is `skin = 2.0`; 10 Å is a peak-benchmark setting,
+not a production default.
 
 Do not compare these numbers with the 160k PME case or with nsys-wrapped
 `Core Run Speed` values.
@@ -33,7 +37,6 @@ has shown intermittent 10000-step NaN after repeated no-verify runs.
 
 ```sh
 SPONGE_CLUSTERED_DISABLE_FINE_TIMERS=1
-SPONGE_CLUSTERED_USE_GMXPACKED_DIRECT=1
 SPONGE_CLUSTERED_GMXPACKED_LIFECYCLE_POLICY=outer
 SPONGE_CLUSTERED_GMXPACKED_ACTIVE_VIEW=1
 SPONGE_CLUSTERED_GMXPACKED_ACTIVE_VIEW_ROLLING_SOURCE_CACHE=0
@@ -58,41 +61,41 @@ SPONGE_CLUSTERED_GMXPACKED_INNER_ACTIVE_CACHED_FILL=1
 SPONGE_CLUSTERED_GMXPACKED_PAIR_SHIFT_REFRESH_BLOCK_SIZE=128
 ```
 
-For DNA_COU peak checks, add both DNA-specific gates:
+The following DNA gates describe the historical pre-promotion baseline only.
+Do not add them to the current cleanup or migration-candidate environment:
+current qualification rejects every `_PROBE` key and exercises the promoted
+production split3/split2 dispatch.
+
+For a historical DNA_COU baseline peak check, add the complete frozen
+DNA-specific selection:
 
 ```sh
 SPONGE_CLUSTERED_GMXPACKED_FULL_DENSE_PADDING=1
-SPONGE_CLUSTERED_GMXPACKED_FORCE_SCI_SPLIT2_PROBE=1
+SPONGE_CLUSTERED_USE_GMXPACKED_DIRECT=1
 SPONGE_CLUSTERED_GMXPACKED_FORCE_SCI_SPLIT3_CONTIGUOUS_PROBE=1
-```
-
-The force SCI split2 and contiguous split3 gates are default-off and
-AB-table-only. When both are set, force-only dispatch selects contiguous
-split3. Do not add either flag to the shared water environment; wat160k and
-wat600k already use the LJ-combination fast path. Split2 evidence is recorded
-in `docs/gmxpacked-dna-force-sci-work-split-probe-20260710.md`; contiguous
-split3 evidence is in
-`docs/gmxpacked-dna-force-sci-split3-contiguous-20260723.md`.
-
-For DNA NPT only, add the default-off virial specialization gate:
-
-```sh
 SPONGE_CLUSTERED_GMXPACKED_VIRIAL_SCI_SPLIT2_PROBE=1
-```
-
-Do not add this gate to the locked NVE path, NVT, or either water system. The
-virial-only full NCU diff, DNA NPT end-to-end result, and public SPONGE
-comparison are recorded in
-`docs/gmxpacked-dna-npt-virial-sci-split2-20260723.md`. The energy+virial
-specialization has a separate default-off gate for any DNA ensemble that
-emits full per-atom output:
-
-```sh
 SPONGE_CLUSTERED_GMXPACKED_ENERGY_VIRIAL_SCI_SPLIT2_PROBE=1
 ```
 
-Do not add the energy+virial gate to either water system. Its validation is in
+These historical gates are default-off and AB-table-only. Do not add them to
+the shared water or current environment; wat160k and wat600k use the
+LJ-combination path, while the current DNA path uses promoted production
+dispatch. The force-only evidence is in
+`docs/gmxpacked-dna-force-sci-split3-contiguous-20260723.md`.
+The full-output validation is in
 `docs/gmxpacked-dna-energy-virial-sci-split2-20260723.md`.
+
+The retained migration producer takes separate current and baseline JSON
+environments. It permits the historical direct opt-in only in the baseline
+JSON, keeps it for all baseline systems, removes the DNA probe/padding keys
+from baseline water cases, and records all resolved per-system environments
+in the manifest:
+
+```text
+pixi run -e dev-cuda13 clustered-lj-matrix \
+  BASELINE_SPONGE CURRENT_SPONGE \
+  CURRENT_ENVIRONMENT.json BASELINE_ENVIRONMENT.json OUTPUT_ROOT
+```
 
 ## 2026-07-09 current peak recheck
 

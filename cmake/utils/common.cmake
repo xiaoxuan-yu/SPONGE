@@ -27,6 +27,9 @@ set(CMAKE_MODULE_PATH "${PROJECT_ROOT_DIR}/cmake/modules")
 
 if(UNIX)
   target_link_libraries(common_libraries INTERFACE ${CMAKE_DL_LIBS})
+  if(NOT APPLE)
+    target_link_libraries(common_libraries INTERFACE rt)
+  endif()
 endif()
 
 function(SearchOptions SEARCH_PATH OUTPUT_VAR)

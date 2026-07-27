@@ -13,8 +13,10 @@ namespace nbnxm_microbench
 
 constexpr char kSnapshotMagic[8] = { 'N', 'B', 'N', 'X', 'M', 'B', 'E', 'N' };
 constexpr char kBuilderMetadataMagic[8] = { 'N', 'B', 'N', 'X', 'M', 'B', 'L', 'D' };
+constexpr char kPairOracleMetadataMagic[8] = { 'N', 'B', 'N', 'X', 'M', 'P', 'O', 'R' };
 constexpr uint32_t kSnapshotVersion = 2u;
 constexpr uint32_t kBuilderMetadataVersion = 1u;
+constexpr uint32_t kPairOracleMetadataVersion = 2u;
 
 enum class SnapshotKind : uint32_t
 {
@@ -22,6 +24,7 @@ enum class SnapshotKind : uint32_t
     gromacsPairlist = 2u,
     spongeClusteredFullOutput = 3u,
     spongeGmxpackedForceOnly = 4u,
+    spongeGmxpackedFullOutput = 5u,
 };
 
 struct SnapshotFileHeader
@@ -229,6 +232,20 @@ struct SpongeGmxpackedForceOnlySnapshotHeader
     LTMatrix3POD cell = {};
 };
 
+struct SpongeGmxpackedFullOutputSnapshotHeader
+{
+    SnapshotFileHeader file = {};
+    uint32_t compute_energy = 0u;
+    uint32_t compute_virial = 0u;
+    uint32_t force_soa = 0u;
+    uint32_t total_output = 0u;
+    uint64_t force_reference_numbers = 0u;
+    uint64_t energy_reference_numbers = 0u;
+    uint64_t virial_reference_numbers = 0u;
+    uint64_t direct_energy_reference_numbers = 0u;
+    uint64_t lj_energy_reference_numbers = 0u;
+};
+
 struct SpongeGmxpackedBuilderMetadataHeader
 {
     char magic[8] = {};
@@ -242,6 +259,16 @@ struct SpongeGmxpackedBuilderMetadataHeader
     uint64_t candidate_shift_numbers = 0u;
     uint64_t candidate_leaf_numbers = 0u;
     uint64_t candidate_leaf_prev_numbers = 0u;
+};
+
+struct SpongePairOracleMetadataHeader
+{
+    char magic[8] = {};
+    uint32_t version = kPairOracleMetadataVersion;
+    uint32_t reserved0 = 0u;
+    uint64_t atom_local_numbers = 0u;
+    uint64_t exclusion_atom_numbers = 0u;
+    uint64_t excluded_entry_numbers = 0u;
 };
 
 struct SpongeForceOnlySnapshot
@@ -332,6 +359,21 @@ struct SpongeGmxpackedForceOnlySnapshot
     std::vector<int> sorted_lj_type;
     std::vector<Float2POD> sorted_lj_comb;
     std::vector<Float2POD> lj_ab;
+    std::vector<int> atom_local;
+    std::vector<int> excluded_list_start;
+    std::vector<int> excluded_numbers;
+    std::vector<int> excluded_list;
+};
+
+struct SpongeGmxpackedFullOutputSnapshot
+{
+    SpongeGmxpackedFullOutputSnapshotHeader header = {};
+    SpongeGmxpackedForceOnlySnapshot payload = {};
+    std::vector<Float4POD> reference_force;
+    std::vector<float> reference_atom_energy;
+    std::vector<LTMatrix3POD> reference_atom_virial;
+    std::vector<float> reference_direct_cf_energy;
+    std::vector<float> reference_lj_energy;
 };
 
 template <typename T>
@@ -399,6 +441,15 @@ inline SpongeGmxpackedBuilderMetadataHeader MakeBuilderMetadataHeader()
     return header;
 }
 
+inline SpongePairOracleMetadataHeader MakePairOracleMetadataHeader()
+{
+    SpongePairOracleMetadataHeader header = {};
+    std::memcpy(header.magic, kPairOracleMetadataMagic,
+                sizeof(kPairOracleMetadataMagic));
+    header.version = kPairOracleMetadataVersion;
+    return header;
+}
+
 inline bool IsValidFileHeader(const SnapshotFileHeader& header,
                               SnapshotKind expected_kind)
 {
@@ -413,6 +464,14 @@ inline bool IsValidBuilderMetadataHeader(
     return std::memcmp(header.magic, kBuilderMetadataMagic,
                        sizeof(kBuilderMetadataMagic)) == 0 &&
            header.version == kBuilderMetadataVersion;
+}
+
+inline bool IsValidPairOracleMetadataHeader(
+    const SpongePairOracleMetadataHeader& header)
+{
+    return std::memcmp(header.magic, kPairOracleMetadataMagic,
+                       sizeof(kPairOracleMetadataMagic)) == 0 &&
+           header.version == kPairOracleMetadataVersion;
 }
 
 inline bool WriteSpongeForceOnlySnapshot(const std::string& path,
@@ -538,30 +597,29 @@ inline bool ReadGromacsPairlistSnapshot(const std::string& path,
            ReadVector(&in, &snapshot->lj_ab, lj_param_numbers);
 }
 
-inline bool WriteSpongeGmxpackedForceOnlySnapshot(
-    const std::string& path,
-    const SpongeGmxpackedForceOnlySnapshot& snapshot)
+inline bool WriteSpongeGmxpackedForceOnlySnapshotPayload(
+    std::ofstream* out, const SpongeGmxpackedForceOnlySnapshot& snapshot,
+    bool write_empty_pair_metadata = false)
 {
-    std::ofstream out(path, std::ios::binary | std::ios::trunc);
-    if (!out.good())
+    if (out == nullptr || !out->good())
     {
         return false;
     }
-    if (!WriteBinary(&out, snapshot.header) ||
-        !WriteVector(&out, snapshot.cluster_offsets) ||
-        !WriteVector(&out, snapshot.cluster_valid_masks) ||
-        !WriteVector(&out, snapshot.cluster_local_masks) ||
-        !WriteVector(&out, snapshot.super_cluster_offsets) ||
-        !WriteVector(&out, snapshot.sci) ||
-        !WriteVector(&out, snapshot.cjpacked) ||
-        !WriteVector(&out, snapshot.excl) ||
-        !WriteVector(&out, snapshot.pair_shift_bits) ||
-        !WriteVector(&out, snapshot.sci_shift_safe_flags) ||
-        !WriteVector(&out, snapshot.sorted_atom_ids) ||
-        !WriteVector(&out, snapshot.sorted_xq) ||
-        !WriteVector(&out, snapshot.sorted_lj_type) ||
-        !WriteVector(&out, snapshot.sorted_lj_comb) ||
-        !WriteVector(&out, snapshot.lj_ab))
+    if (!WriteBinary(out, snapshot.header) ||
+        !WriteVector(out, snapshot.cluster_offsets) ||
+        !WriteVector(out, snapshot.cluster_valid_masks) ||
+        !WriteVector(out, snapshot.cluster_local_masks) ||
+        !WriteVector(out, snapshot.super_cluster_offsets) ||
+        !WriteVector(out, snapshot.sci) ||
+        !WriteVector(out, snapshot.cjpacked) ||
+        !WriteVector(out, snapshot.excl) ||
+        !WriteVector(out, snapshot.pair_shift_bits) ||
+        !WriteVector(out, snapshot.sci_shift_safe_flags) ||
+        !WriteVector(out, snapshot.sorted_atom_ids) ||
+        !WriteVector(out, snapshot.sorted_xq) ||
+        !WriteVector(out, snapshot.sorted_lj_type) ||
+        !WriteVector(out, snapshot.sorted_lj_comb) ||
+        !WriteVector(out, snapshot.lj_ab))
     {
         return false;
     }
@@ -589,37 +647,74 @@ inline bool WriteSpongeGmxpackedForceOnlySnapshot(
         metadata.candidate_leaf_numbers = snapshot.candidate_leaf_ids.size();
         metadata.candidate_leaf_prev_numbers =
             snapshot.candidate_leaf_prev_running_max_ends.size();
-        if (!WriteBinary(&out, metadata) ||
-            !WriteVector(&out, snapshot.cluster_centers) ||
-            !WriteVector(&out, snapshot.cluster_extents) ||
-            !WriteVector(&out, snapshot.super_cluster_centers) ||
-            !WriteVector(&out, snapshot.super_cluster_sizes) ||
-            !WriteVector(&out, snapshot.leaf_cluster_starts) ||
-            !WriteVector(&out, snapshot.leaf_cluster_ends) ||
-            !WriteVector(&out, snapshot.leaf_all_local) ||
-            !WriteVector(&out, snapshot.octree_prefixes) ||
-            !WriteVector(&out, snapshot.octree_child_offsets) ||
-            !WriteVector(&out, snapshot.octree_parents) ||
-            !WriteVector(&out, snapshot.octree_internal_to_leaf) ||
-            !WriteVector(&out, snapshot.sci_supercluster_ids) ||
-            !WriteVector(&out, snapshot.candidate_shift_ids) ||
-            !WriteVector(&out, snapshot.candidate_leaf_offsets) ||
-            !WriteVector(&out, snapshot.candidate_leaf_ids) ||
-            !WriteVector(&out,
+        if (!WriteBinary(out, metadata) ||
+            !WriteVector(out, snapshot.cluster_centers) ||
+            !WriteVector(out, snapshot.cluster_extents) ||
+            !WriteVector(out, snapshot.super_cluster_centers) ||
+            !WriteVector(out, snapshot.super_cluster_sizes) ||
+            !WriteVector(out, snapshot.leaf_cluster_starts) ||
+            !WriteVector(out, snapshot.leaf_cluster_ends) ||
+            !WriteVector(out, snapshot.leaf_all_local) ||
+            !WriteVector(out, snapshot.octree_prefixes) ||
+            !WriteVector(out, snapshot.octree_child_offsets) ||
+            !WriteVector(out, snapshot.octree_parents) ||
+            !WriteVector(out, snapshot.octree_internal_to_leaf) ||
+            !WriteVector(out, snapshot.sci_supercluster_ids) ||
+            !WriteVector(out, snapshot.candidate_shift_ids) ||
+            !WriteVector(out, snapshot.candidate_leaf_offsets) ||
+            !WriteVector(out, snapshot.candidate_leaf_ids) ||
+            !WriteVector(out,
                          snapshot.candidate_leaf_prev_running_max_ends))
         {
             return false;
         }
     }
-    return out.good();
+    const bool has_pair_oracle_metadata =
+        !snapshot.atom_local.empty() ||
+        !snapshot.excluded_list_start.empty() ||
+        !snapshot.excluded_numbers.empty() ||
+        !snapshot.excluded_list.empty();
+    if (has_pair_oracle_metadata || write_empty_pair_metadata)
+    {
+        if (has_pair_oracle_metadata &&
+            (snapshot.atom_local.empty() ||
+            snapshot.excluded_list_start.empty() ||
+            snapshot.excluded_numbers.size() !=
+                snapshot.excluded_list_start.size()))
+        {
+            return false;
+        }
+        SpongePairOracleMetadataHeader metadata =
+            MakePairOracleMetadataHeader();
+        metadata.atom_local_numbers = snapshot.atom_local.size();
+        metadata.exclusion_atom_numbers =
+            snapshot.excluded_list_start.size();
+        metadata.excluded_entry_numbers = snapshot.excluded_list.size();
+        if (!WriteBinary(out, metadata) ||
+            !WriteVector(out, snapshot.atom_local) ||
+            !WriteVector(out, snapshot.excluded_list_start) ||
+            !WriteVector(out, snapshot.excluded_numbers) ||
+            !WriteVector(out, snapshot.excluded_list))
+        {
+            return false;
+        }
+    }
+    return out->good();
 }
 
-inline bool ReadSpongeGmxpackedForceOnlySnapshot(
+inline bool WriteSpongeGmxpackedForceOnlySnapshot(
     const std::string& path,
-    SpongeGmxpackedForceOnlySnapshot* snapshot)
+    const SpongeGmxpackedForceOnlySnapshot& snapshot)
 {
-    std::ifstream in(path, std::ios::binary);
-    if (!in.good() || !ReadBinary(&in, &snapshot->header) ||
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    return WriteSpongeGmxpackedForceOnlySnapshotPayload(&out, snapshot);
+}
+
+inline bool ReadSpongeGmxpackedForceOnlySnapshotPayload(
+    std::ifstream* in, SpongeGmxpackedForceOnlySnapshot* snapshot,
+    bool allow_missing_pair_metadata = true)
+{
+    if (in == nullptr || !in->good() || !ReadBinary(in, &snapshot->header) ||
         !IsValidFileHeader(snapshot->header.file,
                            SnapshotKind::spongeGmxpackedForceOnly))
     {
@@ -639,74 +734,174 @@ inline bool ReadSpongeGmxpackedForceOnlySnapshot(
         static_cast<size_t>(snapshot->header.total_atom_numbers);
     const auto lj_param_numbers =
         static_cast<size_t>(snapshot->header.lj_param_numbers);
-    if (!(ReadVector(&in, &snapshot->cluster_offsets, cluster_numbers) &&
-           ReadVector(&in, &snapshot->cluster_valid_masks, cluster_numbers) &&
-           ReadVector(&in, &snapshot->cluster_local_masks, cluster_numbers) &&
-           ReadVector(&in, &snapshot->super_cluster_offsets,
+    if (!(ReadVector(in, &snapshot->cluster_offsets, cluster_numbers) &&
+           ReadVector(in, &snapshot->cluster_valid_masks, cluster_numbers) &&
+           ReadVector(in, &snapshot->cluster_local_masks, cluster_numbers) &&
+           ReadVector(in, &snapshot->super_cluster_offsets,
                       super_cluster_numbers + 1) &&
-           ReadVector(&in, &snapshot->sci, sci_numbers) &&
-           ReadVector(&in, &snapshot->cjpacked, cjpacked_numbers) &&
-           ReadVector(&in, &snapshot->excl, excl_numbers) &&
-           ReadVector(&in, &snapshot->pair_shift_bits,
+           ReadVector(in, &snapshot->sci, sci_numbers) &&
+           ReadVector(in, &snapshot->cjpacked, cjpacked_numbers) &&
+           ReadVector(in, &snapshot->excl, excl_numbers) &&
+           ReadVector(in, &snapshot->pair_shift_bits,
                       pair_shift_word_numbers) &&
-           ReadVector(&in, &snapshot->sci_shift_safe_flags, sci_numbers) &&
-           ReadVector(&in, &snapshot->sorted_atom_ids, total_atom_numbers) &&
-           ReadVector(&in, &snapshot->sorted_xq, total_atom_numbers) &&
-           ReadVector(&in, &snapshot->sorted_lj_type, total_atom_numbers) &&
-           ReadVector(&in, &snapshot->sorted_lj_comb, total_atom_numbers) &&
-           ReadVector(&in, &snapshot->lj_ab, lj_param_numbers)))
+           ReadVector(in, &snapshot->sci_shift_safe_flags, sci_numbers) &&
+           ReadVector(in, &snapshot->sorted_atom_ids, total_atom_numbers) &&
+           ReadVector(in, &snapshot->sorted_xq, total_atom_numbers) &&
+           ReadVector(in, &snapshot->sorted_lj_type, total_atom_numbers) &&
+           ReadVector(in, &snapshot->sorted_lj_comb, total_atom_numbers) &&
+           ReadVector(in, &snapshot->lj_ab, lj_param_numbers)))
     {
         return false;
     }
     SpongeGmxpackedBuilderMetadataHeader metadata = {};
-    const std::streampos metadata_pos = in.tellg();
-    if (!ReadBinary(&in, &metadata))
+    const std::streampos metadata_pos = in->tellg();
+    if (ReadBinary(in, &metadata) &&
+        IsValidBuilderMetadataHeader(metadata))
     {
-        in.clear();
-        return true;
+        const auto leaf_numbers = static_cast<size_t>(metadata.leaf_numbers);
+        const auto node_numbers = static_cast<size_t>(metadata.node_numbers);
+        const auto parent_numbers =
+            static_cast<size_t>(metadata.parent_numbers);
+        const auto candidate_sci_numbers =
+            static_cast<size_t>(metadata.candidate_sci_numbers);
+        const auto sci_supercluster_id_numbers =
+            static_cast<size_t>(metadata.sci_supercluster_id_numbers);
+        const auto candidate_shift_numbers =
+            static_cast<size_t>(metadata.candidate_shift_numbers);
+        const auto candidate_leaf_numbers =
+            static_cast<size_t>(metadata.candidate_leaf_numbers);
+        const auto candidate_leaf_prev_numbers =
+            static_cast<size_t>(metadata.candidate_leaf_prev_numbers);
+        if (!(ReadVector(in, &snapshot->cluster_centers, cluster_numbers) &&
+              ReadVector(in, &snapshot->cluster_extents, cluster_numbers) &&
+              ReadVector(in, &snapshot->super_cluster_centers,
+                         super_cluster_numbers) &&
+              ReadVector(in, &snapshot->super_cluster_sizes,
+                         super_cluster_numbers) &&
+              ReadVector(in, &snapshot->leaf_cluster_starts, leaf_numbers) &&
+              ReadVector(in, &snapshot->leaf_cluster_ends, leaf_numbers) &&
+              ReadVector(in, &snapshot->leaf_all_local, leaf_numbers) &&
+              ReadVector(in, &snapshot->octree_prefixes, node_numbers) &&
+              ReadVector(in, &snapshot->octree_child_offsets,
+                         node_numbers) &&
+              ReadVector(in, &snapshot->octree_parents, parent_numbers) &&
+              ReadVector(in, &snapshot->octree_internal_to_leaf,
+                         node_numbers) &&
+              ReadVector(in, &snapshot->sci_supercluster_ids,
+                         sci_supercluster_id_numbers) &&
+              ReadVector(in, &snapshot->candidate_shift_ids,
+                         candidate_shift_numbers) &&
+              ReadVector(in, &snapshot->candidate_leaf_offsets,
+                         candidate_sci_numbers + 1) &&
+              ReadVector(in, &snapshot->candidate_leaf_ids,
+                         candidate_leaf_numbers) &&
+              ReadVector(in,
+                         &snapshot->candidate_leaf_prev_running_max_ends,
+                         candidate_leaf_prev_numbers)))
+        {
+            return false;
+        }
     }
-    if (!IsValidBuilderMetadataHeader(metadata))
+    else
     {
-        in.clear();
-        in.seekg(metadata_pos);
-        return true;
+        in->clear();
+        in->seekg(metadata_pos);
     }
-    const auto leaf_numbers = static_cast<size_t>(metadata.leaf_numbers);
-    const auto node_numbers = static_cast<size_t>(metadata.node_numbers);
-    const auto parent_numbers = static_cast<size_t>(metadata.parent_numbers);
-    const auto candidate_sci_numbers =
-        static_cast<size_t>(metadata.candidate_sci_numbers);
-    const auto sci_supercluster_id_numbers =
-        static_cast<size_t>(metadata.sci_supercluster_id_numbers);
-    const auto candidate_shift_numbers =
-        static_cast<size_t>(metadata.candidate_shift_numbers);
-    const auto candidate_leaf_numbers =
-        static_cast<size_t>(metadata.candidate_leaf_numbers);
-    const auto candidate_leaf_prev_numbers =
-        static_cast<size_t>(metadata.candidate_leaf_prev_numbers);
-    return ReadVector(&in, &snapshot->cluster_centers, cluster_numbers) &&
-           ReadVector(&in, &snapshot->cluster_extents, cluster_numbers) &&
-           ReadVector(&in, &snapshot->super_cluster_centers,
-                      super_cluster_numbers) &&
-           ReadVector(&in, &snapshot->super_cluster_sizes,
-                      super_cluster_numbers) &&
-           ReadVector(&in, &snapshot->leaf_cluster_starts, leaf_numbers) &&
-           ReadVector(&in, &snapshot->leaf_cluster_ends, leaf_numbers) &&
-           ReadVector(&in, &snapshot->leaf_all_local, leaf_numbers) &&
-           ReadVector(&in, &snapshot->octree_prefixes, node_numbers) &&
-           ReadVector(&in, &snapshot->octree_child_offsets, node_numbers) &&
-           ReadVector(&in, &snapshot->octree_parents, parent_numbers) &&
-           ReadVector(&in, &snapshot->octree_internal_to_leaf, node_numbers) &&
-           ReadVector(&in, &snapshot->sci_supercluster_ids,
-                      sci_supercluster_id_numbers) &&
-           ReadVector(&in, &snapshot->candidate_shift_ids,
-                      candidate_shift_numbers) &&
-           ReadVector(&in, &snapshot->candidate_leaf_offsets,
-                      candidate_sci_numbers + 1) &&
-           ReadVector(&in, &snapshot->candidate_leaf_ids,
-                      candidate_leaf_numbers) &&
-           ReadVector(&in, &snapshot->candidate_leaf_prev_running_max_ends,
-                      candidate_leaf_prev_numbers);
+
+    SpongePairOracleMetadataHeader pair_metadata = {};
+    if (!ReadBinary(in, &pair_metadata))
+    {
+        in->clear();
+        return allow_missing_pair_metadata;
+    }
+    if (!IsValidPairOracleMetadataHeader(pair_metadata))
+    {
+        return false;
+    }
+    const auto atom_local_numbers =
+        static_cast<size_t>(pair_metadata.atom_local_numbers);
+    const auto exclusion_atom_numbers =
+        static_cast<size_t>(pair_metadata.exclusion_atom_numbers);
+    const auto excluded_entry_numbers =
+        static_cast<size_t>(pair_metadata.excluded_entry_numbers);
+    return ReadVector(in, &snapshot->atom_local, atom_local_numbers) &&
+           ReadVector(in, &snapshot->excluded_list_start,
+                      exclusion_atom_numbers) &&
+           ReadVector(in, &snapshot->excluded_numbers,
+                      exclusion_atom_numbers) &&
+           ReadVector(in, &snapshot->excluded_list,
+                      excluded_entry_numbers);
+}
+
+inline bool ReadSpongeGmxpackedForceOnlySnapshot(
+    const std::string& path,
+    SpongeGmxpackedForceOnlySnapshot* snapshot)
+{
+    std::ifstream in(path, std::ios::binary);
+    return ReadSpongeGmxpackedForceOnlySnapshotPayload(&in, snapshot);
+}
+
+inline bool WriteSpongeGmxpackedFullOutputSnapshot(
+    const std::string& path,
+    const SpongeGmxpackedFullOutputSnapshot& snapshot)
+{
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out.good() ||
+        !IsValidFileHeader(
+            snapshot.header.file,
+            SnapshotKind::spongeGmxpackedFullOutput) ||
+        !IsValidFileHeader(
+            snapshot.payload.header.file,
+            SnapshotKind::spongeGmxpackedForceOnly) ||
+        !WriteBinary(&out, snapshot.header) ||
+        !WriteSpongeGmxpackedForceOnlySnapshotPayload(
+            &out, snapshot.payload, true) ||
+        !WriteVector(&out, snapshot.reference_force) ||
+        !WriteVector(&out, snapshot.reference_atom_energy) ||
+        !WriteVector(&out, snapshot.reference_atom_virial) ||
+        !WriteVector(&out, snapshot.reference_direct_cf_energy) ||
+        !WriteVector(&out, snapshot.reference_lj_energy))
+    {
+        return false;
+    }
+    return out.good();
+}
+
+inline bool ReadSpongeGmxpackedFullOutputSnapshot(
+    const std::string& path,
+    SpongeGmxpackedFullOutputSnapshot* snapshot)
+{
+    std::ifstream in(path, std::ios::binary);
+    if (!in.good() || !ReadBinary(&in, &snapshot->header) ||
+        !IsValidFileHeader(
+            snapshot->header.file,
+            SnapshotKind::spongeGmxpackedFullOutput) ||
+        !ReadSpongeGmxpackedForceOnlySnapshotPayload(
+            &in, &snapshot->payload, false))
+    {
+        return false;
+    }
+    const auto force_reference_numbers =
+        static_cast<size_t>(snapshot->header.force_reference_numbers);
+    const auto energy_reference_numbers =
+        static_cast<size_t>(snapshot->header.energy_reference_numbers);
+    const auto virial_reference_numbers =
+        static_cast<size_t>(snapshot->header.virial_reference_numbers);
+    const auto direct_energy_reference_numbers =
+        static_cast<size_t>(
+            snapshot->header.direct_energy_reference_numbers);
+    const auto lj_energy_reference_numbers =
+        static_cast<size_t>(snapshot->header.lj_energy_reference_numbers);
+    return ReadVector(&in, &snapshot->reference_force,
+                      force_reference_numbers) &&
+           ReadVector(&in, &snapshot->reference_atom_energy,
+                      energy_reference_numbers) &&
+           ReadVector(&in, &snapshot->reference_atom_virial,
+                      virial_reference_numbers) &&
+           ReadVector(&in, &snapshot->reference_direct_cf_energy,
+                      direct_energy_reference_numbers) &&
+           ReadVector(&in, &snapshot->reference_lj_energy,
+                      lj_energy_reference_numbers);
 }
 
 inline bool WriteSpongeClusteredFullOutputSnapshot(
