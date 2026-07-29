@@ -4343,6 +4343,54 @@ The next ReaxFF cleanup is bond-force consumption of the canonical
 `pair_i/pair_j` arrays, followed by hydrogen-bond acceptor discovery directly
 from clustered candidates. Multi-rank exchange remains explicitly deferred.
 
+#### ReaxFF canonical bond-consumer checkpoint - 2026-07-29
+
+The bond-energy/`dE/dBO` pass no longer scans a legacy `ATOM_GROUP` and then
+performs a linear CSR lookup for every spatial neighbor. It now launches one
+thread per canonical ReaxFF bond, using `pair_i[b]`, `pair_j[b]` and the
+corrected bond-order arrays directly. Canonical pair indices remain the stable
+reaction-edge identity; clustered SCI/CJ positions do not escape the raw
+bond-order discovery stage.
+
+This also removes unused bond-kernel coordinate, PBC, force and virial
+arguments, the private unused atom-energy allocation, the bond module's
+full-list request, and its redundant aliases of the bond CSR. Final spatial
+force and virial projection remains in `REAXFF_BOND_ORDER::Calculate_Forces`,
+which already consumes canonical pairs. The existing `max_bonds` truncation
+now writes the bounded count back to `h_num_pairs`, preventing later
+derivative clears and pair kernels from using an unclamped atomic counter.
+
+NCU on PETN measures:
+
+| bond energy path | duration | instructions | registers | achieved occupancy | spills |
+|---|---:|---:|---:|---:|---:|
+| legacy neighbor scan + CSR lookup | `629.47 us` | `39.64 M` | 32 | `7.86%` | 0 |
+| canonical pair index | `77.54 us` | `0.164 M` | 26 | `12.50%` | 0 |
+
+The retained kernel is 8.1 times faster. Its low throughput percentages are a
+consequence of completing in about 78 microseconds rather than a reason to add
+a size dispatch or fusion gate.
+
+Angle and torsion were also audited in this slice. Both already derive all
+topology from the canonical bond CSR; their `ATOM_GROUP` parameters were
+unused and have been removed from the declarations, definitions and ReaxFF
+call site. Hydrogen bond is different: its donor-H edge comes from the bond
+CSR, while its acceptor is a genuine 7.5-Angstrom spatial candidate. It is the
+next real clustered consumer and must be rewritten as direct clustered
+acceptor traversal rather than replaced by the bond CSR.
+
+CPU and CUDA H2/dimer/EEQ plus PETN single-frame validation pass `12/12`.
+With the GPU free of compute processes, the 100-step PETN gate measures
+`97.337 step/s`, `0.840990 ns/day`, compared with `87.942 step/s`,
+`0.759820 ns/day` after the preceding EEQ checkpoint.
+
+Reports:
+
+```text
+.tmp/reaxff-bond-pairs-20260729/bond_legacy.ncu-rep
+.tmp/reaxff-bond-pairs-20260729/bond_canonical.ncu-rep
+```
+
 ### Phase 5: external ABI, NO_PBC and legacy removal
 
 The PRIPS plugin API currently exposes host `h_nl` capacity/count/index. This

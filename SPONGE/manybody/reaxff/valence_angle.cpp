@@ -1,7 +1,5 @@
 ﻿#include "valence_angle.h"
 
-#include "bond_order.h"  // for find_bond_index
-
 static __global__ void Calculate_Valence_Angle_Kernel(
     int atom_numbers, const VECTOR* crd, const int* atom_type,
     const float* Delta_boc, const float* Delta, const float* Delta_val,
@@ -619,11 +617,11 @@ void REAXFF_VALENCE_ANGLE::Initial(CONTROLLER* controller, int atom_numbers,
 
 void REAXFF_VALENCE_ANGLE::Calculate_Valence_Angle_Energy_And_Force(
     int atom_numbers, const VECTOR* crd, VECTOR* frc, const LTMatrix3 cell,
-    const LTMatrix3 rcell, const ATOM_GROUP* nl, REAXFF_BOND_ORDER* bo_module,
-    const float* Delta, const float* Delta_boc, const float* Delta_val,
-    const float* nlp, const float* vlpex, const float* dDelta_lp,
-    float* CdDelta, const int need_atom_energy, float* atom_energy,
-    const int need_virial, LTMatrix3* atom_virial)
+    const LTMatrix3 rcell, REAXFF_BOND_ORDER* bo_module, const float* Delta,
+    const float* Delta_boc, const float* Delta_val, const float* nlp,
+    const float* vlpex, const float* dDelta_lp, float* CdDelta,
+    const int need_atom_energy, float* atom_energy, const int need_virial,
+    LTMatrix3* atom_virial)
 {
     if (!is_initialized) return;
 

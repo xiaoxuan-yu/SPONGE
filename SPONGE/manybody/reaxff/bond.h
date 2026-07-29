@@ -47,26 +47,18 @@ struct REAXFF_BOND
     float* d_dbo_raw_total_dr = NULL;
     float* d_CdDelta = NULL;
 
-    // CSR bond lookup (set from bond_order module)
-    int* d_bond_count = NULL;
-    int* d_bond_offset = NULL;
-    int* d_bond_nbr = NULL;
-    int* d_bond_idx = NULL;
+    // Canonical bond pairs (set from bond_order module)
+    int* d_pair_i = NULL;
+    int* d_pair_j = NULL;
 
-    float* h_energy_atom = NULL;
     float h_energy_sum = 0;
-    float* d_energy_atom = NULL;
     float* d_energy_sum = NULL;
 
     void Initial(CONTROLLER* controller, int atom_numbers,
-                 const char* module_name = NULL,
-                 bool* need_full_nl_flag = NULL);
+                 const char* module_name = NULL);
 
-    void REAXFF_Bond_Force_With_Atom_Energy_And_Virial(
-        const int atom_numbers, const VECTOR* crd, VECTOR* frc,
-        const LTMatrix3 cell, const LTMatrix3 rcell, const ATOM_GROUP* nl,
-        const int need_atom_energy, float* atom_energy, const int need_virial,
-        LTMatrix3* atom_virial);
+    void Calculate_Bond_Energy_And_Derivatives(
+        int bond_numbers, int need_atom_energy, float* atom_energy);
 
     void Step_Print(CONTROLLER* controller);
 };

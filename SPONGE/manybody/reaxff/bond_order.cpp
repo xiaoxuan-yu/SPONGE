@@ -1343,6 +1343,7 @@ void REAXFF_BOND_ORDER::Calculate_Corrected_Bond_Order(
             num_pairs, max_bonds);
         num_pairs = max_bonds;
     }
+    h_num_pairs = num_pairs;
 
     if (num_pairs > 0)
     {
