@@ -3543,6 +3543,146 @@ This is an infrastructure gap, not a test pass; the final CUDA acceptance run
 must repeat the existing two-test SITS suite in the qualified test
 environment.
 
+#### Phase 2 EAM execution checkpoint - 2026-07-29
+
+SITS production convergence is complete in commit `2df2c62`. Regular and
+soft-LJ SITS now use the clustered base plus one generation-keyed sparse
+correction, consume `atom_sys_mark_local` directly, and expose only force-only
+and full variants. The unreachable standalone regular/soft SITS kernels and
+their solvent-prefix API have been removed. REST/REST2 and SPONGE Manager were
+not changed.
+
+EAM is the next legacy full-list consumer. It is pair-decomposable and does
+not require endpoint incidence or a center-complete cursor. The production
+replacement is fixed as three mathematical stages:
+
+1. one authoritative clustered half-pair traversal atomically contributes
+   `rho(type_j, r)` to endpoint `i` and `rho(type_i, r)` to endpoint `j`;
+2. one per-local-atom embedding pass evaluates `F(rho)` and `dF/drho`;
+3. one authoritative clustered half-pair traversal evaluates `phi`,
+   `dF_i * rho_j`, and `dF_j * rho_i`, then writes equal and opposite endpoint
+   forces. Full output assigns half of pair energy and pair virial to each
+   local endpoint while embedding energy remains per atom.
+
+This is algebraically equivalent to the current two directed full-list
+passes, but it evaluates each physical pair once. `rho` and `dF/drho` remain
+EAM-owned per-atom intermediates; no full adjacency, CSR spatial table, or
+`ATOM_GROUP` compatibility view is permitted.
+
+The unchanged full-list CUDA baseline was captured before any EAM kernel
+modification on the tracked 10,976-atom Cu/LAMMPS fixture:
+
+| legacy kernel | duration | grid | registers/thread | spills | achieved occupancy | no eligible |
+|---|---:|---:|---:|---:|---:|---:|
+| density | `64.16 us` | `43 x 256` | 31 | 0 | 15.18% | 75.65% |
+| embedding + energy | `19.17 us` | `43 x 256` | 21 | 0 | 6.59% | 97.18% |
+| force + energy + virial | `725.02 us` | `43 x 256` | 56 | 0 | 15.55% | 96.17% |
+
+The complete report is
+`/tmp/eam-legacy-baseline-20260729.ncu-rep`. The force kernel executed
+9,884,785 instructions but exposed only 43 CTAs; its dominant first-order
+problem is the atom-centric serial neighbor loop and lack of eligible warps,
+not spilling. The first clustered implementation therefore uses SCI/CJ
+partitioning to expose pair-tile work. Launch-shape or accumulator tuning
+beyond that structural change requires a new full NCU report first.
+
+The implementation boundary is:
+
+1. EAM requests the shared clustered spatial service directly and pins the
+   exact native or gmxpacked generation at every invocation. It does not use
+   LJ parameters and does not request endpoint incidence.
+2. EAM owns sorted coordinates and atom types. Atom types are gathered when
+   local/domain ordering changes; coordinates are gathered for the current
+   geometry using the provider permutation and cluster centers.
+3. CUDA/HIP consumes gmxpacked SCI/CJ/exclusion/current-image masks. CPU
+   consumes native SCI/CJ/exclusion rows. Both reapply the exact EAM cutoff.
+4. Density and force each traverse the same half-pair ownership once. There is
+   no separate local-local orientation table and no minimum-image
+   recomputation that discards the provider's explicit pair image.
+5. The externally visible variants remain force-only and full. Density and
+   embedding are dependency stages, not additional output variants. The full
+   pair kernel uses runtime energy/virial store masks.
+6. Once CPU/GPU correctness and performance pass, EAM no longer sets
+   `neighbor_list.is_needed_full`; SW, EDIP, Tersoff, and ReaxFF retain their
+   independent full-list reasons.
+
+The current SPONGE domain layer does not expose the typed two-way intermediate
+exchange required by EAM. Its reusable halo primitive performs forward
+local-to-ghost overwrite, while reverse communication is force-specific; no
+generic additive reverse exchange exists. Multi-PP-rank clustered EAM must
+therefore remain unsupported until a typed exchange supplies:
+
+- forward owner `rho` values when the embedding stage needs complete owner
+  density;
+- forward owner `dF/drho` values before the second pair traversal;
+- reverse-add of ghost density contributions to owners after the first pair
+  traversal;
+- ordinary reverse ghost-force accumulation after the force traversal.
+
+The first production change must reject multi-PP-rank EAM explicitly. It may
+not silently dispatch the legacy full list or claim DD support.
+
+Acceptance uses the existing Cu and Cu/Ni LAMMPS fixtures and adds direct
+intermediate comparison:
+
+- Cu 10,976 atoms and Cu/Ni 864 atoms, including all three perturbations;
+- CPU clustered versus GPU clustered force, energy, pressure, and virial;
+- per-atom `rho` and `dF/drho` against a test-only independent directed
+  evaluator;
+- force-only and full NCU after every retained kernel/launch modification;
+- isolated density + embedding + force total and end-to-end force time within
+  3% of the matching legacy run;
+- no runtime probe, environment opt-in, size gate, or compatibility fallback.
+
+##### EAM clustered implementation result - 2026-07-29
+
+The first production slice is now implemented on both backends. CUDA consumes
+the gmxpacked SCI/CJ/exclusion/current-image payload with an `8 x 8` pair tile;
+CPU consumes the native SCI/CJ/exclusion payload. Both use the provider's
+explicit pair shift, accumulate density into both endpoints, run one
+per-atom embedding pass, then accumulate equal-and-opposite force and split
+pair energy/virial between endpoints. Cubic table interpolation now returns
+value and analytic derivative together, so the force stage no longer rebuilds
+the same interpolation polynomial through three automatic-differentiation
+objects.
+
+The old directed `ATOM_GROUP` density and force kernels and their public EAM
+dispatch were removed after the clustered paths passed. Periodic single-rank
+EAM no longer contributes a full-list reason: the existing fixture reports
+`is_needed_full: false`. Non-periodic EAM is rejected explicitly because this
+consumer has no supported non-PBC implementation; multi-PP-rank EAM is
+rejected with the typed rho/df halo requirement. Neither case falls back to
+the deleted full-list path.
+
+Existing LAMMPS comparison coverage passes on both CUDA 13 and CPU:
+
+```text
+Cu funcfl, perturbations 0/0.1/0.2:       3 passed
+Cu/Ni setfl, perturbations 0/0.1/0.2:     3 passed
+```
+
+The post-change full NCU report is
+`/tmp/eam-clustered-after-20260729.ncu-rep`:
+
+| clustered kernel | duration | grid/block | registers/thread | achieved occupancy | eligible warps/scheduler |
+|---|---:|---:|---:|---:|---:|
+| density | `37.73 us` | `358 x 8` / `8 x 8` | 64 | 37.94% | 1.03 |
+| embedding + energy | `19.30 us` | `43` / `256` | 19 | 7.12% | 0.03 |
+| force + energy + virial | `402.98 us` | `358 x 8` / `8 x 8` | 72 | 45.19% | 0.07 |
+
+The three profiled stages fell from `808.35 us` to `460.00 us`, a `43.1%`
+reduction. Density improved `41.2%`; force improved `44.4%`. The structural
+goal is therefore met: the pair stages expose 2864 CTAs instead of 43
+atom-centric CTAs and do each physical pair once. NCU still identifies the
+full force path as latency-heavy with uncoalesced endpoint/table accesses and
+high scoreboard/LG-throttle stalls. That is the next EAM tuning target; it is
+not a reason to restore a derived adjacency or directed full-list kernel.
+
+Per-atom test-only rho/df differential coverage and the typed DD halo remain
+open. They do not block the single-rank production convergence above, but DD
+must not be enabled until reverse-add density exchange and forward df exchange
+exist.
+
 ### Phase 3: center-neighbor many-body consumers
 
 1. Make grouped SCI metadata plus endpoint incidence a validated

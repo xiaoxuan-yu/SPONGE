@@ -53,6 +53,7 @@ META meta;
 LISTED_FORCES listed_forces;
 PAIRWISE_FORCE pairwise_force;
 LJ_CLUSTERED_DIRECT_CACHE* pairwise_clustered_cache = NULL;
+LJ_CLUSTERED_DIRECT_CACHE* eam_clustered_cache = NULL;
 HARD_WALL hard_wall;
 SOFT_WALLS soft_walls;
 LENNARD_JONES_NO_PBC_INFORMATION LJ_NOPBC;
@@ -1679,8 +1680,25 @@ void Main_Initial(int argc, char* argv[])
 
     sw.Initial(&controller, "SW", &neighbor_list.is_needed_full);
     edip.Initial(&controller, "EDIP", &neighbor_list.is_needed_full);
-    eam.Initial(&controller, md_info.atom_numbers, "EAM",
-                &neighbor_list.is_needed_full);
+    if (controller.Command_Exist("EAM", "in_file") &&
+        (!md_info.pbc.pbc || CONTROLLER::PP_MPI_size > 1))
+    {
+        controller.Throw_SPONGE_Error(
+            spongeErrorValueErrorCommand, "Main_Initial",
+            !md_info.pbc.pbc
+                ? "Clustered EAM requires periodic boundary conditions.\n"
+                : "Clustered EAM requires typed rho/df halo exchange, which "
+                  "is not available for multi-PP-rank execution.\n");
+    }
+    eam.Initial(&controller, md_info.atom_numbers, "EAM");
+    if (eam.is_initialized && md_info.pbc.pbc)
+    {
+        eam_clustered_cache =
+            pairwise_clustered_cache != NULL
+                ? pairwise_clustered_cache
+                : Acquire_Shared_LJ_Clustered_Direct_Cache(
+                      &controller, "clustered_spatial_service", false, true);
+    }
     tersoff.Initial(&controller, md_info.atom_numbers, "TERSOFF",
                     &neighbor_list.is_needed_full);
     reaxff.Initial(&controller, md_info.atom_numbers, md_info.nb.cutoff,
@@ -1994,11 +2012,48 @@ void Main_Calculate_Force()
             md_info.pbc.rcell, neighbor_list.full_neighbor_list.d_nl,
             md_info.need_potential, dd.d_energy, md_info.need_pressure,
             dd.d_virial);
-        eam.EAM_Force_With_Atom_Energy_And_Virial(
-            dd.atom_numbers, dd.crd, dd.frc, md_info.pbc.cell,
-            md_info.pbc.rcell, neighbor_list.full_neighbor_list.d_nl,
-            md_info.need_potential, dd.d_energy, md_info.need_pressure,
-            dd.d_virial);
+        if (eam.is_initialized)
+        {
+#ifdef USE_CPU
+            constexpr bool eam_need_gmxpacked_payload = false;
+            constexpr bool eam_runtime_gmxpacked_direct = false;
+#else
+            constexpr bool eam_need_gmxpacked_payload = true;
+            constexpr bool eam_runtime_gmxpacked_direct = true;
+#endif
+            eam_clustered_cache->Build(
+                dd.crd, md_info.pbc.cell, md_info.pbc.rcell, eam.cut,
+                md_info.need_pressure != 0, false,
+                eam_need_gmxpacked_payload, false,
+                eam_runtime_gmxpacked_direct);
+            CLUSTERED_SPATIAL_VIEW eam_clustered_view;
+            const char* eam_clustered_failure_reason = NULL;
+            if (!Make_Clustered_Spatial_View_From_LJ_Cache(
+                    eam_clustered_cache, &eam_clustered_view,
+                    &eam_clustered_failure_reason))
+            {
+                throw std::runtime_error(
+                    std::string("clustered EAM requires a current clustered "
+                                "payload: ") +
+                    (eam_clustered_failure_reason == NULL
+                         ? "unknown clustered-view failure"
+                         : eam_clustered_failure_reason));
+            }
+            if (!eam.EAM_Force_Clustered(
+                    eam_clustered_view, dd.crd, dd.frc,
+                    md_info.pbc.cell, md_info.pbc.rcell,
+                    md_info.need_potential, dd.d_energy,
+                    md_info.need_pressure, dd.d_virial,
+                    &eam_clustered_failure_reason))
+            {
+                throw std::runtime_error(
+                    std::string("clustered EAM rejected the clustered "
+                                "payload: ") +
+                    (eam_clustered_failure_reason == NULL
+                         ? "unknown EAM clustered failure"
+                         : eam_clustered_failure_reason));
+            }
+        }
         tersoff.TERSOFF_Force_With_Atom_Energy_And_Virial(
             dd.atom_numbers, dd.crd, dd.frc, md_info.pbc.cell,
             md_info.pbc.rcell, neighbor_list.full_neighbor_list.d_nl,
@@ -2259,6 +2314,14 @@ void Main_Refresh_Local_State(bool rebuild_dd)
     if (pairwise_clustered_cache != NULL)
     {
         pairwise_clustered_cache->Refresh_Metadata(
+            dd.atom_numbers, dd.atom_numbers, dd.ghost_numbers,
+            dd.atom_local, dd.d_excluded_list_start, dd.d_excluded_list,
+            dd.d_excluded_numbers);
+    }
+    if (eam_clustered_cache != NULL &&
+        eam_clustered_cache != pairwise_clustered_cache)
+    {
+        eam_clustered_cache->Refresh_Metadata(
             dd.atom_numbers, dd.atom_numbers, dd.ghost_numbers,
             dd.atom_local, dd.d_excluded_list_start, dd.d_excluded_list,
             dd.d_excluded_numbers);
@@ -2568,6 +2631,7 @@ void Main_Clear()
 
     Release_Shared_LJ_Clustered_Direct_Cache();
     pairwise_clustered_cache = NULL;
+    eam_clustered_cache = NULL;
     controller.Clear();
 }
 
@@ -2834,3 +2898,4 @@ void Main_Sync_Dynamic_Targets_To_Controllers()
     middle_langevin.Set_Target_Temperature(target_temperature);
     nhc.Set_Target_Temperature(target_temperature);
 }
+
