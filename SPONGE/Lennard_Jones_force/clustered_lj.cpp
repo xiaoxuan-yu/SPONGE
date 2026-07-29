@@ -13860,7 +13860,85 @@ static void Build_Gmxpacked_Endpoint_Incidence_Metadata(
     LJ_CLUSTER_LAYOUT* layout)
 {
 #ifdef USE_CPU
-    (void)layout;
+    if (layout == NULL)
+    {
+        return;
+    }
+    const bool exact_generation_ready =
+        layout->gmxpacked_endpoint_incidence_ready &&
+        layout->gmxpacked_endpoint_incidence_provider_incarnation ==
+            layout->provider_incarnation &&
+        layout->gmxpacked_endpoint_incidence_payload_generation ==
+            layout->gmxpacked_compact_payload_generation &&
+        layout->gmxpacked_endpoint_incidence_sci_numbers ==
+            layout->gmxpacked_sci_numbers &&
+        layout->gmxpacked_endpoint_incidence_cjpacked_numbers ==
+            layout->gmxpacked_cjpacked_numbers &&
+        layout->gmxpacked_endpoint_incidence_super_cluster_numbers ==
+            layout->super_cluster_numbers &&
+        layout->gmxpacked_endpoint_incidence_offset_tail ==
+            layout->gmxpacked_endpoint_incidence_reference_numbers;
+    if (exact_generation_ready)
+    {
+        return;
+    }
+    Invalidate_Gmxpacked_Endpoint_Incidence(layout);
+    CLUSTERED_GMXPACKED_ENDPOINT_INCIDENCE_HOST incidence;
+    const char* failure_reason = NULL;
+    if (!Clustered_Build_Gmxpacked_Endpoint_Incidence_Host(
+            layout->provider_incarnation,
+            layout->gmxpacked_compact_payload_generation,
+            layout->cluster_numbers, layout->super_cluster_numbers,
+            layout->d_super_cluster_offsets, layout->gmxpacked_sci_numbers,
+            layout->d_gmxpacked_sci, layout->gmxpacked_cjpacked_numbers,
+            layout->d_gmxpacked_cjpacked, &incidence, &failure_reason))
+    {
+        return;
+    }
+    const int reference_numbers =
+        static_cast<int>(incidence.references.size());
+    if (reference_numbers <= 0 ||
+        incidence.offsets.size() !=
+            static_cast<size_t>(layout->super_cluster_numbers + 1) ||
+        incidence.offsets.back() != reference_numbers)
+    {
+        return;
+    }
+    Reserve_Device_Int_Buffer(
+        layout->super_cluster_numbers + 1,
+        &layout->d_gmxpacked_endpoint_incidence_offsets,
+        &layout->gmxpacked_endpoint_incidence_offset_capacity);
+    Reserve_Device_Buffer(
+        reference_numbers,
+        &layout->d_gmxpacked_endpoint_incidence_references,
+        &layout->gmxpacked_endpoint_incidence_reference_capacity);
+    deviceMemcpy(
+        layout->d_gmxpacked_endpoint_incidence_offsets,
+        incidence.offsets.data(),
+        sizeof(int) *
+            static_cast<size_t>(layout->super_cluster_numbers + 1),
+        deviceMemcpyHostToDevice);
+    deviceMemcpy(
+        layout->d_gmxpacked_endpoint_incidence_references,
+        incidence.references.data(),
+        sizeof(CLUSTERED_GMXPACKED_ENDPOINT_REFERENCE) *
+            static_cast<size_t>(reference_numbers),
+        deviceMemcpyHostToDevice);
+    layout->gmxpacked_endpoint_incidence_provider_incarnation =
+        layout->provider_incarnation;
+    layout->gmxpacked_endpoint_incidence_payload_generation =
+        layout->gmxpacked_compact_payload_generation;
+    layout->gmxpacked_endpoint_incidence_sci_numbers =
+        layout->gmxpacked_sci_numbers;
+    layout->gmxpacked_endpoint_incidence_cjpacked_numbers =
+        layout->gmxpacked_cjpacked_numbers;
+    layout->gmxpacked_endpoint_incidence_super_cluster_numbers =
+        layout->super_cluster_numbers;
+    layout->gmxpacked_endpoint_incidence_reference_numbers =
+        reference_numbers;
+    layout->gmxpacked_endpoint_incidence_offset_tail =
+        reference_numbers;
+    layout->gmxpacked_endpoint_incidence_ready = true;
 #else
     if (layout == NULL)
     {
@@ -24429,11 +24507,6 @@ void LJ_CLUSTER_LAYOUT::Enable_Clustered_Spatial_Service()
     enabled = true;
     cluster_size = kClusteredClusterSize;
     super_cluster_clusters = kClusteredSuperClusterClusters;
-    if (controller == NULL ||
-        !controller->Command_Exist("LJ", "clustered_rebuild_skin"))
-    {
-        rebuild_skin = 10.0f;
-    }
     rebuild_dirty = true;
     cache_ready = false;
     Invalidate_Gmxpacked_Incremental_Source_Cache_State(this);

@@ -3685,35 +3685,424 @@ exist.
 
 ### Phase 3: center-neighbor many-body consumers
 
-1. Make grouped SCI metadata plus endpoint incidence a validated
-   consumer-requested invariant on both CPU and GPU. Together they must cover
-   every native and transposed endpoint and every shift record for a center
-   supercluster, be generation-matched and have deterministic IDs/order for
-   test reproducibility.
-2. Add a center-lane neighbor cursor that decodes valid/local masks,
-   exclusions, sorted atom IDs and explicit pair shifts while walking all
-   endpoint tile references in one group. Test reset, two simultaneous
-   cursors, transposed local-local ownership and J/K pairs whose members occur
-   in different shift records.
-3. Add direct pair, center J/K-upper-triangle and edge-with-repeated-K drivers,
-   plus canonical pair/triplet/edge-K oracles. No driver may emit an
-   atom-centric adjacency array.
-4. Migrate Stillinger-Weber first; its missing independent validation fixture
-   is a hard prerequisite. Start with the direct J/K tile product and record
-   candidate/accepted lane counts.
-5. Profile SW before any scheduling cache is introduced. Compare complete
-   traversal cost against a test-only materialized reference, including build
-   and memory cost, to validate the no-table decision.
-6. Migrate EDIP next: direct coordination pass, direct center J/K pass and
-   direct redistribution pass. Add explicit `z/dE_dz` halo state and
-   redistribution validation; do not cache the spatial neighbors shared by
-   those passes.
-7. Migrate Tersoff last, initially recomputing grouped K traversal for each
-   direct i-j lane. Add an accepted-edge work queue or per-edge zeta scratch
-   only if NCU demonstrates a register, dependency-stall or scheduling win
-   after its build and memory costs are included.
-8. Each consumer receives GPU force-only/full, CPU force-only/full and DD
-   ownership validation before its legacy full-list reason is removed.
+#### SW execution checkpoint - 2026-07-29
+
+The existing independent SW validation fixture is sufficient for migration:
+the LAMMPS comparison builds a 10,648-atom two-type diamond system and checks
+the unperturbed, 0.1-Angstrom and 0.2-Angstrom perturbations. The unchanged
+legacy full-list implementation passes all three CUDA comparisons before any
+SW source modification.
+
+The pre-change full NCU report is
+`/tmp/sw-legacy-baseline-20260729.ncu-rep`:
+
+| kernel | duration | grid/block | registers/thread | achieved occupancy | active threads/warp | local-spill requests |
+|---|---:|---:|---:|---:|---:|---:|
+| SW force + energy + virial | `144.99 us` | `333` / `32 x 32` | 64 | 64.08% | 8.61 | 1,724,976 |
+
+The native-CUDA kernel is cache/local-memory bound rather than DRAM bound:
+SM throughput is `38.60%`, memory throughput is `61.06%`, DRAM throughput is
+only `4.89%`, L1 hit rate is `68.11%`, and L2 hit rate is `98.13%`. NCU reports
+100% local-spill overhead and 351,384 local-store sectors. LG-throttle stalls
+consume about 5.7 of the 16.35 warp cycles per issued instruction (`34.8%`).
+The existing kernel also averages only 8.61 active threads per warp because
+one warp owns each atom-centric neighbor loop and neighbor counts are small.
+
+The first retained change is therefore structural only: replace the derived
+directed `ATOM_GROUP` with a center cursor over endpoint incidence, and form
+the J/K upper triangle directly from deterministic incident clustered tiles.
+The SW formulas and automatic-differentiation arithmetic remain unchanged for
+that iteration. This isolates traversal effects in the first post-change NCU
+diff; analytic three-body derivatives or launch changes require that report
+as evidence.
+
+The first direct cursor implementation was functionally correct but
+unacceptable for migration: it kept `is_needed_full=false` and passed all three
+SW comparison cases, but `SW_Clustered_Center_Direct` took `382.70 ms` in
+`/tmp/sw-clustered-after-20260729.ncu-rep` because each ordinal lookup
+rescanned the endpoint cursor. A resumable cursor reduced that to `28.03 ms`
+(`/tmp/sw-clustered-after-cursor-20260729.ncu-rep`), still far above the
+legacy `144.99 us` baseline.
+
+The next two fixes address the actual candidate explosion. Non-LJ clustered
+spatial-service consumers now keep the global `skin` instead of being widened
+to a default `10.00 A` reuse skin; the SW fixture now reports
+`reuse_skin=0.40`. SW also filters center neighbors by their pair-specific
+`a*sigma` cutoff before forming the J/K upper triangle. That version passes
+all three comparison cases and profiles at `793.63 us` in
+`/tmp/sw-clustered-cutfilter-20260729.ncu-rep` with `is_needed_full=false`.
+The retest reports `/tmp/sw-clustered-cutfilter-retest-20260729.ncu-rep` and
+`/tmp/sw-clustered-cutfilter-clean-20260729.ncu-rep` match that result at
+`793.47 us` and `796.10 us`, respectively.
+
+The one-thread-per-center scheduling variant was tested and rejected. It
+passed the three comparison cases, but
+`/tmp/sw-clustered-onethread-20260729.ncu-rep` measured `15.17 ms`,
+SM throughput `7.68%`, achieved occupancy `14.91%`, and only `42` blocks for
+`128` SMs. The current retained implementation is therefore the warp-owned
+center kernel with resumable cursor traversal, pair-cut filtering, and the
+global-skin clustered spatial-service fix. Remaining work must reduce the
+`472M` executed instructions and `6.06M` local-spill requests before this SW
+path is suitable as the clean migration sample.
+
+The first arithmetic cleanup replaces the six-variable SAD three-body
+derivative with its equivalent analytic gradient. It retains the same
+clustered traversal and passes all three SW comparison cases. NCU report
+`/tmp/sw-clustered-analytic-20260729.ncu-rep` measures `749.02 us`, reduces
+local-spill requests from `6,063,346` to `4,391,616`, and reduces executed
+instructions from `472,397,136` to `464,095,630`.
+
+The decisive direct-consumption fix is warp-cooperative neighbor-cache fill.
+Lane zero still decodes each endpoint reference once, but all warp lanes test
+the reference's cluster/lane candidates and compact accepted neighbors into
+shared memory. This is not a derived neighbor table and introduces no runtime
+probe or gate. It passes all three comparison cases and report
+`/tmp/sw-clustered-cooperative-fill-20260729.ncu-rep` measures `391.46 us`.
+Relative to the analytic serial-fill version, executed instructions fall to
+`233,629,980`, local-spill requests fall to `956,176`, and average active
+threads per warp rise from `1.92` to `12.46`. The analytic two-body derivative
+then gives a smaller retained improvement to `384.19 us` in
+`/tmp/sw-clustered-analytic-two-body-20260729.ncu-rep`; it leaves instruction
+and spill counts essentially unchanged.
+
+The direct clustered force is therefore about `2.65x` slower than the
+`144.99 us` legacy full-list kernel, although it has recovered more than half
+of the initial direct-path gap. The remaining difference is structural:
+`233.45M` executed instructions versus `62.12M` for the legacy kernel. SW
+requires an atom-centric J/K sequence, so the next migration iteration should
+derive a compact per-center atom-id adjacency from endpoint incidence and
+stamp it with provider incarnation plus compact-payload generation. The force
+kernel should recompute minimum-image displacement from current coordinates,
+cell, and reciprocal cell, as the legacy arithmetic does; therefore the
+derived topology need not be rebuilt for every gathered-coordinate geometry
+generation. This is the evidence-based exception to direct tile consumption,
+not a return to the global legacy full neighbor list.
+
+A usable source-line build now exists at `build-dev-cuda13-sw-lineinfo`. It is
+configured with the pixi GCC 11.4 host compiler and `-lineinfo`, avoiding the
+CUDA 13/system-GCC incompatibility. Report
+`/tmp/sw-clustered-analytic-lineinfo-20260729.ncu-rep` is available for GUI
+source-counter inspection; the NCU CLI source page emits annotated source but
+does not export its per-line counter columns.
+
+The direct path then satisfied the documented scheduling-cache exception:
+even after cooperative decode and analytic arithmetic it remained `2.65x`
+slower than legacy, and NCU attributed the loss to repeated endpoint decoding
+before the mathematical J/K work. SW now owns a generation-keyed compact
+center-to-atom relation derived from endpoint incidence. This is not exposed
+by the spatial service, is not an `ATOM_GROUP` compatibility API, and is never
+consumed by another operator. Its identity is exactly
+`{provider incarnation, gmxpacked payload generation}`. It stores atom IDs
+only; current displacement and minimum image are recomputed from `crd`,
+`cell`, and `rcell` on every force invocation, so geometry changes do not
+silently reuse stale distances.
+
+The rejected and retained derivation steps are:
+
+| implementation | force duration | decision |
+|---|---:|---|
+| unfiltered derived adjacency | `11.01 ms` | reject: conservative cluster candidates explode the J/K product |
+| pair-active filtering only | `10.63 ms` | reject: image ownership alone does not control the candidate radius |
+| pair cutoff plus rebuild-skin filtering | `275.49 us` | retain derivation rule; force still global-access limited |
+| shared strict-neighbor cache, 32 warps/block | `176.29 us` | retain cache shape, continue launch tuning |
+| shared strict-neighbor cache, 16 warps/block | `168.38 us` | retain |
+| shared strict-neighbor cache, 8 warps/block | `180.99 us` | reject and revert |
+
+The corresponding reports are
+`/tmp/sw-clustered-derived-20260729.ncu-rep`,
+`/tmp/sw-clustered-derived-active-20260729.ncu-rep`,
+`/tmp/sw-clustered-derived-skin-20260729.ncu-rep`,
+`/tmp/sw-clustered-derived-shared-20260729.ncu-rep`,
+`/tmp/sw-clustered-derived-shared-16warp-20260729.ncu-rep`, and
+`/tmp/sw-clustered-derived-shared-8warp-20260729.ncu-rep`.
+Two clean 16-warp force retests measured `173.79` and `170.21 us`;
+the post-builder retest measured `174.94 us`, proving that builder tuning did
+not change the steady-state force code shape.
+
+The first derived-relation builder used one thread per center and took about
+`8.9 ms` in each of count and fill. The retained builder assigns one warp per
+center and cooperatively tests the fixed 64 tile candidates. Count now takes
+`203.14 us` and fill `204.06 us`, reducing generation cost from about
+`17.8 ms` to `0.41 ms`. The two passes run only when the provider incarnation
+or compact-payload generation changes. Their reports are
+`/tmp/sw-clustered-builder-20260729/report.ncu-rep` and
+`/tmp/sw-clustered-coop-builder-20260729.ncu-rep`.
+
+Fresh full NCU then identified the remaining force bottleneck: `54%` of
+global sectors and `15%` of shared wavefronts were excessive, with only
+`24.12%` of scheduler cycles having an eligible warp. The retained
+NCU-driven changes are:
+
+1. ballot/prefix compaction replaces the per-neighbor shared atomic counter.
+   Shared excessive wavefronts fall from `191,664` to zero without a
+   performance regression (`170.69 us`);
+2. each lane owns one cached neighbor while J is replayed in structural
+   order. Three-body J forces are warp-reduced and every neighbor performs one
+   final global force update instead of O(degree) scattered updates. Duration
+   falls to `104.06 us` and excessive global sectors fall from `5,133,287` to
+   `1,782,255`;
+3. matching `__launch_bounds__` to the actual 512-thread block reduces local
+   spill requests from `1,778,216` to `1,000,912` and duration to
+   `99.49 us`;
+4. caching neighbor types beside geometry removes repeated random type loads.
+   The final full kernel measures `96.61 us`, 64 registers/thread,
+   24.58 KiB static shared memory, 53.68% achieved occupancy, 57.16M executed
+   instructions, `1,178,624` excessive global sectors, zero excessive shared
+   wavefronts, and `62.98%` eligible scheduler cycles.
+
+The final reports are
+`/tmp/sw-clustered-ballot-20260729.ncu-rep`,
+`/tmp/sw-clustered-lane-force-20260729.ncu-rep`,
+`/tmp/sw-clustered-bounds512-20260729.ncu-rep`, and
+`/tmp/sw-clustered-cached-type-20260729.ncu-rep`. The final force kernel is
+`33.4%` faster than the `144.99 us` legacy full-list baseline. All retained
+steps pass the three SW/LAMMPS perturbation cases; the final run reports
+`3 passed`.
+
+The old directed full-list SW kernel, its public dispatch, and dead
+direct/derived experimental helpers have been removed. Periodic single-rank
+SW no longer contributes a full-list build reason and has no silent legacy
+fallback. CUDA derives the private relation from generation-matched gmxpacked
+endpoint incidence; CPU derives the same symmetric center relation directly
+from the native SCI/CJ/exclusion payload and keys it by the native payload
+generation. CPU validation initially caught and removed an incorrect
+unconditional gmxpacked-capability requirement. The final independent builds
+and LAMMPS comparisons pass `3/3` on both CUDA 13 and CPU.
+
+The remaining Phase 3 work is:
+
+1. add the independent canonical SW triplet oracle required by the general
+   removal gate;
+2. define or reject multi-PP-rank SW until center/J/K ghost-force reversal is
+   covered;
+3. migrate EDIP next: direct coordination and redistribution passes plus the
+   center J/K path, retaining only mathematical `z/dE_dz` state unless its own
+   NCU evidence separately satisfies the cache exception;
+4. migrate Tersoff after EDIP, initially replaying grouped K for each directed
+   edge and retaining zeta/edge scratch only when measured;
+5. keep exactly force-only and full variants for every consumer.
+
+#### EDIP clustered execution checkpoint - 2026-07-29
+
+EDIP now uses the shared clustered spatial service on both CUDA and CPU and no
+longer requests or consumes the directed legacy full list. Non-periodic input
+is rejected explicitly. Multi-PP-rank input is also rejected until typed
+`z/dE_dz` halo exchange and reverse ghost-force ownership exist; neither case
+falls back to the removed full-list implementation.
+
+The retained implementation derives one EDIP-owned compact center relation
+from the authoritative half-pair payload. CUDA decodes the generation-matched
+gmxpacked SCI/CJ/exclusion/current-image records and inserts both endpoint
+orientations. CPU performs the same symmetric derivation from native SCI/CJ
+records. The cache key is
+`{provider incarnation, representation payload generation}`. The relation is
+private to EDIP and is reused by its three mathematical stages:
+
+1. coordination `z`;
+2. pair/J-K force, energy, virial and `dE/dz`;
+3. redistribution of the `dE/dz` force contribution.
+
+Each row is filtered by the pair-type-specific EDIP cutoff plus the provider
+rebuild skin. Current displacements are recomputed from coordinates, cell and
+reciprocal cell in every force stage, so the relation does not retain stale
+geometry. Only force-only and full kernels are instantiated; energy-only or
+virial-only requests use full with runtime store masks.
+
+The unchanged legacy baseline on the 10,648-atom two-type diamond fixture was:
+
+| legacy stage | duration | registers/thread | achieved occupancy | executed instructions | local spill requests |
+|---|---:|---:|---:|---:|---:|
+| coordination `Get_Z` | `6.46 us` | 28 | 61.18% | 1.597 M | 0 |
+| pair/J-K force full | `43.49 us` | 64 | 57.51% | 18.817 M | 775,940 |
+| redistribution full | `10.59 us` | 32 | 61.55% | 3.389 M | 0 |
+| total | `60.54 us` | - | - | - | - |
+
+The first clustered full capture measured `6.21 + 48.77 + 11.26 =
+66.24 us`. The apparent 9.4% duration regression was a profiler clock
+difference rather than extra force work: the clustered and legacy main
+kernels both consumed about 107k elapsed SM cycles
+(`107,111` versus `107,655`), while the sampled SM clocks were `2.19` and
+`2.47 GHz`. The clustered main kernel executed 18.877 M instructions
+(`+0.32%`), kept 64 registers and the same 775,940 local-spill requests, and
+slightly improved achieved occupancy to 58.73%. This qualifies the retained
+force path as an unchanged code-shape result; wall-time comparisons must be
+clock matched.
+
+The initial private-relation builder used eight packed-range partitions and
+took `16.03 us` for count plus `19.07 us` for fill (`35.10 us` total).
+NCU showed a one-wave launch, 29-32% achieved occupancy versus 75%
+theoretical occupancy, cross-block workload imbalance and L1TEX
+long-scoreboard stalls. Two retained NCU-driven changes followed:
+
+1. sixteen packed-range partitions reduced count/fill to
+   `12.48 + 16.48 = 28.96 us`, a 17.5% reduction;
+2. squared-distance cutoff comparison reused the already loaded endpoint
+   types and removed `sqrtf` plus redundant type loads, reducing the same
+   total to `12.22 + 16.03 = 28.25 us`.
+
+The builder is therefore 19.5% faster than its first implementation and runs
+only when the provider incarnation or representation payload generation
+changes. The final count kernel uses 55 registers, the fill kernel 56, and
+neither spills. Their remaining limiting dependency is the atomic slot
+allocation/irregular endpoint load path; replacing it would require a larger
+scan/layout redesign and is not part of this cleanup slice.
+
+Validation for the current source passes all three LAMMPS perturbations on
+both backends:
+
+```text
+CUDA: 3 passed
+CPU:  3 passed
+```
+
+Reports:
+
+```text
+/tmp/edip-legacy-baseline-20260729.ncu-rep
+/tmp/edip-clustered-force-targeted-20260729.ncu-rep
+/tmp/edip-clustered-builder-targeted-20260729.ncu-rep
+/tmp/edip-clustered-builder-p16-20260729-sections.ncu-rep
+/tmp/edip-clustered-builder-squaredcut-20260729.ncu-rep
+```
+
+The independent removal oracle is now implemented by the dedicated
+`MANYBODY_CLUSTERED_ORACLE_TEST` CTest target. It links the production EDIP
+stages directly without adding a production dump, probe, runtime gate or
+diagnostic buffer. A five-atom, two-type periodic fixture compares the actual
+generation-keyed relation against an independent O(N²) directed-center
+reference, compares the canonical unordered `(i,j,k)` set including both
+minimum-image identities, compares production `z` directly and compares
+production `dE/dz` against a central finite difference of an independent EDIP
+energy implementation. The fixture also covers a clustered exclusion,
+asymmetric pair cutoffs and strict rejection at the exact EDIP cutoff.
+
+The oracle passes on both CPU and CUDA:
+
+```text
+CPU:  manybody clustered oracles passed: EDIP relation/triplets/z/dE_dz;
+      Tersoff relation/directed tuples
+CUDA: manybody clustered oracles passed: EDIP relation/triplets/z/dE_dz;
+      Tersoff relation/directed tuples
+```
+
+This closes the EDIP single-rank removal oracle without retaining a second
+production neighbor representation. Multi-rank support remains explicitly
+unavailable until typed `z/dE_dz` exchange and reverse ghost-force ownership
+are defined.
+
+#### Tersoff clustered execution checkpoint - 2026-07-29
+
+Tersoff now uses the shared clustered spatial service on CUDA and CPU and no
+longer requests or consumes the directed legacy full list. Periodic
+single-rank execution is the supported scope. Non-periodic and multi-PP-rank
+inputs are rejected explicitly because directed-edge/K ghost ownership and
+reverse force exchange have not been defined; there is no silent fallback.
+
+The operator owns a compact, generation-keyed center relation derived from the
+authoritative half-pair payload. CUDA decodes gmxpacked
+SCI/CJ/exclusion/current-image records and inserts both endpoint orientations;
+CPU derives the same symmetric relation from native SCI/CJ records. Its cache
+identity is `{provider incarnation, representation payload generation}`.
+Coordinates and periodic displacements are recomputed on every force call.
+
+Tersoff parameters are directional in `(i,j,k)`. For each center type `i` and
+candidate K type `k`, relation construction therefore uses the conservative
+cutoff
+
+```text
+max over j of R(i,j,k) + D(i,j,k)
+```
+
+The force kernel still applies the exact `(i,j,j)` cutoff to every directed
+edge and the exact `(i,j,k)` cutoff during both K scans. This preserves the
+legacy directed-edge algebra, half-energy ownership, zeta construction and
+derivative redistribution without deriving a generic full neighbor-list API.
+Only force-only and full kernels remain; energy-only or virial-only requests
+use full with runtime output masks.
+
+On the 10,648-atom B/N diamond fixture, the removed full-list
+`Tersoff_Force_CUDA<1,1>` baseline measured:
+
+```text
+781.57 us, 56 registers/thread, 75% theoretical occupancy,
+7.90% achieved occupancy, 107.363 M executed instructions,
+79.05% scheduler cycles with no eligible warp, no spills
+```
+
+The first clustered force kernel retained one thread per center but scanned
+the strict private relation. It measured `201.98 us`, reduced executed
+instructions to `29.119 M`, kept 56 registers and no spills, and remained
+underfilled at `7.81%` achieved occupancy with only 84 blocks. The relation
+builder measured `13.50 + 19.58 = 33.08 us` for count and fill and runs only
+when its generation key changes.
+
+NCU then justified assigning one warp to each center and its lanes to directed
+J edges. The retained 32-by-32 launch produces 333 blocks and measures:
+
+```text
+152.74 us, 56 registers/thread, 64.50% achieved occupancy,
+40.431 M executed instructions, 76.35% no-eligible cycles,
+5.78 active threads/warp, no spills
+```
+
+This scheduling change is 24.4% faster than the initial clustered force and
+80.5% faster than the legacy full-list kernel. Full NCU showed that the
+remaining delay is not DRAM bandwidth: DRAM throughput is `0.87%`, while
+`lg_throttle` and `long_scoreboard` each cost about 11 cycles per issued
+instruction. The kernel issued 447,216 global reduction instructions and
+1.136 M reduction sectors. Combining the repulsive and direct-attractive
+endpoint force for each directed pair removes one three-component atomic
+update and gives a smaller retained result of `150.75 us` without changing
+register count, occupancy or spills.
+
+A warp-broadcast experiment attempted to share K geometry between directed J
+lanes. It was rejected and removed before retention: the existing outer J
+loop is divergent, so dynamically captured shuffle masks first produced NaNs
+and then an illegal access under a fixed stale mask. `compute-sanitizer`
+reported no ordinary out-of-bounds access in the NaN version, confirming that
+the fault was collective participation rather than relation storage. Any
+future K-geometry reuse must first rewrite the outer loop as a fully converged,
+predicated J-tile traversal; no probe, gate or experimental dispatch remains.
+
+The retained source passes all three LAMMPS perturbation cases on both
+backends:
+
+```text
+CUDA: 3 passed; maximum force differences
+      2.0959e-03, 3.4211e-03, 5.3058e-03
+CPU:  3 passed; maximum force differences
+      1.8822e-03, 3.3963e-03, 5.3516e-03
+```
+
+Reports:
+
+```text
+/tmp/tersoff-legacy-baseline-20260729.ncu-rep
+/tmp/tersoff-clustered-force-initial-20260729.ncu-rep
+/tmp/tersoff-clustered-builder-initial-20260729.ncu-rep
+/tmp/tersoff-clustered-warpcenter-20260729.ncu-rep
+/tmp/tersoff-clustered-pair-atomic-20260729.ncu-rep
+```
+
+The same dedicated `MANYBODY_CLUSTERED_ORACLE_TEST` target now closes the
+single-rank Tersoff removal oracle. Its independent O(N²) reference verifies
+the conservative directed center relation, while an independent O(N³)
+enumeration verifies the exact directional `(i,j,k)` tuple set and both
+minimum-image identities after the `(i,j,j)` and `(i,j,k)` cutoffs are
+applied. The fixture distinguishes a conservative relation candidate from an
+accepted J edge and covers clustered exclusions and exact-cutoff behavior.
+It passes on both CPU and CUDA.
+
+The exact-boundary case exposed one production mismatch: the legacy force
+accepted `r == R + D`, but relation construction used strict `<` and could
+discard that edge before the exact force predicate ran. The conservative
+relation predicate now uses `<=`, matching the force algebra; no runtime probe
+or alternate dispatch was introduced.
+
+Tersoff still needs an explicit multi-rank ownership design or rejection
+policy at the public feature level. The old Tersoff full-list kernel and
+dispatch are gone, but ReaxFF remains a separate full-list consumer and
+therefore still keeps the global legacy builder alive.
 
 #### Phase 3 structural checkpoint - 2026-07-27
 

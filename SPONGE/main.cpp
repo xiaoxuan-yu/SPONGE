@@ -54,6 +54,9 @@ LISTED_FORCES listed_forces;
 PAIRWISE_FORCE pairwise_force;
 LJ_CLUSTERED_DIRECT_CACHE* pairwise_clustered_cache = NULL;
 LJ_CLUSTERED_DIRECT_CACHE* eam_clustered_cache = NULL;
+LJ_CLUSTERED_DIRECT_CACHE* sw_clustered_cache = NULL;
+LJ_CLUSTERED_DIRECT_CACHE* edip_clustered_cache = NULL;
+LJ_CLUSTERED_DIRECT_CACHE* tersoff_clustered_cache = NULL;
 HARD_WALL hard_wall;
 SOFT_WALLS soft_walls;
 LENNARD_JONES_NO_PBC_INFORMATION LJ_NOPBC;
@@ -1678,8 +1681,45 @@ void Main_Initial(int argc, char* argv[])
     listed_forces.Initial(&controller, &md_info.sys.connectivity,
                           &md_info.sys.connected_distance);
 
-    sw.Initial(&controller, "SW", &neighbor_list.is_needed_full);
-    edip.Initial(&controller, "EDIP", &neighbor_list.is_needed_full);
+    if (controller.Command_Exist("SW", "in_file") &&
+        (!md_info.pbc.pbc || CONTROLLER::PP_MPI_size > 1))
+    {
+        controller.Throw_SPONGE_Error(
+            spongeErrorValueErrorCommand, "Main_Initial",
+            !md_info.pbc.pbc
+                ? "Clustered SW requires periodic boundary conditions.\n"
+                : "Clustered SW requires complete center-neighbor clustered "
+                  "metadata, which is not available for multi-PP-rank "
+                  "execution.\n");
+    }
+    sw.Initial(&controller, "SW");
+    if (sw.is_initialized && md_info.pbc.pbc)
+    {
+        sw_clustered_cache =
+            pairwise_clustered_cache != NULL
+                ? pairwise_clustered_cache
+                : Acquire_Shared_LJ_Clustered_Direct_Cache(
+                      &controller, "clustered_spatial_service", false, true);
+    }
+    if (controller.Command_Exist("EDIP", "in_file") &&
+        (!md_info.pbc.pbc || CONTROLLER::PP_MPI_size > 1))
+    {
+        controller.Throw_SPONGE_Error(
+            spongeErrorValueErrorCommand, "Main_Initial",
+            !md_info.pbc.pbc
+                ? "Clustered EDIP requires periodic boundary conditions.\n"
+                : "Clustered EDIP requires typed z/dE_dz halo exchange, "
+                  "which is not available for multi-PP-rank execution.\n");
+    }
+    edip.Initial(&controller, "EDIP");
+    if (edip.is_initialized && md_info.pbc.pbc)
+    {
+        edip_clustered_cache =
+            pairwise_clustered_cache != NULL
+                ? pairwise_clustered_cache
+                : Acquire_Shared_LJ_Clustered_Direct_Cache(
+                      &controller, "clustered_spatial_service", false, true);
+    }
     if (controller.Command_Exist("EAM", "in_file") &&
         (!md_info.pbc.pbc || CONTROLLER::PP_MPI_size > 1))
     {
@@ -1699,8 +1739,26 @@ void Main_Initial(int argc, char* argv[])
                 : Acquire_Shared_LJ_Clustered_Direct_Cache(
                       &controller, "clustered_spatial_service", false, true);
     }
-    tersoff.Initial(&controller, md_info.atom_numbers, "TERSOFF",
-                    &neighbor_list.is_needed_full);
+    if (controller.Command_Exist("TERSOFF", "in_file") &&
+        (!md_info.pbc.pbc || CONTROLLER::PP_MPI_size > 1))
+    {
+        controller.Throw_SPONGE_Error(
+            spongeErrorValueErrorCommand, "Main_Initial",
+            !md_info.pbc.pbc
+                ? "Clustered Tersoff requires periodic boundary conditions.\n"
+                : "Clustered Tersoff requires directed-edge/K ghost-force "
+                  "ownership, which is not available for multi-PP-rank "
+                  "execution.\n");
+    }
+    tersoff.Initial(&controller, md_info.atom_numbers, "TERSOFF");
+    if (tersoff.is_initialized && md_info.pbc.pbc)
+    {
+        tersoff_clustered_cache =
+            pairwise_clustered_cache != NULL
+                ? pairwise_clustered_cache
+                : Acquire_Shared_LJ_Clustered_Direct_Cache(
+                      &controller, "clustered_spatial_service", false, true);
+    }
     reaxff.Initial(&controller, md_info.atom_numbers, md_info.nb.cutoff,
                    &neighbor_list.cutoff_full, &neighbor_list.is_needed_full);
 
@@ -2002,16 +2060,81 @@ void Main_Calculate_Force()
             md_info.need_pressure, dd.d_virial, md_info.need_potential,
             dd.d_energy,
             md_info.pbc.cell.a11 * md_info.pbc.cell.a22 * md_info.pbc.cell.a33);
-        sw.SW_Force_With_Atom_Energy_And_Virial_Full_NL(
-            dd.atom_numbers, dd.crd, dd.frc, md_info.pbc.cell,
-            md_info.pbc.rcell, neighbor_list.full_neighbor_list.d_nl,
-            md_info.need_potential, dd.d_energy, md_info.need_pressure,
-            dd.d_virial);
-        edip.EDIP_Force_With_Atom_Energy_And_Virial_Full_NL(
-            dd.atom_numbers, dd.crd, dd.frc, md_info.pbc.cell,
-            md_info.pbc.rcell, neighbor_list.full_neighbor_list.d_nl,
-            md_info.need_potential, dd.d_energy, md_info.need_pressure,
-            dd.d_virial);
+        if (sw.is_initialized)
+        {
+            sw_clustered_cache->Build(
+                dd.crd, md_info.pbc.cell, md_info.pbc.rcell, sw.cut,
+                md_info.need_pressure != 0, false, true, true, true);
+            CLUSTERED_SPATIAL_VIEW sw_clustered_view;
+            const char* sw_clustered_failure_reason = NULL;
+            if (!Make_Clustered_Spatial_View_From_LJ_Cache(
+                    sw_clustered_cache, &sw_clustered_view,
+                    &sw_clustered_failure_reason))
+            {
+                throw std::runtime_error(
+                    std::string("clustered SW requires a current clustered "
+                                "payload: ") +
+                    (sw_clustered_failure_reason == NULL
+                         ? "unknown clustered-view failure"
+                         : sw_clustered_failure_reason));
+            }
+            if (!sw.SW_Force_Clustered(
+                    sw_clustered_view, dd.crd, dd.frc, md_info.pbc.cell,
+                    md_info.pbc.rcell, md_info.need_potential, dd.d_energy,
+                    md_info.need_pressure, dd.d_virial,
+                    &sw_clustered_failure_reason))
+            {
+                throw std::runtime_error(
+                    std::string("clustered SW rejected the clustered payload: ") +
+                    (sw_clustered_failure_reason == NULL
+                         ? "unknown SW clustered failure"
+                         : sw_clustered_failure_reason));
+            }
+        }
+        if (edip.is_initialized)
+        {
+#ifdef USE_CPU
+            constexpr bool edip_need_gmxpacked_payload = false;
+            constexpr bool edip_runtime_gmxpacked_direct = false;
+#else
+            constexpr bool edip_need_gmxpacked_payload = true;
+            constexpr bool edip_runtime_gmxpacked_direct = true;
+#endif
+            edip_clustered_cache->Build(
+                dd.crd, md_info.pbc.cell, md_info.pbc.rcell,
+                edip.cut, md_info.need_pressure != 0, false,
+                edip_need_gmxpacked_payload, false,
+                edip_runtime_gmxpacked_direct);
+            CLUSTERED_SPATIAL_VIEW edip_clustered_view;
+            const char* edip_clustered_failure_reason = NULL;
+            if (!Make_Clustered_Spatial_View_From_LJ_Cache(
+                    edip_clustered_cache, &edip_clustered_view,
+                    &edip_clustered_failure_reason))
+            {
+                throw std::runtime_error(
+                    std::string(
+                        "clustered EDIP requires a current clustered "
+                        "payload: ") +
+                    (edip_clustered_failure_reason == NULL
+                         ? "unknown clustered-view failure"
+                         : edip_clustered_failure_reason));
+            }
+            if (!edip.EDIP_Force_Clustered(
+                    edip_clustered_view, dd.crd, dd.frc,
+                    md_info.pbc.cell, md_info.pbc.rcell,
+                    md_info.need_potential, dd.d_energy,
+                    md_info.need_pressure, dd.d_virial,
+                    &edip_clustered_failure_reason))
+            {
+                throw std::runtime_error(
+                    std::string(
+                        "clustered EDIP rejected the clustered "
+                        "payload: ") +
+                    (edip_clustered_failure_reason == NULL
+                         ? "unknown EDIP clustered failure"
+                         : edip_clustered_failure_reason));
+            }
+        }
         if (eam.is_initialized)
         {
 #ifdef USE_CPU
@@ -2054,11 +2177,51 @@ void Main_Calculate_Force()
                          : eam_clustered_failure_reason));
             }
         }
-        tersoff.TERSOFF_Force_With_Atom_Energy_And_Virial(
-            dd.atom_numbers, dd.crd, dd.frc, md_info.pbc.cell,
-            md_info.pbc.rcell, neighbor_list.full_neighbor_list.d_nl,
-            md_info.need_potential, dd.d_energy, md_info.need_pressure,
-            dd.d_virial);
+        if (tersoff.is_initialized)
+        {
+#ifdef USE_CPU
+            constexpr bool tersoff_need_gmxpacked_payload = false;
+            constexpr bool tersoff_runtime_gmxpacked_direct = false;
+#else
+            constexpr bool tersoff_need_gmxpacked_payload = true;
+            constexpr bool tersoff_runtime_gmxpacked_direct = true;
+#endif
+            tersoff_clustered_cache->Build(
+                dd.crd, md_info.pbc.cell, md_info.pbc.rcell,
+                tersoff.cut, md_info.need_pressure != 0, false,
+                tersoff_need_gmxpacked_payload, false,
+                tersoff_runtime_gmxpacked_direct);
+            CLUSTERED_SPATIAL_VIEW tersoff_clustered_view;
+            const char* tersoff_clustered_failure_reason = NULL;
+            if (!Make_Clustered_Spatial_View_From_LJ_Cache(
+                    tersoff_clustered_cache,
+                    &tersoff_clustered_view,
+                    &tersoff_clustered_failure_reason))
+            {
+                throw std::runtime_error(
+                    std::string(
+                        "clustered Tersoff requires a current clustered "
+                        "payload: ") +
+                    (tersoff_clustered_failure_reason == NULL
+                         ? "unknown clustered-view failure"
+                         : tersoff_clustered_failure_reason));
+            }
+            if (!tersoff.TERSOFF_Force_Clustered(
+                    tersoff_clustered_view, dd.crd, dd.frc,
+                    md_info.pbc.cell, md_info.pbc.rcell,
+                    md_info.need_potential, dd.d_energy,
+                    md_info.need_pressure, dd.d_virial,
+                    &tersoff_clustered_failure_reason))
+            {
+                throw std::runtime_error(
+                    std::string(
+                        "clustered Tersoff rejected the clustered "
+                        "payload: ") +
+                    (tersoff_clustered_failure_reason == NULL
+                         ? "unknown Tersoff clustered failure"
+                         : tersoff_clustered_failure_reason));
+            }
+        }
         listed_forces.Compute_Force(dd.atom_numbers, dd.crd, md_info.pbc.cell,
                                     md_info.pbc.rcell, dd.frc,
                                     md_info.need_potential, dd.d_energy,
@@ -2325,6 +2488,36 @@ void Main_Refresh_Local_State(bool rebuild_dd)
             dd.atom_numbers, dd.atom_numbers, dd.ghost_numbers,
             dd.atom_local, dd.d_excluded_list_start, dd.d_excluded_list,
             dd.d_excluded_numbers);
+    }
+    if (sw_clustered_cache != NULL &&
+        sw_clustered_cache != pairwise_clustered_cache &&
+        sw_clustered_cache != eam_clustered_cache)
+    {
+        sw_clustered_cache->Refresh_Metadata(
+            dd.atom_numbers, dd.atom_numbers, dd.ghost_numbers,
+            dd.atom_local, dd.d_excluded_list_start, dd.d_excluded_list,
+            dd.d_excluded_numbers);
+    }
+    if (edip_clustered_cache != NULL &&
+        edip_clustered_cache != pairwise_clustered_cache &&
+        edip_clustered_cache != eam_clustered_cache &&
+        edip_clustered_cache != sw_clustered_cache)
+    {
+        edip_clustered_cache->Refresh_Metadata(
+            dd.atom_numbers, dd.atom_numbers, dd.ghost_numbers,
+            dd.atom_local, dd.d_excluded_list_start,
+            dd.d_excluded_list, dd.d_excluded_numbers);
+    }
+    if (tersoff_clustered_cache != NULL &&
+        tersoff_clustered_cache != pairwise_clustered_cache &&
+        tersoff_clustered_cache != eam_clustered_cache &&
+        tersoff_clustered_cache != sw_clustered_cache &&
+        tersoff_clustered_cache != edip_clustered_cache)
+    {
+        tersoff_clustered_cache->Refresh_Metadata(
+            dd.atom_numbers, dd.atom_numbers, dd.ghost_numbers,
+            dd.atom_local, dd.d_excluded_list_start,
+            dd.d_excluded_list, dd.d_excluded_numbers);
     }
 
     angle.Get_Local(dd.atom_local, dd.atom_numbers, dd.ghost_numbers,
@@ -2632,6 +2825,9 @@ void Main_Clear()
     Release_Shared_LJ_Clustered_Direct_Cache();
     pairwise_clustered_cache = NULL;
     eam_clustered_cache = NULL;
+    sw_clustered_cache = NULL;
+    edip_clustered_cache = NULL;
+    tersoff_clustered_cache = NULL;
     controller.Clear();
 }
 
@@ -2898,4 +3094,3 @@ void Main_Sync_Dynamic_Targets_To_Controllers()
     middle_langevin.Set_Target_Temperature(target_temperature);
     nhc.Set_Target_Temperature(target_temperature);
 }
-

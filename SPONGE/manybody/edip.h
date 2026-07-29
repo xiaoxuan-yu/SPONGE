@@ -2,6 +2,7 @@
 #define EDIP_H
 #include "../common.h"
 #include "../control.h"
+#include "../neighbor_list/clustered_spatial_view.h"
 
 //  Justo et al, Phys Rev B, 58, 2539 (1998).
 struct EDIP_INFORMATION
@@ -15,6 +16,7 @@ struct EDIP_INFORMATION
     int atom_type_numbers = 0;
     int pair_type_numbers = 0;
     int triple_type_numbers = 0;
+    float cut = 0.0f;
 
     float* z;
     float* dE_dz;
@@ -28,16 +30,25 @@ struct EDIP_INFORMATION
     float h_energy_sum = 0;
     float* d_energy_atom = NULL;
     float* d_energy_sum = NULL;
-    ;
 
-    void Initial(CONTROLLER* controller, const char* module_name = NULL,
-                 bool* need_full_nl_flag = NULL);
+    long long clustered_neighbor_provider_incarnation = -1;
+    long long clustered_neighbor_payload_generation = -1;
+    int clustered_neighbor_numbers = 0;
+    int* d_clustered_neighbor_counts = NULL;
+    int clustered_neighbor_counts_capacity = 0;
+    int* d_clustered_neighbor_offsets = NULL;
+    int clustered_neighbor_offsets_capacity = 0;
+    int* d_clustered_neighbor_atoms = NULL;
+    int clustered_neighbor_atoms_capacity = 0;
 
-    void EDIP_Force_With_Atom_Energy_And_Virial_Full_NL(
-        const int atom_numbers, const VECTOR* crd, VECTOR* frc,
-        const LTMatrix3 cell, const LTMatrix3 rcell, const ATOM_GROUP* fnl_d_nl,
-        const int need_atom_energy, float* atom_energy, const int need_virial,
-        LTMatrix3* atom_virial);
+    void Initial(CONTROLLER* controller, const char* module_name = NULL);
+
+    bool EDIP_Force_Clustered(
+        const CLUSTERED_SPATIAL_VIEW& view, const VECTOR* crd, VECTOR* frc,
+        const LTMatrix3 cell, const LTMatrix3 rcell,
+        const int need_atom_energy, float* atom_energy,
+        const int need_virial, LTMatrix3* atom_virial,
+        const char** failure_reason = NULL);
 
     void Step_Print(CONTROLLER* controller);
 };
