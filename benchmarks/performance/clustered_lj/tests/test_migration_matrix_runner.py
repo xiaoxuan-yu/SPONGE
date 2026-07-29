@@ -236,6 +236,13 @@ def test_timing_finiteness_and_route_parsers(tmp_path):
     assert infer_lj_mode("wat160k", "") == "comb"
     assert infer_lj_mode("dna_cou", DNA_AB_WARNING) == "packed-ab"
 
+    mdinfo.write_text(
+        "Rank   0 | Calculate_Force | 1.25 minutes\n"
+        "Core Run Wall Time: 90.0 seconds (1.50 minutes)\n"
+        "Core Run Speed: 10.0 ns/day\n"
+    )
+    assert parse_timings(mdinfo) == (75.0, 90.0, 10.0)
+
     mdout.write_text("10000 -nan(ind)\n")
     with pytest.raises(MatrixRunError, match="non-finite"):
         require_finite_mdout(mdout)

@@ -3884,23 +3884,37 @@ static __global__ void Build_Leaf_Cluster_Ranges(const int leaf_numbers,
     }
 }
 
-// Phase A subgroup builder: compute the exact per-leaf cluster-span upper bound
-// (max over leaves of cluster_j_end - cluster_j_start) in one pass. This is the
-// provable S_max the subgroup dedup backward scan uses for its early-stop bound;
-// it is recomputed each rebuild from the live leaf ranges, so it holds for any
-// system / cornerstone_leaf_size / density (no magic number).
+// Compute two rebuild-time bounds in one pass: the exact maximum per-leaf
+// cluster span used by the subgroup dedup scan, and the maximum fractional
+// extent of any cluster from its center. A cluster has at most eight atoms in
+// one octree leaf, so its center-to-atom extent is at most 7/8 of the leaf
+// width along each fractional axis.
 static __global__ void Reduce_Max_Leaf_Cluster_Span(const int leaf_numbers,
                                                     const int* leaf_cluster_starts,
                                                     const int* leaf_cluster_ends,
-                                                    int* d_max_span)
+                                                    const uint64_t* leaves,
+                                                    int* d_max_span,
+                                                    int* d_max_extent_bits)
 {
     int local_max = 0;
+    int local_max_extent_bits = 0;
     SIMPLE_DEVICE_FOR(leaf_i, leaf_numbers)
     {
         const int span = leaf_cluster_ends[leaf_i] - leaf_cluster_starts[leaf_i];
         if (span > local_max) { local_max = span; }
+        const unsigned int level =
+            cstone::treeLevel(leaves[leaf_i + 1] - leaves[leaf_i]);
+        const float fractional_extent_bound =
+            0.875f / static_cast<float>(1u << level);
+        const int fractional_extent_bits =
+            __float_as_int(fractional_extent_bound);
+        if (fractional_extent_bits > local_max_extent_bits)
+        {
+            local_max_extent_bits = fractional_extent_bits;
+        }
     }
     atomicMax(d_max_span, local_max);
+    atomicMax(d_max_extent_bits, local_max_extent_bits);
 }
 
 static __global__ void Build_Leaf_All_Local_Flags(
@@ -13330,6 +13344,23 @@ static void Refresh_Clustered_Pair_Shift_Metadata(LJ_CLUSTER_LAYOUT* layout,
 #endif
 }
 
+static float Clustered_Minimum_Box_Face_Height(const LTMatrix3 rcell)
+{
+    const float reciprocal_a =
+        sqrtf(rcell.a11 * rcell.a11 + rcell.a21 * rcell.a21 +
+              rcell.a31 * rcell.a31);
+    const float reciprocal_b =
+        sqrtf(rcell.a22 * rcell.a22 + rcell.a32 * rcell.a32);
+    const float reciprocal_c = fabsf(rcell.a33);
+    if (reciprocal_a <= 0.0f || reciprocal_b <= 0.0f ||
+        reciprocal_c <= 0.0f)
+    {
+        return 0.0f;
+    }
+    return fminf(1.0f / reciprocal_a,
+                 fminf(1.0f / reciprocal_b, 1.0f / reciprocal_c));
+}
+
 static void Refresh_Gmxpacked_Pair_Shift_Metadata(LJ_CLUSTER_LAYOUT* layout,
                                                   LTMatrix3 rcell)
 {
@@ -13407,21 +13438,46 @@ static void Refresh_Gmxpacked_Pair_Shift_Metadata(LJ_CLUSTER_LAYOUT* layout,
     }
     const int refresh_block_size =
         Clustered_Gmxpacked_Pair_Shift_Refresh_Block_Size();
-    Launch_Device_Kernel(Refresh_Gmxpacked_Pair_Shift_Bits,
-                         layout->gmxpacked_sci_numbers,
-                         refresh_block_size, 0, NULL,
-                         layout->gmxpacked_sci_numbers,
-                         layout->d_super_cluster_offsets,
-                         layout->d_cluster_fractional_centers,
-                         layout->d_cluster_fractional_extents,
-                         layout->d_cluster_valid_masks,
-                         layout->d_cluster_local_masks,
-                         layout->d_gmxpacked_sci,
-                         layout->d_gmxpacked_cjpacked,
-                         layout->d_gmxpacked_exclusions,
-                         layout->d_pair_shift_bits,
-                         d_sci_shift_only_flag, d_sci_shift_safe_flags,
-                         d_sci_shift_safe_count, exact_sci_shift_flags);
+    const float minimum_box_face_height =
+        Clustered_Minimum_Box_Face_Height(rcell);
+    const bool periodic_image_dedup_required =
+        minimum_box_face_height <= 0.0f ||
+        layout->cached_cutoff + layout->rebuild_skin +
+                2.0f *
+                    layout
+                        ->gmxpacked_periodic_image_max_fractional_extent_bound *
+                    minimum_box_face_height >=
+            0.5f * minimum_box_face_height;
+    if (periodic_image_dedup_required)
+    {
+        Launch_Device_Kernel(
+            Refresh_Gmxpacked_Pair_Shift_Bits,
+            layout->gmxpacked_sci_numbers, refresh_block_size, 0, NULL,
+            layout->gmxpacked_sci_numbers,
+            layout->d_super_cluster_offsets,
+            layout->d_cluster_fractional_centers,
+            layout->d_cluster_fractional_extents,
+            layout->d_cluster_valid_masks, layout->d_cluster_local_masks,
+            layout->d_gmxpacked_sci, layout->d_gmxpacked_cjpacked,
+            layout->d_gmxpacked_exclusions, layout->d_pair_shift_bits,
+            d_sci_shift_only_flag, d_sci_shift_safe_flags,
+            d_sci_shift_safe_count, exact_sci_shift_flags);
+    }
+    else
+    {
+        Launch_Device_Kernel(
+            Refresh_Gmxpacked_Pair_Shift_Bits_Unique_Image,
+            layout->gmxpacked_sci_numbers, refresh_block_size, 0, NULL,
+            layout->gmxpacked_sci_numbers,
+            layout->d_super_cluster_offsets,
+            layout->d_cluster_fractional_centers,
+            layout->d_cluster_fractional_extents,
+            layout->d_cluster_valid_masks, layout->d_cluster_local_masks,
+            layout->d_gmxpacked_sci, layout->d_gmxpacked_cjpacked,
+            layout->d_gmxpacked_exclusions, layout->d_pair_shift_bits,
+            d_sci_shift_only_flag, d_sci_shift_safe_flags,
+            d_sci_shift_safe_count, exact_sci_shift_flags);
+    }
     if (d_sci_shift_only_flag != NULL)
     {
         deviceMemcpy(&sci_shift_only_safe, d_sci_shift_only_flag, sizeof(int),
@@ -24453,23 +24509,6 @@ void LJ_CLUSTER_LAYOUT::Refresh_Metadata(int input_local_atom_numbers,
     Initialize_Cornerstone_State(this);
 }
 
-static float Clustered_Minimum_Box_Face_Height(const LTMatrix3 rcell)
-{
-    const float reciprocal_a =
-        sqrtf(rcell.a11 * rcell.a11 + rcell.a21 * rcell.a21 +
-              rcell.a31 * rcell.a31);
-    const float reciprocal_b =
-        sqrtf(rcell.a22 * rcell.a22 + rcell.a32 * rcell.a32);
-    const float reciprocal_c = fabsf(rcell.a33);
-    if (reciprocal_a <= 0.0f || reciprocal_b <= 0.0f ||
-        reciprocal_c <= 0.0f)
-    {
-        return 0.0f;
-    }
-    return fminf(1.0f / reciprocal_a,
-                 fminf(1.0f / reciprocal_b, 1.0f / reciprocal_c));
-}
-
 void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                               LTMatrix3 rcell, float cutoff,
                               bool need_virial,
@@ -27095,25 +27134,35 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                          CONTROLLER::device_max_thread, 0, NULL,
                          leaf_numbers, cluster_size, d_leaf_atom_offsets,
                          d_leaf_cluster_starts, d_leaf_cluster_ends);
-    // Phase A subgroup builder: compute the exact max per-leaf cluster span used
-    // as the provable S_max bound for the subgroup dedup backward scan. Cheap
-    // single-pass atomicMax; only the host-side max_leaf_cluster_span is read at
-    // the count/fill launch.
+    // Piggyback the periodic-image extent bound on the existing leaf-span
+    // reduction and host copy, avoiding another kernel or synchronization.
     {
-        Reserve_Device_Int_Buffer(1, &d_leaf_cluster_span_max_scratch,
+        Reserve_Device_Int_Buffer(2, &d_leaf_cluster_span_max_scratch,
                                   &leaf_cluster_span_max_scratch_capacity);
-        int zero = 0;
-        deviceMemcpy(d_leaf_cluster_span_max_scratch, &zero, sizeof(int),
+        int zero[2] = {0, 0};
+        deviceMemcpy(d_leaf_cluster_span_max_scratch, zero, sizeof(zero),
                      deviceMemcpyHostToDevice);
         Launch_Device_Kernel(Reduce_Max_Leaf_Cluster_Span,
                              (leaf_numbers + CONTROLLER::device_max_thread - 1) /
                                  CONTROLLER::device_max_thread,
                              CONTROLLER::device_max_thread, 0, NULL,
                              leaf_numbers, d_leaf_cluster_starts,
-                             d_leaf_cluster_ends, d_leaf_cluster_span_max_scratch);
-        deviceMemcpy(&max_leaf_cluster_span, d_leaf_cluster_span_max_scratch,
-                     sizeof(int), deviceMemcpyDeviceToHost);
+                             d_leaf_cluster_ends,
+                             cstone::rawPtr(cornerstone_state->leaves),
+                             d_leaf_cluster_span_max_scratch,
+                             d_leaf_cluster_span_max_scratch + 1);
+        int reduction_results[2] = {0, 0};
+        deviceMemcpy(reduction_results, d_leaf_cluster_span_max_scratch,
+                     sizeof(reduction_results), deviceMemcpyDeviceToHost);
+        max_leaf_cluster_span = reduction_results[0];
         if (max_leaf_cluster_span < 1) { max_leaf_cluster_span = 1; }
+        union
+        {
+            int bits;
+            float value;
+        } max_fractional_extent = {reduction_results[1]};
+        gmxpacked_periodic_image_max_fractional_extent_bound =
+            fmaxf(0.0f, max_fractional_extent.value);
     }
 
     Reserve_Device_Int_Buffer(cluster_numbers + 1, &d_cluster_offsets,
@@ -27148,7 +27197,6 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                          d_cluster_fractional_centers,
                          d_cluster_fractional_extents,
                          d_cluster_radii);
-
     Reserve_Device_Int_Buffer(leaf_numbers, &d_leaf_all_local,
                               &leaf_all_local_capacity);
     Launch_Device_Kernel(Build_Leaf_All_Local_Flags,

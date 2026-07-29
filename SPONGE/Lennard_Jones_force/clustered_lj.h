@@ -43,6 +43,18 @@ __global__ void Refresh_Gmxpacked_Pair_Shift_Bits(
     uint64_t* pair_shift_bits, int* sci_shift_only_safe,
     int* sci_shift_safe_flags, int* sci_shift_safe_count,
     bool exact_sci_shift_flags);
+__global__ void Refresh_Gmxpacked_Pair_Shift_Bits_Unique_Image(
+    int sci_numbers, const int* super_cluster_offsets,
+    const VECTOR* cluster_fractional_centers,
+    const VECTOR* cluster_fractional_extents,
+    const unsigned int* cluster_valid_masks,
+    const unsigned int* cluster_local_masks,
+    const LJ_CLUSTERED_GMXPACKED_SCI* gmxpacked_sci,
+    const LJ_CLUSTERED_GMXPACKED_CJ* gmxpacked_cjpacked,
+    const LJ_CLUSTERED_GMXPACKED_EXCLUSION* exclusion_entries,
+    uint64_t* pair_shift_bits, int* sci_shift_only_safe,
+    int* sci_shift_safe_flags, int* sci_shift_safe_count,
+    bool exact_sci_shift_flags);
 #endif
 
 struct LJ_CLUSTERED_LEGACY_NEIGHBOR_VIEW_REQUEST
@@ -121,6 +133,8 @@ struct LJ_CLUSTER_LAYOUT
     bool gmxpacked_pair_shift_sci_only_compatible = false;
     bool gmxpacked_pair_shift_metadata_ready = false;
     bool gmxpacked_pair_shift_sci_safe_counts_ready = false;
+    // Maximum center-to-atom extent along one fractional axis.
+    float gmxpacked_periodic_image_max_fractional_extent_bound = 0.0f;
     int gmxpacked_pair_shift_metadata_sci_numbers = 0;
     int gmxpacked_pair_shift_metadata_cjpacked_numbers = 0;
     int gmxpacked_pair_shift_metadata_exclusion_numbers = 0;

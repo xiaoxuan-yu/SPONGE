@@ -568,10 +568,11 @@ def parse_timings(mdinfo_path: Path) -> tuple[float, float, float]:
     number = r"([-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)"
     patterns = {
         "force_s": re.compile(
-            rf"\|\s*Calculate_Force\s*\|\s*{number}\s+seconds\s*$"
+            rf"\|\s*Calculate_Force\s*\|\s*{number}\s+(seconds|minutes)\s*$"
         ),
         "wall_s": re.compile(
-            rf"^\s*Core Run Wall Time:\s*{number}\s+seconds\s*$"
+            rf"^\s*Core Run Wall Time:\s*{number}\s+(seconds|minutes)"
+            r"(?:\s+\([^)]*\))?\s*$"
         ),
         "speed_ns_day": re.compile(
             rf"^\s*Core Run Speed:\s*{number}\s+ns/day\s*$"
@@ -581,7 +582,10 @@ def parse_timings(mdinfo_path: Path) -> tuple[float, float, float]:
         for field, pattern in patterns.items():
             match = pattern.search(line)
             if match is not None:
-                values[field] = float(match.group(1))
+                value = float(match.group(1))
+                if field in {"force_s", "wall_s"} and match.group(2) == "minutes":
+                    value *= 60.0
+                values[field] = value
     missing = sorted(set(patterns) - set(values))
     if missing:
         raise MatrixRunError(

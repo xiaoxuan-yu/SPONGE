@@ -242,7 +242,8 @@ Deduplicate_Gmxpacked_Current_Shift(
     }
 }
 
-__global__ void Refresh_Gmxpacked_Pair_Shift_Bits(
+template<bool deduplicate_periodic_images>
+static __device__ __forceinline__ void Refresh_Gmxpacked_Pair_Shift_Bits_Impl(
     const int sci_numbers, const int* super_cluster_offsets,
     const VECTOR* cluster_fractional_centers,
     const VECTOR* cluster_fractional_extents,
@@ -437,21 +438,24 @@ __global__ void Refresh_Gmxpacked_Pair_Shift_Bits(
                             }
                         }
                     }
-                    if (shift_id != sci_entry.shift_id)
+                    if constexpr (deduplicate_periodic_images)
                     {
-                        const int cluster_i = cluster_i_start + i_local;
-                        Deduplicate_Gmxpacked_Current_Shift(
-                            sci_numbers, sci, cluster_i, cluster_j, jm,
-                            i_local, shift_id, fractional_center_i,
-                            fractional_center_j,
-                            {cached_fractional_extent_i.x,
-                             cached_fractional_extent_i.y,
-                             cached_fractional_extent_i.z},
-                            fractional_extent_j, packed, gmxpacked_sci,
-                            gmxpacked_cjpacked, cluster_valid_masks,
-                            cluster_local_masks, exclusion_entries,
-                            &split_0_active_mask,
-                            &split_1_active_mask);
+                        if (shift_id != sci_entry.shift_id)
+                        {
+                            const int cluster_i = cluster_i_start + i_local;
+                            Deduplicate_Gmxpacked_Current_Shift(
+                                sci_numbers, sci, cluster_i, cluster_j, jm,
+                                i_local, shift_id, fractional_center_i,
+                                fractional_center_j,
+                                {cached_fractional_extent_i.x,
+                                 cached_fractional_extent_i.y,
+                                 cached_fractional_extent_i.z},
+                                fractional_extent_j, packed, gmxpacked_sci,
+                                gmxpacked_cjpacked, cluster_valid_masks,
+                                cluster_local_masks, exclusion_entries,
+                                &split_0_active_mask,
+                                &split_1_active_mask);
+                        }
                     }
                 }
                 Clustered_Set_Pair_Shift_Id(&shift_bits, i_local, shift_id);
@@ -469,6 +473,48 @@ __global__ void Refresh_Gmxpacked_Pair_Shift_Bits(
             atomicAdd(sci_shift_safe_count, 1);
         }
     }
+}
+
+__global__ void Refresh_Gmxpacked_Pair_Shift_Bits(
+    const int sci_numbers, const int* super_cluster_offsets,
+    const VECTOR* cluster_fractional_centers,
+    const VECTOR* cluster_fractional_extents,
+    const unsigned int* cluster_valid_masks,
+    const unsigned int* cluster_local_masks,
+    const LJ_CLUSTERED_GMXPACKED_SCI* gmxpacked_sci,
+    const LJ_CLUSTERED_GMXPACKED_CJ* gmxpacked_cjpacked,
+    const LJ_CLUSTERED_GMXPACKED_EXCLUSION* exclusion_entries,
+    uint64_t* pair_shift_bits, int* sci_shift_only_safe,
+    int* sci_shift_safe_flags, int* sci_shift_safe_count,
+    const bool exact_sci_shift_flags)
+{
+    Refresh_Gmxpacked_Pair_Shift_Bits_Impl<true>(
+        sci_numbers, super_cluster_offsets, cluster_fractional_centers,
+        cluster_fractional_extents, cluster_valid_masks, cluster_local_masks,
+        gmxpacked_sci, gmxpacked_cjpacked, exclusion_entries, pair_shift_bits,
+        sci_shift_only_safe, sci_shift_safe_flags, sci_shift_safe_count,
+        exact_sci_shift_flags);
+}
+
+__global__ void Refresh_Gmxpacked_Pair_Shift_Bits_Unique_Image(
+    const int sci_numbers, const int* super_cluster_offsets,
+    const VECTOR* cluster_fractional_centers,
+    const VECTOR* cluster_fractional_extents,
+    const unsigned int* cluster_valid_masks,
+    const unsigned int* cluster_local_masks,
+    const LJ_CLUSTERED_GMXPACKED_SCI* gmxpacked_sci,
+    const LJ_CLUSTERED_GMXPACKED_CJ* gmxpacked_cjpacked,
+    const LJ_CLUSTERED_GMXPACKED_EXCLUSION* exclusion_entries,
+    uint64_t* pair_shift_bits, int* sci_shift_only_safe,
+    int* sci_shift_safe_flags, int* sci_shift_safe_count,
+    const bool exact_sci_shift_flags)
+{
+    Refresh_Gmxpacked_Pair_Shift_Bits_Impl<false>(
+        sci_numbers, super_cluster_offsets, cluster_fractional_centers,
+        cluster_fractional_extents, cluster_valid_masks, cluster_local_masks,
+        gmxpacked_sci, gmxpacked_cjpacked, exclusion_entries, pair_shift_bits,
+        sci_shift_only_safe, sci_shift_safe_flags, sci_shift_safe_count,
+        exact_sci_shift_flags);
 }
 
 namespace
