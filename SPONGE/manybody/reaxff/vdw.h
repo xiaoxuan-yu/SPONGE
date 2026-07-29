@@ -3,6 +3,7 @@
 
 #include "../../common.h"
 #include "../../control.h"
+#include "../../neighbor_list/clustered_spatial_view.h"
 
 struct REAXFF_VDW
 {
@@ -17,6 +18,8 @@ struct REAXFF_VDW
     // Parameters
     int* h_atom_type = NULL;
     int* d_atom_type = NULL;
+    VECTOR* d_clustered_sorted_crd = NULL;
+    int clustered_scratch_capacity = 0;
 
     // ReaxFF general parameters
     float* h_general_params = NULL;
@@ -40,6 +43,12 @@ struct REAXFF_VDW
         const LTMatrix3 cell, const LTMatrix3 rcell, const ATOM_GROUP* nl,
         const float cutoff, const int need_atom_energy, float* atom_energy,
         const int need_virial, LTMatrix3* atom_virial);
+
+    bool REAXFF_VDW_Force_Clustered(
+        const CLUSTERED_SPATIAL_VIEW& view, const VECTOR* crd, VECTOR* frc,
+        const LTMatrix3 cell, const LTMatrix3 rcell, const float cutoff,
+        const int need_atom_energy, float* atom_energy, const int need_virial,
+        LTMatrix3* atom_virial, const char** failure_reason = NULL);
 
     void Step_Print(CONTROLLER* controller);
 };

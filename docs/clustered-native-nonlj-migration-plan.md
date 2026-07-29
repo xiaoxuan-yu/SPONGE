@@ -4164,6 +4164,89 @@ This does not yet close Phase 3. The remaining structural work is:
 5. Remove half/full `ATOM_GROUP` inputs stage by stage; do not use clustered
    records directly as an unstable reaction-edge ID.
 
+#### ReaxFF VDW clustered checkpoint - 2026-07-29
+
+The first ReaxFF slice deliberately separates pairwise spatial evaluation
+from reaction-graph construction. VDW has no persistent edge identity and now
+consumes the authoritative clustered half-pair payload directly. It does not
+derive an `ATOM_GROUP` or a private center-neighbor table. Raw bond order and
+EEQ are not folded into this kernel: they require stable ReaxFF-owned
+candidate/CSR identities and remain the next migration slice.
+
+For periodic single-rank execution, `REAXFF_VDW_Force_Clustered` validates the
+same provider incarnation, lease, cutoff and backend-specific payload contract
+as the other clustered consumers. CPU traverses native SCI/CJ/exclusion
+records; CUDA traverses generation-matched gmxpacked records and current
+pair-shift metadata. Both gather current sorted coordinates and recompute
+pair distances every force call. The legacy VDW loop is used only when this
+single-rank clustered view is not supplied; no environment gate, probe or
+experimental dispatch was added. Other ReaxFF stages still require the legacy
+half/full lists, so the global `reaxff_legacy` reason is not removed by this
+slice.
+
+The pre-change validation baseline was:
+
+```text
+CPU:  H2/dimer/EEQ 11 passed
+CUDA: H2/dimer/EEQ 11 passed
+PETN 16,240 atoms:
+  relative potential-energy difference 3.177584e-04
+  maximum charge difference            4.89e-04
+  maximum force difference             7.21587e-01
+```
+
+The first direct CUDA implementation was already much faster for force-only,
+but full output performed one force, energy and six-component virial atomic
+update per accepted pair. NCU on the PETN fixture measured:
+
+| path | duration | SM | memory | DRAM | registers | achieved occupancy | spills |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| legacy force-only | `4.43 ms` | `0.82%` | `4.88%` | `0.72%` | 47 | `8.14%` | 0 |
+| direct clustered force-only | `436.51 us` | `13.68%` | `73.58%` | `1.17%` | 64 | `49.91%` | 0 |
+| legacy full | `4.46 ms` | `0.86%` | `4.88%` | `0.81%` | 47 | `8.14%` | 0 |
+| direct clustered full | `4.499 ms` | `1.47%` | `16.15%` | `0.23%` | 64 | `50.25%` | 0 |
+
+The full kernel spent 98.4% of scheduler cycles with no eligible warp and was
+dominated by LG-throttle and long-scoreboard stalls. The retained, single
+NCU-driven change accumulates the fixed-J endpoint force, energy and virial in
+each eight-lane subgroup and performs one final J writeback. Re-profiling the
+exact source gives:
+
+| retained path | duration | change | SM | memory | DRAM | achieved occupancy | spills |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| clustered force-only | `302.11 us` | `-30.8%` vs first direct | `23.30%` | `68.15%` | `2.88%` | `48.90%` | 0 |
+| clustered full | `740.64 us` | `-83.5%` vs first direct | `11.96%` | `35.59%` | `0.43%` | `51.45%` | 0 |
+
+Thus force-only is 14.7 times faster than the legacy kernel and full is 6.0
+times faster. A 100-step PETN run measures `61.582 step/s`, `0.532070 ns/day`
+versus `61.018 step/s`, `0.527193 ns/day` for the retained pre-change
+line-info binary. The small end-to-end gain is expected because EEQ, bond
+order, angles and torsions still dominate and still build/consume legacy
+lists.
+
+The independent `MANYBODY_CLUSTERED_ORACLE_TEST` now also compares ReaxFF VDW
+force, total and atom-reduced energy, and six-component virial against an
+O(N²) periodic reference with clustered exclusions. It passes on CPU and
+CUDA together with the EDIP and Tersoff oracles. Post-change H2/dimer/EEQ
+comparisons pass `11/11` on both backends, and the PETN single-frame
+comparison retains the baseline error envelope.
+
+Reports:
+
+```text
+.tmp/reaxff-vdw-clustered-full-20260729/reaxff_vdw_clustered_full.ncu-rep
+.tmp/reaxff-vdw-clustered-force-20260729/reaxff_vdw_clustered_force_false.ncu-rep
+.tmp/reaxff-vdw-legacy-force-20260729/reaxff_vdw_legacy_force.ncu-rep
+.tmp/reaxff-vdw-subgroup-full-20260729/reaxff_vdw_subgroup_full_retry.ncu-rep
+.tmp/reaxff-vdw-subgroup-force-20260729/reaxff_vdw_subgroup_force_retry.ncu-rep
+```
+
+Multi-rank ReaxFF is intentionally deferred. The next single-rank target is
+raw bond-order discovery: decode clustered half pairs once, apply the strict
+bond-order cutoff and `bo_cut`, compact accepted `(min(i,j), max(i,j))` pairs
+into ReaxFF-owned edge IDs, then build the existing bond CSR from those IDs.
+Clustered SCI/CJ positions must not become reaction-edge IDs.
+
 ### Phase 5: external ABI, NO_PBC and legacy removal
 
 The PRIPS plugin API currently exposes host `h_nl` capacity/count/index. This

@@ -117,7 +117,8 @@ void REAXFF::Step_Print(CONTROLLER* controller, const float* d_charge)
 }
 
 void REAXFF::Calculate_Force(DOMAIN_INFORMATION* dd, MD_INFORMATION* md_info,
-                             NEIGHBOR_LIST* neighbor_list)
+                             NEIGHBOR_LIST* neighbor_list,
+                             const CLUSTERED_SPATIAL_VIEW* clustered_view)
 {
     eeq.Calculate_Charges(dd->atom_numbers, md_info->d_charge, dd->crd,
                           md_info->pbc.cell, md_info->pbc.rcell,
@@ -142,11 +143,30 @@ void REAXFF::Calculate_Force(DOMAIN_INFORMATION* dd, MD_INFORMATION* md_info,
         dd->atom_numbers, dd->crd, dd->frc, md_info->pbc.cell,
         md_info->pbc.rcell, neighbor_list->d_nl, md_info->need_potential,
         dd->d_energy, md_info->need_pressure, dd->d_virial);
-    vdw.REAXFF_VDW_Force_With_Atom_Energy_And_Virial(
-        dd->atom_numbers, dd->crd, dd->frc, md_info->pbc.cell,
-        md_info->pbc.rcell, neighbor_list->d_nl, md_info->nb.cutoff,
-        md_info->need_potential, dd->d_energy, md_info->need_pressure,
-        dd->d_virial);
+    if (clustered_view != NULL)
+    {
+        const char* failure_reason = NULL;
+        if (!vdw.REAXFF_VDW_Force_Clustered(
+                *clustered_view, dd->crd, dd->frc, md_info->pbc.cell,
+                md_info->pbc.rcell, md_info->nb.cutoff, md_info->need_potential,
+                dd->d_energy, md_info->need_pressure, dd->d_virial,
+                &failure_reason))
+        {
+            throw std::runtime_error(
+                std::string(
+                    "clustered ReaxFF VDW rejected the clustered payload: ") +
+                (failure_reason == NULL ? "unknown clustered VDW failure"
+                                        : failure_reason));
+        }
+    }
+    else
+    {
+        vdw.REAXFF_VDW_Force_With_Atom_Energy_And_Virial(
+            dd->atom_numbers, dd->crd, dd->frc, md_info->pbc.cell,
+            md_info->pbc.rcell, neighbor_list->d_nl, md_info->nb.cutoff,
+            md_info->need_potential, dd->d_energy, md_info->need_pressure,
+            dd->d_virial);
+    }
     ovun.Calculate_Over_Under_Energy_And_Force(
         dd->atom_numbers, dd->crd, dd->frc, md_info->pbc.cell,
         md_info->pbc.rcell, &bond_order, md_info->need_potential, dd->d_energy,

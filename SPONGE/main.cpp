@@ -1,8 +1,8 @@
 ﻿#include "main.h"
 
 #include <cmath>
-#include <cstdio>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <sstream>
@@ -57,6 +57,7 @@ LJ_CLUSTERED_DIRECT_CACHE* eam_clustered_cache = NULL;
 LJ_CLUSTERED_DIRECT_CACHE* sw_clustered_cache = NULL;
 LJ_CLUSTERED_DIRECT_CACHE* edip_clustered_cache = NULL;
 LJ_CLUSTERED_DIRECT_CACHE* tersoff_clustered_cache = NULL;
+LJ_CLUSTERED_DIRECT_CACHE* reaxff_clustered_cache = NULL;
 HARD_WALL hard_wall;
 SOFT_WALLS soft_walls;
 LENNARD_JONES_NO_PBC_INFORMATION LJ_NOPBC;
@@ -126,7 +127,8 @@ bool Main_Finite_Async_Lifecycle_Probe_Stop_Enabled()
 
 int Main_Finite_Lifecycle_Probe_Begin_Step()
 {
-    static const int begin_step = [] {
+    static const int begin_step = []
+    {
         const char* value = std::getenv(
             "SPONGE_CLUSTERED_GMXPACKED_FINITE_LIFECYCLE_PROBE_BEGIN");
         return value == NULL ? 0 : atoi(value);
@@ -136,7 +138,8 @@ int Main_Finite_Lifecycle_Probe_Begin_Step()
 
 int Main_Finite_Lifecycle_Probe_End_Step()
 {
-    static const int end_step = [] {
+    static const int end_step = []
+    {
         const char* value = std::getenv(
             "SPONGE_CLUSTERED_GMXPACKED_FINITE_LIFECYCLE_PROBE_END");
         return value == NULL ? -1 : atoi(value);
@@ -146,7 +149,8 @@ int Main_Finite_Lifecycle_Probe_End_Step()
 
 int Main_Finite_Lifecycle_Probe_Interval()
 {
-    static const int interval = [] {
+    static const int interval = []
+    {
         const char* value = std::getenv(
             "SPONGE_CLUSTERED_GMXPACKED_FINITE_LIFECYCLE_PROBE_INTERVAL");
         const int parsed = value == NULL ? 1 : atoi(value);
@@ -157,8 +161,8 @@ int Main_Finite_Lifecycle_Probe_Interval()
 
 const char* Main_Finite_Lifecycle_Probe_Site_Filter()
 {
-    static const char* site = std::getenv(
-        "SPONGE_CLUSTERED_GMXPACKED_FINITE_LIFECYCLE_PROBE_SITE");
+    static const char* site =
+        std::getenv("SPONGE_CLUSTERED_GMXPACKED_FINITE_LIFECYCLE_PROBE_SITE");
     return site != NULL && site[0] != '\0' ? site : NULL;
 }
 
@@ -248,17 +252,14 @@ const char* Main_Finite_Probe_Site_Name(int site_id)
 
 const char* Main_Finite_Probe_Array_Name(int array_id)
 {
-    static const char* arrays[] = {
-        "dd.crd",      "dd.vel",      "dd.frc",    "dd.acc",
-        "md_info.crd", "md_info.vel", "md_info.frc"};
+    static const char* arrays[] = {"dd.crd",     "dd.vel",      "dd.frc",
+                                   "dd.acc",     "md_info.crd", "md_info.vel",
+                                   "md_info.frc"};
     const int count = static_cast<int>(sizeof(arrays) / sizeof(arrays[0]));
     return array_id >= 0 && array_id < count ? arrays[array_id] : "unknown";
 }
 
-int Main_Finite_Probe_Array_Count()
-{
-    return 7;
-}
+int Main_Finite_Probe_Array_Count() { return 7; }
 
 const char* Main_Finite_Probe_Array_Filter()
 {
@@ -325,8 +326,8 @@ __global__ void Main_Finite_Async_Scan_Vector_Array(
         record->site_id = site_id;
         record->array_id = array_id;
         record->local_atom = atom;
-        record->global_atom = local_to_global != NULL ? local_to_global[atom]
-                                                      : atom;
+        record->global_atom =
+            local_to_global != NULL ? local_to_global[atom] : atom;
         record->x = value.x;
         record->y = value.y;
         record->z = value.z;
@@ -505,14 +506,14 @@ Main_Finite_Array_Report Main_Scan_Finite_Vector_Array(
 
     if (report.bad_atoms > 0)
     {
-        std::fprintf(
-            stderr,
-            "SPONGE_FINITE_LIFECYCLE_PROBE step=%d site=%s array=%s "
-            "bad_atoms=%d first_local=%d first_global=%d "
-            "value=(%.9g,%.9g,%.9g)\n",
-            md_info.sys.steps, site, name, report.bad_atoms,
-            report.first_local_atom, report.first_global_atom,
-            report.first_value.x, report.first_value.y, report.first_value.z);
+        std::fprintf(stderr,
+                     "SPONGE_FINITE_LIFECYCLE_PROBE step=%d site=%s array=%s "
+                     "bad_atoms=%d first_local=%d first_global=%d "
+                     "value=(%.9g,%.9g,%.9g)\n",
+                     md_info.sys.steps, site, name, report.bad_atoms,
+                     report.first_local_atom, report.first_global_atom,
+                     report.first_value.x, report.first_value.y,
+                     report.first_value.z);
     }
     return report;
 }
@@ -544,31 +545,27 @@ void Main_Finite_Lifecycle_Probe(const char* site)
     if (has_dd_atoms)
     {
         any_bad |= Main_Scan_Finite_Vector_Array(
-                       site, "dd.crd", dd.crd, dd.atom_numbers,
-                       local_to_global)
+                       site, "dd.crd", dd.crd, dd.atom_numbers, local_to_global)
                        .bad_atoms > 0;
         any_bad |= Main_Scan_Finite_Vector_Array(
-                       site, "dd.vel", dd.vel, dd.atom_numbers,
-                       local_to_global)
+                       site, "dd.vel", dd.vel, dd.atom_numbers, local_to_global)
                        .bad_atoms > 0;
         any_bad |= Main_Scan_Finite_Vector_Array(
-                       site, "dd.frc", dd.frc, dd.atom_numbers,
-                       local_to_global)
+                       site, "dd.frc", dd.frc, dd.atom_numbers, local_to_global)
                        .bad_atoms > 0;
         any_bad |= Main_Scan_Finite_Vector_Array(
-                       site, "dd.acc", dd.acc, dd.atom_numbers,
-                       local_to_global)
+                       site, "dd.acc", dd.acc, dd.atom_numbers, local_to_global)
                        .bad_atoms > 0;
     }
 
-    any_bad |= Main_Scan_Finite_Vector_Array(
-                   site, "md_info.crd", md_info.crd, md_info.atom_numbers, NULL)
+    any_bad |= Main_Scan_Finite_Vector_Array(site, "md_info.crd", md_info.crd,
+                                             md_info.atom_numbers, NULL)
                    .bad_atoms > 0;
-    any_bad |= Main_Scan_Finite_Vector_Array(
-                   site, "md_info.vel", md_info.vel, md_info.atom_numbers, NULL)
+    any_bad |= Main_Scan_Finite_Vector_Array(site, "md_info.vel", md_info.vel,
+                                             md_info.atom_numbers, NULL)
                    .bad_atoms > 0;
-    any_bad |= Main_Scan_Finite_Vector_Array(
-                   site, "md_info.frc", md_info.frc, md_info.atom_numbers, NULL)
+    any_bad |= Main_Scan_Finite_Vector_Array(site, "md_info.frc", md_info.frc,
+                                             md_info.atom_numbers, NULL)
                    .bad_atoms > 0;
 
     if (any_bad)
@@ -760,24 +757,21 @@ Main_Legacy_Neighbor_List_Need Main_Get_Legacy_Neighbor_List_Need()
         selective_interaction.Has_SITS_Direct_LJ_Coulomb() &&
         !selective_interaction.Has_REST2_Direct_LJ_Coulomb();
     need.selective_direct =
-        selective_interaction.Has_Direct_LJ_Coulomb() &&
-        !sits_clustered_direct;
+        selective_interaction.Has_Direct_LJ_Coulomb() && !sits_clustered_direct;
     need.clustered_direct_active =
         sits_clustered_direct ||
         (!selective_interaction.Has_Direct_LJ_Coulomb() &&
          (lj.Use_Clustered_Direct() || lj_soft.Use_Clustered_Direct()));
-    need.direct_solvent_numbers = need.clustered_direct_active
-                                      ? 0
-                                      : solvent_lj.local_solvent_numbers;
+    need.direct_solvent_numbers =
+        need.clustered_direct_active ? 0 : solvent_lj.local_solvent_numbers;
     need.lj_direct_legacy = !need.selective_direct && lj.is_initialized &&
                             !lj.Use_Clustered_Direct();
     need.lj_soft_direct_legacy = !need.selective_direct &&
                                  lj_soft.is_initialized &&
                                  !lj_soft.Use_Clustered_Direct();
     need.solvent_lj_legacy = need.direct_solvent_numbers > 0;
-    need.pairwise_legacy =
-        pairwise_force.is_initialized &&
-        !Main_Custom_Pairwise_Clustered_Enabled();
+    need.pairwise_legacy = pairwise_force.is_initialized &&
+                           !Main_Custom_Pairwise_Clustered_Enabled();
     need.reaxff_legacy = reaxff.is_initialized != 0;
     need.full_legacy = neighbor_list.is_needed_full;
     need.needed = need.selective_direct || need.lj_direct_legacy ||
@@ -792,10 +786,9 @@ bool Main_Needs_Legacy_Neighbor_List()
     return Main_Get_Legacy_Neighbor_List_Need().needed;
 }
 
-void Main_Trace_Legacy_Neighbor_List(
-    const char* site, const char* action,
-    const Main_Legacy_Neighbor_List_Need& need, int requested_update,
-    int effective_update)
+void Main_Trace_Legacy_Neighbor_List(const char* site, const char* action,
+                                     const Main_Legacy_Neighbor_List_Need& need,
+                                     int requested_update, int effective_update)
 {
     if (!Main_Legacy_Neighbor_List_Trace_Enabled())
     {
@@ -818,8 +811,7 @@ void Main_Trace_Legacy_Neighbor_List(
         Main_Neighbor_List_Update_Name(effective_update),
         need.pbc_enabled ? 1 : 0, need.clustered_direct_active ? 1 : 0,
         need.direct_solvent_numbers, need.selective_direct ? 1 : 0,
-        need.lj_direct_legacy ? 1 : 0,
-        need.lj_soft_direct_legacy ? 1 : 0,
+        need.lj_direct_legacy ? 1 : 0, need.lj_soft_direct_legacy ? 1 : 0,
         need.solvent_lj_legacy ? 1 : 0, need.pairwise_legacy ? 1 : 0,
         need.reaxff_legacy ? 1 : 0, need.full_legacy ? 1 : 0,
         need.needed ? "legacy-consumer" : "none");
@@ -839,12 +831,11 @@ void Main_Trace_Legacy_Neighbor_List_Adapter(
         "lj_direct_legacy=%d lj_soft_direct_legacy=%d solvent_lj_legacy=%d "
         "pairwise=%d reaxff=%d full=%d\n",
         site, md_info.sys.steps, outcome != NULL ? outcome : "unknown",
-        reason != NULL ? reason : "none",
-        need.clustered_direct_active ? 1 : 0,
+        reason != NULL ? reason : "none", need.clustered_direct_active ? 1 : 0,
         need.selective_direct ? 1 : 0, need.lj_direct_legacy ? 1 : 0,
-        need.lj_soft_direct_legacy ? 1 : 0,
-        need.solvent_lj_legacy ? 1 : 0, need.pairwise_legacy ? 1 : 0,
-        need.reaxff_legacy ? 1 : 0, need.full_legacy ? 1 : 0);
+        need.lj_soft_direct_legacy ? 1 : 0, need.solvent_lj_legacy ? 1 : 0,
+        need.pairwise_legacy ? 1 : 0, need.reaxff_legacy ? 1 : 0,
+        need.full_legacy ? 1 : 0);
 }
 
 bool Main_Try_Derived_Legacy_Neighbor_View(
@@ -852,8 +843,8 @@ bool Main_Try_Derived_Legacy_Neighbor_View(
 {
     if (!need.clustered_direct_active)
     {
-        Main_Trace_Legacy_Neighbor_List_Adapter(
-            site, need, "fallback-grid", "clustered direct is inactive");
+        Main_Trace_Legacy_Neighbor_List_Adapter(site, need, "fallback-grid",
+                                                "clustered direct is inactive");
         return false;
     }
 
@@ -889,8 +880,7 @@ bool Main_Try_Derived_Legacy_Neighbor_View(
         neighbor_list.max_neighbor_numbers,
         neighbor_list.d_neighbor_list_overflow, &fallback_reason);
     Main_Trace_Legacy_Neighbor_List_Adapter(
-        site, need, ready ? "derived-view" : "fallback-grid",
-        fallback_reason);
+        site, need, ready ? "derived-view" : "fallback-grid", fallback_reason);
     return ready;
 }
 
@@ -904,15 +894,14 @@ void Main_Mark_Legacy_Neighbor_List_Stale(
     }
     main_legacy_neighbor_list_state.valid = false;
     main_legacy_neighbor_list_state.stale = true;
-    Main_Trace_Legacy_Neighbor_List(site, "skip-stale", need,
-                                    requested_update, -1);
+    Main_Trace_Legacy_Neighbor_List(site, "skip-stale", need, requested_update,
+                                    -1);
 }
 
 void Main_Update_Legacy_Neighbor_List_If_Needed(const char* site,
                                                 int requested_update)
 {
-    const bool needs_legacy_neighbor_list =
-        Main_Needs_Legacy_Neighbor_List();
+    const bool needs_legacy_neighbor_list = Main_Needs_Legacy_Neighbor_List();
     const Main_Legacy_Neighbor_List_Need need =
         Main_Get_Legacy_Neighbor_List_Need();
     if (!needs_legacy_neighbor_list)
@@ -934,8 +923,8 @@ void Main_Update_Legacy_Neighbor_List_If_Needed(const char* site,
         return;
     }
 
-    Main_Trace_Legacy_Neighbor_List(site, "update-grid", need,
-                                    requested_update, effective_update);
+    Main_Trace_Legacy_Neighbor_List(site, "update-grid", need, requested_update,
+                                    effective_update);
     neighbor_list.Update(
         dd.atom_local, dd.atom_numbers, dd.ghost_numbers, dd.crd,
         md_info.pbc.cell, md_info.pbc.rcell, md_info.sys.steps,
@@ -1629,9 +1618,8 @@ void Main_Initial(int argc, char* argv[])
         if (pairwise_force.is_initialized &&
             Main_Custom_Pairwise_Clustered_Enabled())
         {
-            pairwise_clustered_cache =
-                Acquire_Shared_LJ_Clustered_Direct_Cache(
-                    &controller, "clustered_spatial_service", false, true);
+            pairwise_clustered_cache = Acquire_Shared_LJ_Clustered_Direct_Cache(
+                &controller, "clustered_spatial_service", false, true);
         }
         nb14.Initial(&controller, lj.h_LJ_A, lj.h_LJ_B, lj.h_atom_LJ_type);
 
@@ -1761,6 +1749,15 @@ void Main_Initial(int argc, char* argv[])
     }
     reaxff.Initial(&controller, md_info.atom_numbers, md_info.nb.cutoff,
                    &neighbor_list.cutoff_full, &neighbor_list.is_needed_full);
+    if (reaxff.is_initialized && md_info.pbc.pbc &&
+        CONTROLLER::PP_MPI_size == 1)
+    {
+        reaxff_clustered_cache =
+            pairwise_clustered_cache != NULL
+                ? pairwise_clustered_cache
+                : Acquire_Shared_LJ_Clustered_Direct_Cache(
+                      &controller, "clustered_spatial_service", false, true);
+    }
 
     restrain.Initial(&controller, md_info.atom_numbers, md_info.crd);
     hard_wall.Initial(&controller, md_info.sys.target_temperature,
@@ -1882,7 +1879,38 @@ void Main_Calculate_Force()
             "Main_Calculate_Force", neighbor_list.CONDITIONAL_UPDATE);
         Main_Finite_Lifecycle_Probe("after_force_neighbor_update");
 
-        reaxff.Calculate_Force(&dd, &md_info, &neighbor_list);
+        CLUSTERED_SPATIAL_VIEW reaxff_clustered_view;
+        const CLUSTERED_SPATIAL_VIEW* reaxff_clustered_view_ptr = NULL;
+        if (reaxff.is_initialized && reaxff_clustered_cache != NULL)
+        {
+#ifdef USE_CPU
+            constexpr bool reaxff_need_gmxpacked_payload = false;
+            constexpr bool reaxff_runtime_gmxpacked_direct = false;
+#else
+            constexpr bool reaxff_need_gmxpacked_payload = true;
+            constexpr bool reaxff_runtime_gmxpacked_direct = true;
+#endif
+            reaxff_clustered_cache->Build(dd.crd, md_info.pbc.cell,
+                                          md_info.pbc.rcell, md_info.nb.cutoff,
+                                          md_info.need_pressure != 0, false,
+                                          reaxff_need_gmxpacked_payload, false,
+                                          reaxff_runtime_gmxpacked_direct);
+            const char* reaxff_clustered_failure_reason = NULL;
+            if (!Make_Clustered_Spatial_View_From_LJ_Cache(
+                    reaxff_clustered_cache, &reaxff_clustered_view,
+                    &reaxff_clustered_failure_reason))
+            {
+                throw std::runtime_error(
+                    std::string("clustered ReaxFF requires a current clustered "
+                                "payload: ") +
+                    (reaxff_clustered_failure_reason == NULL
+                         ? "unknown clustered-view failure"
+                         : reaxff_clustered_failure_reason));
+            }
+            reaxff_clustered_view_ptr = &reaxff_clustered_view;
+        }
+        reaxff.Calculate_Force(&dd, &md_info, &neighbor_list,
+                               reaxff_clustered_view_ptr);
         Main_Finite_Lifecycle_Probe("after_reaxff_force");
 
         LJ_NOPBC.LJ_Force_With_Atom_Energy(
@@ -1949,9 +1977,8 @@ void Main_Calculate_Force()
                             md_info.atom_numbers, dd.atom_numbers, 0,
                             dd.ghost_numbers, dd.crd, dd.d_charge, dd.frc,
                             md_info.pbc.cell, md_info.pbc.rcell,
-                            neighbor_list.d_nl, pm.beta,
-                            md_info.need_potential, dd.d_energy,
-                            md_info.need_pressure, dd.d_virial,
+                            neighbor_list.d_nl, pm.beta, md_info.need_potential,
+                            dd.d_energy, md_info.need_pressure, dd.d_virial,
                             pm.d_direct_atom_energy);
                     if (!selective_interaction
                              .LJ_Soft_Core_Direct_CF_Force_Clustered(
@@ -1961,8 +1988,7 @@ void Main_Calculate_Force()
                                  md_info.nb.cutoff, pm.beta,
                                  md_info.need_potential, dd.d_energy,
                                  md_info.need_pressure, dd.d_virial,
-                                 pm.d_direct_atom_energy,
-                                 &failure_reason))
+                                 pm.d_direct_atom_energy, &failure_reason))
                     {
                         throw std::runtime_error(
                             std::string(
@@ -1978,9 +2004,8 @@ void Main_Calculate_Force()
                     lj.LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
                         md_info.atom_numbers, dd.atom_numbers, 0,
                         dd.ghost_numbers, dd.crd, dd.d_charge, dd.frc,
-                        md_info.pbc.cell, md_info.pbc.rcell,
-                        neighbor_list.d_nl, pm.beta,
-                        md_info.need_potential, dd.d_energy,
+                        md_info.pbc.cell, md_info.pbc.rcell, neighbor_list.d_nl,
+                        pm.beta, md_info.need_potential, dd.d_energy,
                         md_info.need_pressure, dd.d_virial,
                         pm.d_direct_atom_energy);
                     if (!selective_interaction.LJ_Direct_CF_Force_Clustered(
@@ -1995,9 +2020,8 @@ void Main_Calculate_Force()
                             std::string(
                                 "clustered-native SITS dispatch rejected "
                                 "the clustered payload: ") +
-                            (failure_reason == NULL
-                                 ? "unknown SITS failure"
-                                 : failure_reason));
+                            (failure_reason == NULL ? "unknown SITS failure"
+                                                    : failure_reason));
                     }
                 }
             }
@@ -2017,8 +2041,8 @@ void Main_Calculate_Force()
                         md_info.atom_numbers, dd.atom_numbers,
                         direct_solvent_numbers, dd.ghost_numbers, dd.crd,
                         dd.d_charge, &lj_soft, dd.frc, md_info.pbc.cell,
-                        md_info.pbc.rcell, neighbor_list.d_nl,
-                        pm.beta, md_info.need_potential, dd.d_energy,
+                        md_info.pbc.rcell, neighbor_list.d_nl, pm.beta,
+                        md_info.need_potential, dd.d_energy,
                         md_info.need_pressure, dd.d_virial,
                         pm.d_direct_atom_energy);
             }
@@ -2026,20 +2050,18 @@ void Main_Calculate_Force()
         else
         {
             lj.LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
-                md_info.atom_numbers, dd.atom_numbers,
-                direct_solvent_numbers, dd.ghost_numbers, dd.crd, dd.d_charge,
-                dd.frc, md_info.pbc.cell, md_info.pbc.rcell, neighbor_list.d_nl,
-                pm.beta, md_info.need_potential, dd.d_energy,
-                md_info.need_pressure, dd.d_virial,
-                pm.d_direct_atom_energy);
+                md_info.atom_numbers, dd.atom_numbers, direct_solvent_numbers,
+                dd.ghost_numbers, dd.crd, dd.d_charge, dd.frc, md_info.pbc.cell,
+                md_info.pbc.rcell, neighbor_list.d_nl, pm.beta,
+                md_info.need_potential, dd.d_energy, md_info.need_pressure,
+                dd.d_virial, pm.d_direct_atom_energy);
 
             lj_soft.LJ_Soft_Core_PME_Direct_Force_With_Atom_Energy_And_Virial(
-                md_info.atom_numbers, dd.atom_numbers,
-                direct_solvent_numbers, dd.ghost_numbers, dd.crd, dd.d_charge,
-                dd.frc, md_info.pbc.cell, md_info.pbc.rcell, neighbor_list.d_nl,
-                pm.beta, md_info.need_potential, dd.d_energy,
-                md_info.need_pressure, dd.d_virial,
-                pm.d_direct_atom_energy);
+                md_info.atom_numbers, dd.atom_numbers, direct_solvent_numbers,
+                dd.ghost_numbers, dd.crd, dd.d_charge, dd.frc, md_info.pbc.cell,
+                md_info.pbc.rcell, neighbor_list.d_nl, pm.beta,
+                md_info.need_potential, dd.d_energy, md_info.need_pressure,
+                dd.d_virial, pm.d_direct_atom_energy);
         }
         if (direct_solvent_numbers > 0)
         {
@@ -2078,14 +2100,15 @@ void Main_Calculate_Force()
                          ? "unknown clustered-view failure"
                          : sw_clustered_failure_reason));
             }
-            if (!sw.SW_Force_Clustered(
-                    sw_clustered_view, dd.crd, dd.frc, md_info.pbc.cell,
-                    md_info.pbc.rcell, md_info.need_potential, dd.d_energy,
-                    md_info.need_pressure, dd.d_virial,
-                    &sw_clustered_failure_reason))
+            if (!sw.SW_Force_Clustered(sw_clustered_view, dd.crd, dd.frc,
+                                       md_info.pbc.cell, md_info.pbc.rcell,
+                                       md_info.need_potential, dd.d_energy,
+                                       md_info.need_pressure, dd.d_virial,
+                                       &sw_clustered_failure_reason))
             {
                 throw std::runtime_error(
-                    std::string("clustered SW rejected the clustered payload: ") +
+                    std::string(
+                        "clustered SW rejected the clustered payload: ") +
                     (sw_clustered_failure_reason == NULL
                          ? "unknown SW clustered failure"
                          : sw_clustered_failure_reason));
@@ -2101,10 +2124,9 @@ void Main_Calculate_Force()
             constexpr bool edip_runtime_gmxpacked_direct = true;
 #endif
             edip_clustered_cache->Build(
-                dd.crd, md_info.pbc.cell, md_info.pbc.rcell,
-                edip.cut, md_info.need_pressure != 0, false,
-                edip_need_gmxpacked_payload, false,
-                edip_runtime_gmxpacked_direct);
+                dd.crd, md_info.pbc.cell, md_info.pbc.rcell, edip.cut,
+                md_info.need_pressure != 0, false, edip_need_gmxpacked_payload,
+                false, edip_runtime_gmxpacked_direct);
             CLUSTERED_SPATIAL_VIEW edip_clustered_view;
             const char* edip_clustered_failure_reason = NULL;
             if (!Make_Clustered_Spatial_View_From_LJ_Cache(
@@ -2112,24 +2134,21 @@ void Main_Calculate_Force()
                     &edip_clustered_failure_reason))
             {
                 throw std::runtime_error(
-                    std::string(
-                        "clustered EDIP requires a current clustered "
-                        "payload: ") +
+                    std::string("clustered EDIP requires a current clustered "
+                                "payload: ") +
                     (edip_clustered_failure_reason == NULL
                          ? "unknown clustered-view failure"
                          : edip_clustered_failure_reason));
             }
-            if (!edip.EDIP_Force_Clustered(
-                    edip_clustered_view, dd.crd, dd.frc,
-                    md_info.pbc.cell, md_info.pbc.rcell,
-                    md_info.need_potential, dd.d_energy,
-                    md_info.need_pressure, dd.d_virial,
-                    &edip_clustered_failure_reason))
+            if (!edip.EDIP_Force_Clustered(edip_clustered_view, dd.crd, dd.frc,
+                                           md_info.pbc.cell, md_info.pbc.rcell,
+                                           md_info.need_potential, dd.d_energy,
+                                           md_info.need_pressure, dd.d_virial,
+                                           &edip_clustered_failure_reason))
             {
                 throw std::runtime_error(
-                    std::string(
-                        "clustered EDIP rejected the clustered "
-                        "payload: ") +
+                    std::string("clustered EDIP rejected the clustered "
+                                "payload: ") +
                     (edip_clustered_failure_reason == NULL
                          ? "unknown EDIP clustered failure"
                          : edip_clustered_failure_reason));
@@ -2146,9 +2165,8 @@ void Main_Calculate_Force()
 #endif
             eam_clustered_cache->Build(
                 dd.crd, md_info.pbc.cell, md_info.pbc.rcell, eam.cut,
-                md_info.need_pressure != 0, false,
-                eam_need_gmxpacked_payload, false,
-                eam_runtime_gmxpacked_direct);
+                md_info.need_pressure != 0, false, eam_need_gmxpacked_payload,
+                false, eam_runtime_gmxpacked_direct);
             CLUSTERED_SPATIAL_VIEW eam_clustered_view;
             const char* eam_clustered_failure_reason = NULL;
             if (!Make_Clustered_Spatial_View_From_LJ_Cache(
@@ -2162,12 +2180,11 @@ void Main_Calculate_Force()
                          ? "unknown clustered-view failure"
                          : eam_clustered_failure_reason));
             }
-            if (!eam.EAM_Force_Clustered(
-                    eam_clustered_view, dd.crd, dd.frc,
-                    md_info.pbc.cell, md_info.pbc.rcell,
-                    md_info.need_potential, dd.d_energy,
-                    md_info.need_pressure, dd.d_virial,
-                    &eam_clustered_failure_reason))
+            if (!eam.EAM_Force_Clustered(eam_clustered_view, dd.crd, dd.frc,
+                                         md_info.pbc.cell, md_info.pbc.rcell,
+                                         md_info.need_potential, dd.d_energy,
+                                         md_info.need_pressure, dd.d_virial,
+                                         &eam_clustered_failure_reason))
             {
                 throw std::runtime_error(
                     std::string("clustered EAM rejected the clustered "
@@ -2187,15 +2204,14 @@ void Main_Calculate_Force()
             constexpr bool tersoff_runtime_gmxpacked_direct = true;
 #endif
             tersoff_clustered_cache->Build(
-                dd.crd, md_info.pbc.cell, md_info.pbc.rcell,
-                tersoff.cut, md_info.need_pressure != 0, false,
+                dd.crd, md_info.pbc.cell, md_info.pbc.rcell, tersoff.cut,
+                md_info.need_pressure != 0, false,
                 tersoff_need_gmxpacked_payload, false,
                 tersoff_runtime_gmxpacked_direct);
             CLUSTERED_SPATIAL_VIEW tersoff_clustered_view;
             const char* tersoff_clustered_failure_reason = NULL;
             if (!Make_Clustered_Spatial_View_From_LJ_Cache(
-                    tersoff_clustered_cache,
-                    &tersoff_clustered_view,
+                    tersoff_clustered_cache, &tersoff_clustered_view,
                     &tersoff_clustered_failure_reason))
             {
                 throw std::runtime_error(
@@ -2207,16 +2223,14 @@ void Main_Calculate_Force()
                          : tersoff_clustered_failure_reason));
             }
             if (!tersoff.TERSOFF_Force_Clustered(
-                    tersoff_clustered_view, dd.crd, dd.frc,
-                    md_info.pbc.cell, md_info.pbc.rcell,
-                    md_info.need_potential, dd.d_energy,
+                    tersoff_clustered_view, dd.crd, dd.frc, md_info.pbc.cell,
+                    md_info.pbc.rcell, md_info.need_potential, dd.d_energy,
                     md_info.need_pressure, dd.d_virial,
                     &tersoff_clustered_failure_reason))
             {
                 throw std::runtime_error(
-                    std::string(
-                        "clustered Tersoff rejected the clustered "
-                        "payload: ") +
+                    std::string("clustered Tersoff rejected the clustered "
+                                "payload: ") +
                     (tersoff_clustered_failure_reason == NULL
                          ? "unknown Tersoff clustered failure"
                          : tersoff_clustered_failure_reason));
@@ -2251,8 +2265,7 @@ void Main_Calculate_Force()
                 clustered_cache->Build(
                     dd.crd, md_info.pbc.cell, md_info.pbc.rcell,
                     md_info.nb.cutoff, md_info.need_pressure != 0, false,
-                    need_gmxpacked_payload, false,
-                    runtime_gmxpacked_direct);
+                    need_gmxpacked_payload, false, runtime_gmxpacked_direct);
             }
             CLUSTERED_SPATIAL_VIEW clustered_view;
             const char* clustered_failure_reason = NULL;
@@ -2268,11 +2281,11 @@ void Main_Calculate_Force()
                          : clustered_failure_reason));
             }
             if (!pairwise_force.Compute_Force_Clustered(
-                    clustered_view, dd.crd, md_info.pbc.cell,
-                    md_info.pbc.rcell, md_info.nb.cutoff, pm.beta,
-                    dd.d_charge, dd.frc, md_info.need_potential, dd.d_energy,
-                    md_info.need_pressure, dd.d_virial,
-                    pm.d_direct_atom_energy, &clustered_failure_reason))
+                    clustered_view, dd.crd, md_info.pbc.cell, md_info.pbc.rcell,
+                    md_info.nb.cutoff, pm.beta, dd.d_charge, dd.frc,
+                    md_info.need_potential, dd.d_energy, md_info.need_pressure,
+                    dd.d_virial, pm.d_direct_atom_energy,
+                    &clustered_failure_reason))
             {
                 throw std::runtime_error(
                     std::string("clustered-native custom pairwise dispatch "
@@ -2285,11 +2298,10 @@ void Main_Calculate_Force()
         else
         {
             pairwise_force.Compute_Force(
-                neighbor_list.d_nl, dd.crd, md_info.pbc.cell,
-                md_info.pbc.rcell, md_info.nb.cutoff, pm.beta, dd.d_charge,
-                dd.frc, md_info.need_potential, dd.d_energy,
-                md_info.need_pressure, dd.d_virial,
-                pm.d_direct_atom_energy);
+                neighbor_list.d_nl, dd.crd, md_info.pbc.cell, md_info.pbc.rcell,
+                md_info.nb.cutoff, pm.beta, dd.d_charge, dd.frc,
+                md_info.need_potential, dd.d_energy, md_info.need_pressure,
+                dd.d_virial, pm.d_direct_atom_energy);
         }
         angle.Angle_Force_With_Atom_Energy_And_Virial(
             dd.crd, md_info.pbc.cell, md_info.pbc.rcell, dd.frc,
@@ -2450,8 +2462,8 @@ void Main_Refresh_Local_State(bool rebuild_dd)
     lj_soft.Get_Local(dd.atom_local, dd.atom_numbers, dd.ghost_numbers);
     solvent_lj.Get_Local(dd.res_numbers, dd.res_len, dd.atom_numbers,
                          dd.d_mass);
-    Main_Update_Legacy_Neighbor_List_If_Needed(
-        "Main_Refresh_Local_State", neighbor_list.FORCED_UPDATE);
+    Main_Update_Legacy_Neighbor_List_If_Needed("Main_Refresh_Local_State",
+                                               neighbor_list.FORCED_UPDATE);
     const bool sits_clustered_direct =
         selective_interaction.Has_SITS_Direct_LJ_Coulomb() &&
         !selective_interaction.Has_REST2_Direct_LJ_Coulomb();
@@ -2461,15 +2473,11 @@ void Main_Refresh_Local_State(bool rebuild_dd)
             ? 0
             : solvent_lj.local_solvent_numbers;
     lj.Refresh_Clustered_Metadata(clustered_direct_solvent_numbers,
-                                  dd.atom_local,
-                                  dd.d_excluded_list_start,
-                                  dd.d_excluded_list,
-                                  dd.d_excluded_numbers);
-    lj_soft.Refresh_Clustered_Metadata(clustered_direct_solvent_numbers,
-                                       dd.atom_local,
-                                       dd.d_excluded_list_start,
-                                       dd.d_excluded_list,
-                                       dd.d_excluded_numbers);
+                                  dd.atom_local, dd.d_excluded_list_start,
+                                  dd.d_excluded_list, dd.d_excluded_numbers);
+    lj_soft.Refresh_Clustered_Metadata(
+        clustered_direct_solvent_numbers, dd.atom_local,
+        dd.d_excluded_list_start, dd.d_excluded_list, dd.d_excluded_numbers);
     listed_forces.Get_Local(dd.atom_local, dd.atom_numbers, dd.ghost_numbers,
                             dd.atom_local_label, dd.atom_local_id);
     pairwise_force.Get_Local(dd.atom_local, dd.atom_numbers, dd.ghost_numbers,
@@ -2477,16 +2485,16 @@ void Main_Refresh_Local_State(bool rebuild_dd)
     if (pairwise_clustered_cache != NULL)
     {
         pairwise_clustered_cache->Refresh_Metadata(
-            dd.atom_numbers, dd.atom_numbers, dd.ghost_numbers,
-            dd.atom_local, dd.d_excluded_list_start, dd.d_excluded_list,
+            dd.atom_numbers, dd.atom_numbers, dd.ghost_numbers, dd.atom_local,
+            dd.d_excluded_list_start, dd.d_excluded_list,
             dd.d_excluded_numbers);
     }
     if (eam_clustered_cache != NULL &&
         eam_clustered_cache != pairwise_clustered_cache)
     {
         eam_clustered_cache->Refresh_Metadata(
-            dd.atom_numbers, dd.atom_numbers, dd.ghost_numbers,
-            dd.atom_local, dd.d_excluded_list_start, dd.d_excluded_list,
+            dd.atom_numbers, dd.atom_numbers, dd.ghost_numbers, dd.atom_local,
+            dd.d_excluded_list_start, dd.d_excluded_list,
             dd.d_excluded_numbers);
     }
     if (sw_clustered_cache != NULL &&
@@ -2494,8 +2502,8 @@ void Main_Refresh_Local_State(bool rebuild_dd)
         sw_clustered_cache != eam_clustered_cache)
     {
         sw_clustered_cache->Refresh_Metadata(
-            dd.atom_numbers, dd.atom_numbers, dd.ghost_numbers,
-            dd.atom_local, dd.d_excluded_list_start, dd.d_excluded_list,
+            dd.atom_numbers, dd.atom_numbers, dd.ghost_numbers, dd.atom_local,
+            dd.d_excluded_list_start, dd.d_excluded_list,
             dd.d_excluded_numbers);
     }
     if (edip_clustered_cache != NULL &&
@@ -2504,9 +2512,9 @@ void Main_Refresh_Local_State(bool rebuild_dd)
         edip_clustered_cache != sw_clustered_cache)
     {
         edip_clustered_cache->Refresh_Metadata(
-            dd.atom_numbers, dd.atom_numbers, dd.ghost_numbers,
-            dd.atom_local, dd.d_excluded_list_start,
-            dd.d_excluded_list, dd.d_excluded_numbers);
+            dd.atom_numbers, dd.atom_numbers, dd.ghost_numbers, dd.atom_local,
+            dd.d_excluded_list_start, dd.d_excluded_list,
+            dd.d_excluded_numbers);
     }
     if (tersoff_clustered_cache != NULL &&
         tersoff_clustered_cache != pairwise_clustered_cache &&
@@ -2515,9 +2523,21 @@ void Main_Refresh_Local_State(bool rebuild_dd)
         tersoff_clustered_cache != edip_clustered_cache)
     {
         tersoff_clustered_cache->Refresh_Metadata(
-            dd.atom_numbers, dd.atom_numbers, dd.ghost_numbers,
-            dd.atom_local, dd.d_excluded_list_start,
-            dd.d_excluded_list, dd.d_excluded_numbers);
+            dd.atom_numbers, dd.atom_numbers, dd.ghost_numbers, dd.atom_local,
+            dd.d_excluded_list_start, dd.d_excluded_list,
+            dd.d_excluded_numbers);
+    }
+    if (reaxff_clustered_cache != NULL &&
+        reaxff_clustered_cache != pairwise_clustered_cache &&
+        reaxff_clustered_cache != eam_clustered_cache &&
+        reaxff_clustered_cache != sw_clustered_cache &&
+        reaxff_clustered_cache != edip_clustered_cache &&
+        reaxff_clustered_cache != tersoff_clustered_cache)
+    {
+        reaxff_clustered_cache->Refresh_Metadata(
+            dd.atom_numbers, dd.atom_numbers, dd.ghost_numbers, dd.atom_local,
+            dd.d_excluded_list_start, dd.d_excluded_list,
+            dd.d_excluded_numbers);
     }
 
     angle.Get_Local(dd.atom_local, dd.atom_numbers, dd.ghost_numbers,
@@ -2706,9 +2726,11 @@ void Main_Iteration()
                 controller.Get_Time_Recorder("Communication")->Start();
                 dd.Exchange_Particles(&controller, &md_info);
                 controller.Get_Time_Recorder("Communication")->Stop();
-                Main_Finite_Lifecycle_Probe("iteration_after_exchange_particles");
+                Main_Finite_Lifecycle_Probe(
+                    "iteration_after_exchange_particles");
                 Main_Refresh_Local_State(false);
-                Main_Finite_Lifecycle_Probe("iteration_after_refresh_local_state");
+                Main_Finite_Lifecycle_Probe(
+                    "iteration_after_refresh_local_state");
             }
             else
             {
@@ -2828,6 +2850,7 @@ void Main_Clear()
     sw_clustered_cache = NULL;
     edip_clustered_cache = NULL;
     tersoff_clustered_cache = NULL;
+    reaxff_clustered_cache = NULL;
     controller.Clear();
 }
 

@@ -9,6 +9,7 @@
 
 #include "control.h"
 #include "manybody/edip.h"
+#include "manybody/reaxff/vdw.h"
 #include "manybody/tersoff.h"
 
 // The many-body implementation files contain initialization entry points that
@@ -212,7 +213,8 @@ struct Clustered_Fixture
             Device_Copy(std::vector<unsigned int>{0x1u, 0xfu});
         cluster_local_masks =
             Device_Copy(std::vector<unsigned int>{0x1u, 0xfu});
-        cluster_centers = Device_Copy(std::vector<VECTOR>(2));
+        cluster_centers = Device_Copy(std::vector<VECTOR>{
+            {0.2f, 5.0f, 5.0f}, {9.25f, 5.275f, 5.3436934f}});
         cluster_extents = Device_Copy(std::vector<VECTOR>(2));
         super_cluster_offsets = Device_Copy(std::vector<int>{0, 2});
 
@@ -962,6 +964,166 @@ void Test_Tersoff_Oracle(const Clustered_Fixture& fixture,
     Device_Free(&device_force);
     Release_Tersoff(&tersoff);
 }
+
+constexpr int kReaxVdwStride = 8;
+
+std::vector<float> Make_Reaxff_Vdw_Parameters()
+{
+    std::vector<float> parameters(kTypeCount * kTypeCount * kReaxVdwStride,
+                                  0.0f);
+    for (int type_i = 0; type_i < kTypeCount; type_i += 1)
+    {
+        for (int type_j = 0; type_j < kTypeCount; type_j += 1)
+        {
+            float* pair = parameters.data() +
+                          (type_i * kTypeCount + type_j) * kReaxVdwStride;
+            pair[0] = 0.8f + 0.05f * static_cast<float>(type_i + type_j);
+            pair[1] = 0.2f + 0.03f * static_cast<float>(type_i + type_j);
+            pair[2] = 2.0f + 0.1f * static_cast<float>(type_i + type_j);
+            pair[3] = 1.0f;
+        }
+    }
+    return parameters;
+}
+
+double Reaxff_Vdw_Pair_Energy(double distance, const float* parameter,
+                              double cutoff, double p_vdw1)
+{
+    if (distance >= cutoff) return 0.0;
+    const double x = distance / cutoff;
+    const double x4 = x * x * x * x;
+    const double x5 = x4 * x;
+    const double x6 = x5 * x;
+    const double x7 = x6 * x;
+    const double taper = 1.0 - 35.0 * x4 + 84.0 * x5 - 70.0 * x6 + 20.0 * x7;
+    const double shielded_distance = std::pow(
+        std::pow(distance, p_vdw1) + std::pow(1.0 / parameter[3], p_vdw1),
+        1.0 / p_vdw1);
+    const double exponent =
+        parameter[2] * (1.0 - shielded_distance / parameter[0]);
+    return taper * parameter[1] *
+           (std::exp(exponent) - 2.0 * std::exp(0.5 * exponent));
+}
+
+void Release_Reaxff_Vdw(REAXFF_VDW* vdw)
+{
+    Device_Free(&vdw->d_atom_type);
+    Device_Free(&vdw->d_twobody_params);
+    Device_Free(&vdw->d_energy_sum);
+    Device_Free(&vdw->d_clustered_sorted_crd);
+}
+
+void Test_Reaxff_Vdw_Oracle(const Clustered_Fixture& fixture,
+                            const std::vector<VECTOR>& coordinates,
+                            const std::vector<int>& types,
+                            const LTMatrix3& cell, const LTMatrix3& rcell)
+{
+    constexpr double cutoff = 1.8;
+    constexpr double p_vdw1 = 4.0;
+    const std::vector<float> parameters = Make_Reaxff_Vdw_Parameters();
+
+    REAXFF_VDW vdw;
+    vdw.is_initialized = true;
+    vdw.atom_numbers = kAtomCount;
+    vdw.atom_type_numbers = kTypeCount;
+    vdw.p_vdw1 = static_cast<float>(p_vdw1);
+    vdw.d_atom_type = Device_Copy(types);
+    vdw.d_twobody_params = Device_Copy(parameters);
+    vdw.d_energy_sum = Device_Allocate<float>(1);
+    vdw.d_clustered_sorted_crd = Device_Allocate<VECTOR>(kAtomCount);
+    vdw.clustered_scratch_capacity = kAtomCount;
+
+    VECTOR* device_coordinates = Device_Copy(coordinates);
+    VECTOR* device_force = Device_Allocate<VECTOR>(kAtomCount);
+    float* device_energy = Device_Allocate<float>(kAtomCount);
+    LTMatrix3* device_virial = Device_Allocate<LTMatrix3>(kAtomCount);
+    deviceMemset(device_force, 0, sizeof(VECTOR) * kAtomCount);
+    deviceMemset(device_energy, 0, sizeof(float) * kAtomCount);
+    deviceMemset(device_virial, 0, sizeof(LTMatrix3) * kAtomCount);
+
+    const char* failure_reason = nullptr;
+    const bool accepted = vdw.REAXFF_VDW_Force_Clustered(
+        fixture.view, device_coordinates, device_force, cell, rcell,
+        static_cast<float>(cutoff), 1, device_energy, 1, device_virial,
+        &failure_reason);
+    Check(accepted, "ReaxFF VDW accepts the oracle clustered fixture");
+    if (!accepted && failure_reason != nullptr)
+        std::fprintf(stderr, "ReaxFF VDW rejection: %s\n", failure_reason);
+
+    std::vector<VECTOR> expected_force(kAtomCount);
+    double expected_energy = 0.0;
+    LTMatrix3 expected_virial = {};
+    for (int atom_i = 0; atom_i < kAtomCount; atom_i += 1)
+    {
+        for (int atom_j = atom_i + 1; atom_j < kAtomCount; atom_j += 1)
+        {
+            if (Is_Excluded(atom_i, atom_j)) continue;
+            const VECTOR drij =
+                Minimum_Image(coordinates[atom_i], coordinates[atom_j], 10.0f)
+                    .dr;
+            const double distance = std::sqrt(drij * drij);
+            if (!(distance > 0.0 && distance < cutoff)) continue;
+            const float* parameter =
+                parameters.data() +
+                (types[atom_i] * kTypeCount + types[atom_j]) * kReaxVdwStride;
+            const double energy =
+                Reaxff_Vdw_Pair_Energy(distance, parameter, cutoff, p_vdw1);
+            constexpr double difference_step = 1.0e-4;
+            const double derivative =
+                (Reaxff_Vdw_Pair_Energy(distance + difference_step, parameter,
+                                        cutoff, p_vdw1) -
+                 Reaxff_Vdw_Pair_Energy(distance - difference_step, parameter,
+                                        cutoff, p_vdw1)) /
+                (2.0 * difference_step);
+            const VECTOR force_i =
+                static_cast<float>(-derivative / distance) * drij;
+            expected_force[atom_i] = expected_force[atom_i] + force_i;
+            expected_force[atom_j] = expected_force[atom_j] - force_i;
+            expected_energy += energy;
+            expected_virial =
+                expected_virial + Get_Virial_From_Force_Dis(force_i, drij);
+        }
+    }
+
+    const std::vector<VECTOR> actual_force =
+        Device_Read(device_force, kAtomCount);
+    const std::vector<float> actual_energy =
+        Device_Read(device_energy, kAtomCount);
+    const std::vector<LTMatrix3> actual_virial =
+        Device_Read(device_virial, kAtomCount);
+    const float actual_energy_sum = Device_Read(vdw.d_energy_sum, 1)[0];
+    double actual_atom_energy_sum = 0.0;
+    LTMatrix3 actual_virial_sum = {};
+    for (int atom_i = 0; atom_i < kAtomCount; atom_i += 1)
+    {
+        Check_Near(actual_force[atom_i].x, expected_force[atom_i].x, 3.0e-3,
+                   "ReaxFF VDW force x oracle", atom_i);
+        Check_Near(actual_force[atom_i].y, expected_force[atom_i].y, 3.0e-3,
+                   "ReaxFF VDW force y oracle", atom_i);
+        Check_Near(actual_force[atom_i].z, expected_force[atom_i].z, 3.0e-3,
+                   "ReaxFF VDW force z oracle", atom_i);
+        actual_atom_energy_sum += actual_energy[atom_i];
+        actual_virial_sum = actual_virial_sum + actual_virial[atom_i];
+    }
+    Check_Near(actual_energy_sum, expected_energy, 2.0e-4,
+               "ReaxFF VDW energy reduction oracle", 0);
+    Check_Near(actual_atom_energy_sum, expected_energy, 2.0e-4,
+               "ReaxFF VDW atom-energy ownership oracle", 0);
+    const float* actual_virial_values =
+        reinterpret_cast<const float*>(&actual_virial_sum);
+    const float* expected_virial_values =
+        reinterpret_cast<const float*>(&expected_virial);
+    for (int component = 0; component < 6; component += 1)
+        Check_Near(actual_virial_values[component],
+                   expected_virial_values[component], 4.0e-3,
+                   "ReaxFF VDW virial oracle", component);
+
+    Device_Free(&device_coordinates);
+    Device_Free(&device_force);
+    Device_Free(&device_energy);
+    Device_Free(&device_virial);
+    Release_Reaxff_Vdw(&vdw);
+}
 }  // namespace
 
 int main()
@@ -974,6 +1136,7 @@ int main()
 
     Test_Edip_Oracle(fixture, coordinates, types, cell, rcell);
     Test_Tersoff_Oracle(fixture, coordinates, types, cell, rcell);
+    Test_Reaxff_Vdw_Oracle(fixture, coordinates, types, cell, rcell);
 
     if (failures != 0)
     {
@@ -983,6 +1146,6 @@ int main()
     }
     std::printf(
         "manybody clustered oracles passed: EDIP relation/triplets/z/dE_dz; "
-        "Tersoff relation/directed tuples\n");
+        "Tersoff relation/directed tuples; ReaxFF VDW force/energy/virial\n");
     return 0;
 }
