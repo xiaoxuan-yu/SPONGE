@@ -60,7 +60,6 @@ __global__ void Refresh_Gmxpacked_Pair_Shift_Bits_Unique_Image(
 struct LJ_CLUSTERED_LEGACY_NEIGHBOR_VIEW_REQUEST
 {
     bool request_half = true;
-    bool request_full = false;
     bool contains_non_lj_consumer = false;
     bool require_all_local_atoms = true;
     bool require_local_ghost_pairs = true;

@@ -369,82 +369,8 @@ static void REAXFF_VDW_Clustered_Native(
 }
 #endif
 
-static __global__ void REAXFF_VDW_Force_CUDA(
-    const int atom_numbers, const VECTOR* crd, VECTOR* frc,
-    const LTMatrix3 cell, const LTMatrix3 rcell, const ATOM_GROUP* nl,
-    int* atom_types, float* params, int ntypes, float cutoff, float p_vdw1,
-    float* atom_energy, LTMatrix3* atom_virial, float* d_energy_sum)
-{
-    SIMPLE_DEVICE_FOR(i, atom_numbers)
-    {
-        int type_i = atom_types[i];
-        VECTOR ri = crd[i];
-        ATOM_GROUP nl_i = nl[i];
-        VECTOR fi = {0, 0, 0};
-        LTMatrix3 vi = {0, 0, 0, 0, 0, 0};
-        float en_i = 0;
-
-        for (int jj = 0; jj < nl_i.atom_numbers; jj++)
-        {
-            int j = nl_i.atom_serial[jj];
-            int type_j = atom_types[j];
-
-            if (j <= i) continue;
-
-            VECTOR rj = crd[j];
-            VECTOR drij = Get_Periodic_Displacement(ri, rj, cell, rcell);
-            float rij = norm3df(drij.x, drij.y, drij.z);
-
-            if (rij >= cutoff) continue;
-
-            int param_idx = (type_i * ntypes + type_j) * PARAM_STRIDE;
-            const float* param = params + param_idx;
-
-            SADfloat<1> rij_sad(rij, 0);
-            SADfloat<1> energy_sad =
-                reax_vdw_energy_sad(rij_sad, param, cutoff, p_vdw1);
-
-            float force_mag = -energy_sad.dval[0] / rij;
-            VECTOR fij = {force_mag * drij.x, force_mag * drij.y,
-                          force_mag * drij.z};
-
-            fi.x += fij.x;
-            fi.y += fij.y;
-            fi.z += fij.z;
-
-            atomicAdd(&frc[j].x, -fij.x);
-            atomicAdd(&frc[j].y, -fij.y);
-            atomicAdd(&frc[j].z, -fij.z);
-
-            if (atom_virial)
-            {
-                vi = vi + Get_Virial_From_Force_Dis(fij, drij);
-            }
-
-            if (atom_energy)
-            {
-                en_i += energy_sad.val;
-                atomicAdd(d_energy_sum, energy_sad.val);
-            }
-        }
-
-        atomicAdd(&frc[i].x, fi.x);
-        atomicAdd(&frc[i].y, fi.y);
-        atomicAdd(&frc[i].z, fi.z);
-
-        if (atom_energy)
-        {
-            atom_energy[i] += en_i;
-        }
-        if (atom_virial)
-        {
-            atomicAdd(atom_virial + i, vi);
-        }
-    }
-}
-
 void REAXFF_VDW::Initial(CONTROLLER* controller, int atom_numbers,
-                         const char* module_name, bool* need_full_nl_flag)
+                         const char* module_name)
 {
     if (module_name == NULL) module_name = "REAXFF";
     this->atom_numbers = atom_numbers;
@@ -724,35 +650,9 @@ void REAXFF_VDW::Initial(CONTROLLER* controller, int atom_numbers,
     deviceMemset(d_energy_sum, 0, sizeof(float));
     deviceMemset(d_energy_atom, 0, sizeof(float) * atom_numbers);
 
-    if (need_full_nl_flag != NULL) *need_full_nl_flag = true;
     is_initialized = true;
     controller->Step_Print_Initial("REAXFF_VDW", "%14.7e");
     controller->printf("END INITIALIZING REAXFF VDW FORCE\n\n");
-}
-
-void REAXFF_VDW::REAXFF_VDW_Force_With_Atom_Energy_And_Virial(
-    const int atom_numbers, const VECTOR* crd, VECTOR* frc,
-    const LTMatrix3 cell, const LTMatrix3 rcell, const ATOM_GROUP* nl,
-    const float cutoff, const int need_atom_energy, float* atom_energy,
-    const int need_virial, LTMatrix3* atom_virial)
-{
-    if (!is_initialized) return;
-
-    if (need_atom_energy)
-    {
-        deviceMemset(d_energy_sum, 0, sizeof(float));
-        if (atom_energy)
-            deviceMemset(d_energy_atom, 0, sizeof(float) * atom_numbers);
-    }
-
-    dim3 blockSize(128);
-    dim3 gridSize((atom_numbers + blockSize.x - 1) / blockSize.x);
-
-    Launch_Device_Kernel(REAXFF_VDW_Force_CUDA, gridSize, blockSize, 0, NULL,
-                         atom_numbers, crd, frc, cell, rcell, nl, d_atom_type,
-                         d_twobody_params, atom_type_numbers, cutoff,
-                         this->p_vdw1, atom_energy,
-                         need_virial ? atom_virial : NULL, d_energy_sum);
 }
 
 bool REAXFF_VDW::REAXFF_VDW_Force_Clustered(

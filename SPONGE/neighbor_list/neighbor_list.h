@@ -2,7 +2,6 @@
 #define NEIGHBOR_LIST_H
 #include "../common.h"
 #include "../control.h"
-#include "full_neighbor_list.h"
 
 struct NEIGHBOR_LIST
 {
@@ -11,8 +10,6 @@ struct NEIGHBOR_LIST
 
     // 是否需要构建半近邻表（默认需要）
     bool is_needed_half = true;
-    // 是否需要构建全近邻表（默认不需要，由具体势函数开启）
-    bool is_needed_full = false;
 
     void Initial(CONTROLLER* controller, int atom_numbers, float cutoff,
                  float skin, LTMatrix3 cell, LTMatrix3 rcell);
@@ -119,12 +116,6 @@ struct NEIGHBOR_LIST
         CONDITIONAL_UPDATE = 0,
         FORCED_UPDATE = 1
     };
-
-    // 全连接近邻表（用于需要全连接表的计算如SW）
-    FULL_NEIGHBOR_LIST full_neighbor_list;
-
-    // 静态变量：各模块可以注册它们需要的特殊截断距离
-    float cutoff_full = 0.0f;  // 默认值为0表示不需要cutoff_full
 };
 
 #endif

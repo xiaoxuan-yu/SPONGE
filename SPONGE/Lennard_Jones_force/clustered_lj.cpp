@@ -31254,10 +31254,6 @@ bool Ensure_Legacy_Neighbor_View_From_Clustered_Payload(
     {
         return fail("requested legacy view does not require a half-list");
     }
-    if (request.request_full)
-    {
-        return fail("full-list ATOM_GROUP semantics are unproven for clustered payloads");
-    }
     if (request.contains_non_lj_consumer)
     {
         return fail("non-LJ half-list consumers are not proven against clustered ownership");

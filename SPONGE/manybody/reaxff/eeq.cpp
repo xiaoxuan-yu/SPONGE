@@ -249,74 +249,9 @@ static __global__ void EEQ_Matrix_Vector_Multiply(
     }
 }
 
-static __global__ void EEQ_Count_H_Matrix_Entries(
-    int atom_numbers, const VECTOR* crd, const int* atom_types,
-    const float* shield, int atom_type_numbers, const ATOM_GROUP* nl,
-    const LTMatrix3 cell, const LTMatrix3 rcell, float cutoff, int* numnbrs)
-{
-    EEQ_SIMPLE_DEVICE_FOR(i, atom_numbers)
-    {
-        int count = 0;
-        ATOM_GROUP nl_i = nl[i];
-        VECTOR ri = crd[i];
-        int type_i = atom_types[i];
-        for (int j_idx = 0; j_idx < nl_i.atom_numbers; j_idx++)
-        {
-            int atom_j = nl_i.atom_serial[j_idx];
-            int type_j = atom_types[atom_j];
-            VECTOR rj = crd[atom_j];
-            VECTOR drij = Get_Periodic_Displacement(ri, rj, cell, rcell);
-            float r2 = drij.x * drij.x + drij.y * drij.y + drij.z * drij.z;
-            float r = sqrtf(r2);
-            float shield_ij = shield[type_i * atom_type_numbers + type_j];
-            if (r < cutoff && shield_ij >= 0.0f) count++;
-        }
-        numnbrs[i] = count;
-    }
-}
-
-static __global__ void EEQ_Fill_H_Matrix(
-    int atom_numbers, const VECTOR* crd, const int* atom_types,
-    const float* shield, int atom_type_numbers, const ATOM_GROUP* nl,
-    const LTMatrix3 cell, const LTMatrix3 rcell, float cutoff,
-    const int* firstnbrs, int* jlist, float* h_val)
-{
-    EEQ_SIMPLE_DEVICE_FOR(i, atom_numbers)
-    {
-        ATOM_GROUP nl_i = nl[i];
-        VECTOR ri = crd[i];
-        int type_i = atom_types[i];
-        int write_idx = firstnbrs[i];
-        for (int j_idx = 0; j_idx < nl_i.atom_numbers; j_idx++)
-        {
-            int atom_j = nl_i.atom_serial[j_idx];
-            int type_j = atom_types[atom_j];
-            VECTOR rj = crd[atom_j];
-            VECTOR drij = Get_Periodic_Displacement(ri, rj, cell, rcell);
-            float r2 = drij.x * drij.x + drij.y * drij.y + drij.z * drij.z;
-            float r = sqrtf(r2);
-            float shield_ij = shield[type_i * atom_type_numbers + type_j];
-            if (r < cutoff && shield_ij >= 0.0f)
-            {
-                float x = r / cutoff;
-                float x2 = x * x;
-                float x4 = x2 * x2;
-                float x5 = x4 * x;
-                float x6 = x5 * x;
-                float x7 = x6 * x;
-                float taper =
-                    20.0f * x7 - 70.0f * x6 + 84.0f * x5 - 35.0f * x4 + 1.0f;
-                jlist[write_idx] = atom_j;
-                h_val[write_idx] =
-                    taper * (COULOMB_CONSTANT / cbrtf(r2 * r + shield_ij));
-                write_idx++;
-            }
-        }
-    }
-}
-
-static __device__ __forceinline__ float EEQ_H_Offdiagonal(
-    float r, float r2, float cutoff, float shield_ij)
+static __device__ __forceinline__ float EEQ_H_Offdiagonal(float r, float r2,
+                                                          float cutoff,
+                                                          float shield_ij)
 {
     const float x = r / cutoff;
     const float x2 = x * x;
@@ -344,12 +279,9 @@ static __device__ __forceinline__ void EEQ_Consume_Clustered_Pair(
     }
     else
     {
-        const float value =
-            EEQ_H_Offdiagonal(r, r2, cutoff, shield_ij);
-        const int pos_i =
-            firstnbrs[atom_i] + atomicAdd(fill_count + atom_i, 1);
-        const int pos_j =
-            firstnbrs[atom_j] + atomicAdd(fill_count + atom_j, 1);
+        const float value = EEQ_H_Offdiagonal(r, r2, cutoff, shield_ij);
+        const int pos_i = firstnbrs[atom_i] + atomicAdd(fill_count + atom_i, 1);
+        const int pos_j = firstnbrs[atom_j] + atomicAdd(fill_count + atom_j, 1);
         jlist[pos_i] = atom_j;
         h_val[pos_i] = value;
         jlist[pos_j] = atom_i;
@@ -383,8 +315,8 @@ static __global__ void EEQ_Gather_Clustered_Coordinates(
         }
         const int atom_i = sort_permutation[sorted_i];
         const VECTOR center = cluster_centers[lo];
-        sorted_crd[sorted_i] =
-            center + Get_Periodic_Displacement(crd[atom_i], center, cell, rcell);
+        sorted_crd[sorted_i] = center + Get_Periodic_Displacement(
+                                            crd[atom_i], center, cell, rcell);
     }
 }
 
@@ -423,14 +355,14 @@ static __global__ void EEQ_H_Matrix_Clustered_Gmxpacked(
         const CLUSTERED_GMXPACKED_SPLIT split_entry = packed.split[split];
         unsigned int pair_bits = 0xffffffffu;
         if (split_entry.exclusion_index != 0)
-            pair_bits = exclusion_entries[split_entry.exclusion_index]
-                            .pair[split_j_lane * kClusteredClusterSize + i_lane];
+            pair_bits =
+                exclusion_entries[split_entry.exclusion_index]
+                    .pair[split_j_lane * kClusteredClusterSize + i_lane];
         const unsigned int effective_mask = split_entry.imask & pair_bits;
         for (int jm = 0; jm < kClusteredJGroupSize; jm += 1)
         {
             const int cj = packed.cj[jm];
-            if (cj < 0 ||
-                (cluster_valid_masks[cj] & (1u << j_lane)) == 0u ||
+            if (cj < 0 || (cluster_valid_masks[cj] & (1u << j_lane)) == 0u ||
                 (cluster_local_masks[cj] & (1u << j_lane)) == 0u)
                 continue;
             const int sj = cluster_offsets[cj] + j_lane;
@@ -484,8 +416,7 @@ static void EEQ_H_Matrix_Clustered_Native(
     for (int sci = 0; sci < view.sci_numbers; sci += 1)
     {
         const CLUSTERED_SCI entry = view.sci[sci];
-        const int ci_begin =
-            view.super_cluster_offsets[entry.supercluster_id];
+        const int ci_begin = view.super_cluster_offsets[entry.supercluster_id];
         const int ci_end =
             view.super_cluster_offsets[entry.supercluster_id + 1];
         const VECTOR shift =
@@ -918,94 +849,79 @@ static __global__ void CG_Update_P_Kernel(int n, float* p, const float* r,
 
 void REAXFF_EEQ::Calculate_Charges(int atom_numbers, float* d_charge,
                                    const VECTOR* d_crd, const LTMatrix3 cell,
-                                   const LTMatrix3 rcell,
-                                   const ATOM_GROUP* fnl_d_nl, float cutoff,
+                                   const LTMatrix3 rcell, float cutoff,
+                                   const CLUSTERED_SPATIAL_VIEW& view,
                                    float* d_energy, VECTOR* frc,
-                                   int need_virial, LTMatrix3* atom_virial,
-                                   const CLUSTERED_SPATIAL_VIEW* clustered_view)
+                                   int need_virial, LTMatrix3* atom_virial)
 {
-    if (!is_initialized || (fnl_d_nl == NULL && clustered_view == NULL)) return;
+    if (!is_initialized) return;
 
     dim3 blockSize = {std::min(160u, CONTROLLER::device_max_thread)};
     dim3 gridSize = {(atom_numbers + blockSize.x - 1) / blockSize.x};
 
     // ---- Build H matrix CSR ----
-    if (clustered_view == NULL)
-    {
-        Launch_Device_Kernel(EEQ_Count_H_Matrix_Entries, gridSize, blockSize, 0,
-                             NULL, atom_numbers, d_crd, d_atom_type, d_shield,
-                             atom_type_numbers, fnl_d_nl, cell, rcell, cutoff,
-                             d_h_numnbrs);
-    }
-    else
-    {
-        const CLUSTERED_SPATIAL_VIEW& view = *clustered_view;
-        if (view.ghost_numbers != 0 || view.local_atom_numbers != atom_numbers ||
-            view.total_atom_numbers != atom_numbers ||
-            clustered_scratch_capacity < atom_numbers)
-            throw std::runtime_error(
-                "clustered ReaxFF EEQ requires a single-rank all-local view");
-        const char* failure_reason = NULL;
-        CLUSTERED_SPATIAL_VIEW_REQUIREMENTS requirements;
-        requirements.local_atom_numbers = atom_numbers;
-        requirements.ghost_numbers = 0;
-        requirements.cutoff = cutoff;
-        requirements.provider_incarnation = view.provider_incarnation;
-        requirements.lease_epoch = view.lease_epoch;
-        requirements.require_all_local_atoms = true;
+    if (view.ghost_numbers != 0 || view.local_atom_numbers != atom_numbers ||
+        view.total_atom_numbers != atom_numbers ||
+        clustered_scratch_capacity < atom_numbers)
+        throw std::runtime_error(
+            "clustered ReaxFF EEQ requires a single-rank all-local view");
+    const char* failure_reason = NULL;
+    CLUSTERED_SPATIAL_VIEW_REQUIREMENTS requirements;
+    requirements.local_atom_numbers = atom_numbers;
+    requirements.ghost_numbers = 0;
+    requirements.cutoff = cutoff;
+    requirements.provider_incarnation = view.provider_incarnation;
+    requirements.lease_epoch = view.lease_epoch;
+    requirements.require_all_local_atoms = true;
 #ifdef USE_CPU
-        requirements.native_payload_generation = view.native_payload_generation;
-        requirements.require_backend = true;
-        requirements.backend = CLUSTERED_SPATIAL_BACKEND::CPU;
-        requirements.require_native_payload = true;
+    requirements.native_payload_generation = view.native_payload_generation;
+    requirements.require_backend = true;
+    requirements.backend = CLUSTERED_SPATIAL_BACKEND::CPU;
+    requirements.require_native_payload = true;
 #else
-        requirements.gmxpacked_payload_generation =
-            view.gmxpacked_payload_generation;
-        requirements.require_backend = true;
+    requirements.gmxpacked_payload_generation =
+        view.gmxpacked_payload_generation;
+    requirements.require_backend = true;
 #if defined(USE_CUDA)
-        requirements.backend = CLUSTERED_SPATIAL_BACKEND::CUDA;
+    requirements.backend = CLUSTERED_SPATIAL_BACKEND::CUDA;
 #else
-        requirements.backend = CLUSTERED_SPATIAL_BACKEND::HIP;
+    requirements.backend = CLUSTERED_SPATIAL_BACKEND::HIP;
 #endif
-        requirements.require_same_producer_stream = true;
-        requirements.consumer_stream = NULL;
-        requirements.require_gmxpacked_payload = true;
-        requirements.require_pair_shift_metadata = true;
-        requirements.require_pair_shift_rcell = true;
-        requirements.pair_shift_rcell = rcell;
+    requirements.require_same_producer_stream = true;
+    requirements.consumer_stream = NULL;
+    requirements.require_gmxpacked_payload = true;
+    requirements.require_pair_shift_metadata = true;
+    requirements.require_pair_shift_rcell = true;
+    requirements.pair_shift_rcell = rcell;
 #endif
-        if (!Clustered_Validate_Spatial_View(view, requirements,
-                                             &failure_reason))
-            throw std::runtime_error(
-                std::string("clustered ReaxFF EEQ rejected payload: ") +
-                (failure_reason == NULL ? "unknown failure" : failure_reason));
-        deviceMemset(d_h_numnbrs, 0, sizeof(int) * atom_numbers);
-        Launch_Device_Kernel(
-            EEQ_Gather_Clustered_Coordinates,
-            (view.total_atom_numbers + 255) / 256, 256, 0, NULL,
-            view.total_atom_numbers, view.cluster_numbers,
-            view.sort_permutation, view.cluster_offsets, view.cluster_centers,
-            d_crd, cell, rcell, d_clustered_sorted_crd);
+    if (!Clustered_Validate_Spatial_View(view, requirements, &failure_reason))
+        throw std::runtime_error(
+            std::string("clustered ReaxFF EEQ rejected payload: ") +
+            (failure_reason == NULL ? "unknown failure" : failure_reason));
+    deviceMemset(d_h_numnbrs, 0, sizeof(int) * atom_numbers);
+    Launch_Device_Kernel(
+        EEQ_Gather_Clustered_Coordinates, (view.total_atom_numbers + 255) / 256,
+        256, 0, NULL, view.total_atom_numbers, view.cluster_numbers,
+        view.sort_permutation, view.cluster_offsets, view.cluster_centers,
+        d_crd, cell, rcell, d_clustered_sorted_crd);
 #ifdef USE_CPU
-        EEQ_H_Matrix_Clustered_Native<false>(
-            view, d_clustered_sorted_crd, d_atom_type, atom_type_numbers,
-            d_shield, cutoff, cell, d_h_numnbrs, NULL, NULL, NULL, NULL);
+    EEQ_H_Matrix_Clustered_Native<false>(
+        view, d_clustered_sorted_crd, d_atom_type, atom_type_numbers, d_shield,
+        cutoff, cell, d_h_numnbrs, NULL, NULL, NULL, NULL);
 #else
-        constexpr int packed_partitions = 8;
-        const dim3 pair_block(kClusteredClusterSize, kClusteredClusterSize, 1);
-        const dim3 pair_grid(view.gmxpacked_sci_numbers, packed_partitions, 1);
-        Launch_Device_Kernel(
-            EEQ_H_Matrix_Clustered_Gmxpacked<false>, pair_grid, pair_block, 0,
-            NULL, view.gmxpacked_sci_numbers, packed_partitions,
-            view.cluster_numbers, view.cluster_offsets,
-            view.cluster_valid_masks, view.cluster_local_masks,
-            view.super_cluster_offsets, view.gmxpacked_sci,
-            view.gmxpacked_cjpacked, view.gmxpacked_exclusions,
-            view.pair_shift_bits, view.sort_permutation,
-            d_clustered_sorted_crd, d_atom_type, atom_type_numbers, d_shield,
-            cutoff, cell, d_h_numnbrs, NULL, NULL, NULL, NULL);
+    constexpr int packed_partitions = 8;
+    const dim3 pair_block(kClusteredClusterSize, kClusteredClusterSize, 1);
+    const dim3 pair_grid(view.gmxpacked_sci_numbers, packed_partitions, 1);
+    Launch_Device_Kernel(
+        EEQ_H_Matrix_Clustered_Gmxpacked<false>, pair_grid, pair_block, 0, NULL,
+        view.gmxpacked_sci_numbers, packed_partitions, view.cluster_numbers,
+        view.cluster_offsets, view.cluster_valid_masks,
+        view.cluster_local_masks, view.super_cluster_offsets,
+        view.gmxpacked_sci, view.gmxpacked_cjpacked, view.gmxpacked_exclusions,
+        view.pair_shift_bits, view.sort_permutation, d_clustered_sorted_crd,
+        d_atom_type, atom_type_numbers, d_shield, cutoff, cell, d_h_numnbrs,
+        NULL, NULL, NULL, NULL);
 #endif
-    }
 
     int total_nnz = 0;
 #ifndef USE_CPU
@@ -1044,42 +960,28 @@ void REAXFF_EEQ::Calculate_Charges(int atom_numbers, float* d_charge,
     }
     if (total_nnz > 0)
     {
-        if (clustered_view == NULL)
-        {
-            Launch_Device_Kernel(EEQ_Fill_H_Matrix, gridSize, blockSize, 0,
-                                 NULL, atom_numbers, d_crd, d_atom_type,
-                                 d_shield, atom_type_numbers, fnl_d_nl, cell,
-                                 rcell, cutoff, d_h_firstnbrs, d_h_jlist,
-                                 d_h_val);
-        }
-        else
-        {
-            const CLUSTERED_SPATIAL_VIEW& view = *clustered_view;
-            deviceMemset(d_h_fill_count, 0, sizeof(int) * atom_numbers);
+        deviceMemset(d_h_fill_count, 0, sizeof(int) * atom_numbers);
 #ifdef USE_CPU
-            EEQ_H_Matrix_Clustered_Native<true>(
-                view, d_clustered_sorted_crd, d_atom_type, atom_type_numbers,
-                d_shield, cutoff, cell, d_h_numnbrs, d_h_firstnbrs,
-                d_h_fill_count, d_h_jlist, d_h_val);
+        EEQ_H_Matrix_Clustered_Native<true>(
+            view, d_clustered_sorted_crd, d_atom_type, atom_type_numbers,
+            d_shield, cutoff, cell, d_h_numnbrs, d_h_firstnbrs, d_h_fill_count,
+            d_h_jlist, d_h_val);
 #else
-            constexpr int packed_partitions = 8;
-            const dim3 pair_block(kClusteredClusterSize,
-                                  kClusteredClusterSize, 1);
-            const dim3 pair_grid(view.gmxpacked_sci_numbers,
-                                 packed_partitions, 1);
-            Launch_Device_Kernel(
-                EEQ_H_Matrix_Clustered_Gmxpacked<true>, pair_grid, pair_block,
-                0, NULL, view.gmxpacked_sci_numbers, packed_partitions,
-                view.cluster_numbers, view.cluster_offsets,
-                view.cluster_valid_masks, view.cluster_local_masks,
-                view.super_cluster_offsets, view.gmxpacked_sci,
-                view.gmxpacked_cjpacked, view.gmxpacked_exclusions,
-                view.pair_shift_bits, view.sort_permutation,
-                d_clustered_sorted_crd, d_atom_type, atom_type_numbers,
-                d_shield, cutoff, cell, d_h_numnbrs, d_h_firstnbrs,
-                d_h_fill_count, d_h_jlist, d_h_val);
+        const dim3 fill_pair_block(kClusteredClusterSize, kClusteredClusterSize,
+                                   1);
+        const dim3 fill_pair_grid(view.gmxpacked_sci_numbers, packed_partitions,
+                                  1);
+        Launch_Device_Kernel(
+            EEQ_H_Matrix_Clustered_Gmxpacked<true>, fill_pair_grid,
+            fill_pair_block, 0, NULL, view.gmxpacked_sci_numbers,
+            packed_partitions, view.cluster_numbers, view.cluster_offsets,
+            view.cluster_valid_masks, view.cluster_local_masks,
+            view.super_cluster_offsets, view.gmxpacked_sci,
+            view.gmxpacked_cjpacked, view.gmxpacked_exclusions,
+            view.pair_shift_bits, view.sort_permutation, d_clustered_sorted_crd,
+            d_atom_type, atom_type_numbers, d_shield, cutoff, cell, d_h_numnbrs,
+            d_h_firstnbrs, d_h_fill_count, d_h_jlist, d_h_val);
 #endif
-        }
     }
 
     // ---- CG solver ----

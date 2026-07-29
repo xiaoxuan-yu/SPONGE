@@ -704,8 +704,6 @@ struct Main_Legacy_Neighbor_List_Need
     bool lj_soft_direct_legacy = false;
     bool solvent_lj_legacy = false;
     bool pairwise_legacy = false;
-    bool reaxff_legacy = false;
-    bool full_legacy = false;
 };
 
 struct Main_Legacy_Neighbor_List_State
@@ -772,12 +770,9 @@ Main_Legacy_Neighbor_List_Need Main_Get_Legacy_Neighbor_List_Need()
     need.solvent_lj_legacy = need.direct_solvent_numbers > 0;
     need.pairwise_legacy = pairwise_force.is_initialized &&
                            !Main_Custom_Pairwise_Clustered_Enabled();
-    need.reaxff_legacy = reaxff.is_initialized != 0;
-    need.full_legacy = neighbor_list.is_needed_full;
     need.needed = need.selective_direct || need.lj_direct_legacy ||
                   need.lj_soft_direct_legacy || need.solvent_lj_legacy ||
-                  need.pairwise_legacy || need.reaxff_legacy ||
-                  need.full_legacy;
+                  need.pairwise_legacy;
     return need;
 }
 
@@ -801,7 +796,7 @@ void Main_Trace_Legacy_Neighbor_List(const char* site, const char* action,
         "clustered_direct_active=%d direct_solvent_numbers=%d "
         "selective_direct=%d lj_direct_legacy=%d "
         "lj_soft_direct_legacy=%d solvent_lj_legacy=%d pairwise=%d "
-        "reaxff=%d full=%d legacy_deref=%s\n",
+        "legacy_deref=%s\n",
         site, md_info.sys.steps, action, need.needed ? 1 : 0,
         main_legacy_neighbor_list_state.valid ? 1 : 0,
         main_legacy_neighbor_list_state.stale ? 1 : 0,
@@ -813,7 +808,6 @@ void Main_Trace_Legacy_Neighbor_List(const char* site, const char* action,
         need.direct_solvent_numbers, need.selective_direct ? 1 : 0,
         need.lj_direct_legacy ? 1 : 0, need.lj_soft_direct_legacy ? 1 : 0,
         need.solvent_lj_legacy ? 1 : 0, need.pairwise_legacy ? 1 : 0,
-        need.reaxff_legacy ? 1 : 0, need.full_legacy ? 1 : 0,
         need.needed ? "legacy-consumer" : "none");
 }
 
@@ -829,13 +823,12 @@ void Main_Trace_Legacy_Neighbor_List_Adapter(
         "[legacy neighbor-list adapter] site=%s step=%d outcome=%s "
         "reason=%s clustered_direct_active=%d selective_direct=%d "
         "lj_direct_legacy=%d lj_soft_direct_legacy=%d solvent_lj_legacy=%d "
-        "pairwise=%d reaxff=%d full=%d\n",
+        "pairwise=%d\n",
         site, md_info.sys.steps, outcome != NULL ? outcome : "unknown",
         reason != NULL ? reason : "none", need.clustered_direct_active ? 1 : 0,
         need.selective_direct ? 1 : 0, need.lj_direct_legacy ? 1 : 0,
         need.lj_soft_direct_legacy ? 1 : 0, need.solvent_lj_legacy ? 1 : 0,
-        need.pairwise_legacy ? 1 : 0, need.reaxff_legacy ? 1 : 0,
-        need.full_legacy ? 1 : 0);
+        need.pairwise_legacy ? 1 : 0);
 }
 
 bool Main_Try_Derived_Legacy_Neighbor_View(
@@ -860,7 +853,6 @@ bool Main_Try_Derived_Legacy_Neighbor_View(
 
     LJ_CLUSTERED_LEGACY_NEIGHBOR_VIEW_REQUEST request;
     request.request_half = true;
-    request.request_full = need.full_legacy || need.reaxff_legacy;
     request.contains_non_lj_consumer = need.pairwise_legacy;
     request.require_all_local_atoms = true;
     request.require_local_ghost_pairs = true;
@@ -1747,8 +1739,7 @@ void Main_Initial(int argc, char* argv[])
                 : Acquire_Shared_LJ_Clustered_Direct_Cache(
                       &controller, "clustered_spatial_service", false, true);
     }
-    reaxff.Initial(&controller, md_info.atom_numbers, md_info.nb.cutoff,
-                   &neighbor_list.cutoff_full, &neighbor_list.is_needed_full);
+    reaxff.Initial(&controller, md_info.atom_numbers, md_info.nb.cutoff);
     if (reaxff.is_initialized && md_info.pbc.pbc &&
         CONTROLLER::PP_MPI_size == 1)
     {
@@ -1909,8 +1900,12 @@ void Main_Calculate_Force()
             }
             reaxff_clustered_view_ptr = &reaxff_clustered_view;
         }
-        reaxff.Calculate_Force(&dd, &md_info, &neighbor_list,
-                               reaxff_clustered_view_ptr);
+        if (reaxff_clustered_view_ptr == NULL)
+        {
+            throw std::runtime_error(
+                "ReaxFF requires a single-rank clustered spatial view");
+        }
+        reaxff.Calculate_Force(&dd, &md_info, *reaxff_clustered_view_ptr);
         Main_Finite_Lifecycle_Probe("after_reaxff_force");
 
         LJ_NOPBC.LJ_Force_With_Atom_Energy(

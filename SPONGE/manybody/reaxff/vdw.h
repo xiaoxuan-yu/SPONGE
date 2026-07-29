@@ -35,14 +35,7 @@ struct REAXFF_VDW
     float* d_energy_sum = NULL;
 
     void Initial(CONTROLLER* controller, int atom_numbers,
-                 const char* module_name = NULL,
-                 bool* need_full_nl_flag = NULL);
-
-    void REAXFF_VDW_Force_With_Atom_Energy_And_Virial(
-        const int atom_numbers, const VECTOR* crd, VECTOR* frc,
-        const LTMatrix3 cell, const LTMatrix3 rcell, const ATOM_GROUP* nl,
-        const float cutoff, const int need_atom_energy, float* atom_energy,
-        const int need_virial, LTMatrix3* atom_virial);
+                 const char* module_name = NULL);
 
     bool REAXFF_VDW_Force_Clustered(
         const CLUSTERED_SPATIAL_VIEW& view, const VECTOR* crd, VECTOR* frc,

@@ -141,19 +141,15 @@ struct REAXFF_BOND_ORDER
 
     void Initial(CONTROLLER* controller, int atom_numbers,
                  const char* parameter_in_file, const char* type_in_file,
-                 const float cutoff, float* cutoff_full);
+                 const float cutoff);
     void Calculate_Bond_Order(int atom_numbers, const VECTOR* d_crd,
                               const LTMatrix3 cell, const LTMatrix3 rcell,
-                              const ATOM_GROUP* fnl_d_nl, float cutoff,
-                              const CLUSTERED_SPATIAL_VIEW* clustered_view =
-                                  NULL);
-    void Calculate_Corrected_Bond_Order(int atom_numbers, const VECTOR* d_crd,
-                                        const LTMatrix3 cell,
-                                        const LTMatrix3 rcell,
-                                        const ATOM_GROUP* fnl_d_nl,
-                                        float cutoff,
-                                        const CLUSTERED_SPATIAL_VIEW*
-                                            clustered_view = NULL);
+                              float cutoff,
+                              const CLUSTERED_SPATIAL_VIEW& clustered_view);
+    void Calculate_Corrected_Bond_Order(
+        int atom_numbers, const VECTOR* d_crd, const LTMatrix3 cell,
+        const LTMatrix3 rcell, float cutoff,
+        const CLUSTERED_SPATIAL_VIEW& clustered_view);
     void Calculate_Forces(int atom_numbers, const VECTOR* d_crd, VECTOR* d_frc,
                           const LTMatrix3 cell, const LTMatrix3 rcell,
                           float cutoff, float* d_CdDelta, int need_virial,
@@ -161,10 +157,6 @@ struct REAXFF_BOND_ORDER
     void Clear_Derivatives(int atom_numbers, float* d_CdDelta);
 
     // GPU kernel declarations
-    void Calculate_Uncorrected_Bond_Orders_GPU(
-        int atom_numbers, const VECTOR* d_crd, const LTMatrix3 cell,
-        const LTMatrix3 rcell, float cutoff, const ATOM_GROUP* d_nl,
-        int* d_pair_i, int* d_pair_j, float* d_distances, int* d_num_pairs_ptr);
     void Calculate_Corrected_Bond_Orders_GPU(
         int atom_numbers, const VECTOR* d_crd, const LTMatrix3 cell,
         const LTMatrix3 rcell, float cutoff, int num_pairs, int* d_pair_i,

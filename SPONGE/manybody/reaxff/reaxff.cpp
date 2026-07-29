@@ -1,7 +1,6 @@
 ﻿#include "reaxff.h"
 
-void REAXFF::Initial(CONTROLLER* controller, int atom_numbers, float cutoff,
-                     float* cutoff_full, bool* need_full_nl_flag)
+void REAXFF::Initial(CONTROLLER* controller, int atom_numbers, float cutoff)
 {
     is_initialized = 0;
     if (!controller->Command_Exist("REAXFF", "in_file"))
@@ -14,9 +13,9 @@ void REAXFF::Initial(CONTROLLER* controller, int atom_numbers, float cutoff,
 
     eeq.Initial(controller, atom_numbers, parameter_in_file, type_in_file);
     bond_order.Initial(controller, atom_numbers, parameter_in_file,
-                       type_in_file, cutoff, cutoff_full);
+                       type_in_file, cutoff);
     bond.Initial(controller, atom_numbers, "REAXFF");
-    vdw.Initial(controller, atom_numbers, "REAXFF", need_full_nl_flag);
+    vdw.Initial(controller, atom_numbers, "REAXFF");
     ovun.Initial(controller, atom_numbers, "REAXFF");
     angle.Initial(controller, atom_numbers, "REAXFF");
     torsion.Initial(controller, atom_numbers, "REAXFF");
@@ -115,14 +114,12 @@ void REAXFF::Step_Print(CONTROLLER* controller, const float* d_charge)
 }
 
 void REAXFF::Calculate_Force(DOMAIN_INFORMATION* dd, MD_INFORMATION* md_info,
-                             NEIGHBOR_LIST* neighbor_list,
-                             const CLUSTERED_SPATIAL_VIEW* clustered_view)
+                             const CLUSTERED_SPATIAL_VIEW& clustered_view)
 {
     eeq.Calculate_Charges(dd->atom_numbers, md_info->d_charge, dd->crd,
                           md_info->pbc.cell, md_info->pbc.rcell,
-                          neighbor_list->full_neighbor_list.d_nl,
-                          md_info->nb.cutoff, dd->d_energy, dd->frc,
-                          md_info->need_pressure, dd->d_virial, clustered_view);
+                          md_info->nb.cutoff, clustered_view, dd->d_energy,
+                          dd->frc, md_info->need_pressure, dd->d_virial);
     if (CONTROLLER::PP_MPI_size == 1 && dd->d_charge != md_info->d_charge)
     {
         dd->Sync_Local_Charge_From_Global(md_info->d_charge);
@@ -130,7 +127,6 @@ void REAXFF::Calculate_Force(DOMAIN_INFORMATION* dd, MD_INFORMATION* md_info,
 
     bond_order.Calculate_Bond_Order(dd->atom_numbers, dd->crd,
                                     md_info->pbc.cell, md_info->pbc.rcell,
-                                    neighbor_list->full_neighbor_list.d_nl,
                                     md_info->nb.cutoff, clustered_view);
 
     if (bond_order.is_initialized)
@@ -140,29 +136,18 @@ void REAXFF::Calculate_Force(DOMAIN_INFORMATION* dd, MD_INFORMATION* md_info,
 
     bond.Calculate_Bond_Energy_And_Derivatives(
         bond_order.h_num_pairs, md_info->need_potential, dd->d_energy);
-    if (clustered_view != NULL)
+    const char* failure_reason = NULL;
+    if (!vdw.REAXFF_VDW_Force_Clustered(
+            clustered_view, dd->crd, dd->frc, md_info->pbc.cell,
+            md_info->pbc.rcell, md_info->nb.cutoff, md_info->need_potential,
+            dd->d_energy, md_info->need_pressure, dd->d_virial,
+            &failure_reason))
     {
-        const char* failure_reason = NULL;
-        if (!vdw.REAXFF_VDW_Force_Clustered(
-                *clustered_view, dd->crd, dd->frc, md_info->pbc.cell,
-                md_info->pbc.rcell, md_info->nb.cutoff, md_info->need_potential,
-                dd->d_energy, md_info->need_pressure, dd->d_virial,
-                &failure_reason))
-        {
-            throw std::runtime_error(
-                std::string(
-                    "clustered ReaxFF VDW rejected the clustered payload: ") +
-                (failure_reason == NULL ? "unknown clustered VDW failure"
-                                        : failure_reason));
-        }
-    }
-    else
-    {
-        vdw.REAXFF_VDW_Force_With_Atom_Energy_And_Virial(
-            dd->atom_numbers, dd->crd, dd->frc, md_info->pbc.cell,
-            md_info->pbc.rcell, neighbor_list->d_nl, md_info->nb.cutoff,
-            md_info->need_potential, dd->d_energy, md_info->need_pressure,
-            dd->d_virial);
+        throw std::runtime_error(
+            std::string(
+                "clustered ReaxFF VDW rejected the clustered payload: ") +
+            (failure_reason == NULL ? "unknown clustered VDW failure"
+                                    : failure_reason));
     }
     ovun.Calculate_Over_Under_Energy_And_Force(
         dd->atom_numbers, dd->crd, dd->frc, md_info->pbc.cell,
@@ -179,14 +164,9 @@ void REAXFF::Calculate_Force(DOMAIN_INFORMATION* dd, MD_INFORMATION* md_info,
         md_info->pbc.rcell, &bond_order, ovun.d_Delta_boc,
         md_info->need_potential, dd->d_energy, md_info->need_pressure,
         dd->d_virial);
-    if (clustered_view == NULL)
-    {
-        throw std::runtime_error(
-            "ReaxFF hydrogen bond requires a clustered spatial view");
-    }
     const char* hb_failure_reason = NULL;
     if (!hb.Calculate_HB_Energy_And_Force_Clustered(
-            *clustered_view, dd->atom_numbers, dd->crd, dd->frc,
+            clustered_view, dd->atom_numbers, dd->crd, dd->frc,
             md_info->pbc.cell, md_info->pbc.rcell, &bond_order,
             md_info->need_potential, dd->d_energy, md_info->need_pressure,
             dd->d_virial, &hb_failure_reason))
