@@ -4247,6 +4247,102 @@ bond-order cutoff and `bo_cut`, compact accepted `(min(i,j), max(i,j))` pairs
 into ReaxFF-owned edge IDs, then build the existing bond CSR from those IDs.
 Clustered SCI/CJ positions must not become reaction-edge IDs.
 
+#### ReaxFF raw bond-order clustered checkpoint - 2026-07-29
+
+The raw bond-order discovery pass now directly consumes the same single-rank
+clustered view as ReaxFF VDW. CUDA decodes the gmxpacked exact-pair masks and
+per-I-cluster shift metadata; CPU traverses native SCI/CJ and exclusion masks.
+Both paths canonicalize every accepted edge as `(min(i,j), max(i,j))` and
+write the existing ReaxFF-owned `pair_i/pair_j/distance` arrays. The existing
+bond-order correction arrays and symmetric bond CSR remain the canonical
+reaction graph, so SCI/CJ positions do not escape into downstream chemistry.
+The legacy full-list front end remains only when no clustered view is supplied.
+
+CPU and CUDA H2/dimer/EEQ plus PETN single-frame validation pass `12/12`.
+The PETN error envelope is unchanged: relative potential-energy difference
+approximately `3.18e-4`, maximum charge difference below `5.0e-4`, and
+maximum force difference approximately `0.722`.
+
+NCU on PETN captured the clustered raw-BO kernel at `178.11 us`: 56 registers
+per thread, `44.90%` achieved occupancy, `37.95%` SM throughput, 73.62 million
+executed instructions and no local-memory or register spills. Eligible warps
+average `1.14` per scheduler cycle; the leading stalls are long scoreboard
+and wait. This does not justify adding a dispatch split or experimental gate.
+The report is:
+
+```text
+.tmp/reaxff-bo-clustered-ncu-20260729/reaxff_bo_clustered_mangled.ncu-rep
+```
+
+The first standard 100-step throughput attempts are invalid performance
+samples: an unrelated `ref/fp-transformer` Python process occupied 99% GPU SM
+during the runs. A direct uncontended run completed the 100-step core in
+`0.863 s` with `Calculate_Force = 0.835 s`; repeat the standard gate after the
+external GPU job exits before using an end-to-end number for a commit gate.
+
+The next ReaxFF target is EEQ: decode clustered candidates into EEQ's own
+directed H-matrix CSR, preserving diagonal ownership and solver row ordering.
+The bond CSR must not be reused because EEQ has a different cutoff/value
+contract.
+
+#### ReaxFF EEQ clustered checkpoint - 2026-07-29
+
+EEQ now builds its existing directed H-matrix CSR directly from clustered
+half pairs in single-rank execution. Each accepted clustered pair contributes
+the two directed row entries required by CG; the diagonal remains implicit in
+the per-type `eta` array. Count and fill share the exact predicate
+`r < cutoff && shield_ij >= 0`. The same predicate is now also used by the
+legacy fill fallback, fixing its previous mismatch with the legacy count pass.
+The charge solver, row ordering contract and CG arithmetic are unchanged.
+
+The EEQ force pass now consumes the completed H-CSR instead of scanning the
+legacy full `ATOM_GROUP` again. It visits only `j > i`, so every symmetric CSR
+pair contributes force and virial once. The geometric derivative is still
+recomputed from current coordinates because the stored H value does not
+contain `dH/dr`. Gmxpacked pair ownership remains defined by its effective
+pair and shift masks; no second dispatch, probe or runtime gate was added.
+
+CPU and CUDA builds succeed, and the current build binaries pass the H2,
+dimer, EEQ-water and PETN single-frame suites `12/12` on both backends. The
+PETN CUDA error envelope remains unchanged: relative potential-energy
+difference `3.176842e-4`, maximum charge difference `4.90e-4`, and maximum
+force difference `0.721682`.
+
+NCU on PETN gives:
+
+| EEQ pass | legacy duration | clustered/CSR duration | change |
+|---|---:|---:|---:|
+| H count | `200.70 us` | `201.06 us` | unchanged |
+| H fill | `502.62 us` | `346.85 us` | `-31.0%` |
+| force | `980.06 us` | `789.18 us` | `-19.5%` |
+
+The force improvement comes from removing rejected full-list entries:
+executed instructions fall by 38.1% and branch efficiency rises from 61.8%
+to 79.5%; both versions use 38 registers, achieve about 10% occupancy and
+have no spills. The retained kernel remains a small-grid, latency-limited pass
+(`102 x 160` threads, about 0.09 waves/SM), so adding a heavier dispatch is
+not justified.
+
+With the freshly linked `build-dev-cuda13/SPONGE` explicitly selected, the
+standard 100-step PETN gate measures `87.942 step/s`, `0.759820 ns/day`.
+This explicit binary selection is important: invoking bare `SPONGE` inside
+the pixi environment resolves to its separately installed binary and is not
+valid evidence for the working-tree build.
+
+Reports:
+
+```text
+.tmp/reaxff-bo-clustered-ncu-20260729/eeq_clustered_count.ncu-rep
+.tmp/reaxff-bo-clustered-ncu-20260729/eeq_clustered_fill.ncu-rep
+.tmp/reaxff-bo-clustered-ncu-20260729/eeq_legacy_count_fill.ncu-rep
+.tmp/reaxff-eeq-csr-force-20260729/eeq_csr_force.ncu-rep
+.tmp/reaxff-eeq-csr-force-20260729/eeq_legacy_force.ncu-rep
+```
+
+The next ReaxFF cleanup is bond-force consumption of the canonical
+`pair_i/pair_j` arrays, followed by hydrogen-bond acceptor discovery directly
+from clustered candidates. Multi-rank exchange remains explicitly deferred.
+
 ### Phase 5: external ABI, NO_PBC and legacy removal
 
 The PRIPS plugin API currently exposes host `h_nl` capacity/count/index. This

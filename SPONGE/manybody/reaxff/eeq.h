@@ -3,6 +3,7 @@
 
 #include "../../common.h"
 #include "../../control.h"
+#include "../../neighbor_list/clustered_spatial_view.h"
 
 struct REAXFF_EEQ
 {
@@ -42,7 +43,10 @@ struct REAXFF_EEQ
     int* d_h_firstnbrs = NULL;
     int* d_h_jlist = NULL;
     float* d_h_val = NULL;
+    int* d_h_fill_count = NULL;
     int h_matrix_capacity = 0;
+    VECTOR* d_clustered_sorted_crd = NULL;
+    int clustered_scratch_capacity = 0;
 
     // Device-side CG scalar buffers (GPU optimization: avoid host sync)
     float* d_rr_old = NULL;
@@ -72,7 +76,8 @@ struct REAXFF_EEQ
                            const LTMatrix3 rcell, const ATOM_GROUP* fnl_d_nl,
                            float cutoff, float* d_energy = NULL,
                            VECTOR* frc = NULL, int need_virial = 0,
-                           LTMatrix3* atom_virial = NULL);
+                           LTMatrix3* atom_virial = NULL,
+                           const CLUSTERED_SPATIAL_VIEW* clustered_view = NULL);
     void Step_Print(CONTROLLER* controller);
     void Print_Charges(const float* d_charge);
 };
