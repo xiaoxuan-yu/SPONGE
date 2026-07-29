@@ -9,6 +9,7 @@
 
 #include "control.h"
 #include "manybody/edip.h"
+#include "manybody/reaxff/hydrogen_bond.h"
 #include "manybody/reaxff/vdw.h"
 #include "manybody/tersoff.h"
 
@@ -203,6 +204,9 @@ struct Clustered_Fixture
     CLUSTERED_GMXPACKED_SCI* gmxpacked_sci = nullptr;
     CLUSTERED_GMXPACKED_CJ* gmxpacked_cjpacked = nullptr;
     CLUSTERED_GMXPACKED_EXCLUSION* gmxpacked_exclusions = nullptr;
+    int* gmxpacked_endpoint_incidence_offsets = nullptr;
+    CLUSTERED_GMXPACKED_ENDPOINT_REFERENCE*
+        gmxpacked_endpoint_incidence_references = nullptr;
     uint64_t* pair_shift_bits = nullptr;
 
     Clustered_Fixture(const LTMatrix3& rcell)
@@ -246,7 +250,7 @@ struct Clustered_Fixture
         view.padded_total_atom_numbers = kAtomCount;
         view.cluster_numbers = 2;
         view.super_cluster_numbers = 1;
-        view.cached_cutoff = 2.0f;
+        view.cached_cutoff = 7.5f;
         view.rebuild_skin = 0.0f;
         view.sort_permutation = sort_permutation;
         view.cluster_offsets = cluster_offsets;
@@ -354,6 +358,47 @@ struct Clustered_Fixture
         view.gmxpacked_sci = gmxpacked_sci;
         view.gmxpacked_cjpacked = gmxpacked_cjpacked;
         view.gmxpacked_exclusions = gmxpacked_exclusions;
+
+        CLUSTERED_GMXPACKED_ENDPOINT_INCIDENCE_HOST endpoint_incidence;
+        const char* endpoint_failure_reason = nullptr;
+        const bool endpoint_ready =
+            Clustered_Build_Gmxpacked_Endpoint_Incidence_Host(
+                view.provider_incarnation, view.gmxpacked_payload_generation,
+                view.cluster_numbers, view.super_cluster_numbers,
+                std::vector<int>{0, 2}.data(),
+                static_cast<int>(host_sci.size()), host_sci.data(),
+                static_cast<int>(host_packed.size()), host_packed.data(),
+                &endpoint_incidence, &endpoint_failure_reason);
+        Check(endpoint_ready,
+              "clustered fixture builds gmxpacked endpoint incidence");
+        if (!endpoint_ready && endpoint_failure_reason != nullptr)
+            std::fprintf(stderr, "Endpoint incidence rejection: %s\n",
+                         endpoint_failure_reason);
+        gmxpacked_endpoint_incidence_offsets =
+            Device_Copy(endpoint_incidence.offsets);
+        gmxpacked_endpoint_incidence_references =
+            Device_Copy(endpoint_incidence.references);
+        view.gmxpacked_endpoint_incidence_ready = endpoint_ready;
+        view.endpoint_incidence_provider_incarnation =
+            endpoint_incidence.provider_incarnation;
+        view.endpoint_incidence_payload_generation =
+            endpoint_incidence.gmxpacked_payload_generation;
+        view.endpoint_incidence_sci_numbers = view.gmxpacked_sci_numbers;
+        view.endpoint_incidence_cjpacked_numbers =
+            view.gmxpacked_cjpacked_numbers;
+        view.endpoint_incidence_super_cluster_numbers =
+            view.super_cluster_numbers;
+        view.endpoint_incidence_reference_numbers =
+            static_cast<int>(endpoint_incidence.references.size());
+        view.endpoint_incidence_offset_tail =
+            endpoint_incidence.offsets.empty()
+                ? 0
+                : endpoint_incidence.offsets.back();
+        view.gmxpacked_endpoint_incidence_offsets =
+            gmxpacked_endpoint_incidence_offsets;
+        view.gmxpacked_endpoint_incidence_references =
+            gmxpacked_endpoint_incidence_references;
+
         view.pair_shift_metadata_ready = true;
         view.pair_shift_payload_generation = view.gmxpacked_payload_generation;
         view.pair_shift_geometry_generation = view.geometry_generation;
@@ -380,6 +425,8 @@ struct Clustered_Fixture
         Device_Free(&gmxpacked_sci);
         Device_Free(&gmxpacked_cjpacked);
         Device_Free(&gmxpacked_exclusions);
+        Device_Free(&gmxpacked_endpoint_incidence_offsets);
+        Device_Free(&gmxpacked_endpoint_incidence_references);
         Device_Free(&pair_shift_bits);
     }
 };
@@ -1124,6 +1171,169 @@ void Test_Reaxff_Vdw_Oracle(const Clustered_Fixture& fixture,
     Device_Free(&device_virial);
     Release_Reaxff_Vdw(&vdw);
 }
+
+struct Reaxff_Hb_Result
+{
+    bool accepted = false;
+    float energy = 0.0f;
+    std::vector<float> atom_energy;
+    std::vector<VECTOR> force;
+    float dE_dBO_s = 0.0f;
+    const char* failure_reason = nullptr;
+};
+
+Reaxff_Hb_Result Run_Reaxff_Hb_Case(const Clustered_Fixture& fixture,
+                                    const std::vector<VECTOR>& coordinates,
+                                    const LTMatrix3& cell,
+                                    const LTMatrix3& rcell)
+{
+    const std::vector<int> types = {0, 1, 1, 0, 0};
+    std::vector<REAXFF_HB_Info> info(kTypeCount * kTypeCount * kTypeCount);
+    info[(1 * kTypeCount + 0) * kTypeCount + 1] = {0, 1};
+    const std::vector<REAXFF_HB_Entry> entries = {{2.0f, 2.0f, 1.0f, 0.0f}};
+
+    REAXFF_HYDROGEN_BOND hb;
+    hb.is_initialized = true;
+    hb.atom_numbers = kAtomCount;
+    hb.atom_type_numbers = kTypeCount;
+    hb.hydrogen_numbers = 1;
+    hb.d_atom_type = Device_Copy(types);
+    hb.d_is_hydrogen = Device_Copy(std::vector<int>{1, 0, 0, 0, 0});
+    hb.d_hydrogen_atoms = Device_Copy(std::vector<int>{0});
+    hb.d_clustered_atom_to_sorted = Device_Allocate<int>(kAtomCount);
+    hb.d_hb_info = Device_Copy(info);
+    hb.d_hb_entries = Device_Copy(entries);
+    hb.d_energy_hb_sum = Device_Allocate<float>(1);
+    hb.d_dE_dBO_s = Device_Allocate<float>(1);
+    hb.d_dE_dBO_pi = Device_Allocate<float>(1);
+    hb.d_dE_dBO_pi2 = Device_Allocate<float>(1);
+    deviceMemset(hb.d_dE_dBO_s, 0, sizeof(float));
+    deviceMemset(hb.d_dE_dBO_pi, 0, sizeof(float));
+    deviceMemset(hb.d_dE_dBO_pi2, 0, sizeof(float));
+
+    REAXFF_BOND_ORDER bo;
+    bo.d_corrected_bo_s = Device_Copy(std::vector<float>{1.0f});
+    bo.d_corrected_bo_pi = Device_Copy(std::vector<float>{0.0f});
+    bo.d_corrected_bo_pi2 = Device_Copy(std::vector<float>{0.0f});
+    bo.d_bond_count = Device_Copy(std::vector<int>{1, 0, 1, 0, 0});
+    bo.d_bond_offset = Device_Copy(std::vector<int>{0, 1, 1, 2, 2, 2});
+    bo.d_bond_nbr = Device_Copy(std::vector<int>{2, 0});
+    bo.d_bond_idx = Device_Copy(std::vector<int>{0, 0});
+
+    VECTOR* device_coordinates = Device_Copy(coordinates);
+    VECTOR* device_force = Device_Allocate<VECTOR>(kAtomCount);
+    float* device_atom_energy = Device_Allocate<float>(kAtomCount);
+    deviceMemset(device_force, 0, sizeof(VECTOR) * kAtomCount);
+    deviceMemset(device_atom_energy, 0, sizeof(float) * kAtomCount);
+
+    Reaxff_Hb_Result result;
+    result.accepted = hb.Calculate_HB_Energy_And_Force_Clustered(
+        fixture.view, kAtomCount, device_coordinates, device_force, cell, rcell,
+        &bo, 1, device_atom_energy, 0, nullptr, &result.failure_reason);
+    result.energy = Device_Read(hb.d_energy_hb_sum, 1)[0];
+    result.atom_energy = Device_Read(device_atom_energy, kAtomCount);
+    result.force = Device_Read(device_force, kAtomCount);
+    result.dE_dBO_s = Device_Read(hb.d_dE_dBO_s, 1)[0];
+
+    Device_Free(&device_coordinates);
+    Device_Free(&device_force);
+    Device_Free(&device_atom_energy);
+    Device_Free(&hb.d_atom_type);
+    Device_Free(&hb.d_is_hydrogen);
+    Device_Free(&hb.d_hydrogen_atoms);
+    Device_Free(&hb.d_clustered_atom_to_sorted);
+    Device_Free(&hb.d_hb_info);
+    Device_Free(&hb.d_hb_entries);
+    Device_Free(&hb.d_energy_hb_sum);
+    Device_Free(&hb.d_dE_dBO_s);
+    Device_Free(&hb.d_dE_dBO_pi);
+    Device_Free(&hb.d_dE_dBO_pi2);
+    Device_Free(&bo.d_corrected_bo_s);
+    Device_Free(&bo.d_corrected_bo_pi);
+    Device_Free(&bo.d_corrected_bo_pi2);
+    Device_Free(&bo.d_bond_count);
+    Device_Free(&bo.d_bond_offset);
+    Device_Free(&bo.d_bond_nbr);
+    Device_Free(&bo.d_bond_idx);
+    return result;
+}
+
+void Check_Reaxff_Hb_Result(const Reaxff_Hb_Result& result,
+                            double expected_energy, const char* label)
+{
+    Check(result.accepted, label);
+    if (!result.accepted && result.failure_reason != nullptr)
+        std::fprintf(stderr, "ReaxFF HB rejection: %s\n",
+                     result.failure_reason);
+    Check_Near(result.energy, expected_energy, 2.0e-5,
+               "ReaxFF HB energy oracle", 0);
+    Check_Near(result.atom_energy[0], expected_energy, 2.0e-5,
+               "ReaxFF HB hydrogen atom-energy ownership", 0);
+    for (int atom = 1; atom < kAtomCount; atom += 1)
+        Check_Near(result.atom_energy[atom], 0.0, 2.0e-6,
+                   "ReaxFF HB non-hydrogen atom energy", atom);
+
+    VECTOR force_sum = {};
+    for (const VECTOR& force : result.force) force_sum = force_sum + force;
+    Check_Near(force_sum.x, 0.0, 2.0e-5, "ReaxFF HB force conservation x", 0);
+    Check_Near(force_sum.y, 0.0, 2.0e-5, "ReaxFF HB force conservation y", 0);
+    Check_Near(force_sum.z, 0.0, 2.0e-5, "ReaxFF HB force conservation z", 0);
+
+    const double expected_derivative =
+        expected_energy == 0.0 ? 0.0 : 0.5 * std::exp(-1.0);
+    Check_Near(result.dE_dBO_s, expected_derivative, 2.0e-5,
+               "ReaxFF HB bond-order derivative", 0);
+}
+
+void Test_Reaxff_Hb_Oracle()
+{
+    constexpr float box = 20.0f;
+    const LTMatrix3 cell = Diagonal_Matrix(box);
+    const LTMatrix3 rcell = Diagonal_Matrix(1.0f / box);
+    Clustered_Fixture fixture(rcell);
+    const double expected_energy = 0.5 * (1.0 - std::exp(-1.0));
+
+    const std::vector<VECTOR> cross_periodic = {{0.25f, 1.0f, 1.0f},
+                                                {19.25f, 1.0f, 1.0f},
+                                                {0.25f, 2.0f, 1.0f},
+                                                {10.0f, 10.0f, 10.0f},
+                                                {10.0f, 12.0f, 10.0f}};
+    const Reaxff_Hb_Result cross_result =
+        Run_Reaxff_Hb_Case(fixture, cross_periodic, cell, rcell);
+    Check_Reaxff_Hb_Result(cross_result, expected_energy,
+                           "ReaxFF HB accepts cross-PBC clustered pair");
+    constexpr float difference_step = 1.0e-3f;
+    std::vector<VECTOR> donor_plus = cross_periodic;
+    std::vector<VECTOR> donor_minus = cross_periodic;
+    donor_plus[2].x += difference_step;
+    donor_minus[2].x -= difference_step;
+    const float energy_plus =
+        Run_Reaxff_Hb_Case(fixture, donor_plus, cell, rcell).energy;
+    const float energy_minus =
+        Run_Reaxff_Hb_Case(fixture, donor_minus, cell, rcell).energy;
+    const double donor_force_x =
+        -(energy_plus - energy_minus) / (2.0 * difference_step);
+    Check_Near(cross_result.force[2].x, donor_force_x, 4.0e-4,
+               "ReaxFF HB angular force finite-difference oracle", 2);
+
+    const std::vector<VECTOR> cutoff_inside = {{1.0f, 1.0f, 1.0f},
+                                               {8.499f, 1.0f, 1.0f},
+                                               {1.0f, 2.0f, 1.0f},
+                                               {10.0f, 10.0f, 10.0f},
+                                               {10.0f, 12.0f, 10.0f}};
+    Check_Reaxff_Hb_Result(
+        Run_Reaxff_Hb_Case(fixture, cutoff_inside, cell, rcell),
+        expected_energy, "ReaxFF HB includes r_AH=7.5-epsilon");
+
+    const std::vector<VECTOR> cutoff_outside = {{1.0f, 1.0f, 1.0f},
+                                                {8.501f, 1.0f, 1.0f},
+                                                {1.0f, 2.0f, 1.0f},
+                                                {10.0f, 10.0f, 10.0f},
+                                                {10.0f, 12.0f, 10.0f}};
+    Check_Reaxff_Hb_Result(
+        Run_Reaxff_Hb_Case(fixture, cutoff_outside, cell, rcell), 0.0,
+        "ReaxFF HB excludes r_AH=7.5+epsilon");
+}
 }  // namespace
 
 int main()
@@ -1137,6 +1347,7 @@ int main()
     Test_Edip_Oracle(fixture, coordinates, types, cell, rcell);
     Test_Tersoff_Oracle(fixture, coordinates, types, cell, rcell);
     Test_Reaxff_Vdw_Oracle(fixture, coordinates, types, cell, rcell);
+    Test_Reaxff_Hb_Oracle();
 
     if (failures != 0)
     {
@@ -1146,6 +1357,7 @@ int main()
     }
     std::printf(
         "manybody clustered oracles passed: EDIP relation/triplets/z/dE_dz; "
-        "Tersoff relation/directed tuples; ReaxFF VDW force/energy/virial\n");
+        "Tersoff relation/directed tuples; ReaxFF VDW force/energy/virial; "
+        "ReaxFF HB PBC/cutoff/energy/dE_dBO\n");
     return 0;
 }

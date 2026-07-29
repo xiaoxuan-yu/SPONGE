@@ -1893,7 +1893,7 @@ void Main_Calculate_Force()
             reaxff_clustered_cache->Build(dd.crd, md_info.pbc.cell,
                                           md_info.pbc.rcell, md_info.nb.cutoff,
                                           md_info.need_pressure != 0, false,
-                                          reaxff_need_gmxpacked_payload, false,
+                                          reaxff_need_gmxpacked_payload, true,
                                           reaxff_runtime_gmxpacked_direct);
             const char* reaxff_clustered_failure_reason = NULL;
             if (!Make_Clustered_Spatial_View_From_LJ_Cache(

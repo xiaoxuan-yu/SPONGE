@@ -122,17 +122,16 @@ void REAXFF::Calculate_Force(DOMAIN_INFORMATION* dd, MD_INFORMATION* md_info,
                           md_info->pbc.cell, md_info->pbc.rcell,
                           neighbor_list->full_neighbor_list.d_nl,
                           md_info->nb.cutoff, dd->d_energy, dd->frc,
-                          md_info->need_pressure, dd->d_virial,
-                          clustered_view);
+                          md_info->need_pressure, dd->d_virial, clustered_view);
     if (CONTROLLER::PP_MPI_size == 1 && dd->d_charge != md_info->d_charge)
     {
         dd->Sync_Local_Charge_From_Global(md_info->d_charge);
     }
 
-    bond_order.Calculate_Bond_Order(
-        dd->atom_numbers, dd->crd, md_info->pbc.cell, md_info->pbc.rcell,
-        neighbor_list->full_neighbor_list.d_nl, md_info->nb.cutoff,
-        clustered_view);
+    bond_order.Calculate_Bond_Order(dd->atom_numbers, dd->crd,
+                                    md_info->pbc.cell, md_info->pbc.rcell,
+                                    neighbor_list->full_neighbor_list.d_nl,
+                                    md_info->nb.cutoff, clustered_view);
 
     if (bond_order.is_initialized)
     {
@@ -180,11 +179,25 @@ void REAXFF::Calculate_Force(DOMAIN_INFORMATION* dd, MD_INFORMATION* md_info,
         md_info->pbc.rcell, &bond_order, ovun.d_Delta_boc,
         md_info->need_potential, dd->d_energy, md_info->need_pressure,
         dd->d_virial);
-    hb.Calculate_HB_Energy_And_Force(
-        dd->atom_numbers, dd->crd, dd->frc, md_info->pbc.cell,
-        md_info->pbc.rcell, neighbor_list->full_neighbor_list.d_nl, &bond_order,
-        md_info->need_potential, dd->d_energy, md_info->need_pressure,
-        dd->d_virial);
+    if (clustered_view == NULL)
+    {
+        throw std::runtime_error(
+            "ReaxFF hydrogen bond requires a clustered spatial view");
+    }
+    const char* hb_failure_reason = NULL;
+    if (!hb.Calculate_HB_Energy_And_Force_Clustered(
+            *clustered_view, dd->atom_numbers, dd->crd, dd->frc,
+            md_info->pbc.cell, md_info->pbc.rcell, &bond_order,
+            md_info->need_potential, dd->d_energy, md_info->need_pressure,
+            dd->d_virial, &hb_failure_reason))
+    {
+        throw std::runtime_error(
+            std::string("clustered ReaxFF hydrogen bond rejected the clustered "
+                        "payload: ") +
+            (hb_failure_reason == NULL
+                 ? "unknown clustered hydrogen-bond failure"
+                 : hb_failure_reason));
+    }
 
     if (bond_order.is_initialized)
     {

@@ -4,6 +4,7 @@
 #include "../../MD_core/MD_core.h"
 #include "../../common.h"
 #include "../../control.h"
+#include "../../neighbor_list/clustered_spatial_view.h"
 #include "bond_order.h"
 
 struct REAXFF_HB_Entry
@@ -36,6 +37,9 @@ struct REAXFF_HYDROGEN_BOND
     int* d_atom_type = NULL;
     int* h_is_hydrogen = NULL;
     int* d_is_hydrogen = NULL;
+    int hydrogen_numbers = 0;
+    int* d_hydrogen_atoms = NULL;
+    int* d_clustered_atom_to_sorted = NULL;
 
     // HB parameters [acc][don][hyd]
     REAXFF_HB_Info* h_hb_info = NULL;
@@ -53,11 +57,12 @@ struct REAXFF_HYDROGEN_BOND
 
     void Initial(CONTROLLER* controller, int atom_numbers,
                  const char* module_name);
-    void Calculate_HB_Energy_And_Force(
-        int atom_numbers, const VECTOR* crd, VECTOR* frc, const LTMatrix3 cell,
-        const LTMatrix3 rcell, const ATOM_GROUP* nl,
+    bool Calculate_HB_Energy_And_Force_Clustered(
+        const CLUSTERED_SPATIAL_VIEW& view, int atom_numbers, const VECTOR* crd,
+        VECTOR* frc, const LTMatrix3 cell, const LTMatrix3 rcell,
         REAXFF_BOND_ORDER* bo_module, const int need_atom_energy,
-        float* atom_energy, const int need_virial, LTMatrix3* atom_virial);
+        float* atom_energy, const int need_virial, LTMatrix3* atom_virial,
+        const char** failure_reason = NULL);
 
     void Step_Print(CONTROLLER* controller);
 };
