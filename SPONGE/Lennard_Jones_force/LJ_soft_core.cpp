@@ -126,128 +126,6 @@ static __global__ void Gather_Sorted_Soft_Core_Crd(
 }
 
 #ifdef USE_GPU
-template <bool full_output>
-static __device__ __forceinline__ void Compute_Gmxpacked_Soft_Core_Pair(
-    const VECTOR_LJ_SOFT_TYPE& r1, const VECTOR_LJ_SOFT_TYPE& r2,
-    const float dx, const float dy, const float dz, const float dr2,
-    const float AA, const float AB, const float BA, const float BB,
-    const float lambda, const float alpha, const float p,
-    const float input_sigma_6, const float input_sigma_6_min,
-    const float pme_beta, const float ij_factor, VECTOR* pair_force,
-    float* pair_lj_energy, float* pair_coulomb_energy,
-    LTMatrix3* pair_virial)
-{
-    const float lambda_ = 1.0f - lambda;
-    const float inv_r = rsqrtf(dr2);
-    const float inv_r2 = inv_r * inv_r;
-    const float inv_r6 = inv_r2 * inv_r2 * inv_r2;
-    const float dr_abs = dr2 * inv_r;
-    const float charge_product = r1.charge * r2.charge;
-    float force_abs = 0.0f;
-    float lj_energy = 0.0f;
-    float coulomb_energy = 0.0f;
-
-    if (BA * AA != 0.0f || BA + AA == 0.0f)
-    {
-        const float inv_r8 = inv_r6 * inv_r2;
-        force_abs =
-            (lambda_ * (AB - AA * inv_r6) +
-             lambda * (BB - BA * inv_r6)) *
-            inv_r8;
-        const float beta_dr = pme_beta * dr_abs;
-        const float erfc_beta_dr = erfcf(beta_dr);
-        force_abs -=
-            charge_product * inv_r * inv_r2 *
-            (beta_dr * TWO_DIVIDED_BY_SQRT_PI *
-                 expf(-beta_dr * beta_dr) +
-             erfc_beta_dr);
-        if constexpr (full_output)
-        {
-            lj_energy =
-                (lambda_ *
-                     (0.083333333f * AA * inv_r6 - 0.166666667f * AB) +
-                 lambda *
-                     (0.083333333f * BA * inv_r6 - 0.166666667f * BB)) *
-                inv_r6;
-            coulomb_energy = charge_product * erfc_beta_dr * inv_r;
-        }
-    }
-    else
-    {
-        const float dr4 = dr2 * dr2;
-        const float dr6 = dr4 * dr2;
-        const float sigma_A = Get_Soft_Core_Sigma(
-            AA, AB, input_sigma_6, input_sigma_6_min);
-        const float sigma_B = Get_Soft_Core_Sigma(
-            BA, BB, input_sigma_6, input_sigma_6_min);
-        const float soft6_A =
-            dr6 + alpha * powf(lambda, p) * sigma_A;
-        const float soft6_B =
-            dr6 + alpha * powf(lambda_, p) * sigma_B;
-        const float inv_soft6_A = 1.0f / soft6_A;
-        const float inv_soft6_B = 1.0f / soft6_B;
-        const float inv_soft12_A = inv_soft6_A * inv_soft6_A;
-        const float inv_soft12_B = inv_soft6_B * inv_soft6_B;
-        const float soft_A = powf(soft6_A, 0.16666667f);
-        const float soft_B = powf(soft6_B, 0.16666667f);
-        const float beta_soft_A = pme_beta * soft_A;
-        const float beta_soft_B = pme_beta * soft_B;
-        const float erfc_soft_A = erfcf(beta_soft_A);
-        const float erfc_soft_B = erfcf(beta_soft_B);
-
-        force_abs =
-            lambda_ * dr4 * (AB - AA * inv_soft6_A) * inv_soft12_A +
-            lambda * dr4 * (BB - BA * inv_soft6_B) * inv_soft12_B;
-        force_abs -=
-            lambda_ * charge_product * dr4 *
-            (TWO_DIVIDED_BY_SQRT_PI * pme_beta *
-                 expf(-beta_soft_A * beta_soft_A) +
-             erfc_soft_A / soft_A) *
-            inv_soft6_A;
-        force_abs -=
-            lambda * charge_product * dr4 *
-            (TWO_DIVIDED_BY_SQRT_PI * pme_beta *
-                 expf(-beta_soft_B * beta_soft_B) +
-             erfc_soft_B / soft_B) *
-            inv_soft6_B;
-        if constexpr (full_output)
-        {
-            lj_energy =
-                lambda_ *
-                    (0.083333333f * AA * inv_soft6_A -
-                     0.166666667f * AB) *
-                    inv_soft6_A +
-                lambda *
-                    (0.083333333f * BA * inv_soft6_B -
-                     0.166666667f * BB) *
-                    inv_soft6_B;
-            coulomb_energy =
-                charge_product *
-                (lambda_ * erfc_soft_A / soft_A +
-                 lambda * erfc_soft_B / soft_B);
-        }
-    }
-
-    pair_force->x = force_abs * dx;
-    pair_force->y = force_abs * dy;
-    pair_force->z = force_abs * dz;
-    if constexpr (full_output)
-    {
-        *pair_lj_energy = ij_factor * lj_energy;
-        *pair_coulomb_energy = ij_factor * coulomb_energy;
-        *pair_virial = {
-            -ij_factor * pair_force->x * dx,
-            -ij_factor *
-                (pair_force->x * dy + pair_force->y * dx),
-            -ij_factor * pair_force->y * dy,
-            -ij_factor *
-                (pair_force->x * dz + pair_force->z * dx),
-            -ij_factor *
-                (pair_force->y * dz + pair_force->z * dy),
-            -ij_factor * pair_force->z * dz};
-    }
-}
-
 static __device__ __forceinline__ float
 Reduce_Gmxpacked_Soft_Core_Over_J(float value)
 {
@@ -546,7 +424,7 @@ static __global__ __launch_bounds__(
                 float pair_coulomb_energy = 0.0f;
                 LTMatrix3 pair_virial =
                     {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
-                Compute_Gmxpacked_Soft_Core_Pair<full_output>(
+                Compute_Clustered_Soft_Core_Pair<full_output>(
                     r1, r2, dx, dy, dz, dr2,
                     LJ_type_AA[pair_type_A],
                     LJ_type_AB[pair_type_A],

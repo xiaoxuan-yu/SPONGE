@@ -1,128 +1,5 @@
 ﻿#include "SITS.h"
 
-template <bool need_force, bool need_energy, bool need_virial,
-          bool need_coulomb>
-static __global__ void Selective_Lennard_Jones_And_Direct_Coulomb_Device(
-    const int local_atom_numbers, const int solvent_numbers,
-    const ATOM_GROUP* nl, float* atom_ene_LJ, const VECTOR_LJ* crd,
-    const LTMatrix3 cell, const LTMatrix3 rcell, const float* LJ_type_A,
-    const float* LJ_type_B, const int* atom_sys_mark, const float cutoff,
-    VECTOR* frc, VECTOR* frc_enhancing, const float pme_beta,
-    float* atom_energy, float* atom_energy_enhancing, LTMatrix3* atom_virial,
-    LTMatrix3* atom_virial_enhancing, float* atom_direct_cf_energy,
-    const float pwwp_factor)
-{
-#ifdef USE_GPU
-    int atom_i = blockDim.y * blockIdx.x + threadIdx.y;
-    if (atom_i < local_atom_numbers - solvent_numbers)
-#else
-#pragma omp parallel for
-    for (int atom_i = 0; atom_i < local_atom_numbers - solvent_numbers;
-         atom_i++)
-#endif
-    {
-        ATOM_GROUP nl_i = nl[atom_i];
-        VECTOR_LJ r1 = crd[atom_i];
-        int atom_mark_i = atom_sys_mark[atom_i];
-        VECTOR frc_record = {0.0f, 0.0f, 0.0f},
-               frc_enhancing_record = {0.0f, 0.0f, 0.0f};
-        LTMatrix3 virial_record = {0, 0, 0, 0, 0, 0},
-                  virial_enhancing = {0, 0, 0, 0, 0, 0};
-        float energy_lj = 0.0f, energy_enhancing = 0.0f, energy_coulomb = 0.0f;
-#ifdef USE_GPU
-        for (int j = threadIdx.x; j < nl_i.atom_numbers; j += blockDim.x)
-#else
-        for (int j = 0; j < nl_i.atom_numbers; j++)
-#endif
-        {
-            int atom_j = nl_i.atom_serial[j];
-            float ij_factor = atom_j < local_atom_numbers ? 1.0f : 0.5f;
-            VECTOR_LJ r2 = crd[atom_j];
-            VECTOR dr = Get_Periodic_Displacement(r2, r1, cell, rcell);
-            float dr_abs = norm3df(dr.x, dr.y, dr.z);
-            if (dr_abs < cutoff)
-            {
-                int atom_mark_j = atom_sys_mark[atom_j] + atom_mark_i;
-                int atom_pair_LJ_type = Get_LJ_Type(r1.LJ_type, r2.LJ_type);
-                float A = LJ_type_A[atom_pair_LJ_type];
-                float B = LJ_type_B[atom_pair_LJ_type];
-                float factor = 0;
-                if (atom_mark_j == 0)
-                {
-                    factor = 1;
-                }
-                else if (atom_mark_j == 1)
-                {
-                    factor = pwwp_factor;
-                }
-                if (need_force)
-                {
-                    float frc_abs = Get_LJ_Force(r1, r2, dr_abs, A, B);
-                    if (need_coulomb)
-                    {
-                        float frc_cf_abs =
-                            Get_Direct_Coulomb_Force(r1, r2, dr_abs, pme_beta);
-                        frc_abs = frc_abs - frc_cf_abs;
-                    }
-                    VECTOR frc_lin = frc_abs * dr;
-                    frc_record = frc_record + frc_lin;
-                    if (atom_j < local_atom_numbers)
-                        atomicAdd(frc + atom_j, -frc_lin);
-                    frc_lin = factor * frc_lin;
-                    frc_enhancing_record = frc_enhancing_record + frc_lin;
-                    if (need_virial)
-                    {
-                        LTMatrix3 virial0 =
-                            Get_Virial_From_Force_Dis(frc_lin, dr);
-                        virial_record = virial_record + ij_factor * virial0;
-                        virial_enhancing =
-                            virial_enhancing + ij_factor * factor * virial0;
-                    }
-                }
-                if (need_coulomb && need_energy)
-                {
-                    float energy_lin =
-                        Get_Direct_Coulomb_Energy(r1, r2, dr_abs, pme_beta);
-                    energy_coulomb += ij_factor * energy_lin;
-                    energy_enhancing += ij_factor * factor * energy_lin;
-                }
-                if (need_energy)
-                {
-                    float energy_lin = Get_LJ_Energy(r1, r2, dr_abs, A, B);
-                    energy_lj += ij_factor * energy_lin;
-                    energy_enhancing += ij_factor * factor * energy_lin;
-                }
-            }
-        }
-        if (need_force)
-        {
-            Warp_Sum_To(frc + atom_i, frc_record, warpSize);
-            Warp_Sum_To(frc_enhancing + atom_i, frc_enhancing_record, warpSize);
-        }
-        if (need_coulomb && need_energy)
-        {
-            Warp_Sum_To(atom_direct_cf_energy + atom_i, energy_coulomb,
-                        warpSize);
-        }
-        if (need_energy)
-        {
-            Warp_Sum_To(atom_energy + atom_i, energy_lj, warpSize);
-#ifdef USE_GPU
-            if (threadIdx.x == 0)
-#endif
-                atomicAdd(atom_ene_LJ + atom_i, energy_lj);
-            Warp_Sum_To(atom_energy_enhancing + atom_i, energy_enhancing,
-                        warpSize);
-        }
-        if (need_virial)
-        {
-            Warp_Sum_To(atom_virial + atom_i, virial_record, warpSize);
-            Warp_Sum_To(atom_virial_enhancing + atom_i, virial_enhancing,
-                        warpSize);
-        }
-    }
-}
-
 static __host__ __device__ __forceinline__ VECTOR_LJ
 SITS_Make_Packed_LJ_Atom(const float4 xq, const int lj_type)
 {
@@ -148,13 +25,13 @@ static __host__ __forceinline__ SITS_CLUSTERED_PAIR_FORCE
 #else
 static __device__ __forceinline__ SITS_CLUSTERED_PAIR_FORCE
 #endif
-SITS_Store_Clustered_Pair(
+SITS_Store_Clustered_Computed_Pair(
     const int atom_i, const int atom_j, const int global_i,
-    const int global_j, const bool j_is_local, const int selective_atom_end,
-    const VECTOR_LJ r1, const VECTOR_LJ r2, const VECTOR dr,
-    const float2 lj_ab, const float dr_abs, const float pme_beta,
-    const int* atom_sys_mark, const float pwwp_factor, VECTOR* frc,
-    VECTOR* frc_enhancing, float* atom_energy,
+    const int global_j, const bool j_is_local,
+    const VECTOR dr, const VECTOR force_i, const float energy_lj,
+    const float energy_coulomb, const int* atom_sys_mark,
+    const float pwwp_factor, VECTOR* frc, VECTOR* frc_enhancing,
+    float* atom_energy,
     float* atom_energy_enhancing, LTMatrix3* atom_virial,
     LTMatrix3* atom_virial_enhancing, float* atom_direct_cf_energy,
     float* atom_ene_lj, const bool store_energy, const bool store_virial)
@@ -163,7 +40,7 @@ SITS_Store_Clustered_Pair(
     const int owner = owner_is_i ? atom_i : atom_j;
     const float owner_force_sign = owner_is_i ? 1.0f : -1.0f;
     const float ij_factor = j_is_local ? 1.0f : 0.5f;
-    const bool selective_owner = owner < selective_atom_end;
+    const bool selective_owner = atom_sys_mark[owner] == 0;
     float selective_factor = 0.0f;
     if (selective_owner)
     {
@@ -172,10 +49,6 @@ SITS_Store_Clustered_Pair(
         selective_factor =
             mark_sum == 0 ? 1.0f : (mark_sum == 1 ? pwwp_factor : 0.0f);
     }
-
-    float force_abs = Get_LJ_Force(r1, r2, dr_abs, lj_ab.x, lj_ab.y);
-    force_abs -= Get_Direct_Coulomb_Force(r1, r2, dr_abs, pme_beta);
-    const VECTOR force_i = force_abs * dr;
 
     if constexpr (!correction_only)
     {
@@ -201,11 +74,6 @@ SITS_Store_Clustered_Pair(
 
     if constexpr (full_output)
     {
-        const float energy_lj =
-            ij_factor * Get_LJ_Energy(r1, r2, dr_abs, lj_ab.x, lj_ab.y);
-        const float energy_coulomb =
-            ij_factor *
-            Get_Direct_Coulomb_Energy(r1, r2, dr_abs, pme_beta);
         if (store_energy)
         {
             if constexpr (!correction_only)
@@ -261,6 +129,88 @@ SITS_Store_Clustered_Pair(
         force_i, owner_is_i, selective_owner, selective_factor};
 }
 
+template <bool full_output, bool store_j_force_direct,
+          bool correction_only = false>
+#ifdef USE_CPU
+static __host__ __forceinline__ SITS_CLUSTERED_PAIR_FORCE
+#else
+static __device__ __forceinline__ SITS_CLUSTERED_PAIR_FORCE
+#endif
+SITS_Store_Clustered_Pair(
+    const int atom_i, const int atom_j, const int global_i,
+    const int global_j, const bool j_is_local,
+    const VECTOR_LJ r1, const VECTOR_LJ r2, const VECTOR dr,
+    const float2 lj_ab, const float dr_abs, const float pme_beta,
+    const int* atom_sys_mark, const float pwwp_factor, VECTOR* frc,
+    VECTOR* frc_enhancing, float* atom_energy,
+    float* atom_energy_enhancing, LTMatrix3* atom_virial,
+    LTMatrix3* atom_virial_enhancing, float* atom_direct_cf_energy,
+    float* atom_ene_lj, const bool store_energy, const bool store_virial)
+{
+    const float ij_factor = j_is_local ? 1.0f : 0.5f;
+    float force_abs = Get_LJ_Force(r1, r2, dr_abs, lj_ab.x, lj_ab.y);
+    force_abs -= Get_Direct_Coulomb_Force(r1, r2, dr_abs, pme_beta);
+    const VECTOR force_i = force_abs * dr;
+    float energy_lj = 0.0f;
+    float energy_coulomb = 0.0f;
+    if constexpr (full_output)
+    {
+        energy_lj =
+            ij_factor * Get_LJ_Energy(r1, r2, dr_abs, lj_ab.x, lj_ab.y);
+        energy_coulomb =
+            ij_factor *
+            Get_Direct_Coulomb_Energy(r1, r2, dr_abs, pme_beta);
+    }
+    return SITS_Store_Clustered_Computed_Pair<
+        full_output, store_j_force_direct, correction_only>(
+        atom_i, atom_j, global_i, global_j, j_is_local,
+        dr, force_i, energy_lj, energy_coulomb,
+        atom_sys_mark, pwwp_factor, frc, frc_enhancing, atom_energy,
+        atom_energy_enhancing, atom_virial, atom_virial_enhancing,
+        atom_direct_cf_energy, atom_ene_lj, store_energy, store_virial);
+}
+
+template <bool full_output, bool store_j_force_direct,
+          bool correction_only = false>
+#ifdef USE_CPU
+static __host__ __forceinline__ SITS_CLUSTERED_PAIR_FORCE
+#else
+static __device__ __forceinline__ SITS_CLUSTERED_PAIR_FORCE
+#endif
+SITS_Store_Clustered_Soft_Pair(
+    const int atom_i, const int atom_j, const int global_i,
+    const int global_j, const bool j_is_local,
+    const VECTOR_LJ_SOFT_TYPE r1, const VECTOR_LJ_SOFT_TYPE r2,
+    const VECTOR dr, const float AA, const float AB, const float BA,
+    const float BB, const float pme_beta, const float lambda,
+    const float alpha, const float p, const float input_sigma_6,
+    const float input_sigma_6_min, const int* atom_sys_mark,
+    const float pwwp_factor, VECTOR* frc, VECTOR* frc_enhancing,
+    float* atom_energy, float* atom_energy_enhancing,
+    LTMatrix3* atom_virial, LTMatrix3* atom_virial_enhancing,
+    float* atom_direct_cf_energy, float* atom_ene_lj,
+    const bool store_energy, const bool store_virial)
+{
+    const float dr2 = dr * dr;
+    const float ij_factor = j_is_local ? 1.0f : 0.5f;
+    VECTOR force_i = {0.0f, 0.0f, 0.0f};
+    float energy_lj = 0.0f;
+    float energy_coulomb = 0.0f;
+    LTMatrix3 unused_virial = {};
+    Compute_Clustered_Soft_Core_Pair<full_output>(
+        r1, r2, dr.x, dr.y, dr.z, dr2, AA, AB, BA, BB, lambda,
+        alpha, p, input_sigma_6, input_sigma_6_min, pme_beta,
+        ij_factor, &force_i, &energy_lj, &energy_coulomb,
+        &unused_virial);
+    return SITS_Store_Clustered_Computed_Pair<
+        full_output, store_j_force_direct, correction_only>(
+        atom_i, atom_j, global_i, global_j, j_is_local,
+        dr, force_i, energy_lj, energy_coulomb,
+        atom_sys_mark, pwwp_factor, frc, frc_enhancing, atom_energy,
+        atom_energy_enhancing, atom_virial, atom_virial_enhancing,
+        atom_direct_cf_energy, atom_ene_lj, store_energy, store_virial);
+}
+
 #ifdef USE_GPU
 static __device__ __forceinline__ float
 SITS_Reduce_Subgroup_Force_To_Component(float x, float y, float z,
@@ -305,8 +255,9 @@ static __device__ __forceinline__ bool
 SITS_Prune_Gmxpacked_Record_For_Selection(
     const CLUSTERED_GMXPACKED_CJ source,
     const CLUSTERED_GMXPACKED_SCI sci_entry, const int cluster_numbers,
-    const int selective_atom_end, const int* cluster_offsets,
+    const int* cluster_offsets, const unsigned int* cluster_valid_masks,
     const int* super_cluster_offsets, const int* sorted_atom_ids,
+    const int* atom_sys_mark,
     CLUSTERED_GMXPACKED_CJ* compact)
 {
     *compact = source;
@@ -330,11 +281,16 @@ SITS_Prune_Gmxpacked_Record_For_Selection(
                 for (int j_lane = j_lane_begin;
                      j_lane < j_lane_end; j_lane += 1)
                 {
+                    if ((cluster_valid_masks[cluster_j] &
+                         (1u << static_cast<unsigned int>(j_lane))) == 0u)
+                    {
+                        continue;
+                    }
                     const int atom_j = sorted_atom_ids[
                         cluster_offsets[cluster_j] + j_lane];
-                    selected_j = selected_j ||
-                                 (atom_j >= 0 &&
-                                  atom_j < selective_atom_end);
+                    selected_j =
+                        selected_j ||
+                        (atom_j >= 0 && atom_sys_mark[atom_j] == 0);
                 }
             }
             for (int i_local = 0;
@@ -353,11 +309,16 @@ SITS_Prune_Gmxpacked_Record_For_Selection(
                     for (int i_lane = 0;
                          i_lane < kClusteredClusterSize; i_lane += 1)
                     {
+                        if ((cluster_valid_masks[cluster_i] &
+                             (1u << static_cast<unsigned int>(i_lane))) == 0u)
+                        {
+                            continue;
+                        }
                         const int atom_i = sorted_atom_ids[
                             cluster_offsets[cluster_i] + i_lane];
-                        selected_i = selected_i ||
-                                     (atom_i >= 0 &&
-                                      atom_i < selective_atom_end);
+                        selected_i =
+                            selected_i ||
+                            (atom_i >= 0 && atom_sys_mark[atom_i] == 0);
                     }
                 }
                 if (selected_i || selected_j)
@@ -374,8 +335,9 @@ SITS_Prune_Gmxpacked_Record_For_Selection(
 
 static __global__ void SITS_Build_Sparse_Gmxpacked_View_Device(
     const int source_sci_numbers, const int cluster_numbers,
-    const int selective_atom_end, const int* cluster_offsets,
+    const int* cluster_offsets, const unsigned int* cluster_valid_masks,
     const int* super_cluster_offsets, const int* sorted_atom_ids,
+    const int* atom_sys_mark,
     const CLUSTERED_GMXPACKED_SCI* source_sci,
     const CLUSTERED_GMXPACKED_CJ* source_cjpacked,
     const uint64_t* source_pair_shift_bits,
@@ -411,8 +373,9 @@ static __global__ void SITS_Build_Sparse_Gmxpacked_View_Device(
         CLUSTERED_GMXPACKED_CJ pruned = {};
         if (SITS_Prune_Gmxpacked_Record_For_Selection(
                 source_cjpacked[packed_index], source_sci_entry,
-                cluster_numbers, selective_atom_end, cluster_offsets,
-                super_cluster_offsets, sorted_atom_ids, &pruned))
+                cluster_numbers, cluster_offsets, cluster_valid_masks,
+                super_cluster_offsets, sorted_atom_ids, atom_sys_mark,
+                &pruned))
         {
             atomicAdd(&kept_records, 1);
         }
@@ -441,8 +404,9 @@ static __global__ void SITS_Build_Sparse_Gmxpacked_View_Device(
         CLUSTERED_GMXPACKED_CJ pruned = {};
         if (!SITS_Prune_Gmxpacked_Record_For_Selection(
                 source_cjpacked[packed_index], source_sci_entry,
-                cluster_numbers, selective_atom_end, cluster_offsets,
-                super_cluster_offsets, sorted_atom_ids, &pruned))
+                cluster_numbers, cluster_offsets, cluster_valid_masks,
+                super_cluster_offsets, sorted_atom_ids, atom_sys_mark,
+                &pruned))
         {
             continue;
         }
@@ -481,27 +445,25 @@ static void SITS_Reserve_Sparse_Buffer(T** pointer, int* capacity,
 
 static bool SITS_Ensure_Sparse_Gmxpacked_View(
     SITS_INFORMATION* sits, const LJ_CLUSTERED_DIRECT_CACHE* cache,
-    const CLUSTERED_SPATIAL_VIEW& view, const int selective_atom_end)
+    const CLUSTERED_SPATIAL_VIEW& view, const int* atom_sys_mark)
 {
     const LJ_CLUSTER_LAYOUT& layout = cache->layout;
     if (sits->clustered_sparse_provider_incarnation ==
             layout.provider_incarnation &&
         sits->clustered_sparse_payload_generation ==
-            layout.gmxpacked_compact_payload_generation &&
-        sits->clustered_sparse_selective_atom_end == selective_atom_end)
+            layout.gmxpacked_compact_payload_generation)
     {
         return true;
     }
     sits->clustered_sparse_sci_numbers = 0;
     sits->clustered_sparse_cjpacked_numbers = 0;
-    if (selective_atom_end <= 0 || view.gmxpacked_sci_numbers <= 0 ||
+    if (view.gmxpacked_sci_numbers <= 0 ||
         view.gmxpacked_cjpacked_numbers <= 0)
     {
         sits->clustered_sparse_provider_incarnation =
             layout.provider_incarnation;
         sits->clustered_sparse_payload_generation =
             layout.gmxpacked_compact_payload_generation;
-        sits->clustered_sparse_selective_atom_end = selective_atom_end;
         return true;
     }
 
@@ -530,8 +492,8 @@ static bool SITS_Ensure_Sparse_Gmxpacked_View(
     Launch_Device_Kernel(
         SITS_Build_Sparse_Gmxpacked_View_Device, grid_size, block_size,
         0, NULL, view.gmxpacked_sci_numbers, view.cluster_numbers,
-        selective_atom_end, view.cluster_offsets,
-        view.super_cluster_offsets, cache->d_sorted_atom_ids,
+        view.cluster_offsets, view.cluster_valid_masks,
+        view.super_cluster_offsets, view.sort_permutation, atom_sys_mark,
         view.gmxpacked_sci, view.gmxpacked_cjpacked,
         view.pair_shift_bits, sits->d_clustered_sparse_sci,
         sits->d_clustered_sparse_cjpacked,
@@ -553,16 +515,16 @@ static bool SITS_Ensure_Sparse_Gmxpacked_View(
         layout.provider_incarnation;
     sits->clustered_sparse_payload_generation =
         layout.gmxpacked_compact_payload_generation;
-    sits->clustered_sparse_selective_atom_end = selective_atom_end;
     return true;
 }
 #endif
 
-template <bool full_output, bool correction_only = false>
+template <bool full_output, bool correction_only = false,
+          bool soft_core = false>
 static __global__ void SITS_Clustered_Gmxpacked_Direct_Device(
     const int sci_numbers, const int packed_partitions,
     const int cluster_numbers,
-    const int local_atom_numbers, const int selective_atom_end,
+    const int local_atom_numbers,
     const int* cluster_offsets, const unsigned int* cluster_valid_masks,
     const unsigned int* cluster_local_masks,
     const int* super_cluster_offsets,
@@ -571,8 +533,13 @@ static __global__ void SITS_Clustered_Gmxpacked_Direct_Device(
     const CLUSTERED_GMXPACKED_EXCLUSION* exclusion_entries,
     const uint64_t* pair_shift_bits, const int* sorted_atom_ids,
     const float4* sorted_xq, const int* sorted_lj_type,
+    const VECTOR_LJ_SOFT_TYPE* sorted_soft_crd,
     const int* atom_local, const int* atom_sys_mark, const LTMatrix3 cell,
-    const float2* lj_ab_packed, const float cutoff, VECTOR* frc,
+    const float2* lj_ab_packed, const float* lj_aa,
+    const float* lj_ab, const float* lj_ba, const float* lj_bb,
+    const float lambda, const float alpha, const float soft_p,
+    const float sigma_6, const float sigma_6_min,
+    const float cutoff, VECTOR* frc,
     VECTOR* frc_enhancing, const float pme_beta, float* atom_energy,
     float* atom_energy_enhancing, LTMatrix3* atom_virial,
     LTMatrix3* atom_virial_enhancing, float* atom_direct_cf_energy,
@@ -644,8 +611,20 @@ static __global__ void SITS_Clustered_Gmxpacked_Direct_Device(
             const int atom_j = sorted_atom_ids[sorted_j];
             const bool j_is_local =
                 (cluster_local_masks[cluster_j] & j_lane_bit) != 0u;
-            const VECTOR_LJ r2 = SITS_Make_Packed_LJ_Atom(
-                sorted_xq[sorted_j], sorted_lj_type[sorted_j]);
+            VECTOR_LJ r2 = {};
+            VECTOR_LJ_SOFT_TYPE soft_r2 = {};
+            VECTOR r2_crd = {};
+            if constexpr (soft_core)
+            {
+                soft_r2 = sorted_soft_crd[sorted_j];
+                r2_crd = soft_r2.crd;
+            }
+            else
+            {
+                r2 = SITS_Make_Packed_LJ_Atom(
+                    sorted_xq[sorted_j], sorted_lj_type[sorted_j]);
+                r2_crd = r2.crd;
+            }
             const uint64_t shift_bits =
                 pair_shift_bits[packed_idx * kClusteredJGroupSize + jm];
             VECTOR force_j = {0.0f, 0.0f, 0.0f};
@@ -672,30 +651,69 @@ static __global__ void SITS_Clustered_Gmxpacked_Direct_Device(
                 const int atom_i = sorted_atom_ids[sorted_i];
                 const int global_i = atom_local[atom_i];
                 const int global_j = atom_local[atom_j];
-                const VECTOR_LJ r1 = SITS_Make_Packed_LJ_Atom(
-                    sorted_xq[sorted_i], sorted_lj_type[sorted_i]);
+                VECTOR_LJ r1 = {};
+                VECTOR_LJ_SOFT_TYPE soft_r1 = {};
+                VECTOR r1_crd = {};
+                if constexpr (soft_core)
+                {
+                    soft_r1 = sorted_soft_crd[sorted_i];
+                    r1_crd = soft_r1.crd;
+                }
+                else
+                {
+                    r1 = SITS_Make_Packed_LJ_Atom(
+                        sorted_xq[sorted_i], sorted_lj_type[sorted_i]);
+                    r1_crd = r1.crd;
+                }
                 const int shift_id =
                     Clustered_Get_Pair_Shift_Id(shift_bits, i_local);
                 const VECTOR shift =
                     Clustered_Shift_Vector_From_Id(shift_id, cell);
-                const VECTOR dr = (r2.crd - r1.crd) - shift;
+                const VECTOR dr = (r2_crd - r1_crd) - shift;
                 const float dr2 = dr * dr;
                 if (dr2 <= 0.0f || dr2 >= cutoff_sq)
                 {
                     continue;
                 }
-                const int pair_type =
-                    Get_LJ_Type(r1.LJ_type, r2.LJ_type);
-                const SITS_CLUSTERED_PAIR_FORCE stored =
-                    SITS_Store_Clustered_Pair<full_output, false,
-                                              correction_only>(
-                    atom_i, atom_j, global_i, global_j, j_is_local,
-                    selective_atom_end, r1, r2, dr,
-                    lj_ab_packed[pair_type], sqrtf(dr2), pme_beta,
-                    atom_sys_mark, pwwp_factor, frc, frc_enhancing,
-                    atom_energy, atom_energy_enhancing, atom_virial,
-                    atom_virial_enhancing, atom_direct_cf_energy,
-                    atom_ene_lj, store_energy, store_virial);
+                SITS_CLUSTERED_PAIR_FORCE stored = {};
+                if constexpr (soft_core)
+                {
+                    const int pair_type_a = Get_LJ_Type(
+                        soft_r1.LJ_type, soft_r2.LJ_type);
+                    const int pair_type_b = Get_LJ_Type(
+                        soft_r1.LJ_type_B, soft_r2.LJ_type_B);
+                    stored =
+                        SITS_Store_Clustered_Soft_Pair<
+                            full_output, false, correction_only>(
+                            atom_i, atom_j, global_i, global_j,
+                            j_is_local, soft_r1,
+                            soft_r2, dr, lj_aa[pair_type_a],
+                            lj_ab[pair_type_a], lj_ba[pair_type_b],
+                            lj_bb[pair_type_b], pme_beta, lambda, alpha,
+                            soft_p, sigma_6, sigma_6_min, atom_sys_mark,
+                            pwwp_factor, frc, frc_enhancing, atom_energy,
+                            atom_energy_enhancing, atom_virial,
+                            atom_virial_enhancing,
+                            atom_direct_cf_energy, atom_ene_lj,
+                            store_energy, store_virial);
+                }
+                else
+                {
+                    const int pair_type =
+                        Get_LJ_Type(r1.LJ_type, r2.LJ_type);
+                    stored =
+                        SITS_Store_Clustered_Pair<
+                            full_output, false, correction_only>(
+                            atom_i, atom_j, global_i, global_j,
+                            j_is_local, r1, r2, dr,
+                            lj_ab_packed[pair_type], sqrtf(dr2),
+                            pme_beta, atom_sys_mark, pwwp_factor, frc,
+                            frc_enhancing, atom_energy,
+                            atom_energy_enhancing, atom_virial,
+                            atom_virial_enhancing,
+                            atom_direct_cf_energy, atom_ene_lj,
+                            store_energy, store_virial);
+                }
                 if (j_is_local)
                 {
                     if constexpr (!correction_only)
@@ -723,7 +741,7 @@ static __global__ void SITS_Clustered_Gmxpacked_Direct_Device(
                             frc, atom_j, i_lane, reduced_force);
                     }
                 }
-                if (atom_j < selective_atom_end)
+                if (atom_sys_mark[atom_j] == 0)
                 {
                     const float reduced_enhancing =
                         SITS_Reduce_Subgroup_Force_To_Component(
@@ -745,7 +763,6 @@ static __global__ void SITS_Clustered_Gmxpacked_Direct_Device(
     (void)packed_partitions;
     (void)cluster_numbers;
     (void)local_atom_numbers;
-    (void)selective_atom_end;
     (void)cluster_offsets;
     (void)cluster_valid_masks;
     (void)cluster_local_masks;
@@ -757,10 +774,20 @@ static __global__ void SITS_Clustered_Gmxpacked_Direct_Device(
     (void)sorted_atom_ids;
     (void)sorted_xq;
     (void)sorted_lj_type;
+    (void)sorted_soft_crd;
     (void)atom_local;
     (void)atom_sys_mark;
     (void)cell;
     (void)lj_ab_packed;
+    (void)lj_aa;
+    (void)lj_ab;
+    (void)lj_ba;
+    (void)lj_bb;
+    (void)lambda;
+    (void)alpha;
+    (void)soft_p;
+    (void)sigma_6;
+    (void)sigma_6_min;
     (void)cutoff;
     (void)frc;
     (void)frc_enhancing;
@@ -778,13 +805,19 @@ static __global__ void SITS_Clustered_Gmxpacked_Direct_Device(
 }
 
 #ifdef USE_CPU
-template <bool full_output, bool correction_only = false>
+template <bool full_output, bool correction_only = false,
+          bool soft_core = false>
 static void SITS_Clustered_Native_Direct(
-    const CLUSTERED_SPATIAL_VIEW& view, const int selective_atom_end,
+    const CLUSTERED_SPATIAL_VIEW& view,
     const int* sorted_atom_ids, const float4* sorted_xq,
-    const int* sorted_lj_type, const int* atom_local,
+    const int* sorted_lj_type,
+    const VECTOR_LJ_SOFT_TYPE* sorted_soft_crd, const int* atom_local,
     const int* atom_sys_mark, const LTMatrix3 cell, const LTMatrix3 rcell,
-    const float* lj_a, const float* lj_b, const float cutoff, VECTOR* frc,
+    const float* lj_a, const float* lj_b, const float* lj_aa,
+    const float* lj_ab, const float* lj_ba, const float* lj_bb,
+    const float lambda, const float alpha, const float soft_p,
+    const float sigma_6, const float sigma_6_min,
+    const float cutoff, VECTOR* frc,
     VECTOR* frc_enhancing, const float pme_beta, float* atom_energy,
     float* atom_energy_enhancing, LTMatrix3* atom_virial,
     LTMatrix3* atom_virial_enhancing, float* atom_direct_cf_energy,
@@ -815,8 +848,20 @@ static void SITS_Clustered_Native_Direct(
                 const int sorted_i =
                     view.cluster_offsets[cluster_i] + i_lane;
                 const int atom_i = sorted_atom_ids[sorted_i];
-                const VECTOR_LJ r1 = SITS_Make_Packed_LJ_Atom(
-                    sorted_xq[sorted_i], sorted_lj_type[sorted_i]);
+                VECTOR_LJ r1 = {};
+                VECTOR_LJ_SOFT_TYPE soft_r1 = {};
+                VECTOR r1_crd = {};
+                if constexpr (soft_core)
+                {
+                    soft_r1 = sorted_soft_crd[sorted_i];
+                    r1_crd = soft_r1.crd;
+                }
+                else
+                {
+                    r1 = SITS_Make_Packed_LJ_Atom(
+                        sorted_xq[sorted_i], sorted_lj_type[sorted_i]);
+                    r1_crd = r1.crd;
+                }
                 for (int packed_idx = sci_entry.cjpacked_begin;
                      packed_idx < sci_entry.cjpacked_end; packed_idx += 1)
                 {
@@ -874,30 +919,70 @@ static void SITS_Clustered_Native_Direct(
                             {
                                 continue;
                             }
-                            const VECTOR_LJ r2 = SITS_Make_Packed_LJ_Atom(
-                                sorted_xq[sorted_j],
-                                sorted_lj_type[sorted_j]);
-                            const VECTOR dr = (r2.crd - r1.crd) - shift;
+                            VECTOR_LJ r2 = {};
+                            VECTOR_LJ_SOFT_TYPE soft_r2 = {};
+                            VECTOR r2_crd = {};
+                            if constexpr (soft_core)
+                            {
+                                soft_r2 = sorted_soft_crd[sorted_j];
+                                r2_crd = soft_r2.crd;
+                            }
+                            else
+                            {
+                                r2 = SITS_Make_Packed_LJ_Atom(
+                                    sorted_xq[sorted_j],
+                                    sorted_lj_type[sorted_j]);
+                                r2_crd = r2.crd;
+                            }
+                            const VECTOR dr = (r2_crd - r1_crd) - shift;
                             const float dr2 = dr * dr;
                             if (dr2 <= 0.0f || dr2 >= cutoff_sq)
                             {
                                 continue;
                             }
-                            const int pair_type =
-                                Get_LJ_Type(r1.LJ_type, r2.LJ_type);
-                            const float2 lj_ab = {
-                                lj_a[pair_type], lj_b[pair_type]};
-                            SITS_Store_Clustered_Pair<full_output, true,
-                                                      correction_only>(
-                                atom_i, atom_j, global_i, global_j, j_is_local,
-                                selective_atom_end, r1, r2, dr,
-                                lj_ab, sqrtf(dr2), pme_beta,
-                                atom_sys_mark, pwwp_factor, frc,
-                                frc_enhancing, atom_energy,
-                                atom_energy_enhancing, atom_virial,
-                                atom_virial_enhancing,
-                                atom_direct_cf_energy, atom_ene_lj,
-                                store_energy, store_virial);
+                            if constexpr (soft_core)
+                            {
+                                const int pair_type_a = Get_LJ_Type(
+                                    soft_r1.LJ_type, soft_r2.LJ_type);
+                                const int pair_type_b = Get_LJ_Type(
+                                    soft_r1.LJ_type_B, soft_r2.LJ_type_B);
+                                SITS_Store_Clustered_Soft_Pair<
+                                    full_output, true, correction_only>(
+                                    atom_i, atom_j, global_i, global_j,
+                                    j_is_local,
+                                    soft_r1, soft_r2, dr,
+                                    lj_aa[pair_type_a],
+                                    lj_ab[pair_type_a],
+                                    lj_ba[pair_type_b],
+                                    lj_bb[pair_type_b], pme_beta,
+                                    lambda, alpha, soft_p, sigma_6,
+                                    sigma_6_min, atom_sys_mark,
+                                    pwwp_factor, frc, frc_enhancing,
+                                    atom_energy, atom_energy_enhancing,
+                                    atom_virial,
+                                    atom_virial_enhancing,
+                                    atom_direct_cf_energy, atom_ene_lj,
+                                    store_energy, store_virial);
+                            }
+                            else
+                            {
+                                const int pair_type =
+                                    Get_LJ_Type(r1.LJ_type, r2.LJ_type);
+                                const float2 pair_lj_ab = {
+                                    lj_a[pair_type], lj_b[pair_type]};
+                                SITS_Store_Clustered_Pair<
+                                    full_output, true, correction_only>(
+                                    atom_i, atom_j, global_i, global_j,
+                                    j_is_local, r1,
+                                    r2, dr, pair_lj_ab, sqrtf(dr2),
+                                    pme_beta, atom_sys_mark,
+                                    pwwp_factor, frc, frc_enhancing,
+                                    atom_energy, atom_energy_enhancing,
+                                    atom_virial,
+                                    atom_virial_enhancing,
+                                    atom_direct_cf_energy, atom_ene_lj,
+                                    store_energy, store_virial);
+                            }
                         }
                     }
                 }
@@ -906,279 +991,6 @@ static void SITS_Clustered_Native_Direct(
     }
 }
 #endif
-
-template <bool need_force, bool need_energy, bool need_virial,
-          bool need_coulomb, bool need_du_dlambda>
-static __global__ void
-Selective_Lennard_Jones_And_Direct_Coulomb_Soft_Core_Device(
-    const int local_atom_numbers, const int solvent_numbers,
-    const ATOM_GROUP* nl, float* atom_ene_LJ, const VECTOR_LJ_SOFT_TYPE* crd,
-    const LTMatrix3 cell, const LTMatrix3 rcell, const int* atom_sys_mark,
-    const float* LJ_type_AA, const float* LJ_type_AB, const float* LJ_type_BA,
-    const float* LJ_type_BB, const float cutoff, VECTOR* frc,
-    VECTOR* frc_enhancing, const float pme_beta, float* atom_energy,
-    float* atom_energy_enhancing, LTMatrix3* atom_virial,
-    LTMatrix3* atom_virial_enhancing, float* atom_direct_cf_energy,
-    float* atom_du_dlambda_lj, float* atom_du_dlambda_direct,
-    float* atom_du_dlambda_enhancing, const float lambda, const float alpha,
-    const float p, const float input_sigma_6, const float input_sigma_6_min,
-    const float pwwp_factor)
-{
-    float lambda_ = 1.0 - lambda;
-    float alpha_lambda_p = alpha * powf(lambda, p);
-    float alpha_lambda__p = alpha * powf(lambda_, p);
-#ifdef USE_GPU
-    int atom_i = blockDim.y * blockIdx.x + threadIdx.y;
-    if (atom_i < local_atom_numbers - solvent_numbers)
-#else
-#pragma omp parallel for firstprivate(lambda, alpha_lambda_p, alpha_lambda__p)
-    for (int atom_i = 0; atom_i < local_atom_numbers - solvent_numbers;
-         atom_i++)
-#endif
-    {
-        ATOM_GROUP nl_i = nl[atom_i];
-        VECTOR_LJ_SOFT_TYPE r1 = crd[atom_i];
-        VECTOR frc_record = {0., 0., 0.},
-               frc_enhancing_record = {0.0f, 0.0f, 0.0f};
-        LTMatrix3 virial_record = {0, 0, 0, 0, 0, 0},
-                  virial_enhancing = {0, 0, 0, 0, 0, 0};
-        float energy_total = 0., energy_enhancing = 0.0f;
-        float energy_coulomb = 0.;
-        float du_dlambda_lj = 0.;
-        float du_dlambda_direct = 0.;
-        // float du_dlambda_enhancing = 0.0f;
-        int atom_mark_i = atom_sys_mark[atom_i];
-#ifdef USE_GPU
-        for (int j = threadIdx.x; j < nl_i.atom_numbers; j += blockDim.x)
-#else
-        for (int j = 0; j < nl_i.atom_numbers; j++)
-#endif
-        {
-            int atom_j = nl_i.atom_serial[j];
-            float ij_factor = atom_j < local_atom_numbers ? 1.0f : 0.5f;
-            VECTOR_LJ_SOFT_TYPE r2 = crd[atom_j];
-            VECTOR dr = Get_Periodic_Displacement(r2, r1, cell, rcell);
-            float dr_abs = norm3df(dr.x, dr.y, dr.z);
-            if (dr_abs < cutoff)
-            {
-                int atom_mark_j = atom_sys_mark[atom_j] + atom_mark_i;
-                float factor = 0;
-                if (atom_mark_j == 0)
-                {
-                    factor = 1;
-                }
-                else if (atom_mark_j == 1)
-                {
-                    factor = pwwp_factor;
-                }
-                int atom_pair_LJ_type_A = Get_LJ_Type(r1.LJ_type, r2.LJ_type);
-                int atom_pair_LJ_type_B =
-                    Get_LJ_Type(r1.LJ_type_B, r2.LJ_type_B);
-                float AA = LJ_type_AA[atom_pair_LJ_type_A];
-                float AB = LJ_type_AB[atom_pair_LJ_type_A];
-                float BA = LJ_type_BA[atom_pair_LJ_type_B];
-                float BB = LJ_type_BB[atom_pair_LJ_type_B];
-                if (BA * AA != 0 || BA + AA == 0)
-                {
-                    if (need_force)
-                    {
-                        float frc_abs =
-                            lambda_ * Get_LJ_Force(r1, r2, dr_abs, AA, AB) +
-                            lambda * Get_LJ_Force(r1, r2, dr_abs, BA, BB);
-                        if (need_coulomb)
-                        {
-                            float frc_cf_abs = Get_Direct_Coulomb_Force(
-                                r1, r2, dr_abs, pme_beta);
-                            frc_abs = frc_abs - frc_cf_abs;
-                        }
-                        VECTOR frc_lin = frc_abs * dr;
-                        frc_record = frc_record + frc_lin;
-                        frc_enhancing_record =
-                            frc_enhancing_record + factor * frc_lin;
-                        if (atom_j < local_atom_numbers)
-                        {
-                            atomicAdd(frc + atom_j, -frc_lin);
-                            atomicAdd(frc_enhancing + atom_j,
-                                      -factor * frc_lin);
-                        }
-                        if (need_virial)
-                        {
-                            LTMatrix3 virial0 =
-                                Get_Virial_From_Force_Dis(frc_lin, dr);
-                            virial_record = virial_record + ij_factor * virial0;
-                            virial_enhancing =
-                                virial_enhancing + ij_factor * factor * virial0;
-                        }
-                    }
-                    if (need_coulomb && need_energy)
-                    {
-                        float ene =
-                            Get_Direct_Coulomb_Energy(r1, r2, dr_abs, pme_beta);
-                        energy_coulomb += ij_factor * ene;
-                        energy_enhancing += ij_factor * factor * ene;
-                    }
-                    if (need_energy)
-                    {
-                        float ene =
-                            lambda_ * Get_LJ_Energy(r1, r2, dr_abs, AA, AB) +
-                            lambda * Get_LJ_Energy(r1, r2, dr_abs, BA, BB);
-                        energy_total += ij_factor * ene;
-                        energy_enhancing += ij_factor * factor * ene;
-                    }
-                    if (need_du_dlambda)
-                    {
-                        du_dlambda_lj += Get_LJ_Energy(r1, r2, dr_abs, BA, BB) -
-                                         Get_LJ_Energy(r1, r2, dr_abs, AA, AB);
-                        if (need_coulomb)
-                        {
-                            du_dlambda_direct += Get_Direct_Coulomb_dU_dlambda(
-                                r1, r2, dr_abs, pme_beta);
-                        }
-                    }
-                }
-                else
-                {
-                    float sigma_A = Get_Soft_Core_Sigma(AA, AB, input_sigma_6,
-                                                        input_sigma_6_min);
-                    float sigma_B = Get_Soft_Core_Sigma(BA, BB, input_sigma_6,
-                                                        input_sigma_6_min);
-                    float dr_softcore_A = Get_Soft_Core_Distance(
-                        AA, AB, sigma_A, dr_abs, alpha, p, lambda);
-                    float dr_softcore_B = Get_Soft_Core_Distance(
-                        BB, BA, sigma_B, dr_abs, alpha, p, 1 - lambda);
-                    if (need_force)
-                    {
-                        float frc_abs =
-                            lambda_ * Get_Soft_Core_LJ_Force(r1, r2, dr_abs,
-                                                             dr_softcore_A, AA,
-                                                             AB) +
-                            lambda * Get_Soft_Core_LJ_Force(
-                                         r1, r2, dr_abs, dr_softcore_B, BA, BB);
-                        if (need_coulomb)
-                        {
-                            float frc_cf_abs =
-                                lambda_ * Get_Soft_Core_Direct_Coulomb_Force(
-                                              r1, r2, dr_abs, dr_softcore_A,
-                                              pme_beta) +
-                                lambda * Get_Soft_Core_Direct_Coulomb_Force(
-                                             r1, r2, dr_abs, dr_softcore_B,
-                                             pme_beta);
-                            frc_abs = frc_abs - frc_cf_abs;
-                        }
-                        VECTOR frc_lin = frc_abs * dr;
-                        frc_record = frc_record + frc_lin;
-                        frc_enhancing_record =
-                            frc_enhancing_record + factor * frc_lin;
-                        if (atom_j < local_atom_numbers)
-                        {
-                            atomicAdd(frc + atom_j, -frc_lin);
-                            atomicAdd(frc_enhancing + atom_j,
-                                      -factor * frc_lin);
-                        }
-                        if (need_virial)
-                        {
-                            LTMatrix3 virial0 =
-                                Get_Virial_From_Force_Dis(frc_lin, dr);
-                            virial_record = virial_record + ij_factor * virial0;
-                            virial_enhancing =
-                                virial_enhancing + ij_factor * factor * virial0;
-                        }
-                    }
-                    if (need_coulomb && need_energy)
-                    {
-                        float ene =
-                            lambda_ * Get_Direct_Coulomb_Energy(
-                                          r1, r2, dr_softcore_A, pme_beta) +
-                            lambda * Get_Direct_Coulomb_Energy(
-                                         r1, r2, dr_softcore_B, pme_beta);
-                        energy_coulomb += ij_factor * ene;
-                        energy_enhancing += ij_factor * factor * ene;
-                    }
-                    if (need_energy)
-                    {
-                        float ene =
-                            lambda_ *
-                                Get_LJ_Energy(r1, r2, dr_softcore_A, AA, AB) +
-                            lambda *
-                                Get_LJ_Energy(r1, r2, dr_softcore_B, BA, BB);
-                        energy_total += ij_factor * ene;
-                        energy_enhancing += ij_factor * factor * ene;
-                    }
-                    if (need_du_dlambda)
-                    {
-                        du_dlambda_lj +=
-                            Get_LJ_Energy(r1, r2, dr_softcore_B, BA, BB) -
-                            Get_LJ_Energy(r1, r2, dr_softcore_A, AA, AB);
-                        du_dlambda_lj +=
-                            Get_Soft_Core_dU_dlambda(
-                                Get_LJ_Force(r1, r2, dr_softcore_A, AA, AB),
-                                sigma_A, dr_softcore_A, alpha, p, lambda) -
-                            Get_Soft_Core_dU_dlambda(
-                                Get_LJ_Force(r1, r2, dr_softcore_B, BA, BB),
-                                sigma_B, dr_softcore_B, alpha, p, lambda_);
-                        if (need_coulomb)
-                        {
-                            du_dlambda_direct +=
-                                Get_Direct_Coulomb_Energy(r1, r2, dr_softcore_B,
-                                                          pme_beta) -
-                                Get_Direct_Coulomb_Energy(r1, r2, dr_softcore_A,
-                                                          pme_beta);
-                            du_dlambda_direct +=
-                                Get_Soft_Core_dU_dlambda(
-                                    Get_Direct_Coulomb_Force(
-                                        r1, r2, dr_softcore_B, pme_beta),
-                                    sigma_B, dr_softcore_B, alpha, p, lambda_) -
-                                Get_Soft_Core_dU_dlambda(
-                                    Get_Direct_Coulomb_Force(
-                                        r1, r2, dr_softcore_A, pme_beta),
-                                    sigma_A, dr_softcore_A, alpha, p, lambda);
-                            du_dlambda_direct +=
-                                lambda * Get_Direct_Coulomb_dU_dlambda(
-                                             r1, r2, dr_softcore_B, pme_beta) +
-                                lambda_ * Get_Direct_Coulomb_dU_dlambda(
-                                              r1, r2, dr_softcore_A, pme_beta);
-                        }
-                    }
-                }
-            }
-        }
-        if (need_force)
-        {
-            Warp_Sum_To(frc + atom_i, frc_record, warpSize);
-            Warp_Sum_To(frc_enhancing + atom_i, frc_enhancing_record, warpSize);
-        }
-        if (need_coulomb && need_energy)
-        {
-            Warp_Sum_To(atom_direct_cf_energy + atom_i, energy_coulomb,
-                        warpSize);
-        }
-        if (need_energy)
-        {
-            Warp_Sum_To(atom_energy + atom_i, energy_total, warpSize);
-#ifdef USE_GPU
-            if (threadIdx.x == 0)
-#endif
-                atomicAdd(atom_ene_LJ + atom_i, energy_total);
-            Warp_Sum_To(atom_energy_enhancing + atom_i, energy_enhancing,
-                        warpSize);
-        }
-        if (need_virial)
-        {
-            Warp_Sum_To(atom_virial + atom_i, virial_record, warpSize);
-            Warp_Sum_To(atom_virial_enhancing + atom_i, virial_enhancing,
-                        warpSize);
-        }
-        if (need_du_dlambda)
-        {
-            Warp_Sum_To(atom_du_dlambda_lj, du_dlambda_lj, warpSize);
-            if (need_coulomb)
-            {
-                Warp_Sum_To(atom_du_dlambda_direct, du_dlambda_direct,
-                            warpSize);
-            }
-        }
-    }
-}
 
 static __device__ float log_add_log(float a, float b)
 {
@@ -2267,83 +2079,14 @@ void SITS_INFORMATION::Update_And_Enhance(const int step,
                          pw_select.select_virial_tensor[0], h_factor - 1);
 }
 
-void SITS_INFORMATION::SITS_LJ_Direct_CF_Force_With_Atom_Energy_And_Virial(
-    const int atom_numbers, const int local_atom_numbers,
-    const int solvent_numbers, const int ghost_numbers, const VECTOR* crd,
-    const float* charge, LENNARD_JONES_INFORMATION* lj_info, VECTOR* md_frc,
-    const LTMatrix3 cell, const LTMatrix3 rcell, const ATOM_GROUP* nl,
-    const float cutoff, const float pme_beta, const int need_potential,
-    float* atom_energy, const int need_pressure, LTMatrix3* atom_virial,
-    float* coulomb_atom_ene)
-{
-    if (is_initialized && lj_info->is_initialized)
-    {
-        Launch_Device_Kernel(
-            Copy_Crd_And_Charge_To_New_Crd,
-            (this->atom_numbers + CONTROLLER::device_max_thread - 1) /
-                CONTROLLER::device_max_thread,
-            CONTROLLER::device_max_thread, 0, NULL,
-            local_atom_numbers + ghost_numbers, crd,
-            lj_info->crd_with_LJ_parameters_local, charge);
-
-        if (need_potential)
-        {
-            deviceMemset(coulomb_atom_ene, 0,
-                         sizeof(float) * (local_atom_numbers + ghost_numbers));
-            deviceMemset(lj_info->d_LJ_energy_atom, 0,
-                         sizeof(float) * (local_atom_numbers + ghost_numbers));
-            deviceMemset(classic_sits.d_bias, 0, sizeof(float));
-        }
-        if (!local_atom_numbers) return;
-
-        auto f = Selective_Lennard_Jones_And_Direct_Coulomb_Device<true, false,
-                                                                   false, true>;
-        dim3 blockSize = {
-            CONTROLLER::device_warp,
-            CONTROLLER::device_max_thread / CONTROLLER::device_warp};
-        dim3 gridSize = (local_atom_numbers + blockSize.y - 1) / blockSize.y;
-
-        if (need_potential && !need_pressure)
-        {
-            f = Selective_Lennard_Jones_And_Direct_Coulomb_Device<true, true,
-                                                                  false, true>;
-        }
-        else if (need_potential && need_pressure)
-        {
-            f = Selective_Lennard_Jones_And_Direct_Coulomb_Device<true, true,
-                                                                  true, true>;
-        }
-        else if (!need_potential && need_pressure)
-        {
-            f = Selective_Lennard_Jones_And_Direct_Coulomb_Device<true, false,
-                                                                  true, true>;
-        }
-        else
-        {
-            f = Selective_Lennard_Jones_And_Direct_Coulomb_Device<true, false,
-                                                                  false, true>;
-        }
-
-        Launch_Device_Kernel(
-            f, gridSize, blockSize, 0, NULL, local_atom_numbers,
-            solvent_numbers, nl, lj_info->d_LJ_energy_atom,
-            lj_info->crd_with_LJ_parameters_local, cell, rcell, lj_info->d_LJ_A,
-            lj_info->d_LJ_B, atom_sys_mark_local, cutoff, md_frc,
-            pw_select.select_force[0], pme_beta, atom_energy,
-            pw_select.select_atom_energy[0], atom_virial,
-            pw_select.select_atom_virial_tensor[0], coulomb_atom_ene,
-            pwwp_enhance_factor);
-    }
-}
-
 bool SITS_INFORMATION::SITS_LJ_Direct_CF_Force_Clustered(
     const int atom_numbers, const int local_atom_numbers,
-    const int solvent_numbers, const int ghost_numbers, const VECTOR* crd,
-    const float* charge, LENNARD_JONES_INFORMATION* lj_info, VECTOR* md_frc,
+    const int ghost_numbers, const VECTOR* crd, const float* charge,
+    LENNARD_JONES_INFORMATION* lj_info, VECTOR* md_frc,
     const LTMatrix3 cell, const LTMatrix3 rcell, const float cutoff,
     const float pme_beta, const int need_potential, float* atom_energy,
-    const int need_pressure, LTMatrix3* atom_virial,
-    float* coulomb_atom_ene, const char** failure_reason)
+    const int need_pressure, LTMatrix3* atom_virial, float* coulomb_atom_ene,
+    const char** failure_reason)
 {
     if (failure_reason != NULL)
     {
@@ -2471,11 +2214,6 @@ bool SITS_INFORMATION::SITS_LJ_Direct_CF_Force_Clustered(
     {
         return true;
     }
-    const int selective_atom_end =
-        local_atom_numbers > solvent_numbers
-            ? local_atom_numbers - solvent_numbers
-            : 0;
-
 #ifdef USE_CPU
     if (view.sci_numbers <= 0 || view.sci == NULL ||
         view.cjpacked == NULL)
@@ -2488,10 +2226,12 @@ bool SITS_INFORMATION::SITS_LJ_Direct_CF_Force_Clustered(
         cpu_f = SITS_Clustered_Native_Direct<true, true>;
     }
     cpu_f(
-        view, selective_atom_end, cache->d_sorted_atom_ids,
+        view, view.sort_permutation,
         cache->d_sorted_xq, cache->d_sorted_lj_type,
+        NULL,
         cache->layout.d_atom_local, atom_sys_mark_local, cell, rcell,
-        lj_info->d_LJ_A, lj_info->d_LJ_B, cutoff, md_frc,
+        lj_info->d_LJ_A, lj_info->d_LJ_B, NULL, NULL, NULL, NULL,
+        0.0f, 0.0f, 0.0f, 0.0f, 0.0f, cutoff, md_frc,
         pw_select.select_force[0], pme_beta, atom_energy,
         pw_select.select_atom_energy[0], atom_virial,
         pw_select.select_atom_virial_tensor[0], coulomb_atom_ene,
@@ -2505,7 +2245,7 @@ bool SITS_INFORMATION::SITS_LJ_Direct_CF_Force_Clustered(
         return true;
     }
     if (!SITS_Ensure_Sparse_Gmxpacked_View(
-            this, cache, view, selective_atom_end))
+            this, cache, view, atom_sys_mark_local))
     {
         if (failure_reason != NULL)
         {
@@ -2542,15 +2282,17 @@ bool SITS_INFORMATION::SITS_LJ_Direct_CF_Force_Clustered(
     Launch_Device_Kernel(
         device_f, grid_size, block_size, 0, NULL,
         clustered_sparse_sci_numbers, packed_partitions,
-        view.cluster_numbers, local_atom_numbers, selective_atom_end,
+        view.cluster_numbers, local_atom_numbers,
         view.cluster_offsets, view.cluster_valid_masks,
         view.cluster_local_masks,
         view.super_cluster_offsets, d_clustered_sparse_sci,
         d_clustered_sparse_cjpacked, view.gmxpacked_exclusions,
-        d_clustered_sparse_pair_shift_bits, cache->d_sorted_atom_ids,
+        d_clustered_sparse_pair_shift_bits, view.sort_permutation,
         cache->d_sorted_xq, cache->d_sorted_lj_type,
+        NULL,
         cache->layout.d_atom_local, atom_sys_mark_local, cell,
-        lj_info->d_LJ_AB_packed, cutoff, md_frc,
+        lj_info->d_LJ_AB_packed, NULL, NULL, NULL, NULL,
+        0.0f, 0.0f, 0.0f, 0.0f, 0.0f, cutoff, md_frc,
         pw_select.select_force[0], pme_beta, atom_energy,
         pw_select.select_atom_energy[0], atom_virial,
         pw_select.select_atom_virial_tensor[0], coulomb_atom_ene,
@@ -2560,75 +2302,214 @@ bool SITS_INFORMATION::SITS_LJ_Direct_CF_Force_Clustered(
     return true;
 }
 
-void SITS_INFORMATION::
-    SITS_LJ_Soft_Core_Direct_CF_Force_With_Atom_Energy_And_Virial(
-        const int atom_numbers, const int local_atom_numbers,
-        const int solvent_numbers, const int ghost_numbers, const VECTOR* crd,
-        const float* charge, LJ_SOFT_CORE* lj_info, VECTOR* md_frc,
-        const LTMatrix3 cell, const LTMatrix3 rcell, const ATOM_GROUP* nl,
-        const float cutoff, const float pme_beta, const int need_potential,
-        float* atom_energy, const int need_pressure, LTMatrix3* atom_virial,
-        float* coulomb_atom_ene)
+bool SITS_INFORMATION::SITS_LJ_Soft_Core_Direct_CF_Force_Clustered(
+    const int atom_numbers, const int local_atom_numbers,
+    const int ghost_numbers, LJ_SOFT_CORE* lj_info, VECTOR* md_frc,
+    const LTMatrix3 cell, const LTMatrix3 rcell, const float cutoff,
+    const float pme_beta, const int need_potential, float* atom_energy,
+    const int need_pressure, LTMatrix3* atom_virial,
+    float* coulomb_atom_ene, const char** failure_reason)
 {
-    if (is_initialized && lj_info->is_initialized)
+    if (failure_reason != NULL)
     {
-        Launch_Device_Kernel(
-            Copy_Crd_And_Charge_To_New_Crd,
-            (this->atom_numbers + CONTROLLER::device_max_thread - 1) /
-                CONTROLLER::device_max_thread,
-            CONTROLLER::device_max_thread, 0, NULL,
-            local_atom_numbers + ghost_numbers, crd,
-            lj_info->crd_with_LJ_parameters_local, charge);
-
-        if (need_potential)
-        {
-            deviceMemset(coulomb_atom_ene, 0,
-                         sizeof(float) * (local_atom_numbers + ghost_numbers));
-            deviceMemset(lj_info->d_LJ_energy_atom, 0,
-                         sizeof(float) * (local_atom_numbers + ghost_numbers));
-            deviceMemset(classic_sits.d_bias, 0, sizeof(float));
-        }
-        if (!local_atom_numbers) return;
-
-        auto f = Selective_Lennard_Jones_And_Direct_Coulomb_Soft_Core_Device<
-            true, false, false, true, false>;
-        dim3 blockSize = {
-            CONTROLLER::device_warp,
-            CONTROLLER::device_max_thread / CONTROLLER::device_warp};
-        dim3 gridSize = (local_atom_numbers + blockSize.y - 1) / blockSize.y;
-
-        if (need_potential && !need_pressure)
-        {
-            f = Selective_Lennard_Jones_And_Direct_Coulomb_Soft_Core_Device<
-                true, true, false, true, false>;
-        }
-        else if (need_potential && need_pressure)
-        {
-            f = Selective_Lennard_Jones_And_Direct_Coulomb_Soft_Core_Device<
-                true, true, true, true, false>;
-        }
-        else if (!need_potential && need_pressure)
-        {
-            f = Selective_Lennard_Jones_And_Direct_Coulomb_Soft_Core_Device<
-                true, false, true, true, false>;
-        }
-        else
-        {
-            f = Selective_Lennard_Jones_And_Direct_Coulomb_Soft_Core_Device<
-                true, false, false, true, false>;
-        }
-        Launch_Device_Kernel(
-            f, gridSize, blockSize, 0, NULL, local_atom_numbers,
-            solvent_numbers, nl, lj_info->d_LJ_energy_atom,
-            lj_info->crd_with_LJ_parameters_local, cell, rcell,
-            atom_sys_mark_local, lj_info->d_LJ_AA, lj_info->d_LJ_AB,
-            lj_info->d_LJ_BA, lj_info->d_LJ_BB, cutoff, md_frc,
-            pw_select.select_force[0], pme_beta, atom_energy,
-            pw_select.select_atom_energy[0], atom_virial,
-            pw_select.select_atom_virial_tensor[0], coulomb_atom_ene, NULL,
-            NULL, NULL, lj_info->lambda, lj_info->alpha, lj_info->p,
-            lj_info->sigma_6, lj_info->sigma_6_min, pwwp_enhance_factor);
+        *failure_reason = NULL;
     }
+    if (!is_initialized || !selectively_applied || lj_info == NULL ||
+        !lj_info->is_initialized)
+    {
+        if (failure_reason != NULL)
+        {
+            *failure_reason =
+                "clustered SITS requires active selective soft-LJ";
+        }
+        return false;
+    }
+    LJ_CLUSTERED_DIRECT_CACHE* cache = lj_info->clustered_direct_cache;
+    if (cache == NULL || !cache->Use_Clustered_Direct())
+    {
+        if (failure_reason != NULL)
+        {
+            *failure_reason =
+                "clustered SITS requires the soft-LJ clustered cache";
+        }
+        return false;
+    }
+    if (cache->d_sorted_soft_crd == NULL ||
+        cache->layout.d_atom_local == NULL || atom_sys_mark_local == NULL ||
+        lj_info->d_LJ_AA == NULL || lj_info->d_LJ_AB == NULL ||
+        lj_info->d_LJ_BA == NULL || lj_info->d_LJ_BB == NULL)
+    {
+        if (failure_reason != NULL)
+        {
+            *failure_reason =
+                "clustered SITS soft-LJ operator fields are unavailable";
+        }
+        return false;
+    }
+    if (!cache->Coordinate_Gather_Ready_For_Current_Step())
+    {
+        if (failure_reason != NULL)
+        {
+            *failure_reason =
+                "clustered SITS soft-LJ coordinate gather is stale";
+        }
+        return false;
+    }
+
+    CLUSTERED_SPATIAL_VIEW view = {};
+    const char* view_failure_reason = NULL;
+    if (!Make_Clustered_Spatial_View_From_LJ_Cache(
+            cache, &view, &view_failure_reason))
+    {
+        if (failure_reason != NULL)
+        {
+            *failure_reason =
+                view_failure_reason != NULL
+                    ? view_failure_reason
+                    : "clustered SITS soft-LJ spatial view is unavailable";
+        }
+        return false;
+    }
+    CLUSTERED_SPATIAL_VIEW_REQUIREMENTS requirements;
+    requirements.local_atom_numbers = local_atom_numbers;
+    requirements.ghost_numbers = ghost_numbers;
+    requirements.cutoff = cutoff;
+    requirements.provider_incarnation =
+        cache->layout.provider_incarnation;
+    requirements.lease_epoch =
+        cache->layout.spatial_view_lease_epoch;
+    requirements.native_payload_generation =
+        cache->layout.native_payload_generation;
+    requirements.gmxpacked_payload_generation =
+        cache->layout.gmxpacked_compact_payload_generation;
+    requirements.geometry_generation =
+        cache->layout.geometry_generation;
+    requirements.require_all_local_atoms = true;
+#ifdef USE_CPU
+    requirements.require_backend = true;
+    requirements.backend = CLUSTERED_SPATIAL_BACKEND::CPU;
+    requirements.require_native_payload = true;
+#else
+    requirements.require_backend = true;
+#if defined(USE_CUDA)
+    requirements.backend = CLUSTERED_SPATIAL_BACKEND::CUDA;
+#else
+    requirements.backend = CLUSTERED_SPATIAL_BACKEND::HIP;
+#endif
+    requirements.require_same_producer_stream = true;
+    requirements.consumer_stream = NULL;
+    requirements.require_gmxpacked_payload = true;
+    requirements.require_pair_shift_metadata = true;
+    requirements.require_pair_shift_rcell = true;
+    requirements.pair_shift_rcell = rcell;
+#endif
+    if (!Clustered_Validate_Spatial_View(
+            view, requirements, &view_failure_reason))
+    {
+        if (failure_reason != NULL)
+        {
+            *failure_reason =
+                view_failure_reason != NULL
+                    ? view_failure_reason
+                    : "clustered SITS soft-LJ spatial view is invalid";
+        }
+        return false;
+    }
+
+    if (need_potential)
+    {
+        deviceMemset(classic_sits.d_bias, 0, sizeof(float));
+    }
+    if (atom_numbers == 0 || local_atom_numbers == 0)
+    {
+        return true;
+    }
+#ifdef USE_CPU
+    if (view.sci_numbers <= 0 || view.sci == NULL ||
+        view.cjpacked == NULL)
+    {
+        return true;
+    }
+    auto cpu_f = SITS_Clustered_Native_Direct<false, true, true>;
+    if (need_potential || need_pressure)
+    {
+        cpu_f = SITS_Clustered_Native_Direct<true, true, true>;
+    }
+    cpu_f(
+        view, view.sort_permutation, NULL, NULL,
+        cache->d_sorted_soft_crd, cache->layout.d_atom_local,
+        atom_sys_mark_local, cell, rcell, NULL, NULL,
+        lj_info->d_LJ_AA, lj_info->d_LJ_AB, lj_info->d_LJ_BA,
+        lj_info->d_LJ_BB, lj_info->lambda, lj_info->alpha, lj_info->p,
+        lj_info->sigma_6, lj_info->sigma_6_min, cutoff, md_frc,
+        pw_select.select_force[0], pme_beta, atom_energy,
+        pw_select.select_atom_energy[0], atom_virial,
+        pw_select.select_atom_virial_tensor[0], coulomb_atom_ene,
+        lj_info->d_LJ_energy_atom, pwwp_enhance_factor,
+        need_potential != 0, need_pressure != 0);
+#else
+    if (view.gmxpacked_sci_numbers <= 0 ||
+        view.gmxpacked_sci == NULL ||
+        view.gmxpacked_cjpacked == NULL ||
+        view.gmxpacked_exclusions == NULL || view.pair_shift_bits == NULL)
+    {
+        return true;
+    }
+    if (!SITS_Ensure_Sparse_Gmxpacked_View(
+            this, cache, view, atom_sys_mark_local))
+    {
+        if (failure_reason != NULL)
+        {
+            *failure_reason =
+                "clustered SITS soft-LJ sparse gmxpacked view build failed";
+        }
+        return false;
+    }
+    if (clustered_sparse_sci_numbers <= 0 ||
+        clustered_sparse_cjpacked_numbers <= 0)
+    {
+        return true;
+    }
+    auto device_f =
+        SITS_Clustered_Gmxpacked_Direct_Device<false, true, true>;
+    if (need_potential || need_pressure)
+    {
+        device_f =
+            SITS_Clustered_Gmxpacked_Direct_Device<true, true, true>;
+    }
+    const dim3 block_size(
+        static_cast<unsigned int>(kClusteredClusterSize),
+        static_cast<unsigned int>(kClusteredClusterSize), 1u);
+    constexpr int packed_partitions = 8;
+    const dim3 grid_size =
+        (need_potential || need_pressure)
+            ? dim3(static_cast<unsigned int>(
+                       clustered_sparse_sci_numbers),
+                   static_cast<unsigned int>(packed_partitions),
+                   static_cast<unsigned int>(kClusteredJGroupSize))
+            : dim3(static_cast<unsigned int>(
+                       clustered_sparse_sci_numbers * packed_partitions),
+                   1u, 1u);
+    Launch_Device_Kernel(
+        device_f, grid_size, block_size, 0, NULL,
+        clustered_sparse_sci_numbers, packed_partitions,
+        view.cluster_numbers, local_atom_numbers,
+        view.cluster_offsets, view.cluster_valid_masks,
+        view.cluster_local_masks, view.super_cluster_offsets,
+        d_clustered_sparse_sci, d_clustered_sparse_cjpacked,
+        view.gmxpacked_exclusions, d_clustered_sparse_pair_shift_bits,
+        view.sort_permutation, NULL, NULL, cache->d_sorted_soft_crd,
+        cache->layout.d_atom_local, atom_sys_mark_local, cell, NULL,
+        lj_info->d_LJ_AA, lj_info->d_LJ_AB, lj_info->d_LJ_BA,
+        lj_info->d_LJ_BB, lj_info->lambda, lj_info->alpha, lj_info->p,
+        lj_info->sigma_6, lj_info->sigma_6_min, cutoff, md_frc,
+        pw_select.select_force[0], pme_beta, atom_energy,
+        pw_select.select_atom_energy[0], atom_virial,
+        pw_select.select_atom_virial_tensor[0], coulomb_atom_ene,
+        lj_info->d_LJ_energy_atom, pwwp_enhance_factor,
+        need_potential != 0, need_pressure != 0);
+#endif
+    return true;
 }
 
 void SITS_INFORMATION::Step_Print(CONTROLLER* controller, const float beta0)

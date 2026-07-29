@@ -27404,6 +27404,7 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
                               &sci_candidate_leaf_offset_capacity);
     bool candidate_leaf_onepass_used = false;
     bool candidate_leaf_queue2_count_used = false;
+#ifndef USE_CPU
     if (!candidate_leaf_onepass_used)
     {
         const int task_split_depth =
@@ -27754,8 +27755,25 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
             }
         }
     }
+#endif
     if (!candidate_leaf_onepass_used && !candidate_leaf_queue2_count_used)
     {
+#ifdef USE_CPU
+        Launch_Device_Kernel(
+            Count_Supercluster_Candidate_Leaves_Fixed_Shift,
+            1, 1, 0, NULL, candidate_sci_numbers,
+            candidate_sci_supercluster_ids, d_super_cluster_centers,
+            d_super_cluster_sizes, d_super_cluster_offsets,
+            d_leaf_cluster_starts, d_leaf_cluster_ends, d_leaf_all_local,
+            cell, build_cutoff, d_cluster_centers, d_cluster_extents,
+            d_cluster_valid_masks, d_cluster_local_masks,
+            rawPtr(cornerstone_state->octree.prefixes),
+            rawPtr(cornerstone_state->octree.childOffsets),
+            rawPtr(cornerstone_state->octree.parents),
+            rawPtr(cornerstone_state->octree.internalToLeaf),
+            candidate_shift_ids, central_candidate_halfshell_culling,
+            true, use_morton_sfc, d_sci_candidate_leaf_counts);
+#else
         const int candidate_leaf_groups_per_block =
             kClusteredBuilderBlockSize /
             kFixedShiftCandidateLeafSubgroupSize;
@@ -27775,6 +27793,7 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
             rawPtr(cornerstone_state->octree.internalToLeaf),
             candidate_shift_ids, central_candidate_halfshell_culling,
             use_morton_sfc, d_sci_candidate_leaf_counts);
+#endif
     }
 #ifndef USE_CPU
     Clustered_Debug_Device_Sync_If_Tracing(
@@ -27807,6 +27826,23 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
     }
     if (!candidate_leaf_onepass_used)
     {
+#ifdef USE_CPU
+        Launch_Device_Kernel(
+            Fill_Supercluster_Candidate_Leaves_Fixed_Shift,
+            1, 1, 0, NULL, candidate_sci_numbers,
+            candidate_sci_supercluster_ids, d_super_cluster_centers,
+            d_super_cluster_sizes, d_super_cluster_offsets,
+            d_leaf_cluster_starts, d_leaf_cluster_ends, d_leaf_all_local,
+            cell, build_cutoff, d_cluster_centers, d_cluster_extents,
+            d_cluster_valid_masks, d_cluster_local_masks,
+            rawPtr(cornerstone_state->octree.prefixes),
+            rawPtr(cornerstone_state->octree.childOffsets),
+            rawPtr(cornerstone_state->octree.parents),
+            rawPtr(cornerstone_state->octree.internalToLeaf),
+            candidate_shift_ids, d_sci_candidate_leaf_offsets,
+            central_candidate_halfshell_culling, true, use_morton_sfc,
+            d_sci_candidate_leaf_ids);
+#else
         const int candidate_leaf_groups_per_block =
             kClusteredBuilderBlockSize /
             kFixedShiftCandidateLeafSubgroupSize;
@@ -27827,6 +27863,7 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
             candidate_shift_ids, d_sci_candidate_leaf_offsets,
             central_candidate_halfshell_culling, use_morton_sfc,
             d_sci_candidate_leaf_ids);
+#endif
     }
 #ifndef USE_CPU
     if (!candidate_leaf_onepass_used)
@@ -31451,6 +31488,18 @@ void LJ_CLUSTERED_DIRECT_CACHE::Gather_Soft_Core(
     }
     Bind_Clustered_Working_Device(&layout.working_device);
 #endif
+    const int gather_step_count = Note_Clustered_Step_Counter(
+        md_info.sys.steps, &coordinate_gather_step,
+        &coordinate_gather_count_this_step, &coordinate_gather_count_total);
+    if (Clustered_Trace_Warp_Records_Enabled())
+    {
+        fprintf(stderr,
+                "[clustered coordinate gather] step=%d step_gathers=%d "
+                "total_gathers=%lld source=soft-core atoms=%d\n",
+                md_info.sys.steps, gather_step_count,
+                coordinate_gather_count_total, layout.total_atom_numbers);
+        fflush(stderr);
+    }
     ClusteredRecorderScope gather_scope(payload_gather_time_recorder);
     Launch_Device_Kernel(
         Refresh_Current_Cluster_Centers<VECTOR_LJ_SOFT_TYPE>,

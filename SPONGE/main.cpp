@@ -1644,7 +1644,14 @@ void Main_Initial(int argc, char* argv[])
         if (selective_interaction.Has_SITS_Direct_LJ_Coulomb() &&
             !selective_interaction.Has_REST2_Direct_LJ_Coulomb())
         {
-            lj.Enable_Clustered_Direct();
+            if (lj_soft.is_initialized)
+            {
+                lj_soft.Enable_Clustered_Direct();
+            }
+            else
+            {
+                lj.Enable_Clustered_Direct();
+            }
         }
     }
     else
@@ -1858,34 +1865,64 @@ void Main_Calculate_Force()
         {
             if (sits_clustered_direct)
             {
+                const char* failure_reason = NULL;
                 if (lj_soft.is_initialized)
                 {
-                    throw std::runtime_error(
-                        "clustered-native SITS soft-LJ is not yet available");
+                    lj_soft
+                        .LJ_Soft_Core_PME_Direct_Force_With_Atom_Energy_And_Virial(
+                            md_info.atom_numbers, dd.atom_numbers, 0,
+                            dd.ghost_numbers, dd.crd, dd.d_charge, dd.frc,
+                            md_info.pbc.cell, md_info.pbc.rcell,
+                            neighbor_list.d_nl, pm.beta,
+                            md_info.need_potential, dd.d_energy,
+                            md_info.need_pressure, dd.d_virial,
+                            pm.d_direct_atom_energy);
+                    if (!selective_interaction
+                             .LJ_Soft_Core_Direct_CF_Force_Clustered(
+                                 md_info.atom_numbers, dd.atom_numbers,
+                                 dd.ghost_numbers, &lj_soft, dd.frc,
+                                 md_info.pbc.cell, md_info.pbc.rcell,
+                                 md_info.nb.cutoff, pm.beta,
+                                 md_info.need_potential, dd.d_energy,
+                                 md_info.need_pressure, dd.d_virial,
+                                 pm.d_direct_atom_energy,
+                                 &failure_reason))
+                    {
+                        throw std::runtime_error(
+                            std::string(
+                                "clustered-native SITS soft-LJ dispatch "
+                                "rejected the clustered payload: ") +
+                            (failure_reason == NULL
+                                 ? "unknown SITS soft-LJ failure"
+                                 : failure_reason));
+                    }
                 }
-                lj.LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
-                    md_info.atom_numbers, dd.atom_numbers, 0,
-                    dd.ghost_numbers, dd.crd, dd.d_charge, dd.frc,
-                    md_info.pbc.cell, md_info.pbc.rcell,
-                    neighbor_list.d_nl, pm.beta, md_info.need_potential,
-                    dd.d_energy, md_info.need_pressure, dd.d_virial,
-                    pm.d_direct_atom_energy);
-                const char* failure_reason = NULL;
-                if (!selective_interaction.LJ_Direct_CF_Force_Clustered(
-                        md_info.atom_numbers, dd.atom_numbers,
-                        solvent_lj.local_solvent_numbers, dd.ghost_numbers,
-                        dd.crd, dd.d_charge, &lj, dd.frc,
-                        md_info.pbc.cell, md_info.pbc.rcell,
-                        md_info.nb.cutoff, pm.beta, md_info.need_potential,
-                        dd.d_energy, md_info.need_pressure, dd.d_virial,
-                        pm.d_direct_atom_energy, &failure_reason))
+                else
                 {
-                    throw std::runtime_error(
-                        std::string(
-                            "clustered-native SITS dispatch rejected the "
-                            "clustered payload: ") +
-                        (failure_reason == NULL ? "unknown SITS failure"
-                                                : failure_reason));
+                    lj.LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
+                        md_info.atom_numbers, dd.atom_numbers, 0,
+                        dd.ghost_numbers, dd.crd, dd.d_charge, dd.frc,
+                        md_info.pbc.cell, md_info.pbc.rcell,
+                        neighbor_list.d_nl, pm.beta,
+                        md_info.need_potential, dd.d_energy,
+                        md_info.need_pressure, dd.d_virial,
+                        pm.d_direct_atom_energy);
+                    if (!selective_interaction.LJ_Direct_CF_Force_Clustered(
+                            md_info.atom_numbers, dd.atom_numbers,
+                            dd.ghost_numbers, dd.crd, dd.d_charge, &lj, dd.frc,
+                            md_info.pbc.cell, md_info.pbc.rcell,
+                            md_info.nb.cutoff, pm.beta, md_info.need_potential,
+                            dd.d_energy, md_info.need_pressure, dd.d_virial,
+                            pm.d_direct_atom_energy, &failure_reason))
+                    {
+                        throw std::runtime_error(
+                            std::string(
+                                "clustered-native SITS dispatch rejected "
+                                "the clustered payload: ") +
+                            (failure_reason == NULL
+                                 ? "unknown SITS failure"
+                                 : failure_reason));
+                    }
                 }
             }
             else
@@ -1905,8 +1942,8 @@ void Main_Calculate_Force()
                         direct_solvent_numbers, dd.ghost_numbers, dd.crd,
                         dd.d_charge, &lj_soft, dd.frc, md_info.pbc.cell,
                         md_info.pbc.rcell, neighbor_list.d_nl,
-                        md_info.nb.cutoff, pm.beta, md_info.need_potential,
-                        dd.d_energy, md_info.need_pressure, dd.d_virial,
+                        pm.beta, md_info.need_potential, dd.d_energy,
+                        md_info.need_pressure, dd.d_virial,
                         pm.d_direct_atom_energy);
             }
         }
