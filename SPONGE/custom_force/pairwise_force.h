@@ -21,7 +21,6 @@ struct PAIRWISE_FORCE
     std::vector<std::string> parameter_name;
     std::string source_code;
     std::string ele_code;
-    JIT_Function force_function;
     JIT_Function clustered_force_function;
 #ifdef USE_GPU
     JIT_Function clustered_full_force_function;
@@ -32,7 +31,6 @@ struct PAIRWISE_FORCE
     int* cpu_pairwise_types;
     int* gpu_pairwise_types;
     int* gpu_pairwise_types_local;
-    std::vector<void*> launch_args;
     std::vector<void*> clustered_launch_args;
 
     int* clustered_sorted_atom_ids = nullptr;
@@ -53,19 +51,11 @@ struct PAIRWISE_FORCE
     void Real_Initial(CONTROLLER* controller);
     void Get_Local(int* atom_local, int local_atom_numbers, int ghost_numbers,
                    char* atom_local_label, int* atom_local_id);
-    void Compute_Force(ATOM_GROUP* nl, const VECTOR* crd, LTMatrix3 cell,
-                       LTMatrix3 rcell, float cutoff, float pme_beta,
-                       float* charge, VECTOR* frc, int need_energy,
-                       float* atom_energy, int need_virial,
-                       LTMatrix3* atom_virial, float* pme_direct_atom_energy);
     bool Compute_Force_Clustered(
         const CLUSTERED_SPATIAL_VIEW& view, const VECTOR* crd, LTMatrix3 cell,
         LTMatrix3 rcell, float cutoff, float pme_beta, float* charge,
         VECTOR* frc, int need_energy, float* atom_energy, int need_virial,
         LTMatrix3* atom_virial, float* pme_direct_atom_energy,
         const char** failure_reason = nullptr);
-    float Get_Energy(ATOM_GROUP* nl, const VECTOR* crd, LTMatrix3 cell,
-                     LTMatrix3 rcell, float cutoff, float pme_beta,
-                     float* charge, float* pme_direct_atom_energy);
     void Step_Print(CONTROLLER* controller);
 };

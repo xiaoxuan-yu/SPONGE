@@ -96,21 +96,6 @@ LTMatrix3* SELECTIVE_INTERACTION::Select_Atom_Virial_Tensor()
     return sits.pw_select.select_atom_virial_tensor[0];
 }
 
-void SELECTIVE_INTERACTION::LJ_Direct_CF_Force_With_Atom_Energy_And_Virial(
-    const int atom_numbers, const int local_atom_numbers,
-    const int solvent_numbers, const int ghost_numbers, const VECTOR* crd,
-    const float* charge, LENNARD_JONES_INFORMATION* lj_info, VECTOR* md_frc,
-    const LTMatrix3 cell, const LTMatrix3 rcell, const ATOM_GROUP* nl,
-    const float cutoff, const float pme_beta, const int need_energy,
-    float* atom_energy_ww, const int need_pressure, LTMatrix3* atom_virial_ww,
-    float* elect_atom_ene)
-{
-    rest2.LJ_Direct_CF_Force_With_Atom_Energy_And_Virial(
-        atom_numbers, local_atom_numbers, solvent_numbers, ghost_numbers, crd,
-        charge, lj_info, md_frc, cell, rcell, nl, cutoff, pme_beta, need_energy,
-        atom_energy_ww, need_pressure, atom_virial_ww, elect_atom_ene);
-}
-
 bool SELECTIVE_INTERACTION::LJ_Direct_CF_Force_Clustered(
     const int atom_numbers, const int local_atom_numbers,
     const int ghost_numbers, const VECTOR* crd, const float* charge,
@@ -120,12 +105,20 @@ bool SELECTIVE_INTERACTION::LJ_Direct_CF_Force_Clustered(
     const int need_pressure, LTMatrix3* atom_virial_ww,
     float* elect_atom_ene, const char** failure_reason)
 {
-    if (!Has_SITS_Direct_LJ_Coulomb() || rest2.is_initialized)
+    if (rest2.is_initialized)
+    {
+        return rest2.LJ_Direct_CF_Force_Clustered(
+            &sits, atom_numbers, local_atom_numbers, ghost_numbers, crd,
+            charge, lj_info, md_frc, cell, rcell, cutoff, pme_beta,
+            need_energy, atom_energy_ww, need_pressure, atom_virial_ww,
+            elect_atom_ene, failure_reason);
+    }
+    if (!Has_SITS_Direct_LJ_Coulomb())
     {
         if (failure_reason != NULL)
         {
             *failure_reason =
-                "clustered selective direct dispatch is SITS-only";
+                "clustered selective direct dispatch requires SITS or REST2";
         }
         return false;
     }
@@ -163,13 +156,13 @@ void SELECTIVE_INTERACTION::
         const int atom_numbers, const int local_atom_numbers,
         const int solvent_numbers, const int ghost_numbers, const VECTOR* crd,
         const float* charge, LJ_SOFT_CORE* lj_info, VECTOR* frc,
-        const LTMatrix3 cell, const LTMatrix3 rcell, const ATOM_GROUP* nl,
+        const LTMatrix3 cell, const LTMatrix3 rcell,
         const float pme_beta, const int need_energy, float* atom_energy_ww,
         const int need_pressure,
         LTMatrix3* atom_virial_ww, float* elect_atom_ene)
 {
     lj_info->LJ_Soft_Core_PME_Direct_Force_With_Atom_Energy_And_Virial(
         atom_numbers, local_atom_numbers, solvent_numbers, ghost_numbers, crd,
-        charge, frc, cell, rcell, nl, pme_beta, need_energy, atom_energy_ww,
+        charge, frc, cell, rcell, NULL, pme_beta, need_energy, atom_energy_ww,
         need_pressure, atom_virial_ww, elect_atom_ene);
 }

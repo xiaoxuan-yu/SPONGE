@@ -266,190 +266,8 @@ void PAIRWISE_FORCE::JIT_Compile(CONTROLLER* controller)
             "        %s will not be calculated with direct part of the "
             "electrostatic potential\n",
             this->force_name.c_str());
-    std::string full_source_code = R"JIT(#if defined(__CUDACC__)
-#ifndef USE_GPU
-#define USE_GPU
-#endif
-#ifndef USE_CUDA
-#define USE_CUDA
-#endif
-#elif defined(__HIPCC__) || defined(__HIPCC_RTC__)
-#ifndef USE_GPU
-#define USE_GPU
-#endif
-#ifndef USE_HIP
-#define USE_HIP
-#endif
-#endif
-#include "common.h"
-#ifndef USE_GPU
-__forceinline__ float atomicAdd(float* x, float y)
-{
-    float x0;
-#ifdef _WIN32
-#pragma omp critical(sponge_jit_atomic_add_float)
-#else
-#pragma omp atomic capture
-#endif
-    {
-        x0 = *x;
-        *x += y;
-    }
-    return x0;
-}
-__forceinline__ int atomicAdd(int* x, int y)
-{
-    int x0;
-#ifdef _WIN32
-#pragma omp critical(sponge_jit_atomic_add_int)
-#else
-#pragma omp atomic capture
-#endif
-    {
-        x0 = *x;
-        *x += y;
-    }
-    return x0;
-}
-#endif
-__device__ __forceinline__ int Get_Pairwise_Type(int a, int b)
-{
-    int y = (b - a);
-    int x = y >> 31;
-    y = (y ^ x) - x;
-    x = b + a;
-    int z = (x + y) >> 1;
-    x = (x - y) >> 1;
-    return (z * (z + 1) >> 1) + x;
-}
-extern "C" __global__ void pairwise_force_energy_and_virial(%PARM_ARGS%,
-    const float* charge, const float pme_beta, ATOM_GROUP* nl, const int* pairwise_types,
-    const VECTOR* crd, const LTMatrix3 cell, const LTMatrix3 rcell, const float cutoff,
-    VECTOR* frc, float* atom_energy, LTMatrix3* atom_virial, float* pme_atom_energy,
-    float* listed_item_energy, const int local_atom_numbers, int need_atom_energy,
-    int need_virial, int atom_numbers)
-{
-#ifdef USE_GPU
-    int atom_i = blockDim.y * blockIdx.x + threadIdx.y;
-    if (atom_i < atom_numbers)
-#else
-#pragma omp parallel for
-    for (int atom_i = 0; atom_i < atom_numbers; atom_i++)
-#endif
-    {
-#ifdef USE_GPU
-        if (atom_i >= local_atom_numbers) return;
-#else
-        if (atom_i >= local_atom_numbers) continue;
-#endif
-        ATOM_GROUP nl_i = nl[atom_i];
-        VECTOR r1 = crd[atom_i];
-        int pairwise_type_i = pairwise_types[atom_i];
-        VECTOR frc_record = { 0.0f, 0.0f, 0.0f };
-        LTMatrix3 virial_record = {0, 0, 0, 0, 0, 0};
-        float energy_total = 0.0f;
-        float energy_coulomb = 0.0f;
-        float charge_i = 0;
-        float charge_j = 0;
-        if (pme_atom_energy != nullptr)
-        {
-            charge_i = charge[atom_i];
-        }
-#ifdef USE_GPU
-        for (int j = threadIdx.x; j < nl_i.atom_numbers; j += blockDim.x)
-#else
-        for (int j = 0; j < nl_i.atom_numbers; j++)
-#endif
-        {
-            int atom_j = nl_i.atom_serial[j];
-            float ij_factor = atom_j < local_atom_numbers ? 1.0f : 0.5f;
-            VECTOR vector_dr = Get_Periodic_Displacement(crd[atom_j], r1, cell, rcell);
-            float float_dr_ij =
-                sqrtf(vector_dr.x * vector_dr.x + vector_dr.y * vector_dr.y +
-                      vector_dr.z * vector_dr.z);
-            if (float_dr_ij < cutoff)
-            {
-                int atom_pairwise_type = Get_Pairwise_Type(pairwise_type_i, pairwise_types[atom_j]);
-                %PARM_DEC%
-                SADfloat<1> r_ij(float_dr_ij, 0);
-                SADfloat<1> E, E_ele;
-                %SOURCE_CODE%
-                energy_total += ij_factor * E.val;
-                if (pme_atom_energy != nullptr)
-                {
-                    charge_j = charge[atom_j];
-                    %COULOMB_CODE%
-                    energy_coulomb += ij_factor * E_ele.val;
-                }
-                float frc_abs = E.dval[0] / float_dr_ij;
-                if (pme_atom_energy != nullptr)
-                {
-                    frc_abs += E_ele.dval[0] / float_dr_ij;
-                }
-                VECTOR frc_temp = frc_abs * vector_dr;
-                if (frc != nullptr)
-                {
-                    frc_record = frc_record + frc_temp;
-                    if (atom_j < local_atom_numbers)
-                        atomicAdd(frc + atom_j, -frc_temp);
-                }
-                if (need_virial && atom_virial != nullptr)
-                {
-                    virial_record = virial_record -
-                        ij_factor * Get_Virial_From_Force_Dis(frc_temp, vector_dr);
-                }
-            }
-        }
-        if (frc != nullptr)
-        {
-            Warp_Sum_To(frc + atom_i, frc_record, warpSize);
-        }
-        if (pme_atom_energy != nullptr && (need_atom_energy || need_virial))
-        {
-            float energy_coulomb_sum = energy_coulomb;
-            Warp_Sum_To(pme_atom_energy + atom_i, energy_coulomb_sum, warpSize);
-        }
-        if (listed_item_energy != nullptr)
-        {
-            float listed_energy_sum = energy_total;
-            Warp_Sum_To(listed_item_energy + atom_i, listed_energy_sum, warpSize);
-        }
-        if (need_atom_energy && atom_energy != nullptr)
-        {
-            float atom_energy_sum = energy_total;
-            Warp_Sum_To(atom_energy + atom_i, atom_energy_sum, warpSize);
-        }
-        if (need_virial && atom_virial != nullptr)
-        {
-            Warp_Sum_To(&(atom_virial + atom_i)->a11, virial_record.a11, warpSize);
-            Warp_Sum_To(&(atom_virial + atom_i)->a21, virial_record.a21, warpSize);
-            Warp_Sum_To(&(atom_virial + atom_i)->a22, virial_record.a22, warpSize);
-            Warp_Sum_To(&(atom_virial + atom_i)->a31, virial_record.a31, warpSize);
-            Warp_Sum_To(&(atom_virial + atom_i)->a32, virial_record.a32, warpSize);
-            Warp_Sum_To(&(atom_virial + atom_i)->a33, virial_record.a33, warpSize);
-        }
-    }
-}
-)JIT";
     std::string PARM_ARGS = string_join("const %0%* %1%_list", ", ",
                                         {parameter_type, parameter_name});
-    std::string PARM_DEC = string_join(
-        "                const %0% %1% = %1%_list[atom_pairwise_type];", "\n",
-        {parameter_type, parameter_name});
-    full_source_code =
-        string_format(full_source_code, {{"PARM_ARGS", PARM_ARGS},
-                                         {"PARM_DEC", PARM_DEC},
-                                         {"SOURCE_CODE", source_code},
-                                         {"COULOMB_CODE", ele_code}});
-    force_function.Compile(full_source_code);
-    if (!force_function.error_reason.empty())
-    {
-        force_function.error_reason = "Reason:\n" + force_function.error_reason;
-        controller->Throw_SPONGE_Error(spongeErrorMallocFailed,
-                                       "PAIRWISE_FORCE::JIT_Compile",
-                                       force_function.error_reason.c_str());
-    }
-
     std::string clustered_source_code = R"JIT(#if defined(__CUDACC__)
 #ifndef USE_GPU
 #define USE_GPU
@@ -482,6 +300,19 @@ __forceinline__ float atomicAdd(float* x, float y)
     return x0;
 }
 #endif
+
+__device__ __forceinline__ unsigned int
+Clustered_Get_Pair_Active_I_Mask(unsigned long long packed_shift_bits,
+                                 int split)
+{
+    const unsigned long long active_marker = 1ull << 56;
+    if ((packed_shift_bits & active_marker) == 0ull)
+    {
+        return 0xffu;
+    }
+    return static_cast<unsigned int>(
+        (packed_shift_bits >> (40 + split * 8)) & 0xffull);
+}
 
 struct CLUSTERED_PAIRWISE_SCI
 {
@@ -1468,7 +1299,6 @@ void PAIRWISE_FORCE::Real_Initial(CONTROLLER* controller)
                   sizeof(void*) * parameter_name.size());
     Malloc_Safely((void**)&gpu_parameters,
                   sizeof(void*) * parameter_name.size());
-    launch_args = std::vector<void*>(parameter_name.size() + 17);
     clustered_launch_args =
         std::vector<void*>(parameter_name.size() + 28);
     Malloc_Safely((void**)&cpu_pairwise_types, sizeof(int) * atom_numbers);
@@ -1496,7 +1326,6 @@ void PAIRWISE_FORCE::Real_Initial(CONTROLLER* controller)
             Malloc_Safely((void**)cpu_parameters + j,
                           sizeof(float) * total_type_pairwise_numbers);
         }
-        launch_args[j] = gpu_parameters + j;
         clustered_launch_args[j] = gpu_parameters + j;
     }
     for (int j = 0; j < n_ij_parameter; j++)
@@ -1560,77 +1389,6 @@ void PAIRWISE_FORCE::Real_Initial(CONTROLLER* controller)
     local_atom_numbers = atom_numbers;
     total_local_numbers = atom_numbers;
     this->is_initialized = 1;
-}
-
-void PAIRWISE_FORCE::Compute_Force(ATOM_GROUP* nl, const VECTOR* crd,
-                                   LTMatrix3 cell, LTMatrix3 rcell,
-                                   float cutoff, float pme_beta, float* charge,
-                                   VECTOR* frc, int need_energy,
-                                   float* atom_energy, int need_virial,
-                                   LTMatrix3* atom_virial,
-                                   float* pme_direct_atom_energy)
-{
-    if (!this->is_initialized || total_local_numbers <= 0) return;
-
-    float* listed_item_energy = need_energy ? this->item_energy : NULL;
-    if (listed_item_energy != NULL)
-    {
-        deviceMemset(this->item_energy, 0, sizeof(float) * local_atom_numbers);
-    }
-    float* NULLPTR = NULL;
-    LTMatrix3* NULL_VIRIAL = NULL;
-    launch_args[parameter_name.size()] = &charge;
-    launch_args[parameter_name.size() + 1] = &pme_beta;
-    launch_args[parameter_name.size() + 2] = &nl;
-    launch_args[parameter_name.size() + 3] = &gpu_pairwise_types_local;
-    launch_args[parameter_name.size() + 4] = &crd;
-    launch_args[parameter_name.size() + 5] = &cell;
-    launch_args[parameter_name.size() + 6] = &rcell;
-    launch_args[parameter_name.size() + 7] = &cutoff;
-    launch_args[parameter_name.size() + 8] = &frc;
-    launch_args[parameter_name.size() + 9] =
-        need_energy ? &atom_energy : &NULLPTR;
-    launch_args[parameter_name.size() + 10] =
-        need_virial ? &atom_virial : &NULL_VIRIAL;
-    float* pme_ptr = NULLPTR;
-    if (this->with_ele && pme_direct_atom_energy != NULL)
-    {
-        pme_ptr = pme_direct_atom_energy;
-        deviceMemset(pme_ptr, 0, sizeof(float) * local_atom_numbers);
-    }
-    launch_args[parameter_name.size() + 11] = &pme_ptr;
-    if (listed_item_energy != NULL)
-    {
-        launch_args[parameter_name.size() + 12] = &listed_item_energy;
-    }
-    else
-    {
-        launch_args[parameter_name.size() + 12] = &NULLPTR;
-    }
-    int local_atom_numbers_flag = local_atom_numbers;
-    int need_atom_energy_flag = need_energy ? 1 : 0;
-    int need_virial_flag = need_virial ? 1 : 0;
-    int total_numbers_flag = total_local_numbers;
-    launch_args[parameter_name.size() + 13] = &local_atom_numbers_flag;
-    launch_args[parameter_name.size() + 14] = &need_atom_energy_flag;
-    launch_args[parameter_name.size() + 15] = &need_virial_flag;
-    launch_args[parameter_name.size() + 16] = &total_numbers_flag;
-
-    dim3 blockSize = {CONTROLLER::device_warp,
-                      CONTROLLER::device_max_thread / CONTROLLER::device_warp};
-    dim3 gridSize = (total_local_numbers + blockSize.y - 1) / blockSize.y;
-    force_function(gridSize, blockSize, 0, 0, launch_args);
-
-    if (need_energy)
-    {
-        Sum_Of_List(item_energy, sum_energy, local_atom_numbers);
-        deviceMemcpy(&last_energy, sum_energy, sizeof(float),
-                     deviceMemcpyDeviceToHost);
-    }
-    else
-    {
-        last_energy = 0.0f;
-    }
 }
 
 bool PAIRWISE_FORCE::Compute_Force_Clustered(
@@ -1835,54 +1593,6 @@ bool PAIRWISE_FORCE::Compute_Force_Clustered(
         *failure_reason = NULL;
     }
     return true;
-}
-
-float PAIRWISE_FORCE::Get_Energy(ATOM_GROUP* nl, const VECTOR* crd,
-                                 LTMatrix3 cell, LTMatrix3 rcell, float cutoff,
-                                 float pme_beta, float* charge,
-                                 float* pme_direct_atom_energy)
-{
-    if (!this->is_initialized || total_local_numbers <= 0) return 0;
-
-    deviceMemset(this->item_energy, 0, sizeof(float) * local_atom_numbers);
-    float* NULLPTR = NULL;
-    LTMatrix3* NULL_VIRIAL = NULL;
-    launch_args[parameter_name.size()] = &charge;
-    launch_args[parameter_name.size() + 1] = &pme_beta;
-    launch_args[parameter_name.size() + 2] = &nl;
-    launch_args[parameter_name.size() + 3] = &gpu_pairwise_types_local;
-    launch_args[parameter_name.size() + 4] = &crd;
-    launch_args[parameter_name.size() + 5] = &cell;
-    launch_args[parameter_name.size() + 6] = &rcell;
-    launch_args[parameter_name.size() + 7] = &cutoff;
-    launch_args[parameter_name.size() + 8] = &NULLPTR;
-    launch_args[parameter_name.size() + 9] = &item_energy;
-    launch_args[parameter_name.size() + 10] = &NULL_VIRIAL;
-    float* pme_ptr = NULLPTR;
-    if (this->with_ele && pme_direct_atom_energy != NULL)
-    {
-        pme_ptr = pme_direct_atom_energy;
-        deviceMemset(pme_ptr, 0, sizeof(float) * local_atom_numbers);
-    }
-    launch_args[parameter_name.size() + 11] = &pme_ptr;
-    launch_args[parameter_name.size() + 12] = &item_energy;
-    int local_atom_numbers_flag = local_atom_numbers;
-    int need_atom_energy_flag = 1;
-    int need_virial_flag = 0;
-    int total_numbers_flag = total_local_numbers;
-    launch_args[parameter_name.size() + 13] = &local_atom_numbers_flag;
-    launch_args[parameter_name.size() + 14] = &need_atom_energy_flag;
-    launch_args[parameter_name.size() + 15] = &need_virial_flag;
-    launch_args[parameter_name.size() + 16] = &total_numbers_flag;
-    dim3 blockSize = {CONTROLLER::device_warp,
-                      CONTROLLER::device_max_thread / CONTROLLER::device_warp};
-    dim3 gridSize = (total_local_numbers + blockSize.y - 1) / blockSize.y;
-    force_function(gridSize, blockSize, 0, 0, launch_args);
-    Sum_Of_List(item_energy, sum_energy, local_atom_numbers);
-    float h_energy = NAN;
-    deviceMemcpy(&h_energy, sum_energy, sizeof(float),
-                 deviceMemcpyDeviceToHost);
-    return h_energy;
 }
 
 void PAIRWISE_FORCE::Get_Local(int* atom_local, int local_atom_numbers,

@@ -186,6 +186,17 @@ struct SITS_INFORMATION
         LTMatrix3* atom_virial_ww, float* elect_atom_ene,
         const char** failure_reason);
 
+    bool REST2_LJ_Direct_CF_Correction_Clustered(
+        const int atom_numbers, const int local_atom_numbers,
+        const int ghost_numbers, LENNARD_JONES_INFORMATION* lj_info,
+        VECTOR* md_frc, const LTMatrix3 cell, const LTMatrix3 rcell,
+        const float cutoff, const float pme_beta, const int need_energy,
+        float* atom_energy, const int need_pressure, LTMatrix3* atom_virial,
+        float* atom_direct_cf_energy, const int* rest2_atom_sys_mark,
+        const float rest2_lambda_m, const float rest2_sqrt_lambda_m,
+        float* rest2_unscaled_atom_energy,
+        float* rest2_effective_atom_energy, const char** failure_reason);
+
     void Step_Print(CONTROLLER* controller, const float beta0);
 
     void Check_Solvent(CONTROLLER* controller, int atom_numbers,

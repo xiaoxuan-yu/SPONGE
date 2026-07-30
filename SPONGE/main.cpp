@@ -703,7 +703,6 @@ struct Main_Legacy_Neighbor_List_Need
     bool lj_direct_legacy = false;
     bool lj_soft_direct_legacy = false;
     bool solvent_lj_legacy = false;
-    bool pairwise_legacy = false;
 };
 
 struct Main_Legacy_Neighbor_List_State
@@ -720,13 +719,6 @@ bool Main_Legacy_Neighbor_List_Trace_Enabled()
 {
     const char* enabled = std::getenv("SPONGE_LEGACY_NEIGHBOR_LIST_TRACE");
     return enabled != NULL && enabled[0] != '\0' && enabled[0] != '0';
-}
-
-bool Main_Custom_Pairwise_Clustered_Enabled()
-{
-    static const bool enabled = Main_Finite_Lifecycle_Probe_Env_Enabled(
-        "SPONGE_CUSTOM_PAIRWISE_CLUSTERED_NATIVE");
-    return enabled;
 }
 
 const char* Main_Neighbor_List_Update_Name(int update)
@@ -754,10 +746,13 @@ Main_Legacy_Neighbor_List_Need Main_Get_Legacy_Neighbor_List_Need()
     const bool sits_clustered_direct =
         selective_interaction.Has_SITS_Direct_LJ_Coulomb() &&
         !selective_interaction.Has_REST2_Direct_LJ_Coulomb();
+    const bool rest2_clustered_direct =
+        selective_interaction.Has_REST2_Direct_LJ_Coulomb();
     need.selective_direct =
-        selective_interaction.Has_Direct_LJ_Coulomb() && !sits_clustered_direct;
+        selective_interaction.Has_Direct_LJ_Coulomb() &&
+        !sits_clustered_direct && !rest2_clustered_direct;
     need.clustered_direct_active =
-        sits_clustered_direct ||
+        sits_clustered_direct || rest2_clustered_direct ||
         (!selective_interaction.Has_Direct_LJ_Coulomb() &&
          (lj.Use_Clustered_Direct() || lj_soft.Use_Clustered_Direct()));
     need.direct_solvent_numbers =
@@ -768,11 +763,8 @@ Main_Legacy_Neighbor_List_Need Main_Get_Legacy_Neighbor_List_Need()
                                  lj_soft.is_initialized &&
                                  !lj_soft.Use_Clustered_Direct();
     need.solvent_lj_legacy = need.direct_solvent_numbers > 0;
-    need.pairwise_legacy = pairwise_force.is_initialized &&
-                           !Main_Custom_Pairwise_Clustered_Enabled();
     need.needed = need.selective_direct || need.lj_direct_legacy ||
-                  need.lj_soft_direct_legacy || need.solvent_lj_legacy ||
-                  need.pairwise_legacy;
+                  need.lj_soft_direct_legacy || need.solvent_lj_legacy;
     return need;
 }
 
@@ -795,7 +787,7 @@ void Main_Trace_Legacy_Neighbor_List(const char* site, const char* action,
         "requested_update=%s effective_update=%s pbc=%d "
         "clustered_direct_active=%d direct_solvent_numbers=%d "
         "selective_direct=%d lj_direct_legacy=%d "
-        "lj_soft_direct_legacy=%d solvent_lj_legacy=%d pairwise=%d "
+        "lj_soft_direct_legacy=%d solvent_lj_legacy=%d "
         "legacy_deref=%s\n",
         site, md_info.sys.steps, action, need.needed ? 1 : 0,
         main_legacy_neighbor_list_state.valid ? 1 : 0,
@@ -807,7 +799,7 @@ void Main_Trace_Legacy_Neighbor_List(const char* site, const char* action,
         need.pbc_enabled ? 1 : 0, need.clustered_direct_active ? 1 : 0,
         need.direct_solvent_numbers, need.selective_direct ? 1 : 0,
         need.lj_direct_legacy ? 1 : 0, need.lj_soft_direct_legacy ? 1 : 0,
-        need.solvent_lj_legacy ? 1 : 0, need.pairwise_legacy ? 1 : 0,
+        need.solvent_lj_legacy ? 1 : 0,
         need.needed ? "legacy-consumer" : "none");
 }
 
@@ -822,13 +814,11 @@ void Main_Trace_Legacy_Neighbor_List_Adapter(
     controller.MPI_printf(
         "[legacy neighbor-list adapter] site=%s step=%d outcome=%s "
         "reason=%s clustered_direct_active=%d selective_direct=%d "
-        "lj_direct_legacy=%d lj_soft_direct_legacy=%d solvent_lj_legacy=%d "
-        "pairwise=%d\n",
+        "lj_direct_legacy=%d lj_soft_direct_legacy=%d solvent_lj_legacy=%d\n",
         site, md_info.sys.steps, outcome != NULL ? outcome : "unknown",
         reason != NULL ? reason : "none", need.clustered_direct_active ? 1 : 0,
         need.selective_direct ? 1 : 0, need.lj_direct_legacy ? 1 : 0,
-        need.lj_soft_direct_legacy ? 1 : 0, need.solvent_lj_legacy ? 1 : 0,
-        need.pairwise_legacy ? 1 : 0);
+        need.lj_soft_direct_legacy ? 1 : 0, need.solvent_lj_legacy ? 1 : 0);
 }
 
 bool Main_Try_Derived_Legacy_Neighbor_View(
@@ -853,7 +843,7 @@ bool Main_Try_Derived_Legacy_Neighbor_View(
 
     LJ_CLUSTERED_LEGACY_NEIGHBOR_VIEW_REQUEST request;
     request.request_half = true;
-    request.contains_non_lj_consumer = need.pairwise_legacy;
+    request.contains_non_lj_consumer = false;
     request.require_all_local_atoms = true;
     request.require_local_ghost_pairs = true;
     request.require_exclusions = true;
@@ -1607,8 +1597,7 @@ void Main_Initial(int argc, char* argv[])
                    md_info.pbc.rcell, md_info.sys.box_length, md_info.nb.cutoff,
                    md_info.no_direct_interaction_virtual_atom_numbers);
         pairwise_force.Initial(&controller);
-        if (pairwise_force.is_initialized &&
-            Main_Custom_Pairwise_Clustered_Enabled())
+        if (pairwise_force.is_initialized)
         {
             pairwise_clustered_cache = Acquire_Shared_LJ_Clustered_Direct_Cache(
                 &controller, "clustered_spatial_service", false, true);
@@ -1625,8 +1614,7 @@ void Main_Initial(int argc, char* argv[])
         }
         selective_interaction.Check_Solvent(&controller, md_info.atom_numbers,
                                             solvent_lj.solvent_numbers);
-        if (selective_interaction.Has_SITS_Direct_LJ_Coulomb() &&
-            !selective_interaction.Has_REST2_Direct_LJ_Coulomb())
+        if (selective_interaction.Has_Direct_LJ_Coulomb())
         {
             if (lj_soft.is_initialized)
             {
@@ -1900,12 +1888,15 @@ void Main_Calculate_Force()
             }
             reaxff_clustered_view_ptr = &reaxff_clustered_view;
         }
-        if (reaxff_clustered_view_ptr == NULL)
+        if (reaxff.is_initialized && reaxff_clustered_view_ptr == NULL)
         {
             throw std::runtime_error(
                 "ReaxFF requires a single-rank clustered spatial view");
         }
-        reaxff.Calculate_Force(&dd, &md_info, *reaxff_clustered_view_ptr);
+        if (reaxff.is_initialized)
+        {
+            reaxff.Calculate_Force(&dd, &md_info, *reaxff_clustered_view_ptr);
+        }
         Main_Finite_Lifecycle_Probe("after_reaxff_force");
 
         LJ_NOPBC.LJ_Force_With_Atom_Energy(
@@ -1954,8 +1945,10 @@ void Main_Calculate_Force()
         const bool sits_clustered_direct =
             selective_interaction.Has_SITS_Direct_LJ_Coulomb() &&
             !selective_interaction.Has_REST2_Direct_LJ_Coulomb();
+        const bool rest2_clustered_direct =
+            selective_interaction.Has_REST2_Direct_LJ_Coulomb();
         const bool clustered_direct_active =
-            sits_clustered_direct ||
+            sits_clustered_direct || rest2_clustered_direct ||
             (!selective_interaction.Has_Direct_LJ_Coulomb() &&
              (lj.Use_Clustered_Direct() || lj_soft.Use_Clustered_Direct()));
         const int direct_solvent_numbers =
@@ -2022,21 +2015,29 @@ void Main_Calculate_Force()
             }
             else
             {
-                selective_interaction
-                    .LJ_Direct_CF_Force_With_Atom_Energy_And_Virial(
+                const char* failure_reason = NULL;
+                if (!selective_interaction.LJ_Direct_CF_Force_Clustered(
                         md_info.atom_numbers, dd.atom_numbers,
-                        direct_solvent_numbers, dd.ghost_numbers, dd.crd,
-                        dd.d_charge, &lj, dd.frc, md_info.pbc.cell,
-                        md_info.pbc.rcell, neighbor_list.d_nl,
+                        dd.ghost_numbers, dd.crd, dd.d_charge, &lj, dd.frc,
+                        md_info.pbc.cell, md_info.pbc.rcell,
                         md_info.nb.cutoff, pm.beta, md_info.need_potential,
                         dd.d_energy, md_info.need_pressure, dd.d_virial,
-                        pm.d_direct_atom_energy);
+                        pm.d_direct_atom_energy, &failure_reason))
+                {
+                    throw std::runtime_error(
+                        std::string(
+                            "clustered-native REST2 dispatch rejected the "
+                            "clustered payload: ") +
+                        (failure_reason == NULL
+                             ? "unknown REST2 failure"
+                             : failure_reason));
+                }
                 selective_interaction
                     .LJ_Soft_Core_Direct_CF_Force_With_Atom_Energy_And_Virial(
                         md_info.atom_numbers, dd.atom_numbers,
                         direct_solvent_numbers, dd.ghost_numbers, dd.crd,
                         dd.d_charge, &lj_soft, dd.frc, md_info.pbc.cell,
-                        md_info.pbc.rcell, neighbor_list.d_nl, pm.beta,
+                        md_info.pbc.rcell, pm.beta,
                         md_info.need_potential, dd.d_energy,
                         md_info.need_pressure, dd.d_virial,
                         pm.d_direct_atom_energy);
@@ -2235,8 +2236,7 @@ void Main_Calculate_Force()
                                     md_info.pbc.rcell, dd.frc,
                                     md_info.need_potential, dd.d_energy,
                                     md_info.need_pressure, dd.d_virial);
-        if (pairwise_force.is_initialized &&
-            Main_Custom_Pairwise_Clustered_Enabled())
+        if (pairwise_force.is_initialized)
         {
             LJ_CLUSTERED_DIRECT_CACHE* clustered_cache =
                 pairwise_clustered_cache;
@@ -2289,14 +2289,6 @@ void Main_Calculate_Force()
                          ? "unknown custom-pairwise failure"
                          : clustered_failure_reason));
             }
-        }
-        else
-        {
-            pairwise_force.Compute_Force(
-                neighbor_list.d_nl, dd.crd, md_info.pbc.cell, md_info.pbc.rcell,
-                md_info.nb.cutoff, pm.beta, dd.d_charge, dd.frc,
-                md_info.need_potential, dd.d_energy, md_info.need_pressure,
-                dd.d_virial, pm.d_direct_atom_energy);
         }
         angle.Angle_Force_With_Atom_Energy_And_Virial(
             dd.crd, md_info.pbc.cell, md_info.pbc.rcell, dd.frc,
