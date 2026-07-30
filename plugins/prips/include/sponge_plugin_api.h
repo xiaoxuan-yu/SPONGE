@@ -6,7 +6,7 @@ extern "C"
 {
     enum
     {
-        SPONGE_PRIPS_API_VERSION = 2,
+        SPONGE_PRIPS_API_VERSION = 3,
     };
 
     typedef struct SPONGE_PLUGIN_API
@@ -22,10 +22,6 @@ extern "C"
         int (*get_steps)();
         void* (*get_coordinate_ptr)();
         void* (*get_force_ptr)();
-
-        int (*get_neighbor_list_max_numbers)();
-        int (*get_neighbor_list_count)(int atom_index);
-        void* (*get_neighbor_list_index_ptr)();
 
         int (*get_local_atom_numbers)();
         int (*get_local_ghost_numbers)();

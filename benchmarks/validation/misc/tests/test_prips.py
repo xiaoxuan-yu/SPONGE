@@ -52,7 +52,6 @@ def _write_prips_script(case_dir, backend):
         "    with open('prips_hook.log', 'a', encoding='utf-8') as f:\n"
         "        f.write(\n"
         "            f'after_init atom_numbers={Sponge.md_info.atom_numbers} '\n"
-        "            f'neighbor_max={Sponge.neighbor_list.max_neighbor_numbers} '\n"
         "            f'rank={Sponge.controller.MPI_rank} '\n"
         "            f'coord[0,0]={float(crd[0, 0]):.6f}\\n'\n"
         "        )\n"
@@ -161,7 +160,6 @@ def test_tip3p_prips_plugin_hooks_run(statics_path, outputs_path, mpi_np):
     )
     assert after_init_line is not None
     assert "atom_numbers=1011" in after_init_line
-    assert "neighbor_max=1200" in after_init_line
     assert "coord[0,0]=" in after_init_line
     assert len(force_lines) == 2
     assert final_force_line is not None

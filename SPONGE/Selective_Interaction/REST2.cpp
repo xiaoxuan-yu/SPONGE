@@ -216,8 +216,8 @@ bool REST2_INFORMATION::LJ_Direct_CF_Force_Clustered(
         return false;
     }
     lj_info->LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
-        atom_numbers, local_atom_numbers, 0, ghost_numbers, crd, charge,
-        md_frc, cell, rcell, NULL, pme_beta, need_energy, atom_energy_ww,
+        atom_numbers, local_atom_numbers, ghost_numbers, crd, charge, md_frc,
+        cell, rcell, pme_beta, need_energy, atom_energy_ww,
         need_pressure, atom_virial_ww, elect_atom_ene);
     return clustered_workspace->REST2_LJ_Direct_CF_Correction_Clustered(
         atom_numbers, local_atom_numbers, ghost_numbers, lj_info, md_frc,

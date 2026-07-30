@@ -11530,19 +11530,6 @@ struct ClusteredGmxpackedRecordBuilderStageTimer
     }
 };
 
-static void Invalidate_Clustered_Legacy_Neighbor_View(
-    LJ_CLUSTER_LAYOUT* layout)
-{
-    if (layout == NULL)
-    {
-        return;
-    }
-    layout->legacy_neighbor_view_ready = false;
-    layout->legacy_neighbor_view_payload_build_count = -1;
-    layout->legacy_neighbor_view_step = -1;
-    layout->legacy_neighbor_view_cutoff_skin = -1.0f;
-}
-
 #ifndef USE_CPU
 static void Clustered_Debug_Device_Sync_If_Tracing(const char* tag)
 {
@@ -24366,7 +24353,6 @@ void LJ_CLUSTER_LAYOUT::Initial(CONTROLLER* controller, const char* module_name,
     primary_payload_build_step = -1;
     primary_payload_build_count_this_step = 0;
     primary_payload_build_count_total = 0;
-    Invalidate_Clustered_Legacy_Neighbor_View(this);
     this->controller = controller;
     working_device = controller->working_device;
     rebuild_refresh_interval = 0;
@@ -24510,7 +24496,6 @@ void LJ_CLUSTER_LAYOUT::Enable_Clustered_Spatial_Service()
     rebuild_dirty = true;
     cache_ready = false;
     Invalidate_Gmxpacked_Incremental_Source_Cache_State(this);
-    Invalidate_Clustered_Legacy_Neighbor_View(this);
     if (controller != NULL)
     {
         controller->printf(
@@ -24577,7 +24562,6 @@ void LJ_CLUSTER_LAYOUT::Refresh_Metadata(int input_local_atom_numbers,
         rebuild_dirty = true;
         cache_ready = false;
         Publish_Gathered_Cluster_Geometry(this);
-        Invalidate_Clustered_Legacy_Neighbor_View(this);
     }
     Initialize_Cornerstone_State(this);
 }
@@ -24618,7 +24602,6 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
             cache_ready = false;
             Invalidate_Gmxpacked_Incremental_Source_Cache_State(this);
             stable_target_layout_anchor_ready = false;
-            Invalidate_Clustered_Legacy_Neighbor_View(this);
         }
     }
 #ifndef USE_CPU
@@ -24658,7 +24641,6 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
         runtime_aux_clustered_metadata_requested = false;
         Invalidate_Gmxpacked_Incremental_Source_Cache_State(this);
         stable_target_layout_anchor_ready = false;
-        Invalidate_Clustered_Legacy_Neighbor_View(this);
         return;
     }
 
@@ -26952,7 +26934,6 @@ void LJ_CLUSTER_LAYOUT::Build(const VECTOR* crd, LTMatrix3 cell,
     Reset_Build_Buffers(this);
     Reset_Gmxpacked_Payload(this);
     Clear_Native_Payload_Publication(this);
-    Invalidate_Clustered_Legacy_Neighbor_View(this);
     grouped_sci_ready = false;
     local_cluster_numbers = 0;
     candidate_sci_numbers = 0;
@@ -31212,108 +31193,10 @@ void LJ_CLUSTER_LAYOUT::Clear()
     primary_payload_build_step = -1;
     primary_payload_build_count_this_step = 0;
     primary_payload_build_count_total = 0;
-    Invalidate_Clustered_Legacy_Neighbor_View(this);
     d_atom_local = NULL;
     d_excluded_list_start = NULL;
     d_excluded_list = NULL;
     d_excluded_numbers = NULL;
-}
-
-bool Ensure_Legacy_Neighbor_View_From_Clustered_Payload(
-    LJ_CLUSTERED_DIRECT_CACHE* cache,
-    const LJ_CLUSTERED_LEGACY_NEIGHBOR_VIEW_REQUEST& request,
-    ATOM_GROUP* d_legacy_nl, int max_neighbor_numbers,
-    int* d_neighbor_list_overflow, const char** fallback_reason)
-{
-    const char* reason = "clustered legacy adapter not evaluated";
-    auto fail = [&](const char* why) -> bool
-    {
-        reason = why;
-        if (cache != NULL)
-        {
-            Invalidate_Clustered_Legacy_Neighbor_View(&cache->layout);
-        }
-        if (fallback_reason != NULL)
-        {
-            *fallback_reason = reason;
-        }
-        return false;
-    };
-
-    if (cache == NULL || !cache->initialized)
-    {
-        return fail("clustered payload cache is absent or uninitialized");
-    }
-    LJ_CLUSTER_LAYOUT& layout = cache->layout;
-    Invalidate_Clustered_Legacy_Neighbor_View(&layout);
-    if (!layout.Use_Clustered_Direct())
-    {
-        return fail("clustered direct payload is disabled");
-    }
-    if (!request.request_half)
-    {
-        return fail("requested legacy view does not require a half-list");
-    }
-    if (request.contains_non_lj_consumer)
-    {
-        return fail("non-LJ half-list consumers are not proven against clustered ownership");
-    }
-    if (d_legacy_nl == NULL || max_neighbor_numbers <= 0 ||
-        d_neighbor_list_overflow == NULL)
-    {
-        return fail("legacy ATOM_GROUP output storage is unavailable");
-    }
-    if (!layout.cache_ready || layout.gmxpacked_sci_numbers <= 0 ||
-        layout.gmxpacked_cjpacked_numbers <= 0 ||
-        layout.d_gmxpacked_sci == NULL || layout.d_gmxpacked_cjpacked == NULL ||
-        layout.d_cluster_offsets == NULL || layout.d_cluster_valid_masks == NULL ||
-        layout.d_cluster_local_masks == NULL || layout.d_sort_permutation == NULL ||
-        layout.d_super_cluster_offsets == NULL)
-    {
-        return fail("compact clustered payload is absent or not ready");
-    }
-    if (request.local_atom_numbers != layout.local_atom_numbers ||
-        request.ghost_numbers != layout.ghost_numbers)
-    {
-        return fail("legacy local/ghost domain differs from clustered payload domain");
-    }
-    if (request.require_all_local_atoms &&
-        layout.direct_local_atom_numbers != request.local_atom_numbers)
-    {
-        return fail("clustered payload covers only the direct local subset");
-    }
-    if (request.require_local_ghost_pairs && layout.total_atom_numbers !=
-                                             request.local_atom_numbers +
-                                                 request.ghost_numbers)
-    {
-        return fail("clustered payload total does not cover local plus ghost atoms");
-    }
-    if (request.require_exclusions &&
-        (layout.d_atom_local != request.d_atom_local ||
-         layout.d_excluded_list_start != request.d_excluded_list_start ||
-         layout.d_excluded_list != request.d_excluded_list ||
-         layout.d_excluded_numbers != request.d_excluded_numbers))
-    {
-        return fail("clustered exclusion metadata does not match requested legacy view");
-    }
-
-    const float requested_cutoff_skin = request.cutoff + request.skin;
-    const float payload_cutoff_skin =
-        layout.cached_cutoff +
-        (Clustered_Outer_Inner_Prune_Enabled(&layout) ? layout.rebuild_skin
-                                                      : 0.0f);
-    if (requested_cutoff_skin < 0.0f ||
-        payload_cutoff_skin + 1.0e-4f < requested_cutoff_skin)
-    {
-        return fail("clustered cutoff/skin is not a semantic superset");
-    }
-
-    layout.legacy_neighbor_view_payload_build_count =
-        layout.primary_payload_build_count_total;
-    layout.legacy_neighbor_view_step = md_info.sys.steps;
-    layout.legacy_neighbor_view_cutoff_skin = requested_cutoff_skin;
-    return fail(
-        "half-list pair-set proof is missing; grid legacy build remains required");
 }
 
 void LJ_CLUSTERED_DIRECT_CACHE::Initial(CONTROLLER* controller,

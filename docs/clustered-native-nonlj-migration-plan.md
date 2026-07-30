@@ -4423,3 +4423,51 @@ only when:
 At every phase, a performance or correctness failure stops further migration.
 Fallback may remain temporarily for comparison, but it must not silently mask
 a failed clustered-native implementation.
+
+#### Phase 5 provider-removal checkpoint - 2026-07-30
+
+The periodic legacy neighbor-list provider is now removed. Regular LJ and
+soft-LJ require the shared clustered spatial service; their legacy
+`ATOM_GROUP` kernels, the standalone solvent-LJ specialization, the
+grid-derived compatibility adapter, and the main-loop legacy
+initial/update/trace lifecycle have been deleted. The obsolete
+solvent-prefix argument has also been removed from clustered metadata refresh,
+so both LJ variants publish the complete local domain directly.
+
+PRIPS closes the external compatibility gate by an explicit ABI break:
+
+- `SPONGE_PRIPS_API_VERSION` is 3;
+- the three host neighbor capacity/count/index callbacks and the Python
+  `Sponge.neighbor_list` wrapper are removed;
+- the host loader accepts `Initial_Stable` only, so an old plugin cannot
+  silently receive a stale or derived `ATOM_GROUP`.
+
+NO_PBC remains a separate, documented direct algorithm and does not retain or
+instantiate the periodic grid provider. `ATOM_GROUP` itself remains only as
+the unrelated update-group representation used by constraints, domain
+decomposition and restraints. No SPONGE Manager-specific implementation was
+introduced.
+
+The removal deletes approximately 3,100 lines across the provider, fallback
+kernels, solvent specialization, adapter and plugin scaffolding. CPU and CUDA
+builds pass, as do the clustered spatial/oracle CTests, CPU/CUDA soft-core and
+selective-SITS validation, and the PRIPS v3 force-hook integration test.
+
+A three-cycle, 10,000-step real A/B used `HEAD` as the pre-removal baseline
+and the cleaned worktree as the candidate. All 36 cases were valid. The
+candidate's mean deltas remain within the existing 3% conjunctive gate:
+
+| system | ensemble | force delta | wall delta | speed delta |
+|---|---|---:|---:|---:|
+| DNA_COU | NVT | -0.729% | -0.245% | +0.255% |
+| DNA_COU | NPT | +1.227% | +1.659% | -1.637% |
+| wat160k | NVT | +1.133% | +1.393% | -1.381% |
+| wat160k | NPT | +0.710% | +0.490% | -0.507% |
+| wat600k | NVT | +0.526% | +0.575% | -0.561% |
+| wat600k | NPT | +0.363% | +0.345% | -0.338% |
+
+The run was intentionally allowed under a variable Chrome graphics workload,
+so its absolute throughput is not a new peak claim. The alternating
+baseline/candidate comparison is the acceptance evidence. Raw results are in
+`.tmp/neighbor-close-perf-final-ab/matrix.tsv`; the normal 5% idle-SM
+guard was restored immediately after the run.

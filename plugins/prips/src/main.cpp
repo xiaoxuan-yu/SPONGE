@@ -244,49 +244,6 @@ static PyObject* Local_Force(PyObject* self, PyObject* args)
     return create_dltensor(frc, 2, shape, NULL, kDLFloat);
 }
 
-// Neighbor List
-static PyObject* Neighbor_List_Index(PyObject* self, PyObject* args)
-{
-    if (sponge_api == NULL || sponge_api->get_neighbor_list_index_ptr == NULL ||
-        sponge_api->get_atom_numbers == NULL ||
-        sponge_api->get_neighbor_list_max_numbers == NULL)
-    {
-        return Py_BuildValue("");
-    }
-    void* nl_index = sponge_api->get_neighbor_list_index_ptr();
-    if (nl_index == NULL) return Py_BuildValue("");
-    int64_t shape[2] = {sponge_api->get_atom_numbers(),
-                        sponge_api->get_neighbor_list_max_numbers()};
-    return create_dltensor(nl_index, 2, shape, NULL, kDLInt);
-}
-
-static PyObject* Neighbor_List_Numbers(PyObject* self, PyObject* args)
-{
-    if (sponge_api == NULL || sponge_api->get_neighbor_list_count == NULL ||
-        sponge_api->get_atom_numbers == NULL)
-    {
-        return Py_BuildValue("");
-    }
-    const int atom_numbers = sponge_api->get_atom_numbers();
-    PyObject* numbers = PyList_New(atom_numbers);
-    for (int i = 0; i < atom_numbers; i++)
-    {
-        PyList_SET_ITEM(
-            numbers, i,
-            PyLong_FromLong(sponge_api->get_neighbor_list_count(i)));
-    }
-    return numbers;
-}
-
-static PyObject* Neighbor_List_Max_Numbers(PyObject* self, PyObject* args)
-{
-    if (sponge_api == NULL || sponge_api->get_neighbor_list_max_numbers == NULL)
-    {
-        return Py_BuildValue("");
-    }
-    return Py_BuildValue("i", sponge_api->get_neighbor_list_max_numbers());
-}
-
 // Domain information
 // CONTROLLER
 static PyObject* Control_Printf(PyObject* self, PyObject* args, PyObject* kw)
@@ -323,12 +280,6 @@ static PyMethodDef SpongeMethods[] = {
     {"_atom_local_id", (PyCFunction)Atom_Local_Id, METH_VARARGS, ""},
     {"_local_crd", (PyCFunction)Local_Coordinate, METH_VARARGS, ""},
     {"_local_frc", (PyCFunction)Local_Force, METH_VARARGS, ""},
-    {"_neighbor_list_number", (PyCFunction)Neighbor_List_Numbers, METH_VARARGS,
-     ""},
-    {"_neighbor_list_index", (PyCFunction)Neighbor_List_Index, METH_VARARGS,
-     ""},
-    {"_neighbor_list_max_numbers", (PyCFunction)Neighbor_List_Max_Numbers,
-     METH_VARARGS, ""},
     {"_printf", (PyCFunction)Control_Printf, METH_VARARGS | METH_KEYWORDS, ""},
     {"_MPI_rank", (PyCFunction)Control_MPI_Rank, METH_VARARGS, ""},
     {NULL, NULL, 0, NULL}};
@@ -470,28 +421,6 @@ class MD_INFORMATION:
 Sponge.MD_INFORMATION = MD_INFORMATION
 Sponge.md_info = MD_INFORMATION()
 Sponge.md_info.sys = MD_INFORMATION.system_information()
-
-class NEIGHBOR_LIST:
-    def __init__(self):
-        self._number = Sponge._neighbor_list_number()
-        self._max_neighbor_numbers = Sponge._neighbor_list_max_numbers()
-        index_capsule = Sponge._neighbor_list_index()
-        self._index = None if index_capsule is None else Sponge.backend(Sponge.SpongeDLPackTensor(index_capsule))
-
-    @property
-    def index(self):
-        return self._index
-
-    @property
-    def number(self):
-        return self._number
-
-    @property
-    def max_neighbor_numbers(self):
-        return self._max_neighbor_numbers
-
-Sponge.NEIGHBOR_LIST = NEIGHBOR_LIST
-Sponge.neighbor_list = None
 
 class DOMAIN_INFORMATION:
     @property
@@ -683,27 +612,10 @@ else:
     controller_printf("    end initializing pyplugin\n");
 }
 
-PLUGIN_API void Initial(void* md, void* ctrl, void* nl, void* cv, void* cv_map,
-                        void* cv_instance_map)
-{
-    (void)md;
-    (void)ctrl;
-    (void)nl;
-    (void)cv;
-    (void)cv_map;
-    (void)cv_instance_map;
-    fprintf(stderr,
-            "PRIPS requires SPONGE stable plugin API support. "
-            "Rebuild SPONGE with Initial_Stable loader support.\n");
-    exit(1);
-}
-
 PLUGIN_API void After_Initial()
 {
     if (!is_initialized) return;
     PyRun_SimpleString(R"XYJ(
-if Sponge.neighbor_list is None:
-    Sponge.neighbor_list = Sponge.NEIGHBOR_LIST()
 if hasattr(sponge_pyplugin, "After_Initial"):
     sponge_pyplugin.After_Initial()
     )XYJ");

@@ -4,7 +4,6 @@ namespace
 {
 MD_INFORMATION* g_plugin_md_info = NULL;
 CONTROLLER* g_plugin_controller = NULL;
-NEIGHBOR_LIST* g_plugin_neighbor_list = NULL;
 DOMAIN_INFORMATION* g_plugin_domain_info = NULL;
 SPONGE_PLUGIN_API g_prips_api = {};
 }  // namespace
@@ -76,33 +75,6 @@ void* PluginGetForcePtr()
     return g_plugin_md_info == NULL ? NULL : g_plugin_md_info->frc;
 }
 
-int PluginGetNeighborListMaxNumbers()
-{
-    return g_plugin_neighbor_list == NULL
-               ? 0
-               : g_plugin_neighbor_list->max_neighbor_numbers;
-}
-
-int PluginGetNeighborListCount(int atom_index)
-{
-    if (g_plugin_neighbor_list == NULL ||
-        g_plugin_neighbor_list->h_nl == NULL || g_plugin_md_info == NULL ||
-        atom_index < 0 || atom_index >= g_plugin_md_info->atom_numbers)
-    {
-        return 0;
-    }
-    return g_plugin_neighbor_list->h_nl[atom_index].atom_numbers;
-}
-
-void* PluginGetNeighborListIndexPtr()
-{
-    if (g_plugin_neighbor_list == NULL || g_plugin_neighbor_list->h_nl == NULL)
-    {
-        return NULL;
-    }
-    return g_plugin_neighbor_list->h_nl->atom_serial;
-}
-
 int PluginGetLocalAtomNumbers()
 {
     return g_plugin_domain_info == NULL ? 0
@@ -167,9 +139,6 @@ const SPONGE_PLUGIN_API* BuildPripsApi()
     g_prips_api.get_steps = PluginGetSteps;
     g_prips_api.get_coordinate_ptr = PluginGetCoordinatePtr;
     g_prips_api.get_force_ptr = PluginGetForcePtr;
-    g_prips_api.get_neighbor_list_max_numbers = PluginGetNeighborListMaxNumbers;
-    g_prips_api.get_neighbor_list_count = PluginGetNeighborListCount;
-    g_prips_api.get_neighbor_list_index_ptr = PluginGetNeighborListIndexPtr;
     g_prips_api.get_local_atom_numbers = PluginGetLocalAtomNumbers;
     g_prips_api.get_local_ghost_numbers = PluginGetLocalGhostNumbers;
     g_prips_api.get_local_pp_rank = PluginGetLocalPPRank;
@@ -183,9 +152,7 @@ const SPONGE_PLUGIN_API* BuildPripsApi()
 }
 }  // namespace
 
-void SPONGE_PLUGIN::Initial(MD_INFORMATION* md_info, CONTROLLER* controller,
-                            COLLECTIVE_VARIABLE_CONTROLLER* cv_controller,
-                            NEIGHBOR_LIST* neighbor_list)
+void SPONGE_PLUGIN::Initial(MD_INFORMATION* md_info, CONTROLLER* controller)
 {
     if (!controller->Command_Exist("plugin"))
     {
@@ -196,7 +163,6 @@ void SPONGE_PLUGIN::Initial(MD_INFORMATION* md_info, CONTROLLER* controller,
     plugin_numbers = 0;
     g_plugin_md_info = md_info;
     g_plugin_controller = controller;
-    g_plugin_neighbor_list = neighbor_list;
     g_plugin_domain_info = NULL;
 
     std::string command(controller->Original_Command("plugin"));
@@ -299,9 +265,7 @@ void SPONGE_PLUGIN::Initial(MD_INFORMATION* md_info, CONTROLLER* controller,
 
         stable_initial_func = (InitialStableFunction)dlsym(
             plugin_handles[count], "Initial_Stable");
-        version_check_error = version_check_func(
-            stable_initial_func != NULL ? SPONGE_PRIPS_API_VERSION
-                                        : controller->last_modify_date);
+        version_check_error = version_check_func(SPONGE_PRIPS_API_VERSION);
         if (!version_check_error.empty())
         {
             std::string error_reason =
@@ -321,12 +285,10 @@ void SPONGE_PLUGIN::Initial(MD_INFORMATION* md_info, CONTROLLER* controller,
             plugin_numbers, plugin_name.c_str(), plugin_version.c_str(),
             plugin_path);
 
-        InitialFunction func =
-            (InitialFunction)dlsym(plugin_handles[count], "Initial");
-        if (func == NULL && stable_initial_func == NULL)
+        if (stable_initial_func == NULL)
         {
             std::string error_reason =
-                "Reason:\n\tFind the initial function of the plugin from ";
+                "Reason:\n\tFind the stable initial function of the plugin from ";
             error_reason += plugin_path;
             error_reason += " (" + plugin_name + " version: " + plugin_version +
                             ") failed\n";
@@ -385,15 +347,7 @@ void SPONGE_PLUGIN::Initial(MD_INFORMATION* md_info, CONTROLLER* controller,
         }
 
         controller->printf(" (%d in total)\n", funcs_loaded);
-        if (stable_initial_func != NULL)
-        {
-            stable_initial_func(BuildPripsApi());
-        }
-        else
-        {
-            func(md_info, controller, neighbor_list, cv_controller, CV_MAP,
-                 CV_INSTANCE_MAP);
-        }
+        stable_initial_func(BuildPripsApi());
 
         count += 1;
         last_pos = command.find_first_not_of(" ", pos);

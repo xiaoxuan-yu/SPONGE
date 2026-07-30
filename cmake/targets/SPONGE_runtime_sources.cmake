@@ -20,12 +20,10 @@ set(SPONGE_RUNTIME_SOURCES
     ${PROJECT_ROOT_DIR}/SPONGE/xponge/xponge.cpp
     ${PROJECT_ROOT_DIR}/SPONGE/MD_core/MD_core.cpp
     ${PROJECT_ROOT_DIR}/SPONGE/Domain_decomposition/Domain_decomposition.cpp
-    ${PROJECT_ROOT_DIR}/SPONGE/neighbor_list/neighbor_list.cpp
     ${PROJECT_ROOT_DIR}/SPONGE/neighbor_list/clustered_spatial_view.cpp
     ${PROJECT_ROOT_DIR}/SPONGE/Lennard_Jones_force/clustered_lj.cpp
     ${PROJECT_ROOT_DIR}/SPONGE/Lennard_Jones_force/Lennard_Jones_force.cpp
     ${PROJECT_ROOT_DIR}/SPONGE/Lennard_Jones_force/LJ_soft_core.cpp
-    ${PROJECT_ROOT_DIR}/SPONGE/Lennard_Jones_force/solvent_LJ.cpp
     ${PROJECT_ROOT_DIR}/SPONGE/thermostat/Middle_Langevin_MD.cpp
     ${PROJECT_ROOT_DIR}/SPONGE/thermostat/Andersen_thermostat.cpp
     ${PROJECT_ROOT_DIR}/SPONGE/thermostat/Berendsen_thermostat.cpp

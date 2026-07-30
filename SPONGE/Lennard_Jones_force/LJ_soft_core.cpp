@@ -638,302 +638,6 @@ static __global__ void Total_C6_Get(int atom_numbers, int* atom_lj_type_A,
     atomicAdd(d_factor, temp_sum);
 }
 
-static __global__ void Total_C6_B_A_Get(int atom_numbers, int* atom_lj_type_A,
-                                        int* atom_lj_type_B, float* d_lj_Ab,
-                                        float* d_lj_Bb, double* d_factor)
-{
-    int j;
-    double temp_sum = 0.0;
-    int xA, yA, xB, yB;
-    int itype_A, jtype_A, itype_B, jtype_B, atom_pair_LJ_type_A,
-        atom_pair_LJ_type_B;
-#ifdef USE_GPU
-    for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < atom_numbers;
-         i += gridDim.x * blockDim.x)
-#else
-#pragma omp parallel for firstprivate(                         \
-        j, xA, yA, xB, yB, itype_A, jtype_A, itype_B, jtype_B, \
-            atom_pair_LJ_type_A, atom_pair_LJ_type_B) reduction(+ : temp_sum)
-    for (int i = 0; i < atom_numbers; i++)
-#endif
-    {
-        itype_A = atom_lj_type_A[i];
-        itype_B = atom_lj_type_B[i];
-        double temp_small_sum = 0.0;
-#ifdef USE_GPU
-        for (j = blockIdx.y * blockDim.y + threadIdx.y; j < atom_numbers;
-             j += gridDim.y * blockDim.y)
-#else
-        for (j = 0; j < atom_numbers; j++)
-#endif
-        {
-            jtype_A = atom_lj_type_A[j];
-            jtype_B = atom_lj_type_B[j];
-            yA = (jtype_A - itype_A);
-            xA = yA >> 31;
-            yA = (yA ^ xA) - xA;
-            xA = jtype_A + itype_A;
-            jtype_A = (xA + yA) >> 1;
-            xA = (xA - yA) >> 1;
-            atom_pair_LJ_type_A = (jtype_A * (jtype_A + 1) >> 1) + xA;
-
-            yB = (jtype_B - itype_B);
-            xB = yB >> 31;
-            yB = (yB ^ xB) - xB;
-            xB = jtype_B + itype_B;
-            jtype_B = (xB + yB) >> 1;
-            xB = (xB - yB) >> 1;
-            atom_pair_LJ_type_B = (jtype_B * (jtype_B + 1) >> 1) + xB;
-
-            temp_small_sum +=
-                d_lj_Bb[atom_pair_LJ_type_B] - d_lj_Ab[atom_pair_LJ_type_A];
-        }
-        temp_sum += temp_small_sum;
-    }
-    atomicAdd(d_factor, temp_sum);
-}
-
-template <bool need_force, bool need_energy, bool need_virial,
-          bool need_coulomb, bool need_du_dlambda>
-static __global__ void Lennard_Jones_And_Direct_Coulomb_Soft_Core_CUDA(
-    const int atom_numbers, const int solvent_numbers, const ATOM_GROUP* nl,
-    const VECTOR_LJ_SOFT_TYPE* crd, const LTMatrix3 cell, const LTMatrix3 rcell,
-    const float* LJ_type_AA, const float* LJ_type_AB, const float* LJ_type_BA,
-    const float* LJ_type_BB, const float cutoff, VECTOR* frc,
-    const float pme_beta, float* atom_energy, LTMatrix3* atom_virial,
-    float* atom_direct_cf_energy, float* atom_du_dlambda_lj,
-    float* atom_du_dlambda_direct, const float lambda, const float alpha,
-    const float p, const float input_sigma_6, const float input_sigma_6_min,
-    float* this_energy)
-{
-    float lambda_ = 1.0 - lambda;
-    float alpha_lambda_p = alpha * powf(lambda, p);
-    float alpha_lambda__p = alpha * powf(lambda_, p);
-#ifdef USE_GPU
-    int atom_i = blockDim.y * blockIdx.x + threadIdx.y;
-    if (atom_i < atom_numbers - solvent_numbers)
-#else
-#pragma omp parallel for firstprivate(lambda, alpha_lambda_p, alpha_lambda__p)
-    for (int atom_i = 0; atom_i < atom_numbers - solvent_numbers; atom_i++)
-#endif
-    {
-        ATOM_GROUP nl_i = nl[atom_i];
-        VECTOR_LJ_SOFT_TYPE r1 = crd[atom_i];
-        VECTOR frc_record = {0., 0., 0.};
-        LTMatrix3 virial_record = {0, 0, 0, 0, 0, 0};
-        float energy_lj = 0.;
-        float energy_coulomb = 0.;
-        float du_dlambda_lj = 0.;
-        float du_dlambda_direct = 0.;
-#ifdef USE_GPU
-        for (int j = threadIdx.x; j < nl_i.atom_numbers; j += blockDim.x)
-#else
-        for (int j = 0; j < nl_i.atom_numbers; j++)
-#endif
-        {
-            int atom_j = nl_i.atom_serial[j];
-            float ij_factor = atom_j < atom_numbers ? 1.0f : 0.5f;
-            VECTOR_LJ_SOFT_TYPE r2 = crd[atom_j];
-            VECTOR dr = Get_Periodic_Displacement(r2, r1, cell, rcell);
-            float dr_abs = norm3df(dr.x, dr.y, dr.z);
-            if (dr_abs < cutoff)
-            {
-                int atom_pair_LJ_type_A = Get_LJ_Type(r1.LJ_type, r2.LJ_type);
-                int atom_pair_LJ_type_B =
-                    Get_LJ_Type(r1.LJ_type_B, r2.LJ_type_B);
-                float AA = LJ_type_AA[atom_pair_LJ_type_A];
-                float AB = LJ_type_AB[atom_pair_LJ_type_A];
-                float BA = LJ_type_BA[atom_pair_LJ_type_B];
-                float BB = LJ_type_BB[atom_pair_LJ_type_B];
-                if (BA * AA != 0 || BA + AA == 0)
-                {
-                    if (need_force)
-                    {
-                        float frc_abs =
-                            lambda_ * Get_LJ_Force(r1, r2, dr_abs, AA, AB) +
-                            lambda * Get_LJ_Force(r1, r2, dr_abs, BA, BB);
-                        if (need_coulomb)
-                        {
-                            float frc_cf_abs = Get_Direct_Coulomb_Force(
-                                r1, r2, dr_abs, pme_beta);
-                            frc_abs = frc_abs - frc_cf_abs;
-                        }
-                        VECTOR frc_lin = frc_abs * dr;
-                        frc_record = frc_record + frc_lin;
-                        if (atom_j < atom_numbers)
-                            atomicAdd(frc + atom_j, -frc_lin);
-                        if (need_virial)
-                        {
-                            virial_record =
-                                virial_record -
-                                ij_factor *
-                                    Get_Virial_From_Force_Dis(frc_lin, dr);
-                        }
-                    }
-                    if (need_coulomb && need_energy)
-                    {
-                        energy_coulomb +=
-                            ij_factor *
-                            Get_Direct_Coulomb_Energy(r1, r2, dr_abs, pme_beta);
-                    }
-                    if (need_energy)
-                    {
-                        energy_lj +=
-                            ij_factor *
-                            (lambda_ * Get_LJ_Energy(r1, r2, dr_abs, AA, AB) +
-                             lambda * Get_LJ_Energy(r1, r2, dr_abs, BA, BB));
-                    }
-                    if (need_du_dlambda)
-                    {
-                        du_dlambda_lj +=
-                            ij_factor * (Get_LJ_Energy(r1, r2, dr_abs, BA, BB) -
-                                         Get_LJ_Energy(r1, r2, dr_abs, AA, AB));
-                        if (need_coulomb)
-                        {
-                            du_dlambda_direct +=
-                                ij_factor * Get_Direct_Coulomb_dU_dlambda(
-                                                r1, r2, dr_abs, pme_beta);
-                        }
-                    }
-                }
-                else
-                {
-                    float sigma_A = Get_Soft_Core_Sigma(AA, AB, input_sigma_6,
-                                                        input_sigma_6_min);
-                    float sigma_B = Get_Soft_Core_Sigma(BA, BB, input_sigma_6,
-                                                        input_sigma_6_min);
-                    float dr_softcore_A = Get_Soft_Core_Distance(
-                        AA, AB, sigma_A, dr_abs, alpha, p, lambda);
-                    float dr_softcore_B = Get_Soft_Core_Distance(
-                        BB, BA, sigma_B, dr_abs, alpha, p, 1 - lambda);
-                    if (need_force)
-                    {
-                        float frc_abs =
-                            lambda_ * Get_Soft_Core_LJ_Force(r1, r2, dr_abs,
-                                                             dr_softcore_A, AA,
-                                                             AB) +
-                            lambda * Get_Soft_Core_LJ_Force(
-                                         r1, r2, dr_abs, dr_softcore_B, BA, BB);
-                        if (need_coulomb)
-                        {
-                            float frc_cf_abs =
-                                lambda_ * Get_Soft_Core_Direct_Coulomb_Force(
-                                              r1, r2, dr_abs, dr_softcore_A,
-                                              pme_beta) +
-                                lambda * Get_Soft_Core_Direct_Coulomb_Force(
-                                             r1, r2, dr_abs, dr_softcore_B,
-                                             pme_beta);
-                            frc_abs = frc_abs - frc_cf_abs;
-                        }
-                        VECTOR frc_lin = frc_abs * dr;
-                        frc_record = frc_record + frc_lin;
-                        if (atom_j < atom_numbers)
-                            atomicAdd(frc + atom_j, -frc_lin);
-                        if (need_virial)
-                        {
-                            virial_record =
-                                virial_record -
-                                ij_factor *
-                                    Get_Virial_From_Force_Dis(frc_lin, dr);
-                        }
-                    }
-                    if (need_coulomb && need_energy)
-                    {
-                        energy_coulomb +=
-                            ij_factor *
-                            (lambda_ * Get_Direct_Coulomb_Energy(
-                                           r1, r2, dr_softcore_A, pme_beta) +
-                             lambda * Get_Direct_Coulomb_Energy(
-                                          r1, r2, dr_softcore_B, pme_beta));
-                    }
-                    if (need_energy)
-                    {
-                        energy_lj +=
-                            ij_factor *
-                            (lambda_ *
-                                 Get_LJ_Energy(r1, r2, dr_softcore_A, AA, AB) +
-                             lambda *
-                                 Get_LJ_Energy(r1, r2, dr_softcore_B, BA, BB));
-                    }
-                    if (need_du_dlambda)
-                    {
-                        du_dlambda_lj +=
-                            ij_factor *
-                            (Get_LJ_Energy(r1, r2, dr_softcore_B, BA, BB) -
-                             Get_LJ_Energy(r1, r2, dr_softcore_A, AA, AB));
-                        du_dlambda_lj +=
-                            Get_Soft_Core_dU_dlambda(
-                                Get_LJ_Force(r1, r2, dr_softcore_A, AA, AB),
-                                sigma_A, dr_softcore_A, alpha, p, lambda) -
-                            Get_Soft_Core_dU_dlambda(
-                                Get_LJ_Force(r1, r2, dr_softcore_B, BA, BB),
-                                sigma_B, dr_softcore_B, alpha, p, lambda_);
-                        if (need_coulomb)
-                        {
-                            du_dlambda_direct +=
-                                ij_factor *
-                                (Get_Direct_Coulomb_Energy(
-                                     r1, r2, dr_softcore_B, pme_beta) -
-                                 Get_Direct_Coulomb_Energy(
-                                     r1, r2, dr_softcore_A, pme_beta));
-                            du_dlambda_direct +=
-                                ij_factor *
-                                (Get_Soft_Core_dU_dlambda(
-                                     Get_Direct_Coulomb_Force(
-                                         r1, r2, dr_softcore_B, pme_beta),
-                                     sigma_B, dr_softcore_B, alpha, p,
-                                     lambda_) -
-                                 Get_Soft_Core_dU_dlambda(
-                                     Get_Direct_Coulomb_Force(
-                                         r1, r2, dr_softcore_A, pme_beta),
-                                     sigma_A, dr_softcore_A, alpha, p, lambda));
-                            du_dlambda_direct +=
-                                ij_factor *
-                                (lambda * Get_Direct_Coulomb_dU_dlambda(
-                                              r1, r2, dr_softcore_B, pme_beta) +
-                                 lambda_ *
-                                     Get_Direct_Coulomb_dU_dlambda(
-                                         r1, r2, dr_softcore_A, pme_beta));
-                        }
-                    }
-                }
-            }
-        }
-        if (need_force)
-        {
-            Warp_Sum_To(frc + atom_i, frc_record, warpSize);
-        }
-        if (need_energy)
-        {
-            float energy_total = energy_lj;
-            if (need_coulomb)
-            {
-                energy_total += energy_coulomb;
-            }
-            Warp_Sum_To(atom_energy + atom_i, energy_total, warpSize);
-            Warp_Sum_To(this_energy + atom_i, energy_lj, warpSize);
-        }
-        if (need_coulomb && need_energy)
-        {
-            Warp_Sum_To(atom_direct_cf_energy + atom_i, energy_coulomb,
-                        warpSize);
-        }
-        if (need_virial)
-        {
-            Warp_Sum_To(atom_virial + atom_i, virial_record, warpSize);
-        }
-        if (need_du_dlambda)
-        {
-            Warp_Sum_To(atom_du_dlambda_lj, du_dlambda_lj, warpSize);
-            if (need_coulomb)
-            {
-                Warp_Sum_To(atom_du_dlambda_direct, du_dlambda_direct,
-                            warpSize);
-            }
-        }
-    }
-}
-
 template <bool need_force, bool need_energy, bool need_virial,
           bool need_coulomb>
 static __global__ void Clustered_Lennard_Jones_And_Direct_Coulomb_Soft_Core(
@@ -2619,9 +2323,10 @@ void LJ_SOFT_CORE::Initial(CONTROLLER* controller, float cutoff,
         this->cutoff = cutoff;
         clustered_direct_cache = Acquire_Shared_LJ_Clustered_Direct_Cache(
             controller, this->module_name, false);
-        clustered_direct_requested =
-            clustered_direct_cache != NULL &&
-            clustered_direct_cache->Use_Clustered_Direct();
+        if (clustered_direct_cache != NULL)
+        {
+            clustered_direct_cache->layout.Enable_Clustered_Spatial_Service();
+        }
         Device_Malloc_Safely((void**)&crd_with_parameters,
                              sizeof(VECTOR_LJ_SOFT_TYPE) * atom_numbers);
         Launch_Device_Kernel(
@@ -2647,19 +2352,9 @@ void LJ_SOFT_CORE::Initial(CONTROLLER* controller, float cutoff,
         deviceMemcpy(&h_factor, d_factor, sizeof(double),
                      deviceMemcpyDeviceToHost);
         long_range_factor = (float)h_factor;
-        deviceMemset(d_factor, 0, sizeof(double));
-
-        Launch_Device_Kernel(Total_C6_B_A_Get, gridSize, blockSize, 0, NULL,
-                             atom_numbers, d_atom_LJ_type_A, d_atom_LJ_type_B,
-                             d_LJ_AB, d_LJ_BB, d_factor);
-        deviceMemcpy(&h_factor, d_factor, sizeof(double),
-                     deviceMemcpyDeviceToHost);
-        long_range_factor_TI = (float)h_factor;
         Free_Single_Device_Pointer((void**)&d_factor);
 
         long_range_factor *=
-            -2.0f / 3.0f * CONSTANT_Pi / cutoff / cutoff / cutoff / 6.0f;
-        long_range_factor_TI *=
             -2.0f / 3.0f * CONSTANT_Pi / cutoff / cutoff / cutoff / 6.0f;
         controller->printf("        long range correction factor is: %e\n",
                            long_range_factor);
@@ -2715,13 +2410,6 @@ void LJ_SOFT_CORE::LJ_Soft_Core_Malloc()
     Device_Malloc_And_Copy_Safely((void**)&d_LJ_energy_sum_intrasys,
                                   &h_LJ_energy_sum_intrasys, sizeof(float));
 
-    Malloc_Safely((void**)&h_sigma_of_dH_dlambda_lj, sizeof(float));
-    Malloc_Safely((void**)&h_sigma_of_dH_dlambda_direct, sizeof(float));
-
-    Device_Malloc_And_Copy_Safely((void**)&d_sigma_of_dH_dlambda_lj,
-                                  h_sigma_of_dH_dlambda_lj, sizeof(float));
-    Device_Malloc_And_Copy_Safely((void**)&d_sigma_of_dH_dlambda_direct,
-                                  h_sigma_of_dH_dlambda_direct, sizeof(float));
 }
 
 void LJ_SOFT_CORE::Parameter_Host_To_Device()
@@ -2747,28 +2435,29 @@ void LJ_SOFT_CORE::Parameter_Host_To_Device()
 
 void LJ_SOFT_CORE::LJ_Soft_Core_PME_Direct_Force_With_Atom_Energy_And_Virial(
     const int atom_numbers, const int local_atom_numbers,
-    const int solvent_numbers, const int ghost_numbers, const VECTOR* crd,
-    const float* charge, VECTOR* frc, const LTMatrix3 cell,
-    const LTMatrix3 rcell, const ATOM_GROUP* nl, const float pme_beta,
+    const int ghost_numbers, const VECTOR* crd, const float* charge,
+    VECTOR* frc, const LTMatrix3 cell, const LTMatrix3 rcell,
+    const float pme_beta,
     const int need_atom_energy, float* atom_energy, const int need_virial,
     LTMatrix3* atom_lj_virial, float* atom_direct_pme_energy)
 {
     if (is_initialized)
     {
-        const bool use_clustered_direct = Use_Clustered_Direct();
-        CLUSTERED_SPATIAL_VIEW clustered_view = {};
-        if (use_clustered_direct)
+        if (!Use_Clustered_Direct())
         {
-#ifdef USE_CPU
-            clustered_direct_cache->Build(crd, cell, rcell, cutoff,
-                                          need_virial != 0, false, false,
-                                          false, false);
-#else
-            clustered_direct_cache->Build(crd, cell, rcell, cutoff,
-                                          need_virial != 0, false, true,
-                                          false, true);
-#endif
+            throw std::runtime_error(
+                "soft-LJ requires the clustered spatial service");
         }
+        CLUSTERED_SPATIAL_VIEW clustered_view = {};
+#ifdef USE_CPU
+        clustered_direct_cache->Build(crd, cell, rcell, cutoff,
+                                      need_virial != 0, false, false,
+                                      false, false);
+#else
+        clustered_direct_cache->Build(crd, cell, rcell, cutoff,
+                                      need_virial != 0, false, true,
+                                      false, true);
+#endif
         Launch_Device_Kernel(
             Copy_Crd_And_Charge_To_New_Crd,
             (this->atom_numbers + CONTROLLER::device_max_thread - 1) /
@@ -2776,8 +2465,7 @@ void LJ_SOFT_CORE::LJ_Soft_Core_PME_Direct_Force_With_Atom_Energy_And_Virial(
             CONTROLLER::device_max_thread, 0, NULL,
             this->local_atom_numbers + this->ghost_numbers, crd,
             crd_with_LJ_parameters_local, charge);
-        if (use_clustered_direct &&
-            clustered_direct_cache->layout.total_atom_numbers > 0)
+        if (clustered_direct_cache->layout.total_atom_numbers > 0)
         {
             clustered_direct_cache->Gather_Soft_Core(
                 crd_with_LJ_parameters_local, cell, rcell);
@@ -2849,7 +2537,6 @@ void LJ_SOFT_CORE::LJ_Soft_Core_PME_Direct_Force_With_Atom_Energy_And_Virial(
 
         if (atom_numbers == 0 || local_atom_numbers == 0) return;
 
-        if (use_clustered_direct)
         {
             auto& clustered_layout = clustered_direct_cache->layout;
 #ifdef USE_CPU
@@ -3002,106 +2689,6 @@ void LJ_SOFT_CORE::LJ_Soft_Core_PME_Direct_Force_With_Atom_Energy_And_Virial(
             }
 #endif
         }
-        else
-        {
-            dim3 blockSize = {
-                CONTROLLER::device_warp,
-                CONTROLLER::device_max_thread / CONTROLLER::device_warp};
-            dim3 gridSize = (atom_numbers + blockSize.y - 1) / blockSize.y;
-
-            auto f = Lennard_Jones_And_Direct_Coulomb_Soft_Core_CUDA<
-                true, false, false, true, false>;
-
-            if (!need_atom_energy && !need_virial)
-            {
-                f = Lennard_Jones_And_Direct_Coulomb_Soft_Core_CUDA<
-                    true, false, false, true, false>;
-            }
-            else if (need_atom_energy && !need_virial)
-            {
-                f = Lennard_Jones_And_Direct_Coulomb_Soft_Core_CUDA<
-                    true, true, false, true, false>;
-            }
-            else if (!need_atom_energy && need_virial)
-            {
-                f = Lennard_Jones_And_Direct_Coulomb_Soft_Core_CUDA<
-                    true, false, true, true, false>;
-            }
-            else
-            {
-                f = Lennard_Jones_And_Direct_Coulomb_Soft_Core_CUDA<
-                    true, true, true, true, false>;
-            }
-            Launch_Device_Kernel(
-                f, gridSize, blockSize, 0, NULL, local_atom_numbers,
-                solvent_numbers, nl, crd_with_LJ_parameters_local, cell, rcell,
-                d_LJ_AA, d_LJ_AB, d_LJ_BA, d_LJ_BB, cutoff, frc, pme_beta,
-                atom_energy, atom_lj_virial, atom_direct_pme_energy, NULL,
-                NULL, lambda, alpha, p, sigma_6, sigma_6_min,
-                d_LJ_energy_atom);
-        }
-    }
-}
-
-float LJ_SOFT_CORE::Get_Partial_H_Partial_Lambda_With_Columb_Direct(
-    const int solvent_numbers, const VECTOR* crd, const LTMatrix3 cell,
-    const LTMatrix3 rcell, const float* charge, const ATOM_GROUP* nl,
-    const float* charge_B_A, const float pme_beta, const int charge_perturbated)
-{
-    if (is_initialized)
-    {
-        Launch_Device_Kernel(
-            Copy_Crd_And_Charge_To_New_Crd,
-            (this->atom_numbers + CONTROLLER::device_max_thread - 1) /
-                CONTROLLER::device_max_thread,
-            CONTROLLER::device_max_thread, 0, NULL,
-            this->local_atom_numbers + this->ghost_numbers, crd,
-            crd_with_parameters, charge, charge_B_A);
-
-        deviceMemset(d_sigma_of_dH_dlambda_lj, 0, sizeof(float));
-
-        dim3 blockSize = {
-            CONTROLLER::device_warp,
-            CONTROLLER::device_max_thread / CONTROLLER::device_warp};
-        dim3 gridSize = (atom_numbers + blockSize.y - 1) / blockSize.y;
-        auto f =
-            Lennard_Jones_And_Direct_Coulomb_Soft_Core_CUDA<false, false, false,
-                                                            true, true>;
-
-        if (charge_perturbated > 0)
-        {
-            deviceMemset(d_sigma_of_dH_dlambda_direct, 0, sizeof(float));
-            f = Lennard_Jones_And_Direct_Coulomb_Soft_Core_CUDA<
-                false, false, false, true, true>;
-        }
-        else
-        {
-            f = Lennard_Jones_And_Direct_Coulomb_Soft_Core_CUDA<
-                false, false, false, false, true>;
-        }
-        Launch_Device_Kernel(
-            f, gridSize, blockSize, 0, NULL, local_atom_numbers,
-            solvent_numbers, nl, crd_with_LJ_parameters_local, cell, rcell,
-            d_LJ_AA, d_LJ_AB, d_LJ_BA, d_LJ_BB, cutoff, NULL, pme_beta, NULL,
-            NULL, NULL, d_sigma_of_dH_dlambda_lj, d_sigma_of_dH_dlambda_direct,
-            lambda, alpha, p, sigma_6, sigma_6_min, NULL);
-
-        deviceMemcpy(h_sigma_of_dH_dlambda_lj, d_sigma_of_dH_dlambda_lj,
-                     sizeof(float), deviceMemcpyDeviceToHost);
-        deviceMemcpy(h_sigma_of_dH_dlambda_direct, d_sigma_of_dH_dlambda_direct,
-                     sizeof(float), deviceMemcpyDeviceToHost);
-#ifdef USE_MPI
-        MPI_Allreduce(MPI_IN_PLACE, h_sigma_of_dH_dlambda_lj, 1, MPI_FLOAT,
-                      MPI_SUM, CONTROLLER::pp_comm);
-        MPI_Allreduce(MPI_IN_PLACE, h_sigma_of_dH_dlambda_direct, 1, MPI_FLOAT,
-                      MPI_SUM, CONTROLLER::pp_comm);
-#endif
-        return *h_sigma_of_dH_dlambda_lj +
-               long_range_factor_TI / cell.a11 / cell.a22 / cell.a33;
-    }
-    else
-    {
-        return NAN;
     }
 }
 
@@ -3179,8 +2766,7 @@ void LJ_SOFT_CORE::Get_Local(int* atom_local, int local_atom_numbers,
                          crd_with_LJ_parameters_local);
 }
 
-void LJ_SOFT_CORE::Refresh_Clustered_Metadata(int solvent_numbers,
-                                              const int* d_atom_local,
+void LJ_SOFT_CORE::Refresh_Clustered_Metadata(const int* d_atom_local,
                                               const int* d_excluded_list_start,
                                               const int* d_excluded_list,
                                               const int* d_excluded_numbers)
@@ -3188,13 +2774,9 @@ void LJ_SOFT_CORE::Refresh_Clustered_Metadata(int solvent_numbers,
     if (!is_initialized) return;
     if (clustered_direct_cache != NULL)
     {
-        (void)solvent_numbers;
-        // Soft-core parameters apply to the full alchemical system. Unlike
-        // regular LJ, this path has no separate solvent direct-force kernel.
-        const int direct_local_atom_numbers = local_atom_numbers;
         clustered_direct_cache->Refresh_Metadata(
-            local_atom_numbers, direct_local_atom_numbers, ghost_numbers,
-            d_atom_local, d_excluded_list_start,
+            local_atom_numbers, local_atom_numbers, ghost_numbers, d_atom_local,
+            d_excluded_list_start,
             d_excluded_list, d_excluded_numbers);
     }
 }

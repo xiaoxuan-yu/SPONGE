@@ -1503,65 +1503,6 @@ static void Build_Cornerstone_Leaves(
 
 }  // namespace
 
-// 由LJ坐标和转化系数求距离
-__global__ void Copy_LJ_Type_To_New_Crd(const int atom_numbers,
-                                        VECTOR_LJ* new_crd, const int* LJ_type)
-{
-    SIMPLE_DEVICE_FOR(atom_i, atom_numbers)
-    {
-        new_crd[atom_i].LJ_type = LJ_type[atom_i];
-    }
-}
-
-__global__ void Copy_Crd_And_Charge_To_New_Crd(const int atom_numbers,
-                                               const VECTOR* crd,
-                                               VECTOR_LJ* new_crd,
-                                               const float* charge)
-{
-    SIMPLE_DEVICE_FOR(atom_i, atom_numbers)
-    {
-        new_crd[atom_i].crd = crd[atom_i];
-        new_crd[atom_i].charge = charge[atom_i];
-    }
-}
-
-__global__ void Copy_Crd_To_New_Crd(const int atom_numbers, const VECTOR* crd,
-                                    VECTOR_LJ* new_crd)
-{
-    SIMPLE_DEVICE_FOR(atom_i, atom_numbers)
-    {
-        new_crd[atom_i].crd = crd[atom_i];
-    }
-}
-
-static __global__ void Gather_Sorted_LJ_Crd(const int atom_numbers,
-                                            const int* permutation,
-                                            const VECTOR_LJ* src,
-                                            VECTOR_LJ* dest)
-{
-    SIMPLE_DEVICE_FOR(sorted_i, atom_numbers)
-    {
-        dest[sorted_i] = src[permutation[sorted_i]];
-    }
-}
-
-static __global__ void Gather_Sorted_LJ_Packed(const int atom_numbers,
-                                               const int* permutation,
-                                               const VECTOR_LJ* src,
-                                               int* sorted_atom_ids,
-                                               float4* sorted_xq,
-                                               int* sorted_lj_type)
-{
-    SIMPLE_DEVICE_FOR(sorted_i, atom_numbers)
-    {
-        const int atom_i = permutation[sorted_i];
-        const VECTOR_LJ atom = src[atom_i];
-        sorted_atom_ids[sorted_i] = atom_i;
-        sorted_xq[sorted_i] = {atom.crd.x, atom.crd.y, atom.crd.z, atom.charge};
-        sorted_lj_type[sorted_i] = atom.LJ_type;
-    }
-}
-
 static __global__ void device_add(float* variable, const float adder)
 {
     variable[0] += adder;
@@ -1655,102 +1596,6 @@ Get_Clustered_Direct_Coulomb_Force_Abs_PME_Corr(
            (inv_r * inv_r2 + Clustered_PME_Corr_F(beta2_r2) * beta3);
 }
 
-template <bool need_force, bool need_energy, bool need_virial,
-          bool need_coulomb>
-static __global__ void Lennard_Jones_And_Direct_Coulomb_Device(
-    const int local_atom_numbers, const int solvent_numbers,
-    const ATOM_GROUP* nl, const VECTOR_LJ* crd, const LTMatrix3 cell,
-    const LTMatrix3 rcell, const float* LJ_type_A, const float* LJ_type_B,
-    const float cutoff, VECTOR* frc, const float pme_beta, float* atom_energy,
-    LTMatrix3* atom_virial, float* atom_direct_cf_energy, float* atom_LJ_ene,
-    const bool store_energy, const bool store_virial)
-{
-#ifdef USE_GPU
-    int atom_i = 0 + blockDim.y * blockIdx.x + threadIdx.y;
-    if (atom_i < local_atom_numbers - solvent_numbers)
-#else
-#pragma omp parallel for schedule(dynamic)
-    for (int atom_i = 0; atom_i < local_atom_numbers - solvent_numbers;
-         atom_i++)
-#endif
-    {
-        VECTOR frc_record = {0.0f, 0.0f, 0.0f};
-        LTMatrix3 virial = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
-        float energy_lj = 0.0f;
-        float energy_coulomb = 0.0f;
-        float energy_total = 0.0f;
-        ATOM_GROUP nl_i = nl[atom_i];
-        VECTOR_LJ r1 = crd[atom_i];
-#ifdef USE_GPU
-        for (int j = threadIdx.x; j < nl_i.atom_numbers; j += blockDim.x)
-#else
-        for (int j = 0; j < nl_i.atom_numbers; j += 1)
-#endif
-        {
-            int atom_j = nl_i.atom_serial[j];
-            float ij_factor = atom_j < local_atom_numbers ? 1.0f : 0.5f;
-            VECTOR_LJ r2 = crd[atom_j];
-            VECTOR dr = Get_Periodic_Displacement(r2, r1, cell, rcell);
-            float dr_abs = norm3df(dr.x, dr.y, dr.z);
-            if (dr_abs < cutoff)
-            {
-                int atom_pair_LJ_type = Get_LJ_Type(r1.LJ_type, r2.LJ_type);
-                float A = LJ_type_A[atom_pair_LJ_type];
-                float B = LJ_type_B[atom_pair_LJ_type];
-                if (need_force)
-                {
-                    float frc_abs = Get_LJ_Force(r1, r2, dr_abs, A, B);
-                    if (need_coulomb)
-                    {
-                        float frc_cf_abs =
-                            Get_Direct_Coulomb_Force(r1, r2, dr_abs, pme_beta);
-                        frc_abs = frc_abs - frc_cf_abs;
-                    }
-                    VECTOR frc_lin = frc_abs * dr;
-                    frc_record = frc_record + frc_lin;
-                    if (atom_j < local_atom_numbers)
-                    {
-                        atomicAdd(frc + atom_j, -frc_lin);
-                    }
-                    if (need_virial)
-                    {
-                        virial = virial - ij_factor * Get_Virial_From_Force_Dis(
-                                                          frc_lin, dr);
-                    }
-                }
-                if (need_energy && store_energy)
-                {
-                    energy_lj +=
-                        ij_factor * Get_LJ_Energy(r1, r2, dr_abs, A, B);
-                    if (need_coulomb)
-                    {
-                        energy_coulomb +=
-                            ij_factor *
-                            Get_Direct_Coulomb_Energy(r1, r2, dr_abs, pme_beta);
-                    }
-                }
-            }
-        }
-        energy_total = energy_lj + energy_coulomb;
-        if (need_force)
-        {
-            Warp_Sum_To(frc + atom_i, frc_record, warpSize);
-        }
-        if (need_energy && store_energy)
-        {
-            Warp_Sum_To(atom_energy + atom_i, energy_total, warpSize);
-            Warp_Sum_To(atom_LJ_ene + atom_i, energy_lj, warpSize);
-            if (need_coulomb)
-                Warp_Sum_To(atom_direct_cf_energy + atom_i, energy_coulomb,
-                            warpSize);
-        }
-        if (need_virial && store_virial)
-        {
-            Warp_Sum_To(atom_virial + atom_i, virial, warpSize);
-        }
-    }
-}
-
 #ifdef USE_CPU
 template <bool full_output>
 static void Cpu_Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb(
@@ -1794,8 +1639,7 @@ static void Cpu_Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb(
                     continue;
                 }
 
-                const int sorted_atom_i =
-                    cluster_offsets[cluster_i] + lane_i;
+                const int sorted_atom_i = cluster_offsets[cluster_i] + lane_i;
                 const int atom_i = sorted_atom_ids[sorted_atom_i];
                 const VECTOR_LJ r1 = Make_Packed_LJ_Atom(
                     sorted_xq[sorted_atom_i], sorted_lj_type[sorted_atom_i]);
@@ -1828,15 +1672,14 @@ static void Cpu_Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb(
                         const unsigned int valid_mask_j =
                             cluster_valid_masks[cluster_j];
                         const int exclusion_index =
-                            Clustered_First_Exclusion_Index(
-                                packed, jm, i_local);
+                            Clustered_First_Exclusion_Index(packed, jm, i_local);
                         const unsigned long long exclusion_mask =
                             exclusion_index >= 0
                                 ? exclusion_mask_pool[exclusion_index]
                                 : 0ull;
                         const VECTOR pair_shift_vec =
-                            Clustered_Shift_Vector_From_Id(
-                                sci_entry.shift_id, cell);
+                            Clustered_Shift_Vector_From_Id(sci_entry.shift_id,
+                                                          cell);
                         VECTOR frc_j[max_cluster_size] = {};
 
                         for (int lane_j = 0; lane_j < cluster_size;
@@ -1865,9 +1708,8 @@ static void Cpu_Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb(
                             const VECTOR_LJ r2 = Make_Packed_LJ_Atom(
                                 sorted_xq[sorted_atom_j],
                                 sorted_lj_type[sorted_atom_j]);
-                            const VECTOR dr =
-                                Get_Clustered_Shifted_Displacement(
-                                    r2, r1, pair_shift_vec);
+                            const VECTOR dr = Get_Clustered_Shifted_Displacement(
+                                r2, r1, pair_shift_vec);
                             const float dr2 = dr * dr;
                             if (dr2 >= cutoff_sq || dr2 == 0.0f)
                             {
@@ -2758,17 +2600,10 @@ void LENNARD_JONES_INFORMATION::Initial(CONTROLLER* controller, float cutoff,
         }
         clustered_direct_cache = Acquire_Shared_LJ_Clustered_Direct_Cache(
             controller, this->module_name, use_ordered_layout);
-        clustered_direct_requested =
-            clustered_direct_cache != NULL &&
-            clustered_direct_cache->Use_Clustered_Direct();
-        Device_Malloc_Safely((void**)&crd_with_LJ_parameters,
-                             sizeof(VECTOR_LJ) * atom_numbers);
-        Launch_Device_Kernel(
-            Copy_LJ_Type_To_New_Crd,
-            (this->atom_numbers + CONTROLLER::device_max_thread - 1) /
-                CONTROLLER::device_max_thread,
-            CONTROLLER::device_max_thread, 0, NULL, atom_numbers,
-            crd_with_LJ_parameters, d_atom_LJ_type);
+        if (clustered_direct_cache != NULL)
+        {
+            clustered_direct_cache->layout.Enable_Clustered_Spatial_Service();
+        }
         controller->printf("    Start initializing long range LJ correction\n");
         long_range_factor = 0;
 
@@ -2836,23 +2671,16 @@ void LENNARD_JONES_INFORMATION::Get_Local(int* atom_local,
 }
 
 void LENNARD_JONES_INFORMATION::Refresh_Clustered_Metadata(
-    int solvent_numbers, const int* d_atom_local,
-    const int* d_excluded_list_start,
+    const int* d_atom_local, const int* d_excluded_list_start,
     const int* d_excluded_list,
     const int* d_excluded_numbers)
 {
     if (!is_initialized) return;
     if (clustered_direct_cache != NULL)
     {
-        const int capped_solvent_numbers =
-            solvent_numbers > 0 ? solvent_numbers : 0;
-        const int direct_local_atom_numbers =
-            local_atom_numbers > capped_solvent_numbers
-                ? (local_atom_numbers - capped_solvent_numbers)
-                : 0;
         clustered_direct_cache->Refresh_Metadata(
-            local_atom_numbers, direct_local_atom_numbers, ghost_numbers,
-            d_atom_local, d_excluded_list_start,
+            local_atom_numbers, local_atom_numbers, ghost_numbers, d_atom_local,
+            d_excluded_list_start,
             d_excluded_list, d_excluded_numbers);
     }
 }
@@ -2928,18 +2756,22 @@ void LENNARD_JONES_INFORMATION::Parameter_Host_To_Device()
 
 void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
     const int atom_numbers, const int local_atom_numbers,
-    const int solvent_numbers, const int ghost_numbers, const VECTOR* crd,
-    const float* charge, VECTOR* frc, const LTMatrix3 cell,
-    const LTMatrix3 rcell, const ATOM_GROUP* nl, const float pme_beta,
+    const int ghost_numbers, const VECTOR* crd, const float* charge,
+    VECTOR* frc, const LTMatrix3 cell, const LTMatrix3 rcell,
+    const float pme_beta,
     const int need_atom_energy, float* atom_energy, const int need_virial,
     LTMatrix3* atom_virial, float* atom_direct_pme_energy)
 {
     if (is_initialized)
     {
-        const bool use_clustered_direct = Use_Clustered_Direct();
+        if (!Use_Clustered_Direct())
+        {
+            throw std::runtime_error(
+                "regular LJ requires the clustered spatial service");
+        }
         const bool want_full_output_snapshot =
             Clustered_Microbench_Dump_Prefix() != NULL &&
-            (need_atom_energy || need_virial) && use_clustered_direct;
+            (need_atom_energy || need_virial);
         bool have_full_output_snapshot = false;
         nbnxm_microbench::SpongeGmxpackedFullOutputSnapshot
             full_output_snapshot = {};
@@ -2947,28 +2779,21 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
         std::vector<float> full_output_atom_energy_before;
         std::vector<LTMatrix3> full_output_atom_virial_before;
         CLUSTERED_SPATIAL_VIEW clustered_view = {};
-        if (use_clustered_direct)
+        if (d_LJ_AB_packed == NULL)
         {
-            if (d_LJ_AB_packed == NULL)
-            {
-                throw std::runtime_error(
-                    "clustered regular LJ requires packed LJ parameters");
-            }
-#ifdef USE_CPU
-            clustered_direct_cache->Build(crd, cell, rcell, cutoff,
-                                          need_virial != 0, false, false,
-                                          false, false);
-#else
-            clustered_direct_cache->Build(crd, cell, rcell, cutoff,
-                                          need_virial != 0,
-                                          false,
-                                          true,
-                                          false,
-                                          true);
-#endif
+            throw std::runtime_error(
+                "clustered regular LJ requires packed LJ parameters");
         }
-        if (use_clustered_direct &&
-            clustered_direct_cache->layout.total_atom_numbers > 0)
+#ifdef USE_CPU
+        clustered_direct_cache->Build(crd, cell, rcell, cutoff,
+                                      need_virial != 0, false, false,
+                                      false, false);
+#else
+        clustered_direct_cache->Build(crd, cell, rcell, cutoff,
+                                      need_virial != 0, false, true,
+                                      false, true);
+#endif
+        if (clustered_direct_cache->layout.total_atom_numbers > 0)
         {
             clustered_direct_cache->Gather_Plain(
                 crd, charge, crd_with_LJ_parameters_local, cell, rcell,
@@ -3064,16 +2889,6 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
                     cell, dump_use_gmxpacked_lj_comb_kernel);
             }
         }
-        else if (!use_clustered_direct)
-        {
-            Launch_Device_Kernel(
-                Copy_Crd_And_Charge_To_New_Crd,
-                (this->atom_numbers + CONTROLLER::device_max_thread - 1) /
-                    CONTROLLER::device_max_thread,
-                CONTROLLER::device_max_thread, 0, NULL,
-                this->local_atom_numbers + this->ghost_numbers, crd,
-                crd_with_LJ_parameters_local, charge);
-        }
         if (need_atom_energy)
         {
             deviceMemset(atom_direct_pme_energy, 0,
@@ -3084,7 +2899,6 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
 
         if (atom_numbers == 0 || local_atom_numbers == 0) return;
 
-        if (use_clustered_direct)
         {
             auto& clustered_layout = clustered_direct_cache->layout;
             const bool clustered_gather_ready =
@@ -3864,27 +3678,6 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
                 clustered_direct_cache->direct_kernel_time_recorder->Stop();
             }
 #endif
-        }
-        else
-        {
-            dim3 blockSize = {
-                CONTROLLER::device_warp,
-                CONTROLLER::device_max_thread / CONTROLLER::device_warp};
-            dim3 gridSize = (atom_numbers + blockSize.y - 1) / blockSize.y;
-            auto f =
-                Lennard_Jones_And_Direct_Coulomb_Device<true, false, false,
-                                                        true>;
-            if (need_atom_energy || need_virial)
-            {
-                f = Lennard_Jones_And_Direct_Coulomb_Device<
-                    true, true, true, true>;
-            }
-            Launch_Device_Kernel(
-                f, gridSize, blockSize, 0, NULL, local_atom_numbers,
-                solvent_numbers, nl, crd_with_LJ_parameters_local, cell, rcell,
-                d_LJ_A, d_LJ_B, cutoff, frc, pme_beta, atom_energy,
-                atom_virial, atom_direct_pme_energy, d_LJ_energy_atom,
-                need_atom_energy != 0, need_virial != 0);
         }
     }
 }

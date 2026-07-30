@@ -57,23 +57,6 @@ __global__ void Refresh_Gmxpacked_Pair_Shift_Bits_Unique_Image(
     bool exact_sci_shift_flags);
 #endif
 
-struct LJ_CLUSTERED_LEGACY_NEIGHBOR_VIEW_REQUEST
-{
-    bool request_half = true;
-    bool contains_non_lj_consumer = false;
-    bool require_all_local_atoms = true;
-    bool require_local_ghost_pairs = true;
-    bool require_exclusions = true;
-    int local_atom_numbers = 0;
-    int ghost_numbers = 0;
-    float cutoff = 0.0f;
-    float skin = 0.0f;
-    const int* d_atom_local = NULL;
-    const int* d_excluded_list_start = NULL;
-    const int* d_excluded_list = NULL;
-    const int* d_excluded_numbers = NULL;
-};
-
 struct LJ_CLUSTER_LAYOUT
 {
     CONTROLLER* controller = NULL;
@@ -89,11 +72,6 @@ struct LJ_CLUSTER_LAYOUT
     long long primary_payload_build_count_total = 0;
     bool runtime_gmxpacked_direct_requested = false;
     bool runtime_aux_clustered_metadata_requested = false;
-    bool legacy_neighbor_view_ready = false;
-    long long legacy_neighbor_view_payload_build_count = -1;
-    int legacy_neighbor_view_step = -1;
-    float legacy_neighbor_view_cutoff_skin = -1.0f;
-
     int cluster_size = 8;
     int super_cluster_clusters = 8;
     int cornerstone_max_depth = 6;
@@ -533,9 +511,3 @@ void Compare_Gmxpacked_Record_Stream_Focus_Pair_Forces(
     LJ_CLUSTERED_DIRECT_CACHE* cache, const float2* d_LJ_AB_packed,
     size_t lj_param_numbers, float cutoff, float pme_beta, LTMatrix3 cell,
     LTMatrix3 rcell);
-
-bool Ensure_Legacy_Neighbor_View_From_Clustered_Payload(
-    LJ_CLUSTERED_DIRECT_CACHE* cache,
-    const LJ_CLUSTERED_LEGACY_NEIGHBOR_VIEW_REQUEST& request,
-    ATOM_GROUP* d_legacy_nl, int max_neighbor_numbers,
-    int* d_neighbor_list_overflow, const char** fallback_reason);

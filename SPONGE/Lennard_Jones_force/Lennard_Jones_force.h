@@ -133,9 +133,7 @@ struct LENNARD_JONES_INFORMATION
     int ordered_layout_max_depth = 6;
     int ordered_layout_leaf_size = 32;
     int ordered_layout_min_residue_numbers = 256;
-    bool clustered_direct_requested = false;
     LJ_CLUSTERED_DIRECT_CACHE* clustered_direct_cache = NULL;
-    VECTOR_LJ* crd_with_LJ_parameters = NULL;
 
     /*
         以下用于区域分解
@@ -144,31 +142,16 @@ struct LENNARD_JONES_INFORMATION
     int ghost_numbers = 0;
     VECTOR_LJ* crd_with_LJ_parameters_local =
         NULL;  // 局域原子的坐标，电荷LJ_type打包
-    VECTOR_LJ* sorted_crd_with_LJ_parameters_local = NULL;
-    float4* clustered_sorted_xq_local = NULL;
-    int* clustered_sorted_lj_type_local = NULL;
-    int* clustered_sorted_atom_ids_local = NULL;
     void Get_Local(int* atom_local, int local_atom_numbers,
                    int ghost_numbers);  // 获取局域粒子信息
-    void Refresh_Clustered_Metadata(int solvent_numbers,
-                                    const int* d_atom_local,
+    void Refresh_Clustered_Metadata(const int* d_atom_local,
                                     const int* d_excluded_list_start,
                                     const int* d_excluded_list,
                                     const int* d_excluded_numbers);
     bool Use_Clustered_Direct() const
     {
-        return clustered_direct_requested &&
-               clustered_direct_cache != NULL &&
+        return clustered_direct_cache != NULL &&
                clustered_direct_cache->Use_Clustered_Direct();
-    }
-    void Enable_Clustered_Direct()
-    {
-        if (clustered_direct_cache != NULL)
-        {
-            clustered_direct_cache->layout.Enable_Clustered_Spatial_Service();
-            clustered_direct_requested =
-                clustered_direct_cache->Use_Clustered_Direct();
-        }
     }
     void Maybe_Apply_Ordered_Layout(CONTROLLER* controller,
                                     DOMAIN_INFORMATION* domain,
@@ -178,29 +161,11 @@ struct LENNARD_JONES_INFORMATION
     // 可以根据外界传入的need_atom_energy和need_virial，选择性计算能量和维里。其中的维里对PME直接部分计算的原子能量，在和PME其他部分加和后即维里。
     void LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
         const int atom_numbers, const int local_atom_numbers,
-        const int solvent_numbers, const int ghost_numbers, const VECTOR* crd,
-        const float* charge, VECTOR* frc, const LTMatrix3 cell,
-        const LTMatrix3 rcell, const ATOM_GROUP* nl, const float pme_beta,
+        const int ghost_numbers, const VECTOR* crd, const float* charge,
+        VECTOR* frc, const LTMatrix3 cell, const LTMatrix3 rcell,
+        const float pme_beta,
         const int need_atom_energy, float* atom_energy, const int need_virial,
         LTMatrix3* atom_virial, float* atom_direct_pme_energy);
-
-#ifdef KPCCL_TASKLOOP
-    void LJ_PME_Direct_Force_With_Atom_Energy_And_Virial_Init(
-        const int atom_numbers, const int local_atom_numbers,
-        const int ghost_numbers, const VECTOR* crd, const float* charge,
-        VECTOR* frc, const LTMatrix3 cell, const LTMatrix3 rcell,
-        const ATOM_GROUP* nl, const float pme_beta, const int need_atom_energy,
-        float* atom_energy, const int need_virial, LTMatrix3* atom_virial,
-        float* atom_direct_pme_energy);
-
-    void LJ_PME_Direct_Force_With_Atom_Energy_And_Virial_KPCCL(
-        const int atom_numbers, const int local_atom_numbers,
-        const int ghost_numbers, const VECTOR* crd, const float* charge,
-        VECTOR* frc, const LTMatrix3 cell, const LTMatrix3 rcell,
-        const ATOM_GROUP* nl, const float pme_beta, const int need_atom_energy,
-        float* atom_energy, const int need_virial, LTMatrix3* atom_virial,
-        float* atom_direct_pme_energy);
-#endif
 
     // 长程能量和维里修正
     float long_range_factor = 0;

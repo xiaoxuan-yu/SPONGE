@@ -10,8 +10,6 @@ struct SELECTIVE_INTERACTION
     int is_initialized = 0;
 
     void Initial(CONTROLLER* controller, int atom_numbers);
-    void Check_Solvent(CONTROLLER* controller, int atom_numbers,
-                       int solvent_numbers);
     void Reset_Force_Energy(int* md_need_potential);
     void Update_And_Enhance(const int step, float* d_total_potential,
                             const int need_pressure, LTMatrix3* d_total_virial,
@@ -50,8 +48,8 @@ struct SELECTIVE_INTERACTION
 
     void LJ_Soft_Core_Direct_CF_Force_With_Atom_Energy_And_Virial(
         const int atom_numbers, const int local_atom_numbers,
-        const int solvent_numbers, const int ghost_numbers, const VECTOR* crd,
-        const float* charge, LJ_SOFT_CORE* lj_info, VECTOR* frc,
+        const int ghost_numbers, const VECTOR* crd, const float* charge,
+        LJ_SOFT_CORE* lj_info, VECTOR* frc,
         const LTMatrix3 cell, const LTMatrix3 rcell,
         const float pme_beta, const int need_energy, float* atom_energy_ww,
         const int need_pressure,

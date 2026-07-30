@@ -13,12 +13,6 @@ void SELECTIVE_INTERACTION::Initial(CONTROLLER* controller, int atom_numbers)
     is_initialized = sits.is_initialized || rest2.is_initialized;
 }
 
-void SELECTIVE_INTERACTION::Check_Solvent(CONTROLLER* controller,
-                                          int atom_numbers, int solvent_numbers)
-{
-    sits.Check_Solvent(controller, atom_numbers, solvent_numbers);
-}
-
 void SELECTIVE_INTERACTION::Reset_Force_Energy(int* md_need_potential)
 {
     sits.Reset_Force_Energy(md_need_potential);
@@ -154,15 +148,15 @@ bool SELECTIVE_INTERACTION::LJ_Soft_Core_Direct_CF_Force_Clustered(
 void SELECTIVE_INTERACTION::
     LJ_Soft_Core_Direct_CF_Force_With_Atom_Energy_And_Virial(
         const int atom_numbers, const int local_atom_numbers,
-        const int solvent_numbers, const int ghost_numbers, const VECTOR* crd,
-        const float* charge, LJ_SOFT_CORE* lj_info, VECTOR* frc,
+        const int ghost_numbers, const VECTOR* crd, const float* charge,
+        LJ_SOFT_CORE* lj_info, VECTOR* frc,
         const LTMatrix3 cell, const LTMatrix3 rcell,
         const float pme_beta, const int need_energy, float* atom_energy_ww,
         const int need_pressure,
         LTMatrix3* atom_virial_ww, float* elect_atom_ene)
 {
     lj_info->LJ_Soft_Core_PME_Direct_Force_With_Atom_Energy_And_Virial(
-        atom_numbers, local_atom_numbers, solvent_numbers, ghost_numbers, crd,
-        charge, frc, cell, rcell, NULL, pme_beta, need_energy, atom_energy_ww,
+        atom_numbers, local_atom_numbers, ghost_numbers, crd, charge, frc, cell,
+        rcell, pme_beta, need_energy, atom_energy_ww,
         need_pressure, atom_virial_ww, elect_atom_ene);
 }

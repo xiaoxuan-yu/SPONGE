@@ -199,9 +199,6 @@ struct SITS_INFORMATION
 
     void Step_Print(CONTROLLER* controller, const float beta0);
 
-    void Check_Solvent(CONTROLLER* controller, int atom_numbers,
-                       int solvent_numbers);
-
     /*
         以下用于区域分解
     */

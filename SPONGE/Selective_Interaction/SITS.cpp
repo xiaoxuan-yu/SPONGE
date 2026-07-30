@@ -2840,48 +2840,6 @@ void SITS_INFORMATION::Step_Print(CONTROLLER* controller, const float beta0)
     controller->Step_Print(print_fb_name, h_factor);
 }
 
-static __global__ void Check_Solvent_Atom_Included(int atom_numbers,
-                                                   int solvent_numbers,
-                                                   int* atom_sys_mark,
-                                                   int* errored)
-{
-#ifdef USE_GPU
-    int i = threadIdx.x + blockDim.x * blockIdx.x;
-    if (i < solvent_numbers)
-#else
-#pragma omp parallel for
-    for (int i = 0; i < solvent_numbers; i++)
-#endif
-    {
-        if (!atom_sys_mark[atom_numbers - solvent_numbers + i]) errored[0] = 1;
-    }
-}
-
-void SITS_INFORMATION::Check_Solvent(CONTROLLER* controller, int atom_numbers,
-                                     int solvent_numbers)
-{
-    if (!is_initialized || solvent_numbers == 0) return;
-    int *errored, h_errored;
-    Device_Malloc_Safely((void**)&errored, sizeof(int));
-    deviceMemset(errored, 0, sizeof(int));
-    Launch_Device_Kernel(Check_Solvent_Atom_Included,
-                         (solvent_numbers + CONTROLLER::device_max_thread - 1) /
-                             CONTROLLER::device_max_thread,
-                         CONTROLLER::device_max_thread, 0, NULL, atom_numbers,
-                         solvent_numbers, atom_sys_mark, errored);
-
-    deviceMemcpy(&h_errored, errored, sizeof(int), deviceMemcpyDeviceToHost);
-    if (h_errored == 1)
-    {
-        controller->Throw_SPONGE_Error(
-            spongeErrorConflictingCommand, "SITS_INFORMATION::Check_Solvent",
-            "Reason:\n\tYou are trying to apply SITS to the solvents. If YOU "
-            "KNOW WHAT YOU ARE DOING, set the command 'solvent_LJ' to 0 to run "
-            "the simulation.");
-    }
-    Free_Single_Device_Pointer((void**)&errored);
-}
-
 void SELECT::Initial()
 {
     select_atom_energy.clear();

@@ -65,22 +65,6 @@ class MD_INFORMATION:
 md_info = MD_INFORMATION()
 " Basic information instance for MD "
 
-class NEIGHBOR_LIST:
-    @property
-    def index(self) -> SpongeDLPackTensor | None:
-        "Neighbor index matrix with shape (atom_numbers, max_neighbor_numbers)"
-
-    @property
-    def number(self) -> list[int] | None:
-        "Neighbor count for each atom"
-
-    @property
-    def max_neighbor_numbers(self) -> int | None:
-        "The allocated max number of neighbors for one atom"
-
-neighbor_list: NEIGHBOR_LIST | None
-" Neighbor list interface, available after SPONGE finishes initialization "
-
 class DOMAIN_INFORMATION:
     @property
     def atom_numbers(self) -> int | None:

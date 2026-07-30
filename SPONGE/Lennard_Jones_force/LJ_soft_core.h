@@ -349,19 +349,11 @@ struct LJ_SOFT_CORE
     float sigma_min;
     float sigma_6_min;
 
-    float* h_sigma_of_dH_dlambda_lj = NULL;
-    float* d_sigma_of_dH_dlambda_lj = NULL;
-
-    float* h_sigma_of_dH_dlambda_direct = NULL;
-    float* d_sigma_of_dH_dlambda_direct = NULL;
-
     float cutoff = 10.0;
-    bool clustered_direct_requested = false;
     LJ_CLUSTERED_DIRECT_CACHE* clustered_direct_cache = NULL;
     VECTOR_LJ_SOFT_TYPE* crd_with_parameters = NULL;
     float h_LJ_long_energy = 0.0;
     float long_range_factor = 0.0;
-    float long_range_factor_TI = 0.0;
 
     void Initial(CONTROLLER* controller, float cutoff,
                  char* module_name = NULL);
@@ -374,9 +366,9 @@ struct LJ_SOFT_CORE
 
     void LJ_Soft_Core_PME_Direct_Force_With_Atom_Energy_And_Virial(
         const int atom_numbers, const int local_atom_numbers,
-        const int solvent_numbers, const int ghost_numbers, const VECTOR* crd,
-        const float* charge, VECTOR* frc, const LTMatrix3 cell,
-        const LTMatrix3 rcell, const ATOM_GROUP* nl, const float pme_beta,
+        const int ghost_numbers, const VECTOR* crd, const float* charge,
+        VECTOR* frc, const LTMatrix3 cell, const LTMatrix3 rcell,
+        const float pme_beta,
         const int need_atom_energy, float* atom_energy, const int need_virial,
         LTMatrix3* atom_lj_virial, float* atom_direct_pme_energy);
 
@@ -386,12 +378,6 @@ struct LJ_SOFT_CORE
                                int need_potential, float* d_potential,
                                const float volume);
 
-    float Get_Partial_H_Partial_Lambda_With_Columb_Direct(
-        const int solvent_numbers, const VECTOR* crd, const LTMatrix3 cell,
-        const LTMatrix3 rcell, const float* charge, const ATOM_GROUP* nl,
-        const float* charge_B_A, const float pme_beta,
-        const int charge_perturbated);
-
     /*
         以下用于区域分解
     */
@@ -399,27 +385,15 @@ struct LJ_SOFT_CORE
     int ghost_numbers = 0;
     VECTOR_LJ_SOFT_TYPE* crd_with_LJ_parameters_local =
         NULL;  // 局域原子的坐标，电荷LJ_type打包
-    VECTOR_LJ_SOFT_TYPE* sorted_crd_with_LJ_parameters_local = NULL;
     void Get_Local(int* atom_local, int local_atom_numbers,
                    int ghost_numbers);  // 获取局域粒子信息
-    void Refresh_Clustered_Metadata(int solvent_numbers,
-                                    const int* d_atom_local,
+    void Refresh_Clustered_Metadata(const int* d_atom_local,
                                     const int* d_excluded_list_start,
                                     const int* d_excluded_list,
                                     const int* d_excluded_numbers);
     bool Use_Clustered_Direct() const
     {
-        return clustered_direct_requested &&
-               clustered_direct_cache != NULL &&
+        return clustered_direct_cache != NULL &&
                clustered_direct_cache->Use_Clustered_Direct();
-    }
-    void Enable_Clustered_Direct()
-    {
-        if (clustered_direct_cache != NULL)
-        {
-            clustered_direct_cache->layout.Enable_Clustered_Spatial_Service();
-            clustered_direct_requested =
-                clustered_direct_cache->Use_Clustered_Direct();
-        }
     }
 };
