@@ -24,7 +24,13 @@ build-backend = "py_build_cmake.build"
 directory = "."
 
 [tool.py-build-cmake.sdist]
-include = ["CMakeLists.txt", "src/*", "include/*", "THIRD_PARTY_NOTICES"]
+include = [
+        "CMakeLists.txt",
+        "src/*",
+        "include/*",
+        "THIRD_PARTY_NOTICES",
+        "LICENSE-DLPACK",
+]
 
 [tool.py-build-cmake.cmake]
 build_type = "Release"
