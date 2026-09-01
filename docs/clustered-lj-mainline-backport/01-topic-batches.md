@@ -51,6 +51,17 @@
 - B2.1 没有生产 source、kernel、launch 或默认 binary 变化，因此不触发 SASS/NCU/A-B；这些门槛从 B2.2 builder runtime 接入默认 SPONGE 起执行。
 - B2.2 再迁移 lifecycle、builder 实现与 runtime source/object ownership，并以 CPU/CUDA SPONGE 构建闭包结束。
 
+B2.2 实施结果：
+
+- 从 `19856de` 恢复 provider lifecycle、endpoint incidence、pair shift 与完整 builder 源码树；regular/soft LJ、gather、Manager 和 worker 均未进入本批。
+- 新增 `SPONGE_clustered_neighbor_sources.cmake`，只管理中立 neighbor foundation 及六个职责明确的 object target；主线原有 `SPONGE.cmake` 的 `main.cpp`、H5/toml/jit/HighFive/HDF5 source 与链接结构保持。
+- 主线 H5 使 builder 的 `MD_core.h` 间接依赖 `hdf5.h`；因此 object target 显式继承 HighFive/HDF5 usage requirements，不通过全局 include 绕过依赖。
+- CPU builder 需要 CUDA 风格公共 primitive 的 host shim；只恢复 `cpu_api.h` 的 builtin dimension、mask/shuffle/ballot、bit-cast、atomic declaration 与 `warpSize=1`。旧 CPU 生产调用均在 GPU guard 内或在 CPU 分支忽略 warp 参数，审计未发现行为变化。
+- `dev-cpu` 与 `dev-cuda13`/SM89 均以 24 并行完整构建 SPONGE 和 contract target；contract 各 1/1 通过。
+- CPU tests 为 28 pass、1 fail、4 skip；唯一失败是 tracked H5 manifest 写死 `/home/youmans/sidereus/SPONGE`，精确父版本 `634a797` 同项同因失败，分类为既有 fixture 污染。
+- SM89 SASS：父 434、候选 797；434 个 common function 全部 exact，0 changed、0 removed，只新增 363 个未接入主循环的 builder/Cornerstone function。原有 LJ、PME、neighbor 代表 kernel hash 全相同。
+- 本批尚无可达 builder launch，故 NCU 没有采样对象，migration A/B 也尚无 clustered route；B3 接入 Provider/LJ 生命周期时首次执行 NCU、replay 与 production A/B。
+
 ### B3：regular LJ、soft-LJ 与主生命周期
 
 - clustered workspace/gather；

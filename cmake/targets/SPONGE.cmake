@@ -104,8 +104,6 @@ set(SPONGE_SOURCES
     ${PROJECT_ROOT_DIR}/SPONGE/manybody/reaxff/native_init.cpp
     ${PROJECT_ROOT_DIR}/SPONGE/manybody/reaxff/reaxff.cpp)
 
-set(SOURCES ${SPONGE_SOURCES})
-
 find_package(tomlplusplus CONFIG REQUIRED)
 find_package(HighFive CONFIG REQUIRED)
 find_package(HDF5 1.10.7 REQUIRED COMPONENTS C)
@@ -117,6 +115,12 @@ if(WIN32
       "HDF5 1.12.0 does not provide H5Pset_file_locking; use HDF5 1.10.7-1.10.x or 1.12.1+"
   )
 endif()
+
+include(
+  ${PROJECT_ROOT_DIR}/cmake/targets/SPONGE_clustered_neighbor_sources.cmake)
+list(APPEND SPONGE_SOURCES ${SPONGE_CLUSTERED_NEIGHBOR_SOURCES})
+set(SOURCES ${SPONGE_SOURCES})
+
 add_library(
   sponge_toml STATIC
   ${PROJECT_ROOT_DIR}/SPONGE/third_party/toml/toml.cpp
@@ -139,6 +143,18 @@ target_include_directories(sponge_jit_header PUBLIC ${PROJECT_ROOT_DIR}/SPONGE)
 
 add_executable(${CURRENT_TARGET} ${SOURCES})
 target_link_libraries(${CURRENT_TARGET} PRIVATE sponge_jit_header sponge_toml)
+set_target_properties(
+  ${CURRENT_TARGET}
+  PROPERTIES CXX_STANDARD 20
+             CXX_STANDARD_REQUIRED ON
+             CUDA_STANDARD 20
+             CUDA_STANDARD_REQUIRED ON
+             HIP_STANDARD 20
+             HIP_STANDARD_REQUIRED ON)
+target_include_directories(
+  ${CURRENT_TARGET}
+  PRIVATE ${PROJECT_ROOT_DIR}/SPONGE
+          ${PROJECT_ROOT_DIR}/SPONGE/third_party/cornerstone_octree/include)
 if(TARGET HighFive::HighFive)
   target_link_libraries(${CURRENT_TARGET} PRIVATE HighFive::HighFive)
 elseif(TARGET HighFive)
