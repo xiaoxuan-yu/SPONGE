@@ -14,14 +14,17 @@
 - 固定 upstream/source/reference SHA；
 - 不改生产源码。
 
-### B1：验证工具与独立 contract
+### B1：独立 Python benchmark harness
 
-- clustered spatial-view test；
-- manybody clustered oracle；
-- NBNXM microbench 与 snapshot producer 的独立 target/source；
-- replay/production runner 与 migration gate。
+- replay matrix runner；
+- production matrix runner；
+- migration gate；
+- 三者的纯 Python 单元测试；
+- wat160k、wat600k 与 DNA_COU staging/dry-run 所需的 canonical tracked inputs。
 
-约束：不得提前把尚未存在的生产 source 注入 SPONGE；工具 target 可在后续批次逐步变为可构建。
+依赖审计证明 native contract/manybody oracle、NBNXM microbench 与 snapshot producer 都依赖尚未迁移的 provider/builder/LJ 闭包，因此延后到对应主题批次。本批只迁移 benchmarks/performance/clustered_lj，不修改 CMake，不影响默认 configure，也不声称 native target 已可构建。
+
+实施结果：从 19856de 恢复 6 个 runner/gate/test 文件及三组最小输入闭包；首次测试以 52/56 暴露缺失 tracked inputs，补齐后 56/56 通过。没有放宽 staging、idle、route、matched 或 3% gate。
 
 ### B2：contract、provider 与 builder foundation
 
@@ -31,6 +34,7 @@
 - builder internal API、CPU/GPU payload、candidate、active refresh、record stream；
 - Cornerstone 与中立 buffer/traversal primitive；
 - runtime CMake source/object ownership。
+- 在本闭包可构建后加入 clustered spatial-view test；manybody oracle 随 consumer 批，microbench/snapshot 随 LJ 批。
 
 约束：
 

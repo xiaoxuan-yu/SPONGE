@@ -6,7 +6,7 @@
 - 性能实现检查点：19856deb
 - 计划与审计检查点：71046ec
 - 共同祖先：4c694ebab7032b0ef28d8312115d0f3253800125
-- 状态：只建立迁移计划与独立 worktree，尚未移植运行时代码
+- 状态：B0 计划已提交；B1 Python benchmark harness 与 canonical tracked inputs 已恢复，56/56 单元测试通过
 
 ## 目标
 
