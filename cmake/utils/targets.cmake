@@ -1,8 +1,10 @@
 message(STATUS "Load build targets from ${TARGETS_FILE}")
 
-set(TARGETS
-    "SPONGE"
-    CACHE STRING "targets for SPONGE" FORCE)
+if(NOT DEFINED TARGETS)
+  set(TARGETS
+      "SPONGE"
+      CACHE STRING "targets for SPONGE")
+endif()
 
 message(STATUS "-- Build targets: ${TARGETS}")
 
@@ -11,11 +13,16 @@ searchoptions("${PROJECT_ROOT_DIR}/cmake/targets/*.cmake" TARGETS_OPTIONS)
 foreach(CURRENT_TARGET ${TARGETS})
   set(SOURCES)
   set(TARGET_SOURCE_LANGUAGE "${CPP_DIALECT}")
+  unset(TARGET_LINKER_LANGUAGE)
   if(CURRENT_TARGET IN_LIST TARGETS_OPTIONS)
     include("${PROJECT_ROOT_DIR}/cmake/targets/${CURRENT_TARGET}.cmake")
     if(SOURCES)
       set_source_files_properties(${SOURCES}
                                   PROPERTIES LANGUAGE ${TARGET_SOURCE_LANGUAGE})
+    endif()
+    if(TARGET_LINKER_LANGUAGE)
+      set_target_properties(
+        ${CURRENT_TARGET} PROPERTIES LINKER_LANGUAGE ${TARGET_LINKER_LANGUAGE})
     endif()
     target_link_libraries(${CURRENT_TARGET} PUBLIC common_libraries)
   else()

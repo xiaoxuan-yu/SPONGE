@@ -43,6 +43,14 @@
 - Manager/worker source 不进入 runtime source list；
 - 本批结束时 contract/oracle target 和 CPU/CUDA SPONGE 至少可编译。
 
+实施拆分：
+
+- B2.1 先迁移 contract、Provider 的只读 view 接口与参数/state 定义、Cornerstone gitlink，以及独立 `CLUSTERED_SPATIAL_VIEW_TEST`；不接入默认 SPONGE source list。
+- 为使独立 target 可达，`cmake/utils/targets.cmake` 改为仅在调用方未设置时默认 `SPONGE`，不再以 `FORCE` 覆盖 `-DTARGETS=`；默认构建集合未改变，也未加入 Manager。
+- B2.1 在 `dev-cpu` 与 `dev-cuda13`/SM89 下均完成 24 并行构建，`ClusteredSpatialViewContract` 各 1/1 通过。
+- B2.1 没有生产 source、kernel、launch 或默认 binary 变化，因此不触发 SASS/NCU/A-B；这些门槛从 B2.2 builder runtime 接入默认 SPONGE 起执行。
+- B2.2 再迁移 lifecycle、builder 实现与 runtime source/object ownership，并以 CPU/CUDA SPONGE 构建闭包结束。
+
 ### B3：regular LJ、soft-LJ 与主生命周期
 
 - clustered workspace/gather；

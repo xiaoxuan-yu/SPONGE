@@ -6,7 +6,7 @@
 - 性能实现检查点：19856deb
 - 计划与审计检查点：71046ec
 - 共同祖先：4c694ebab7032b0ef28d8312115d0f3253800125
-- 状态：B0 计划已提交；B1 Python benchmark harness 与 canonical tracked inputs 已恢复，56/56 单元测试通过
+- 状态：B0/B1 已提交；B2.1 contract/provider-view 接口、Cornerstone 锁定版本与独立 CPU/CUDA contract target 已迁移，CPU/CUDA 各 1/1 通过
 
 ## 目标
 
