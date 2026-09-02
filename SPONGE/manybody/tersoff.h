@@ -2,6 +2,7 @@
 #define TERSOFF_FORCE_H
 #include "../common.h"
 #include "../control.h"
+#include "../neighbor_list/contract/view.h"
 
 // J. Tersoff, Phys. Rev. B 37, 6991 (1988)
 struct TERSOFF_INFORMATION
@@ -13,6 +14,7 @@ struct TERSOFF_INFORMATION
 
     int atom_numbers = 0;
     int atom_type_numbers = 0;
+    float cut = 0.0f;
 
     int* h_atom_type = NULL;
     int* d_atom_type = NULL;
@@ -23,21 +25,33 @@ struct TERSOFF_INFORMATION
 
     float* h_params = NULL;
     float* d_params = NULL;
+    float* h_center_cutoffs = NULL;
+    float* d_center_cutoffs = NULL;
 
     float* h_energy_atom = NULL;
     float h_energy_sum = 0;
     float* d_energy_atom = NULL;
     float* d_energy_sum = NULL;
 
-    void Initial(CONTROLLER* controller, int atom_numbers,
-                 const char* module_name = NULL,
-                 bool* need_full_nl_flag = NULL);
+    long long clustered_neighbor_provider_incarnation = -1;
+    long long clustered_neighbor_payload_generation = -1;
+    int clustered_neighbor_numbers = 0;
+    int* d_clustered_neighbor_counts = NULL;
+    int clustered_neighbor_counts_capacity = 0;
+    int* d_clustered_neighbor_offsets = NULL;
+    int clustered_neighbor_offsets_capacity = 0;
+    int* d_clustered_neighbor_atoms = NULL;
+    int clustered_neighbor_atoms_capacity = 0;
 
-    void TERSOFF_Force_With_Atom_Energy_And_Virial(
-        const int atom_numbers, const VECTOR* crd, VECTOR* frc,
-        const LTMatrix3 cell, const LTMatrix3 rcell, const ATOM_GROUP* nl,
-        const int need_atom_energy, float* atom_energy, const int need_virial,
-        LTMatrix3* atom_virial);
+    void Initial(CONTROLLER* controller, int atom_numbers,
+                 const char* module_name = NULL);
+
+    bool TERSOFF_Force_Clustered(
+        const CLUSTERED_SPATIAL_VIEW& view, const VECTOR* crd, VECTOR* frc,
+        const LTMatrix3 cell, const LTMatrix3 rcell,
+        const int need_atom_energy, float* atom_energy,
+        const int need_virial, LTMatrix3* atom_virial,
+        const char** failure_reason = NULL);
 
     void Step_Print(CONTROLLER* controller);
 };

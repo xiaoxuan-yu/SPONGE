@@ -113,6 +113,17 @@ B4 实施结果：
 
 约束：保留 upstream native/H5 initialization；只替换邻居消费算法，不合并不同算子的数学循环。
 
+B5.1 实施结果（SW/EDIP/Tersoff）：
+
+- SW、EDIP 与 Tersoff 不再申请 legacy full neighbor list；三者从主循环中的唯一 `ClusteredNeighborProvider` 获取 all-local gmxpacked view，EAM、custom 与 ReaxFF 仍停留在 legacy 边界，留给后续 B5 子批。
+- upstream H5/native 初始化保持；三种势均显式限制为 PBC、单 PP rank，避免在尚无 typed halo 与 directed-edge ownership 时产生隐式错误。
+- GPU 构建按 per-pair shift/active mask 生成 directed center relation，CPU 使用对应 gmxpacked relation；最终 SW/EDIP/Tersoff 数学循环保持独立，不引入通用 evaluator 或第二套 provider。
+- 新增 CPU gmxpacked traversal helper 与 EDIP/Tersoff manybody oracle；oracle target 可独立配置，不依赖 `SPONGE` target 偶然定义的库。
+- CPU/CUDA SPONGE、contract 与 manybody oracle 构建/测试通过；SW LAMMPS diamond fixture 通过。source/candidate 的 SW 与 EDIP/Tersoff 目标 SASS exact，NCU launch/resource 无结构性变化。
+- 相对精确父提交 `d7cdb87` 的 replay 36/36、production 36/36 通过；官方组合 migration gate 通过。完整数值见验证文档的 B5.1 检查点。
+
+B5 后续保持小批提交：先迁移 EAM，再处理 custom pair，最后按 VDW/EEQ/BO/bond/HB 依赖顺序收口 ReaxFF；每个 device 子批单独执行 source-first NCU、SASS 与完整 A/B gate。
+
 ### B6：清理、源码树与最终 source owner
 
 - 应用 K1–K7 已验证的 lookup/buffer/offset/SITS/soft-LJ 清理；

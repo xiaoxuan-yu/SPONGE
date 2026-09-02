@@ -164,3 +164,31 @@ B4 将 selective interaction 接入唯一 clustered provider，并移除旧 SITS
 - production 为 3 systems × NVT/NPT × 2 implementations × 3 runs，共 36/36 valid；所有进程返回 0，GPU idle 为 2%，锁频为 2520 MHz。
 - production paired speed delta：wat160k NVT `-0.312%`、NPT `-0.010%`；wat600k NVT `-0.299%`、NPT `+0.248%`；DNA NVT `+0.294%`、NPT `-0.072%`。
 - 官方 replay + production migration gate 通过；本批没有使用宽松 gate，也没有提交临时 runner 或性能产物。
+
+## 11. B5.1 SW/EDIP/Tersoff 检查点
+
+B5.1 将首组三体 manybody consumers 接到唯一 clustered provider；精确批次父版本为 `d7cdb87`。EAM、custom 与 ReaxFF 未进入本批，因此 A/B 只判断本批新增 consumer 是否扰动既有 LJ 生产路径。
+
+### Correctness 与边界
+
+- CPU 与 CUDA13/SM89 的 SPONGE、`CLUSTERED_SPATIAL_VIEW_TEST`、`MANYBODY_CLUSTERED_ORACLE_TEST` 构建通过；contract 与 manybody oracle 各 2/2 通过。
+- `MANYBODY_CLUSTERED_ORACLE_TEST` 以单 target 配置、构建和执行 1/1 通过，未借用 SPONGE target 的 `sponge_toml` 定义。
+- EDIP/Tersoff oracle 覆盖非中心 periodic shift、pair active mask、exclusion、非对称/严格 cutoff、directed relation、三元组 image identity、EDIP z 与 dE/dz；CPU 与 CUDA 均通过。
+- SW 使用现有 LAMMPS diamond 对照 fixture，10648 atoms，1/1 通过；没有新增 production probe 或临时 gate。
+- 三个 consumer 的 view contract 在 Provider `AcquireView` 集中验证；CUDA 要求 pair-shift metadata/rcell，SW 额外要求 endpoint incidence。consumer 只检查自己的算法缓冲区，避免重复 contract 逻辑。
+- SW/EDIP/Tersoff 保留 upstream H5/native initialization，并显式拒绝 non-PBC 与 multi-rank。EAM、custom 与 ReaxFF 的 legacy full-list owner 未在本批改动。
+
+### SASS 与 NCU
+
+- source-first EDIP/Tersoff oracle NCU 覆盖 8 个 kernel 实例，共 44 passes；source/candidate normalized SASS 均为 4768 条指令，SHA-256 均为 `b170562d2b657c5ca4f7a4e6c5db6408598a3d0a23ea892ba0d17ab3fea0cf4d`。
+- EDIP/Tersoff 的 grid/block、register、shared、occupancy limit 与 branch 指标一致。代表 duration（source → candidate，微秒）：EDIP builder false `8.384 → 4.864`、true `6.272 → 4.960`，EDIP force `3.968 → 3.968`，Tersoff builder false `4.832 → 4.800`、true `5.824 → 4.928`，Tersoff force `6.272 → 6.240`。
+- SW diamond NCU 覆盖 builder false/true 与 cached-center full，共 44 passes；normalized SASS 均为 3216 条指令，SHA-256 均为 `3471d7bcc80a1cb615cb021a7e87ecbcdbfdcec543060cb3abea9cfd1b549a72`。
+- SW 三个实例资源与 launch exact；duration 为 builder false `260.58 → 265.31 us`、true `270.11 → 268.83 us`、cached full `101.44 → 102.30 us`。最大单项变化 `+1.82%`，无 spill、occupancy 或 launch 形态回退。
+
+### Replay 与 production
+
+- replay 使用精确父提交 `d7cdb87` 与当前 candidate 各自构建的 microbench，3 systems × 2 output modes × 2 implementations × 3 runs，warmup 200、iterations 2000，共 36/36 valid，full 全部 matched。
+- replay paired median kernel-time delta：wat160k force-only `-0.211%`、full `-0.151%`；wat600k force-only `-0.199%`、full `+0.016%`；DNA force-only `+0.647%`、full `+0.020%`。
+- production 使用同一父/candidate 的 SPONGE binary，3 systems × NVT/NPT × 2 implementations × 3 runs，每次 10000 steps，共 36/36 valid。四次图形负载越过 5% 的尝试由正式 runner 标无效并重试，未计入矩阵。
+- production paired speed delta：wat160k NVT `+0.325%`、NPT `-0.441%`；wat600k NVT `-0.129%`、NPT `-0.015%`；DNA NVT `-0.208%`、NPT `+0.069%`。
+- 官方 replay + production migration gate 在每个 cell 的 3% 合取门限下通过；未修改 runner、未放宽 idle/performance gate，NCU report、SASS dump 与矩阵产物均只保留在 `.tmp`。

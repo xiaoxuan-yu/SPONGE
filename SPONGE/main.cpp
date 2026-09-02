@@ -87,6 +87,30 @@ void Ensure_Clustered_Neighbor_Provider()
     }
 }
 
+CLUSTERED_SPATIAL_VIEW_REQUIREMENTS
+Clustered_All_Local_View_Requirements(
+    int local_atom_numbers, int ghost_numbers, float cutoff, LTMatrix3 rcell,
+    bool require_endpoint_incidence = false)
+{
+    CLUSTERED_SPATIAL_VIEW_REQUIREMENTS requirements;
+    requirements.local_atom_numbers = local_atom_numbers;
+    requirements.ghost_numbers = ghost_numbers;
+    requirements.cutoff = cutoff;
+    requirements.require_all_local_atoms = true;
+    requirements.require_gmxpacked_payload = true;
+#if defined(USE_CUDA) || defined(USE_HIP)
+    requirements.require_gmxpacked_endpoint_incidence =
+        require_endpoint_incidence;
+    requirements.require_pair_shift_metadata = true;
+    requirements.require_pair_shift_rcell = true;
+    requirements.pair_shift_rcell = rcell;
+#else
+    (void)rcell;
+    (void)require_endpoint_incidence;
+#endif
+    return requirements;
+}
+
 bool Needs_Legacy_Neighbor_List()
 {
     if (!md_info.pbc.pbc)
@@ -1253,12 +1277,58 @@ void Main_Initial(int argc, char* argv[])
     listed_forces.Initial(&controller, &md_info.sys.connectivity,
                           &md_info.sys.connected_distance);
 
-    sw.Initial(&controller, "SW", &neighbor_list.is_needed_full);
-    edip.Initial(&controller, "EDIP", &neighbor_list.is_needed_full);
+    sw.Initial(&controller, "SW");
+    if (sw.is_initialized)
+    {
+        if (!md_info.pbc.pbc || CONTROLLER::PP_MPI_size > 1)
+        {
+            controller.Throw_SPONGE_Error(
+                spongeErrorValueErrorCommand, "Main_Initial",
+                !md_info.pbc.pbc
+                    ? "Clustered SW requires periodic boundary conditions.\n"
+                    : "Clustered SW requires complete center-neighbor "
+                      "clustered metadata, which is not available for "
+                      "multi-PP-rank execution.\n");
+        }
+        Ensure_Clustered_Neighbor_Provider();
+    }
+
+    edip.Initial(&controller, "EDIP");
+    if (edip.is_initialized)
+    {
+        if (!md_info.pbc.pbc || CONTROLLER::PP_MPI_size > 1)
+        {
+            controller.Throw_SPONGE_Error(
+                spongeErrorValueErrorCommand, "Main_Initial",
+                !md_info.pbc.pbc
+                    ? "Clustered EDIP requires periodic boundary "
+                      "conditions.\n"
+                    : "Clustered EDIP requires typed z/dE_dz halo "
+                      "exchange, which is not available for multi-PP-rank "
+                      "execution.\n");
+        }
+        Ensure_Clustered_Neighbor_Provider();
+    }
+
     eam.Initial(&controller, md_info.atom_numbers, "EAM",
                 &neighbor_list.is_needed_full);
-    tersoff.Initial(&controller, md_info.atom_numbers, "TERSOFF",
-                    &neighbor_list.is_needed_full);
+
+    tersoff.Initial(&controller, md_info.atom_numbers, "TERSOFF");
+    if (tersoff.is_initialized)
+    {
+        if (!md_info.pbc.pbc || CONTROLLER::PP_MPI_size > 1)
+        {
+            controller.Throw_SPONGE_Error(
+                spongeErrorValueErrorCommand, "Main_Initial",
+                !md_info.pbc.pbc
+                    ? "Clustered Tersoff requires periodic boundary "
+                      "conditions.\n"
+                    : "Clustered Tersoff requires directed-edge/K "
+                      "ghost-force ownership, which is not available for "
+                      "multi-PP-rank execution.\n");
+        }
+        Ensure_Clustered_Neighbor_Provider();
+    }
     reaxff.Initial(&controller, md_info.atom_numbers, md_info.nb.cutoff,
                    &neighbor_list.cutoff_full, &neighbor_list.is_needed_full);
 
@@ -1591,26 +1661,138 @@ void Main_Calculate_Force()
             md_info.need_pressure, dd.d_virial, md_info.need_potential,
             dd.d_energy,
             md_info.pbc.cell.a11 * md_info.pbc.cell.a22 * md_info.pbc.cell.a33);
-        sw.SW_Force_With_Atom_Energy_And_Virial_Full_NL(
-            dd.atom_numbers, dd.crd, dd.frc, md_info.pbc.cell,
-            md_info.pbc.rcell, neighbor_list.full_neighbor_list.d_nl,
-            md_info.need_potential, dd.d_energy, md_info.need_pressure,
-            dd.d_virial);
-        edip.EDIP_Force_With_Atom_Energy_And_Virial_Full_NL(
-            dd.atom_numbers, dd.crd, dd.frc, md_info.pbc.cell,
-            md_info.pbc.rcell, neighbor_list.full_neighbor_list.d_nl,
-            md_info.need_potential, dd.d_energy, md_info.need_pressure,
-            dd.d_virial);
+        if (sw.is_initialized)
+        {
+#ifdef USE_CPU
+            constexpr bool sw_need_endpoint_incidence = false;
+#else
+            constexpr bool sw_need_endpoint_incidence = true;
+#endif
+            ClusteredBuildRequest request;
+            request.coordinates = dd.crd;
+            request.cell = md_info.pbc.cell;
+            request.reciprocal_cell = md_info.pbc.rcell;
+            request.cutoff = sw.cut;
+            request.need_endpoint_incidence = sw_need_endpoint_incidence;
+            clustered_neighbor_provider.Build(request);
+            CLUSTERED_SPATIAL_VIEW sw_clustered_view;
+            const CLUSTERED_SPATIAL_VIEW_REQUIREMENTS requirements =
+                Clustered_All_Local_View_Requirements(
+                    sw.atom_numbers, 0, sw.cut, md_info.pbc.rcell,
+                    sw_need_endpoint_incidence);
+            const char* sw_clustered_failure_reason = NULL;
+            if (!clustered_neighbor_provider.AcquireView(
+                    requirements, &sw_clustered_view,
+                    &sw_clustered_failure_reason))
+            {
+                throw std::runtime_error(
+                    std::string("clustered SW requires a current clustered "
+                                "payload: ") +
+                    (sw_clustered_failure_reason == NULL
+                         ? "unknown clustered-view failure"
+                         : sw_clustered_failure_reason));
+            }
+            if (!sw.SW_Force_Clustered(
+                    sw_clustered_view, dd.crd, dd.frc, md_info.pbc.cell,
+                    md_info.pbc.rcell, md_info.need_potential, dd.d_energy,
+                    md_info.need_pressure, dd.d_virial,
+                    &sw_clustered_failure_reason))
+            {
+                throw std::runtime_error(
+                    std::string("clustered SW rejected the clustered payload: ") +
+                    (sw_clustered_failure_reason == NULL
+                         ? "unknown SW clustered failure"
+                         : sw_clustered_failure_reason));
+            }
+        }
+        if (edip.is_initialized)
+        {
+            ClusteredBuildRequest request;
+            request.coordinates = dd.crd;
+            request.cell = md_info.pbc.cell;
+            request.reciprocal_cell = md_info.pbc.rcell;
+            request.cutoff = edip.cut;
+            clustered_neighbor_provider.Build(request);
+            CLUSTERED_SPATIAL_VIEW edip_clustered_view;
+            const CLUSTERED_SPATIAL_VIEW_REQUIREMENTS requirements =
+                Clustered_All_Local_View_Requirements(
+                    edip.atom_numbers, 0, edip.cut, md_info.pbc.rcell);
+            const char* edip_clustered_failure_reason = NULL;
+            if (!clustered_neighbor_provider.AcquireView(
+                    requirements, &edip_clustered_view,
+                    &edip_clustered_failure_reason))
+            {
+                throw std::runtime_error(
+                    std::string(
+                        "clustered EDIP requires a current clustered "
+                        "payload: ") +
+                    (edip_clustered_failure_reason == NULL
+                         ? "unknown clustered-view failure"
+                         : edip_clustered_failure_reason));
+            }
+            if (!edip.EDIP_Force_Clustered(
+                    edip_clustered_view, dd.crd, dd.frc,
+                    md_info.pbc.cell, md_info.pbc.rcell,
+                    md_info.need_potential, dd.d_energy,
+                    md_info.need_pressure, dd.d_virial,
+                    &edip_clustered_failure_reason))
+            {
+                throw std::runtime_error(
+                    std::string(
+                        "clustered EDIP rejected the clustered "
+                        "payload: ") +
+                    (edip_clustered_failure_reason == NULL
+                         ? "unknown EDIP clustered failure"
+                         : edip_clustered_failure_reason));
+            }
+        }
         eam.EAM_Force_With_Atom_Energy_And_Virial(
             dd.atom_numbers, dd.crd, dd.frc, md_info.pbc.cell,
             md_info.pbc.rcell, neighbor_list.full_neighbor_list.d_nl,
             md_info.need_potential, dd.d_energy, md_info.need_pressure,
             dd.d_virial);
-        tersoff.TERSOFF_Force_With_Atom_Energy_And_Virial(
-            dd.atom_numbers, dd.crd, dd.frc, md_info.pbc.cell,
-            md_info.pbc.rcell, neighbor_list.full_neighbor_list.d_nl,
-            md_info.need_potential, dd.d_energy, md_info.need_pressure,
-            dd.d_virial);
+        if (tersoff.is_initialized)
+        {
+            ClusteredBuildRequest request;
+            request.coordinates = dd.crd;
+            request.cell = md_info.pbc.cell;
+            request.reciprocal_cell = md_info.pbc.rcell;
+            request.cutoff = tersoff.cut;
+            clustered_neighbor_provider.Build(request);
+            CLUSTERED_SPATIAL_VIEW tersoff_clustered_view;
+            const CLUSTERED_SPATIAL_VIEW_REQUIREMENTS requirements =
+                Clustered_All_Local_View_Requirements(
+                    tersoff.atom_numbers, 0, tersoff.cut,
+                    md_info.pbc.rcell);
+            const char* tersoff_clustered_failure_reason = NULL;
+            if (!clustered_neighbor_provider.AcquireView(
+                    requirements, &tersoff_clustered_view,
+                    &tersoff_clustered_failure_reason))
+            {
+                throw std::runtime_error(
+                    std::string(
+                        "clustered Tersoff requires a current clustered "
+                        "payload: ") +
+                    (tersoff_clustered_failure_reason == NULL
+                         ? "unknown clustered-view failure"
+                         : tersoff_clustered_failure_reason));
+            }
+            if (!tersoff.TERSOFF_Force_Clustered(
+                    tersoff_clustered_view, dd.crd, dd.frc,
+                    md_info.pbc.cell, md_info.pbc.rcell,
+                    md_info.need_potential, dd.d_energy,
+                    md_info.need_pressure, dd.d_virial,
+                    &tersoff_clustered_failure_reason))
+            {
+                throw std::runtime_error(
+                    std::string(
+                        "clustered Tersoff rejected the clustered "
+                        "payload: ") +
+                    (tersoff_clustered_failure_reason == NULL
+                         ? "unknown Tersoff clustered failure"
+                         : tersoff_clustered_failure_reason));
+            }
+        }
         listed_forces.Compute_Force(dd.atom_numbers, dd.crd, md_info.pbc.cell,
                                     md_info.pbc.rcell, dd.frc,
                                     md_info.need_potential, dd.d_energy,
