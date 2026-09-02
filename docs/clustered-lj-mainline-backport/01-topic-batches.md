@@ -139,7 +139,15 @@ B5.3 实施结果（custom pair）：
 - CPU/CUDA SPONGE、microbench、snapshot producer 与 clustered contract 构建/测试通过；三组 Morse/LAMMPS 对照、500707-pair canonical oracle 和单原子空表均通过。完整 NCU 与 A/B 数值见验证文档的 B5.3 检查点。
 - 相对精确父提交 `314184a` 的 replay 36/36、production 36/36 通过；官方组合 migration gate 通过。
 
-B5 后续保持小批提交：下一批按 VDW/EEQ/BO/bond/HB 依赖顺序收口 ReaxFF；每个 device 子批单独执行 source-first NCU、SASS 与完整 A/B gate。
+B5.4 实施结果（ReaxFF VDW）：
+
+- ReaxFF VDW 不再消费 legacy half list；主循环为 VDW 从唯一 `ClusteredNeighborProvider` 获取 all-local gmxpacked view。EEQ、bond-order、bond、angle/torsion 与 hydrogen-bond 仍保留原邻居表，避免在一个提交中混合迁移。
+- GPU 直接遍历 8-way packed partitions，并使用 per-pair shift/active mask、exclusion 与 subgroup endpoint reduction；CPU 使用对应 clustered SCI traversal。实现只有 force-only/full 两种 specialization，没有 virial-only、fallback、probe 或 evaluator。
+- VDW 初始化不再单独请求 legacy full list；bond 等未迁移 ReaxFF consumers 仍维持 legacy list owner。PBC/single-PP-rank 约束在初始化时 fail-fast，合法空 payload 在 coordinate gather 前直接收口。
+- CPU/CUDA PETN/LAMMPS 对照、clustered contract 与 manybody oracle 通过；source/candidate 最终 VDW kernel normalized SASS exact，NCU 无 launch、register、occupancy 或 spill 回退。完整数值见验证文档的 B5.4 检查点。
+- PETN 16240 NVE 2000-step、三次交错 A/B 的 median throughput 为 `0.609 → 0.898 ns/day`，提升 `47.56%`；相对精确父提交 `49298b8` 的 replay 36/36、production 36/36 与官方组合 migration gate 均通过。
+
+B5 后续保持小批提交：下一批迁移 ReaxFF EEQ，再按 BO/bond/HB 依赖顺序收口；每个 device 子批单独执行 source-first NCU、SASS 与完整 A/B gate。
 
 ### B6：清理、源码树与最终 source owner
 

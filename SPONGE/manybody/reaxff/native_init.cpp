@@ -315,7 +315,7 @@ void Initialize_Bond(REAXFF_BOND* bond, CONTROLLER* controller,
 
 void Initialize_VDW(REAXFF_VDW* vdw, CONTROLLER* controller,
                     const NativeReaxFFDefinition& definition,
-                    const int atom_numbers, bool* need_full_nl_flag)
+                    const int atom_numbers)
 {
     constexpr int stride = 8;
     const int ntypes = static_cast<int>(definition.atoms.size());
@@ -358,9 +358,11 @@ void Initialize_VDW(REAXFF_VDW* vdw, CONTROLLER* controller,
     Device_Malloc_Safely((void**)&vdw->d_energy_sum, sizeof(float));
     Device_Malloc_Safely((void**)&vdw->d_energy_atom,
                          sizeof(float) * atom_numbers);
+    Device_Malloc_Safely(reinterpret_cast<void**>(&vdw->d_clustered_sorted_crd),
+                         sizeof(VECTOR) * static_cast<size_t>(atom_numbers));
+    vdw->clustered_scratch_capacity = atom_numbers;
     deviceMemset(vdw->d_energy_sum, 0, sizeof(float));
     deviceMemset(vdw->d_energy_atom, 0, sizeof(float) * atom_numbers);
-    if (need_full_nl_flag != NULL) *need_full_nl_flag = true;
     vdw->is_initialized = 1;
     controller->Step_Print_Initial("REAXFF_VDW", "%14.7e");
     controller->printf("END INITIALIZING REAXFF VDW FORCE\n\n");
@@ -719,8 +721,7 @@ void Initial_ReaxFF_From_Native(REAXFF* reaxff, CONTROLLER* controller,
                           atom_numbers);
     Initialize_Bond(&reaxff->bond, controller, definition, atom_numbers,
                     need_full_nl_flag);
-    Initialize_VDW(&reaxff->vdw, controller, definition, atom_numbers,
-                   need_full_nl_flag);
+    Initialize_VDW(&reaxff->vdw, controller, definition, atom_numbers);
     Initialize_Over_Under(&reaxff->ovun, controller, definition, atom_numbers);
     Initialize_Angle(&reaxff->angle, controller, definition, atom_numbers);
     Initialize_Torsion(&reaxff->torsion, controller, definition, atom_numbers);

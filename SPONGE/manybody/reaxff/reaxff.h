@@ -3,6 +3,7 @@
 
 #include "../../Domain_decomposition/Domain_decomposition.h"
 #include "../../control.h"
+#include "../../neighbor_list/contract/view.h"
 #include "../../neighbor_list/neighbor_list.h"
 #include "bond.h"
 #include "bond_order.h"
@@ -30,7 +31,8 @@ struct REAXFF
     void Initial(CONTROLLER* controller, int atom_numbers, float cutoff,
                  float* cutoff_full, bool* need_full_nl_flag);
     void Calculate_Force(DOMAIN_INFORMATION* dd, MD_INFORMATION* md_info,
-                         NEIGHBOR_LIST* neighbor_list);
+                         NEIGHBOR_LIST* neighbor_list,
+                         const CLUSTERED_SPATIAL_VIEW& clustered_view);
     void Step_Print(CONTROLLER* controller, const float* d_charge,
                     bool write_legacy_eeq_charges);
 

@@ -251,3 +251,29 @@ B5.3 将运行时 JIT custom-pair consumer 接到唯一 clustered provider；精
 - production 使用同一父/candidate 的 SPONGE binary，3 systems × NVT/NPT × 2 implementations × 3 runs，每次 10000 steps，共 36/36 valid。median ns/day（父版本 → 候选）：wat160k NVT `91.202 → 92.153`、NPT `84.132 → 84.737`；wat600k NVT `26.408 → 26.483`、NPT `24.496 → 24.380`；DNA NVT `355.003 → 358.464`、NPT `341.352 → 342.527`。
 - 对应 median throughput delta 为 wat160k NVT `+1.043%`、NPT `+0.719%`；wat600k NVT `+0.283%`、NPT `-0.475%`；DNA NVT `+0.975%`、NPT `+0.344%`。wat160k NVT 的首个父版本样本出现一次慢启动，但另两组配对样本正常，且它只使候选侧看起来更快，不会隐藏性能回退。
 - 官方 replay + production migration gate 在每个 cell 的 3% 合取门限下通过；runner、idle/performance gate、NCU report、snapshots 与矩阵产物只保留在 `.tmp`。
+
+## 14. B5.4 ReaxFF VDW 检查点
+
+B5.4 只迁移 ReaxFF VDW；精确批次父版本为 `49298b8`，性能实现参考为 `19856de`。EEQ、bond-order、bond、angle/torsion 与 hydrogen-bond 不在本批改动范围，仍保留 legacy neighbor-list consumer。
+
+### Correctness 与边界
+
+- CPU 与 CUDA13/SM89 的 SPONGE、`CLUSTERED_SPATIAL_VIEW_TEST`、`MANYBODY_CLUSTERED_ORACLE_TEST` 构建通过；clustered contract 与 manybody oracle 在 CPU/CUDA 各 2/2 通过。
+- PETN 16240 的现有 LAMMPS 单帧对照在 CPU、CUDA 均通过。相对精确父版本的 step 0/1 A/B 中，CPU total potential 差为 `+0.12 kcal/mol`、pressure 差不超过 `0.03 bar`、force max/RMS 差为 `0.003365/0.000135`；GPU total potential 差为 `-0.24/-0.12 kcal/mol`、pressure 差为 `-0.07 bar`、force max/RMS 差为 `0.004598/0.000191`。
+- VDW 只替换邻居遍历：native/H5 参数与 type 初始化保持，其他 ReaxFF 数学阶段和 legacy list 不变。GPU 使用 per-pair image shift 与 active mask；CPU 继续遵守其 SCI-shift backend contract。PBC 与 single-PP-rank 在初始化时 fail-fast，空 SCI payload 在 coordinate gather 前作为合法 no-op 收口。
+- GPU 以 packed traversal 的局部 j endpoint 聚合 atom energy/virial；这些数组在 ReaxFF 路径只进入总能量/总 virial 归约，端点归属不是可观察物理语义。审计期间尝试恢复 legacy 的较小 atom-id 归属会增加热循环随机 atomic，NCU 显示 full kernel 回退 `10.48%`，因此未纳入提交；恢复 subgroup 聚合后最终 SASS 与性能参考 exact。
+- opt-in H5 ReaxFF/EDIP runtime smoke 在 candidate 与精确父版本上都于既有 Tersoff clustered force 中触发同一 SIGSEGV，发生在 VDW 调用之前；本批不将该父版本已有问题归因于 VDW，也不越界修复 Tersoff。
+
+### SASS 与 NCU
+
+- legacy VDW kernel 的 source-first NCU 为约 `4.48 ms`，127 blocks × 128 threads、40 registers、0 spill；achieved occupancy 约 `8.13%`，no-eligible 约 `98.81%`，L1TEX scoreboard 约 `80.6 cycles`，过量 sectors 约占 `81%`。
+- clustered VDW launch 为 `(708,8,1)` blocks × `(8,8,1)` threads。full 为 64 registers、理论/实际 occupancy 约 `66.67%/51%`、0 spill；force-only 为 72 registers、理论/实际 occupancy 约 `58.33%/43%`、0 spill。
+- 最终 source/candidate 的两个 specialization normalized SASS exact：full 为 1472 个 encoding，force-only 为 2944 个 encoding；launch 与资源一致。final full 两次 duration 为 `667.97/695.81 us`，均值 `681.89 us`，相对 source 均值 `680.88 us` 为 `+0.15%`；force-only 候选均值约 `271.50 us`，相对 source `270.38 us` 为 `+0.41%`。
+- 对 legacy 单 kernel，clustered full 约加速 `6.6×`，force-only 约加速 `16.5×`。最终 full executed instructions 为 `99,462,397`，force-only 为约 `77.91M`；两者没有 spill、launch 形态或 occupancy 上限退化。
+
+### PETN throughput、replay 与 production
+
+- PETN 16240 NVE 使用现有 throughput fixture，2000 steps、parent/current 各三次并交错执行。parent elapsed 为 `28.262/28.424/28.380 s`，current 为 `19.324/19.220/19.233 s`；median steps/s 为 `70.472 → 103.987`，median ns/day 为 `0.608878 → 0.898445`，提升 `47.557%`。
+- replay 为 3 systems × 2 output modes × 2 implementations × 3 runs，共 36/36 valid。paired median kernel-time delta：wat160k force-only `+0.158%`、full `-0.209%`；wat600k force-only `-0.280%`、full `+0.061%`；DNA force-only `-1.251%`、full `+0.467%`。
+- production 为 3 systems × NVT/NPT × 2 implementations × 3 runs，每次 10000 steps，共 36/36 valid，pre/post idle SM 均为 `3%`。median ns/day（父版本 → 候选）：wat160k NVT `91.097 → 91.326`、NPT `84.020 → 84.435`；wat600k NVT `26.416 → 26.309`、NPT `24.017 → 24.056`；DNA NVT `356.530 → 359.714`、NPT `341.395 → 343.904`。
+- 对应 throughput delta 为 wat160k NVT `+0.251%`、NPT `+0.494%`；wat600k NVT `-0.405%`、NPT `+0.162%`；DNA NVT `+0.893%`、NPT `+0.735%`。官方 replay + production migration gate 在 3% 合取门限下通过；runner、gate、NCU/SASS 与性能产物均未进入提交，只保留在 `.tmp`。
