@@ -1,18 +1,14 @@
+if(NOT PARALLEL_BACKEND STREQUAL "cuda" AND
+   NOT PARALLEL_BACKEND STREQUAL "hip")
+  message(FATAL_ERROR
+          "SPONGE_CLUSTERED_SNAPSHOT_PRODUCER requires a GPU backend")
+endif()
+
 find_package(tomlplusplus CONFIG REQUIRED)
 find_package(HighFive CONFIG REQUIRED)
 find_package(HDF5 1.10.7 REQUIRED COMPONENTS C)
-if(WIN32
-   AND HDF5_VERSION VERSION_GREATER_EQUAL "1.12.0"
-   AND HDF5_VERSION VERSION_LESS "1.12.1")
-  message(
-    FATAL_ERROR
-      "HDF5 1.12.0 does not provide H5Pset_file_locking; use HDF5 1.10.7-1.10.x or 1.12.1+"
-  )
-endif()
 
-include(
-  ${PROJECT_ROOT_DIR}/cmake/targets/SPONGE_runtime_sources.cmake)
-set(SOURCES ${SPONGE_RUNTIME_SOURCES})
+include(${PROJECT_ROOT_DIR}/cmake/targets/SPONGE_runtime_sources.cmake)
 
 if(NOT TARGET sponge_toml)
   add_library(
@@ -38,7 +34,15 @@ if(NOT TARGET sponge_jit_header)
   target_include_directories(sponge_jit_header PUBLIC ${PROJECT_ROOT_DIR}/SPONGE)
 endif()
 
+set(SOURCES
+    ${PROJECT_ROOT_DIR}/tools/nbnxm_microbench/clustered_lj_snapshot_producer_main.cpp
+    ${PROJECT_ROOT_DIR}/tools/nbnxm_microbench/clustered_lj_snapshot_producer.cpp
+    ${SPONGE_RUNTIME_SOURCES})
+set(TARGET_LINKER_LANGUAGE "${CPP_DIALECT}")
+
 add_executable(${CURRENT_TARGET} ${SOURCES})
+target_compile_definitions(${CURRENT_TARGET}
+                           PRIVATE SPONGE_EMBEDDED_RUNTIME=1)
 target_link_libraries(${CURRENT_TARGET} PRIVATE sponge_jit_header sponge_toml)
 set_target_properties(
   ${CURRENT_TARGET}
@@ -50,15 +54,13 @@ set_target_properties(
              HIP_STANDARD_REQUIRED ON)
 target_include_directories(
   ${CURRENT_TARGET}
-  PRIVATE ${PROJECT_ROOT_DIR}/SPONGE
+  PRIVATE ${PROJECT_ROOT_DIR}/tools/nbnxm_microbench
+          ${PROJECT_ROOT_DIR}/SPONGE
           ${PROJECT_ROOT_DIR}/SPONGE/third_party/cornerstone_octree/include)
 if(TARGET HighFive::HighFive)
   target_link_libraries(${CURRENT_TARGET} PRIVATE HighFive::HighFive)
 elseif(TARGET HighFive)
   target_link_libraries(${CURRENT_TARGET} PRIVATE HighFive)
-else()
-  message(
-    FATAL_ERROR "HighFive target was not provided by find_package(HighFive)")
 endif()
 if(TARGET HDF5::HDF5)
   target_link_libraries(${CURRENT_TARGET} PRIVATE HDF5::HDF5)
@@ -66,4 +68,3 @@ else()
   target_include_directories(${CURRENT_TARGET} PRIVATE ${HDF5_INCLUDE_DIRS})
   target_link_libraries(${CURRENT_TARGET} PRIVATE ${HDF5_LIBRARIES})
 endif()
-install(TARGETS ${CURRENT_TARGET} RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})

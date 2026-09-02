@@ -224,3 +224,30 @@ B5.2 将 EAM 接到唯一 clustered provider；精确批次父版本为 `722dddc
 - production paired speed delta：wat160k NVT `+0.475%`、NPT `-0.450%`；wat600k NVT `-0.108%`、NPT `+0.076%`；DNA NVT `+0.010%`、NPT `+0.552%`。
 - 空表 host-dispatch 修复发生在正式 A/B 后；六个 A/B case 均不初始化 EAM，microbench target 未改变，且 post-fix EAM SASS/launch/resource exact，因此该矩阵仍直接覆盖受影响的 LJ 生产路径。
 - 官方 replay + production migration gate 在每个 cell 的 3% 合取门限下通过；runner、idle/performance gate、NCU report 与矩阵产物均未进入提交。
+
+## 13. B5.3 custom pair 检查点
+
+B5.3 将运行时 JIT custom-pair consumer 接到唯一 clustered provider；精确批次父版本为 `314184a`，性能实现参考为 `19856de`。ReaxFF 未进入本批。
+
+### Correctness、JIT 与空表边界
+
+- CPU 与 CUDA13/SM89 的 SPONGE 构建通过；CUDA `NBNXM_MICROBENCH` 与 `SPONGE_CLUSTERED_SNAPSHOT_PRODUCER` 同步构建。沙箱外 clustered contract 与 manybody oracle 为 2/2 通过。
+- Morse/LAMMPS 对照在 CPU、CUDA 各连续运行三次并通过能量、压力、应力与逐原子 force 检查。GPU 最大绝对 force 误差为 `2.11e-4` 到 `2.84e-4`，CPU 为 `1.65e-4` 到 `2.56e-4`。
+- 19³ periodic fixture 的 canonical pair oracle 为 `500707/500707` exact，duplicate、missing、extra 均为 0；单原子 CPU/GPU 空表 case 的 potential 与 Morse force 均为 0。
+- custom pair 保留主线 native/H5 输入和 JIT 势函数，仅替换邻居遍历与 launch contract。JIT 源显式携带 clustered lane-valid/local primitive，避免依赖宿主 translation unit 的预处理状态；生产实现只有 force-only/full 两种 specialization。
+- `SPONGE_CLUSTERED_SNAPSHOT_PRODUCER` 复用主程序初始化与 clustered provider，并通过 `SPONGE_EMBEDDED_RUNTIME` 排除可执行入口。公共 runtime source 清单只有一个 CMake owner，未引入第二套生产实现。
+
+### SASS 与 NCU
+
+- source reference 的 custom-pair JIT 源缺少 `Clustered_Lane_Is_Valid`/`Clustered_Lane_Is_Local` 定义，无法重新生成 live reference report；该缺陷未带入候选。对照使用此前同实现的 final NCU report，同时对候选重新执行完整 NCU。
+- force-only 候选 kernel 为约 `38.30 us`，历史 final 为 `42.30 us`；69 registers、0 spill，理论 occupancy `58.33%`，achieved occupancy 约 `34.5–35.3%`，launch 为 2480 blocks × 64 threads。
+- full 候选 kernel 为约 `60.93 us`，历史 final 为 `68.54 us`；72 registers、`16.38 KiB` dynamic shared、`1.28 KiB` static shared、0 spill，理论/实际 occupancy 为 `20.83%/18.19%`。资源和 launch 形态无回退。
+- full 候选 executed instruction 比历史 report 多约 0.90M，但实测 duration 更低，且无 spill、occupancy 或 memory-write 放大；因此接受该差异。空表 host-dispatch 修复不改变 JIT kernel source。
+
+### Replay 与 production
+
+- replay 使用精确父提交 `314184a` 与当前 candidate 的 microbench，3 systems × 2 output modes × 2 implementations × 3 runs，warmup 200、iterations 2000，共 36/36 valid。首轮一次 post-run idle SM 为 7% 被正式 runner 判无效并中止；保留原记录后按同一 5% 阈值完整重跑通过，未放宽 gate。
+- replay paired median kernel-time delta：wat160k force-only `-1.055%`、full `-0.396%`；wat600k force-only `-0.247%`、full `+0.204%`；DNA force-only `+0.640%`、full `+0.059%`。
+- production 使用同一父/candidate 的 SPONGE binary，3 systems × NVT/NPT × 2 implementations × 3 runs，每次 10000 steps，共 36/36 valid。median ns/day（父版本 → 候选）：wat160k NVT `91.202 → 92.153`、NPT `84.132 → 84.737`；wat600k NVT `26.408 → 26.483`、NPT `24.496 → 24.380`；DNA NVT `355.003 → 358.464`、NPT `341.352 → 342.527`。
+- 对应 median throughput delta 为 wat160k NVT `+1.043%`、NPT `+0.719%`；wat600k NVT `+0.283%`、NPT `-0.475%`；DNA NVT `+0.975%`、NPT `+0.344%`。wat160k NVT 的首个父版本样本出现一次慢启动，但另两组配对样本正常，且它只使候选侧看起来更快，不会隐藏性能回退。
+- 官方 replay + production migration gate 在每个 cell 的 3% 合取门限下通过；runner、idle/performance gate、NCU report、snapshots 与矩阵产物只保留在 `.tmp`。

@@ -117,8 +117,7 @@ bool Needs_Legacy_Neighbor_List()
     {
         return false;
     }
-    return plugin.plugin_numbers > 0 ||
-           pairwise_force.is_initialized || reaxff.is_initialized ||
+    return plugin.plugin_numbers > 0 || reaxff.is_initialized ||
            neighbor_list.is_needed_full;
 }
 
@@ -1124,6 +1123,7 @@ void Apply_H5_Protocol_Restart_State()
 }
 }  // namespace
 
+#ifndef SPONGE_EMBEDDED_RUNTIME
 int main(int argc, char* argv[])
 {
     Main_Initial(argc, argv);
@@ -1145,6 +1145,7 @@ int main(int argc, char* argv[])
     return 0;
 }
 
+#endif
 void Main_Initial(int argc, char* argv[])
 {
     controller.Initial(argc, argv, SUBPACKAGE_HINT);
@@ -1242,6 +1243,10 @@ void Main_Initial(int argc, char* argv[])
                    md_info.pbc.rcell, md_info.sys.box_length, md_info.nb.cutoff,
                    md_info.no_direct_interaction_virtual_atom_numbers);
         pairwise_force.Initial(&controller);
+        if (pairwise_force.is_initialized)
+        {
+            Ensure_Clustered_Neighbor_Provider();
+        }
         nb14.Initial(&controller, lj.h_LJ_A, lj.h_LJ_B, lj.h_atom_LJ_type);
 
         selective_interaction.Initial(&controller, md_info.atom_numbers);
@@ -1843,11 +1848,49 @@ void Main_Calculate_Force()
                                     md_info.pbc.rcell, dd.frc,
                                     md_info.need_potential, dd.d_energy,
                                     md_info.need_pressure, dd.d_virial);
-        pairwise_force.Compute_Force(
-            neighbor_list.d_nl, dd.crd, md_info.pbc.cell, md_info.pbc.rcell,
-            md_info.nb.cutoff, pm.beta, dd.d_charge, dd.frc,
-            md_info.need_potential, dd.d_energy, md_info.need_pressure,
-            dd.d_virial, pm.d_direct_atom_energy);
+        if (pairwise_force.is_initialized)
+        {
+            ClusteredBuildRequest request;
+            request.coordinates = dd.crd;
+            request.cell = md_info.pbc.cell;
+            request.reciprocal_cell = md_info.pbc.rcell;
+            request.cutoff = md_info.nb.cutoff;
+            clustered_neighbor_provider.Build(request);
+
+            CLUSTERED_SPATIAL_VIEW clustered_view;
+            const CLUSTERED_SPATIAL_VIEW_REQUIREMENTS requirements =
+                Clustered_All_Local_View_Requirements(
+                    pairwise_force.local_atom_numbers,
+                    pairwise_force.total_local_numbers -
+                        pairwise_force.local_atom_numbers,
+                    md_info.nb.cutoff, md_info.pbc.rcell);
+            const char* clustered_failure_reason = NULL;
+            if (!clustered_neighbor_provider.AcquireView(
+                    requirements, &clustered_view,
+                    &clustered_failure_reason))
+            {
+                throw std::runtime_error(
+                    std::string("clustered custom pairwise dispatch requires "
+                                "a current payload: ") +
+                    (clustered_failure_reason == NULL
+                         ? "unknown clustered-view failure"
+                         : clustered_failure_reason));
+            }
+            if (!pairwise_force.Compute_Force_Clustered(
+                    clustered_view, dd.crd, md_info.pbc.cell,
+                    md_info.pbc.rcell, md_info.nb.cutoff, pm.beta,
+                    dd.d_charge, dd.frc, md_info.need_potential, dd.d_energy,
+                    md_info.need_pressure, dd.d_virial,
+                    pm.d_direct_atom_energy, &clustered_failure_reason))
+            {
+                throw std::runtime_error(
+                    std::string("clustered custom pairwise dispatch rejected "
+                                "the payload: ") +
+                    (clustered_failure_reason == NULL
+                         ? "unknown custom-pairwise failure"
+                         : clustered_failure_reason));
+            }
+        }
         angle.Angle_Force_With_Atom_Energy_And_Virial(
             dd.crd, md_info.pbc.cell, md_info.pbc.rcell, dd.frc,
             md_info.need_potential, dd.d_energy, md_info.need_pressure,

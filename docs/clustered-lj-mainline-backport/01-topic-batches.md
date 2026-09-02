@@ -130,7 +130,16 @@ B5.2 实施结果（EAM）：
 - 修复 builder 在合法空 pair list 上遗留 `sci>0、cj=0` 未发布状态的问题；CPU payload、host compact 与 device compact 现在都以 all-valid 或 all-zero 原子计数收口，consumer contract 仍拒绝 partial payload。
 - 相对精确父提交 `722dddc` 的 replay 36/36、production 36/36 通过；官方组合 migration gate 通过。
 
-B5 后续保持小批提交：下一批处理 custom pair，随后按 VDW/EEQ/BO/bond/HB 依赖顺序收口 ReaxFF；每个 device 子批单独执行 source-first NCU、SASS 与完整 A/B gate。
+B5.3 实施结果（custom pair）：
+
+- custom pair 不再申请或消费 legacy full neighbor list；主循环从唯一 `ClusteredNeighborProvider` 获取 all-local gmxpacked view，CPU/GPU 都遍历同一 clustered pair product。
+- 保留主线 native/H5 初始化与运行时 JIT 势函数，只把 JIT launch contract 收口为 clustered force-only/full 两种变体；不增加 virial-only、legacy fallback、probe、gate 或通用 evaluator。
+- sorted id/coordinate/charge/type 由 custom-pair owner 的复用缓冲区提供；exclusion mask、local/ghost 权重、能量、virial 与 force 的语义保持。合法空 pair list 为 no-op，partial payload 继续拒绝。
+- 为验证运行时 JIT 路径，加入独立 custom-pair oracle 和 clustered snapshot producer；SPONGE 的 runtime source 清单抽为单一 CMake owner，producer 与主程序共享该清单而不复制生产源码枚举。
+- CPU/CUDA SPONGE、microbench、snapshot producer 与 clustered contract 构建/测试通过；三组 Morse/LAMMPS 对照、500707-pair canonical oracle 和单原子空表均通过。完整 NCU 与 A/B 数值见验证文档的 B5.3 检查点。
+- 相对精确父提交 `314184a` 的 replay 36/36、production 36/36 通过；官方组合 migration gate 通过。
+
+B5 后续保持小批提交：下一批按 VDW/EEQ/BO/bond/HB 依赖顺序收口 ReaxFF；每个 device 子批单独执行 source-first NCU、SASS 与完整 A/B gate。
 
 ### B6：清理、源码树与最终 source owner
 
