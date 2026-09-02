@@ -155,7 +155,16 @@ B5.5 实施结果（ReaxFF EEQ）：
 - PETN source-first NCU 中，EEQ gather + count + fill + force 总时延由 `1.537–1.542 ms` 降至 `1.263–1.270 ms`，约减少 `17.4–18.1%`；PETN 2000-step 三次交错 A/B 为 `0.9005 → 0.9136 ns/day`，提升 `1.45%`。
 - 相对精确父提交 `580dcb11` 的 replay 36/36、production 36/36 通过；官方组合 migration gate 通过。
 
-B5 后续保持小批提交：下一批按依赖顺序迁移 ReaxFF bond-order/bond，再收口 angle/torsion 与 hydrogen-bond；每个 device 子批单独执行 source-first NCU、SASS 与完整 A/B gate。
+B5.6 实施结果（ReaxFF bond-order/bond）：
+
+- bond-order 不再扫描 legacy `ATOM_GROUP`；CPU/GPU 都直接遍历同一 all-local gmxpacked payload，生成 canonical bond pair、原始 bond order 与距离，后续 correction、CSR、angle/torsion/over-under 和 force projection 继续复用这份稀疏结果。
+- bond energy 不再重新扫描 full neighbor list 并对 CSR 做逐邻居 lookup，而是每个 canonical bond 直接计算一次能量和三组 bond-order 导数；删除 bond owner 的 full-list 请求及未使用的坐标、force、virial、CSR 参数。
+- GPU CSR prefix 从单线程串行 kernel 改为 device exclusive scan；CPU 保留原顺序实现。angle/torsion 同步删除已经无效的 `ATOM_GROUP` 裸参数，但不合并各自数学 kernel。
+- legacy/raw BO、legacy bond-force 与 GPU 串行 prefix kernel 均已从候选 binary 消失；full neighbor list 当前只由尚未迁移的 hydrogen-bond 请求和消费。
+- CPU/CUDA PETN/LAMMPS 单帧对照、clustered contract 与 manybody oracle 通过；source-first NCU 显示 raw BO `969.86 → 179.30 us`、bond energy/derivative `567.36 → 71.10 us`，新 kernel 均无 spill。完整数值见验证文档的 B5.6 检查点。
+- PETN 16240 NVE 2000-step、三次交错 A/B 的 median throughput 为 `0.9134 → 1.1329 ns/day`，提升 `24.01%`；相对精确父提交 `2d772b9a` 的 replay 36/36、production 36/36 均通过 3% gate。
+
+B5 后续保持小批提交：下一批迁移 ReaxFF hydrogen-bond，消除最后一个 legacy full-list consumer；angle/torsion 已直接消费 bond-order CSR，不需要重新扫描 spatial neighbor list。每个 device 子批单独执行 source-first NCU、SASS 与完整 A/B gate。
 
 ### B6：清理、源码树与最终 source owner
 

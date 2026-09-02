@@ -1,7 +1,5 @@
 ﻿#include "bond.h"
 
-#include "bond_order.h"  // for find_bond_index
-
 static const int De_s = 0;
 static const int De_p = 1;
 static const int De_PP = 2;
@@ -29,68 +27,47 @@ __device__ __forceinline__ SADfloat<N> reax_bond_energy_sad(SADfloat<N> BO_s,
     return ebond;
 }
 
-static __global__ void REAXFF_Bond_Force_CUDA(
-    const int atom_numbers, const VECTOR* crd, VECTOR* frc,
-    const LTMatrix3 cell, const LTMatrix3 rcell, const ATOM_GROUP* nl,
-    int* atom_types, float* params, int ntypes, float* bo_s, float* bo_pi,
-    float* bo_pi2, float* d_dE_dBO_s, float* d_dE_dBO_pi, float* d_dE_dBO_pi2,
-    float* atom_energy, LTMatrix3* atom_virial, float* d_energy_sum,
-    const int* bond_count, const int* bond_offset, const int* bond_nbr,
-    const int* bond_idx_arr)
+static __global__ void REAXFF_Bond_Energy_And_Derivatives(
+    int bond_numbers, const int* pair_i, const int* pair_j,
+    const int* atom_types, const float* params, int ntypes, const float* bo_s,
+    const float* bo_pi, const float* bo_pi2, float* d_dE_dBO_s,
+    float* d_dE_dBO_pi, float* d_dE_dBO_pi2, float* atom_energy,
+    float* d_energy_sum)
 {
-    SIMPLE_DEVICE_FOR(i, atom_numbers)
+    SIMPLE_DEVICE_FOR(b, bond_numbers)
     {
+        const int i = pair_i[b];
+        const int j = pair_j[b];
         int type_i = atom_types[i];
-        VECTOR ri = crd[i];
-        ATOM_GROUP nl_i = nl[i];
-        float en_i = 0;
+        int param_idx = type_i * ntypes + atom_types[j];
+        const float* param = params + param_idx * PARAM_STRIDE;
 
-        for (int jj = 0; jj < nl_i.atom_numbers; jj++)
+        float BO_s_ij = bo_s[b];
+        float BO_pi_ij = bo_pi[b];
+        float BO_pi2_ij = bo_pi2[b];
+        if (BO_s_ij + BO_pi_ij + BO_pi2_ij >= 1e-10f)
         {
-            int j = nl_i.atom_serial[jj];
-
-            if (j <= i) continue;
-
-            int b = find_bond_index(i, j, bond_count, bond_offset, bond_nbr,
-                                    bond_idx_arr);
-            if (b < 0) continue;
-
-            int param_idx = type_i * ntypes + atom_types[j];
-            const float* param = params + param_idx * PARAM_STRIDE;
-
-            float BO_s_ij = bo_s[b];
-            float BO_pi_ij = bo_pi[b];
-            float BO_pi2_ij = bo_pi2[b];
-
-            if (BO_s_ij + BO_pi_ij + BO_pi2_ij < 1e-10f) continue;
-
             SADfloat<3> BO_s_sad(BO_s_ij, 0);
             SADfloat<3> BO_pi_sad(BO_pi_ij, 1);
             SADfloat<3> BO_pi2_sad(BO_pi2_ij, 2);
-
             SADfloat<3> energy_sad =
                 reax_bond_energy_sad(BO_s_sad, BO_pi_sad, BO_pi2_sad, param);
 
-            atomicAdd(&d_dE_dBO_s[b], energy_sad.dval[0]);
-            atomicAdd(&d_dE_dBO_pi[b], energy_sad.dval[1]);
-            atomicAdd(&d_dE_dBO_pi2[b], energy_sad.dval[2]);
+            d_dE_dBO_s[b] += energy_sad.dval[0];
+            d_dE_dBO_pi[b] += energy_sad.dval[1];
+            d_dE_dBO_pi2[b] += energy_sad.dval[2];
 
-            if (atom_energy)
+            if (atom_energy != NULL)
             {
-                en_i += energy_sad.val;
+                atomicAdd(&atom_energy[i], energy_sad.val);
                 atomicAdd(d_energy_sum, energy_sad.val);
             }
-        }
-
-        if (atom_energy)
-        {
-            atom_energy[i] += en_i;
         }
     }
 }
 
 void REAXFF_BOND::Initial(CONTROLLER* controller, int atom_numbers,
-                          const char* module_name, bool* need_full_nl_flag)
+                          const char* module_name)
 {
     if (module_name == NULL) module_name = "REAXFF";
     this->atom_numbers = atom_numbers;
@@ -295,41 +272,33 @@ void REAXFF_BOND::Initial(CONTROLLER* controller, int atom_numbers,
     Device_Malloc_And_Copy_Safely((void**)&d_atom_type, h_atom_type,
                                   sizeof(int) * atom_numbers);
     Device_Malloc_Safely((void**)&d_energy_sum, sizeof(float));
-    Device_Malloc_Safely((void**)&d_energy_atom, sizeof(float) * atom_numbers);
     deviceMemset(d_energy_sum, 0, sizeof(float));
-    deviceMemset(d_energy_atom, 0, sizeof(float) * atom_numbers);
-
-    if (need_full_nl_flag != NULL) *need_full_nl_flag = true;
 
     is_initialized = true;
     controller->Step_Print_Initial("REAXFF_BOND", "%14.7e");
     controller->printf("END INITIALIZING REAXFF BOND FORCE\n\n");
 }
 
-void REAXFF_BOND::REAXFF_Bond_Force_With_Atom_Energy_And_Virial(
-    const int atom_numbers, const VECTOR* crd, VECTOR* frc,
-    const LTMatrix3 cell, const LTMatrix3 rcell, const ATOM_GROUP* nl,
-    const int need_atom_energy, float* atom_energy, const int need_virial,
-    LTMatrix3* atom_virial)
+void REAXFF_BOND::Calculate_Bond_Energy_And_Derivatives(int bond_numbers,
+                                                        int need_atom_energy,
+                                                        float* atom_energy)
 {
     if (!is_initialized) return;
 
     if (need_atom_energy)
     {
         deviceMemset(d_energy_sum, 0, sizeof(float));
-        if (atom_energy)
-            deviceMemset(d_energy_atom, 0, sizeof(float) * atom_numbers);
     }
+    if (bond_numbers <= 0) return;
 
     dim3 blockSize(128);
-    dim3 gridSize((atom_numbers + blockSize.x - 1) / blockSize.x);
+    dim3 gridSize((bond_numbers + blockSize.x - 1) / blockSize.x);
 
-    Launch_Device_Kernel(REAXFF_Bond_Force_CUDA, gridSize, blockSize, 0, NULL,
-                         atom_numbers, crd, frc, cell, rcell, nl, d_atom_type,
-                         d_twobody_params, atom_type_numbers, d_bo_s, d_bo_pi,
-                         d_bo_pi2, d_dE_dBO_s, d_dE_dBO_pi, d_dE_dBO_pi2,
-                         atom_energy, atom_virial, d_energy_sum, d_bond_count,
-                         d_bond_offset, d_bond_nbr, d_bond_idx);
+    Launch_Device_Kernel(
+        REAXFF_Bond_Energy_And_Derivatives, gridSize, blockSize, 0, NULL,
+        bond_numbers, d_pair_i, d_pair_j, d_atom_type, d_twobody_params,
+        atom_type_numbers, d_bo_s, d_bo_pi, d_bo_pi2, d_dE_dBO_s, d_dE_dBO_pi,
+        d_dE_dBO_pi2, need_atom_energy ? atom_energy : NULL, d_energy_sum);
 }
 
 void REAXFF_BOND::Step_Print(CONTROLLER* controller)

@@ -53,12 +53,14 @@ void REAXFF::Initial(CONTROLLER* controller, int atom_numbers, float cutoff,
     eeq.Initial(controller, atom_numbers, parameter_in_file, type_in_file);
     bond_order.Initial(controller, atom_numbers, parameter_in_file,
                        type_in_file, cutoff, cutoff_full);
-    bond.Initial(controller, atom_numbers, "REAXFF", need_full_nl_flag);
+    bond.Initial(controller, atom_numbers, "REAXFF");
     vdw.Initial(controller, atom_numbers, "REAXFF");
     ovun.Initial(controller, atom_numbers, "REAXFF");
     angle.Initial(controller, atom_numbers, "REAXFF");
     torsion.Initial(controller, atom_numbers, "REAXFF");
     hb.Initial(controller, atom_numbers, "REAXFF");
+    if (need_full_nl_flag != NULL && hb.is_initialized)
+        *need_full_nl_flag = true;
     if (bond.is_initialized && vdw.is_initialized && eeq.is_initialized)
     {
         controller->Step_Print_Initial("REAXFF", "%14.7e");
@@ -86,10 +88,8 @@ void REAXFF::Wire_Shared_State()
     bond.d_dbo_pi_dDelta_j = bond_order.d_dbo_pi_dDelta_j;
     bond.d_dbo_pi2_dDelta_j = bond_order.d_dbo_pi2_dDelta_j;
     bond.d_dbo_raw_total_dr = bond_order.d_dbo_raw_total_dr;
-    bond.d_bond_count = bond_order.d_bond_count;
-    bond.d_bond_offset = bond_order.d_bond_offset;
-    bond.d_bond_nbr = bond_order.d_bond_nbr;
-    bond.d_bond_idx = bond_order.d_bond_idx;
+    bond.d_pair_i = bond_order.d_pair_i;
+    bond.d_pair_j = bond_order.d_pair_j;
 
     ovun.d_dE_dBO_s = bond_order.d_dE_dBO_s;
     ovun.d_dE_dBO_pi = bond_order.d_dE_dBO_pi;
@@ -176,19 +176,17 @@ void REAXFF::Calculate_Force(DOMAIN_INFORMATION* dd, MD_INFORMATION* md_info,
         dd->Sync_Local_Charge_From_Global(md_info->d_charge);
     }
 
-    bond_order.Calculate_Bond_Order(
-        dd->atom_numbers, dd->crd, md_info->pbc.cell, md_info->pbc.rcell,
-        neighbor_list->full_neighbor_list.d_nl, md_info->nb.cutoff);
+    bond_order.Calculate_Bond_Order(dd->atom_numbers, dd->crd,
+                                    md_info->pbc.cell, md_info->pbc.rcell,
+                                    md_info->nb.cutoff, clustered_view);
 
     if (bond_order.is_initialized)
     {
         bond_order.Clear_Derivatives(dd->atom_numbers, ovun.d_CdDelta);
     }
 
-    bond.REAXFF_Bond_Force_With_Atom_Energy_And_Virial(
-        dd->atom_numbers, dd->crd, dd->frc, md_info->pbc.cell,
-        md_info->pbc.rcell, neighbor_list->d_nl, md_info->need_potential,
-        dd->d_energy, md_info->need_pressure, dd->d_virial);
+    bond.Calculate_Bond_Energy_And_Derivatives(
+        bond_order.h_num_pairs, md_info->need_potential, dd->d_energy);
     const char* vdw_failure_reason = NULL;
     if (!vdw.REAXFF_VDW_Force_Clustered(
             clustered_view, dd->crd, dd->frc, md_info->pbc.cell,
@@ -208,15 +206,15 @@ void REAXFF::Calculate_Force(DOMAIN_INFORMATION* dd, MD_INFORMATION* md_info,
         md_info->need_pressure, dd->d_virial);
     angle.Calculate_Valence_Angle_Energy_And_Force(
         dd->atom_numbers, dd->crd, dd->frc, md_info->pbc.cell,
-        md_info->pbc.rcell, neighbor_list->full_neighbor_list.d_nl, &bond_order,
-        ovun.d_Delta, ovun.d_Delta_boc, ovun.d_Delta_val, ovun.d_nlp,
-        ovun.d_vlpex, ovun.d_dDelta_lp, ovun.d_CdDelta, md_info->need_potential,
-        dd->d_energy, md_info->need_pressure, dd->d_virial);
+        md_info->pbc.rcell, &bond_order, ovun.d_Delta, ovun.d_Delta_boc,
+        ovun.d_Delta_val, ovun.d_nlp, ovun.d_vlpex, ovun.d_dDelta_lp,
+        ovun.d_CdDelta, md_info->need_potential, dd->d_energy,
+        md_info->need_pressure, dd->d_virial);
     torsion.Calculate_Torsion_Energy_And_Force(
         dd->atom_numbers, dd->crd, dd->frc, md_info->pbc.cell,
-        md_info->pbc.rcell, neighbor_list->full_neighbor_list.d_nl, &bond_order,
-        ovun.d_Delta_boc, md_info->need_potential, dd->d_energy,
-        md_info->need_pressure, dd->d_virial);
+        md_info->pbc.rcell, &bond_order, ovun.d_Delta_boc,
+        md_info->need_potential, dd->d_energy, md_info->need_pressure,
+        dd->d_virial);
     hb.Calculate_HB_Energy_And_Force(
         dd->atom_numbers, dd->crd, dd->frc, md_info->pbc.cell,
         md_info->pbc.rcell, neighbor_list->full_neighbor_list.d_nl, &bond_order,

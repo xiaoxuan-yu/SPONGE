@@ -302,3 +302,32 @@ B5.5 只迁移 ReaxFF EEQ；精确批次父版本为 `580dcb11`，性能实现�
 - replay 首轮第 2 cycle 的 DNA full/current 因 post-run idle SM `6%` 超过既有 `5%` 环境门槛中止；GPU idle 恢复到 `3%` 后按完全相同参数和门槛新目录重跑，36/36 valid。官方 paired median kernel-time delta：wat160k force-only `+0.028%`、full `-0.153%`；wat600k force-only `-0.486%`、full `+0.216%`；DNA force-only `+1.701%`、full `+0.474%`。
 - production 为 3 systems × NVT/NPT × 2 implementations × 3 runs，每次 10000 steps，共 36/36 valid。官方 paired speed delta：wat160k NVT `+0.443%`、NPT `+0.718%`；wat600k NVT `-0.208%`、NPT `-0.057%`；DNA NVT `+0.505%`、NPT `+0.066%`。
 - 官方 replay + production migration gate 在每个 cell 的 3% 合取门限下通过；临时 PETN runner、NCU/SASS、snapshots 与矩阵产物均只保留在 `.tmp`，没有新增 production probe、gate 或 fallback。
+
+## 16. B5.6 ReaxFF bond-order/bond 检查点
+
+B5.6 迁移 ReaxFF bond-order 的空间遍历，并让 bond energy 直接消费其 canonical pair；精确批次父版本为 `2d772b9a`，性能实现参考为 `19856de`。hydrogen-bond 仍是唯一 legacy full-neighbor consumer。
+
+### Correctness、数据流与边界
+
+- CPU 与 CUDA13/SM89 的 SPONGE 构建通过。PETN 16240 全 ReaxFF 单帧 LAMMPS 对照在 CPU、CUDA 各 1/1 通过；CPU potential 为 `-1615557.0 kcal/mol`、pressure 为 `-4180.42 bar`，GPU 对应为 `-1615557.0 kcal/mol`、`-4181.37 bar`。CPU/GPU force max/RMS 误差分别为 `0.721583/0.171325` 与 `0.721323/0.171328`，charge max/RMS 误差分别为 `0.000492/0.000165` 与 `0.000492/0.000166`。
+- CPU clustered contract 与 standalone manybody oracle 各 1/1 通过；H5 input validation 通过，两个 opt-in H5 runtime case 由既有测试配置标记 skip，不记为本批通过项。
+- raw bond-order 在 gmxpacked traversal 中一次生成 canonical `pair_i/pair_j`、距离和每原子总 BO；correction 后建立 CSR，angle、torsion 与 over/under 继续复用 CSR。bond energy 改为逐 canonical pair 计算，不再扫描 full list 或查找 CSR bond index。
+- CPU 与 GPU 共用同一 raw-BO 数学 helper；GPU 使用 8 个 packed partition、pair-shift metadata、active mask 与 exclusion，CPU 使用对应 SCI traversal。single-rank all-local、backend、payload generation 和 pair-shift contract 继续由既有 view validator 检查；空 payload 不启动零尺寸 gather/pair kernel，并将 CSR 与总 corrected BO 清零。
+- `max_bonds = atom_numbers * 32` 及超限 warning 是父版本已有的稀疏存储上限，本批没有增加第二种容量策略、fallback 或 production gate；PETN 验证未触发该上限。
+- bond 与 angle/torsion 的失效 `ATOM_GROUP` 参数及 bond 的旧 CSR lookup 字段已删除。full neighbor list 目前只在 hydrogen-bond 初始化时申请，并只传给 hydrogen-bond force。
+
+### Source-first NCU 与静态代码检查
+
+- 精确父版本的 raw BO、单线程 CSR prefix 和 bond force 分别为 `969.86 us`、`737.22 us` 和 `567.36 us`。raw BO 为 16 blocks × 1024 threads、37 registers、约 `63.51%` achieved occupancy；bond force 为 127 blocks × 128 threads、34 registers、约 `7.87%` achieved occupancy；两者均无 spill。
+- 候选 gather 为 `4.70 us`；clustered raw BO 为 `179.30 us`，launch 为 `(708,8,1)` blocks × `(8,8,1)` threads、48 registers、约 `48.31%` achieved occupancy、0 spill。count/fill/reduce 分别为 `8.00/8.32/9.02 us`，GPU 串行 prefix 改由 device exclusive scan。
+- bond energy/derivative 改为 388 blocks × 128 threads 的 canonical-pair kernel，duration 为 `71.10 us`、30 registers、0 spill；CdDelta 为 `5.95 us`。作为对照，父版本 correction/count/fill/reduce/CdDelta 为 `6.59/6.88/10.11/10.50/6.21 us`，候选 correction 为 `6.40 us`，未出现下游 kernel 回退。
+- 最新候选 binary 已无 `Calculate_Uncorrected_Bond_Orders_Kernel`、`REAXFF_Bond_Force_CUDA` 或 `Exclusive_Prefix_Sum_Kernel`；新 clustered raw BO、gather 和 canonical-pair bond kernel 均存在。静态 fatbin resource dump（`sm_75` 段）分别为 `58/22/27` registers，stack/local/shared 均为 0；SM89 NCU 上述资源以实际 JIT/设备采样值为准。
+- 未改动的 correction、count、fill、reduce、CdDelta 与 force-projection 六个 kernel，其 normalized SASS 与资源相对父版本 exact。最后一次只用预处理删除 GPU 不可达 prefix 定义，复核确认旧 prefix 符号已消失，不改变这六个 kernel。
+
+### PETN throughput、replay 与 production
+
+- PETN 16240 NVE 使用现有 throughput fixture，2000 steps、parent/current 各三次并交错执行。parent elapsed 为 `18.946/18.819/18.918 s`，current 为 `15.490/15.192/15.253 s`；median ns/day 为 `0.913413 → 1.132866`，提升 `24.01%`。
+- replay 使用精确父提交 `2d772b9a` 与当前 candidate 各自构建的 microbench，3 systems × 2 output modes × 2 implementations × 3 runs，warmup 200、iterations 2000，共 36/36 valid，full 全部 matched。paired median kernel-time delta：wat160k force-only `-0.385%`、full `+0.423%`；wat600k force-only `+0.184%`、full `+0.059%`；DNA force-only `+0.113%`、full `+0.307%`。
+- production 使用同一父/candidate 的 SPONGE binary，3 systems × NVT/NPT × 2 implementations × 3 runs，每次 10000 steps，共 36/36 valid。median ns/day（父版本 → 候选）：wat160k NVT `91.865 → 91.667`、NPT `83.728 → 84.186`；wat600k NVT `26.292 → 26.329`、NPT `23.986 → 23.949`；DNA NVT `359.928 → 359.018`、NPT `341.442 → 342.913`。
+- production paired speed delta：wat160k NVT `-0.215%`、NPT `+0.486%`；wat600k NVT `+0.133%`、NPT `-0.066%`；DNA NVT `-0.362%`、NPT `+0.517%`。所有 36 个进程返回 0，post-idle SM 为 `3–5%`。
+- replay 与 production 均在每个 cell 的 3% 门限下通过；临时 NCU report、SASS/resource dump、PETN runner、snapshot 与矩阵产物只保留在 `.tmp`，没有新增 production probe、gate 或 fallback。

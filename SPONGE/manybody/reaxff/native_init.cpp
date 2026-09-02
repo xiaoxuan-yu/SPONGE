@@ -241,6 +241,9 @@ void Initialize_Bond_Order(REAXFF_BOND_ORDER* bo, CONTROLLER* controller,
     Device_Malloc_Safely((void**)&bo->d_pair_distances,
                          sizeof(float) * bo->max_bonds);
     Device_Malloc_Safely((void**)&bo->d_num_pairs_ptr, sizeof(int));
+    Device_Malloc_Safely((void**)&bo->d_clustered_sorted_crd,
+                         sizeof(VECTOR) * atom_numbers);
+    bo->clustered_scratch_capacity = atom_numbers;
     Device_Malloc_Safely((void**)&bo->d_corrected_bo_s,
                          sizeof(float) * bo->max_bonds);
     Device_Malloc_Safely((void**)&bo->d_corrected_bo_pi,
@@ -281,7 +284,7 @@ void Initialize_Bond_Order(REAXFF_BOND_ORDER* bo, CONTROLLER* controller,
 
 void Initialize_Bond(REAXFF_BOND* bond, CONTROLLER* controller,
                      const NativeReaxFFDefinition& definition,
-                     const int atom_numbers, bool* need_full_nl_flag)
+                     const int atom_numbers)
 {
     constexpr int stride = 5;
     const int ntypes = static_cast<int>(definition.atoms.size());
@@ -308,11 +311,7 @@ void Initialize_Bond(REAXFF_BOND* bond, CONTROLLER* controller,
     Device_Copy(&bond->d_twobody_params, bond->h_twobody_params, count);
     Copy_Atom_Types(&bond->h_atom_type, &bond->d_atom_type, definition);
     Device_Malloc_Safely((void**)&bond->d_energy_sum, sizeof(float));
-    Device_Malloc_Safely((void**)&bond->d_energy_atom,
-                         sizeof(float) * atom_numbers);
     deviceMemset(bond->d_energy_sum, 0, sizeof(float));
-    deviceMemset(bond->d_energy_atom, 0, sizeof(float) * atom_numbers);
-    if (need_full_nl_flag != NULL) *need_full_nl_flag = true;
     bond->is_initialized = 1;
     controller->Step_Print_Initial("REAXFF_BOND", "%14.7e");
     controller->printf("END INITIALIZING REAXFF BOND FORCE\n\n");
@@ -724,13 +723,14 @@ void Initial_ReaxFF_From_Native(REAXFF* reaxff, CONTROLLER* controller,
     Initialize_EEQ(&reaxff->eeq, controller, definition, atom_numbers);
     Initialize_Bond_Order(&reaxff->bond_order, controller, definition,
                           atom_numbers);
-    Initialize_Bond(&reaxff->bond, controller, definition, atom_numbers,
-                    need_full_nl_flag);
+    Initialize_Bond(&reaxff->bond, controller, definition, atom_numbers);
     Initialize_VDW(&reaxff->vdw, controller, definition, atom_numbers);
     Initialize_Over_Under(&reaxff->ovun, controller, definition, atom_numbers);
     Initialize_Angle(&reaxff->angle, controller, definition, atom_numbers);
     Initialize_Torsion(&reaxff->torsion, controller, definition, atom_numbers);
     Initialize_Hydrogen_Bond(&reaxff->hb, controller, definition, atom_numbers);
+    if (need_full_nl_flag != NULL && reaxff->hb.is_initialized)
+        *need_full_nl_flag = true;
     if (reaxff->bond.is_initialized && reaxff->vdw.is_initialized &&
         reaxff->eeq.is_initialized)
     {

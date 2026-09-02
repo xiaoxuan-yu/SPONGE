@@ -1,95 +1,284 @@
 ﻿#include "bond_order.h"
 
-// Use neighbor list instead of O(N^2) all-pairs scan
-static __global__ void Calculate_Uncorrected_Bond_Orders_Kernel(
-    int atom_numbers, const VECTOR* crd, const LTMatrix3 cell,
-    const LTMatrix3 rcell, float cutoff, const int* atom_type, const float* r_s,
+#ifndef USE_CPU
+#include <thrust/device_ptr.h>
+#include <thrust/scan.h>
+#endif
+
+static __device__ __forceinline__ float REAXFF_Raw_Bond_Order(
+    float r, int type_i, int type_j, int atom_type_numbers, const float* r_s,
     const float* r_p, const float* r_pp, const float* bo_1, const float* bo_2,
     const float* bo_3, const float* bo_4, const float* bo_5, const float* bo_6,
-    const float* ro_pi, const float* ro_pi2, const int atom_type_numbers,
-    float bo_cut, float* total_bond_order, const ATOM_GROUP* nl, int* pair_i,
+    const float* ro_pi, const float* ro_pi2, float bo_cut)
+{
+    const int idx = type_i * atom_type_numbers + type_j;
+    float bo_s = 0.0f;
+    if (r_s[idx] > 0.0f)
+        bo_s =
+            (1.0f + bo_cut) * expf(bo_1[idx] * powf(r / r_s[idx], bo_2[idx]));
+    float bo_p = 0.0f;
+    if (ro_pi[type_i] > 0.0f && ro_pi[type_j] > 0.0f && r_p[idx] > 0.0f)
+        bo_p = expf(bo_3[idx] * powf(r / r_p[idx], bo_4[idx]));
+    float bo_p2 = 0.0f;
+    if (ro_pi2[type_i] > 0.0f && ro_pi2[type_j] > 0.0f && r_pp[idx] > 0.0f)
+        bo_p2 = expf(bo_5[idx] * powf(r / r_pp[idx], bo_6[idx]));
+    const float raw = bo_s + bo_p + bo_p2;
+    return raw >= bo_cut ? raw - bo_cut : -1.0f;
+}
+
+static __device__ __forceinline__ void REAXFF_Emit_Raw_Bond(
+    int atom_i, int atom_j, float r, float total_bo, float* total_bond_order,
+    int* pair_i, int* pair_j, float* distances, int max_pairs, int* num_pairs)
+{
+    atomicAdd(total_bond_order + atom_i, total_bo);
+    atomicAdd(total_bond_order + atom_j, total_bo);
+    const int pos = atomicAdd(num_pairs, 1);
+    if (pos < max_pairs)
+    {
+        pair_i[pos] = atom_i < atom_j ? atom_i : atom_j;
+        pair_j[pos] = atom_i < atom_j ? atom_j : atom_i;
+        distances[pos] = r;
+    }
+}
+
+static __global__ void REAXFF_Gather_Clustered_Coordinates(
+    int total_numbers, int cluster_numbers, const int* sort_permutation,
+    const int* cluster_offsets, const VECTOR* cluster_centers,
+    const VECTOR* crd, const LTMatrix3 cell, const LTMatrix3 rcell,
+    VECTOR* sorted_crd)
+{
+#ifdef USE_GPU
+    const int sorted_i = blockDim.x * blockIdx.x + threadIdx.x;
+    if (sorted_i < total_numbers)
+#else
+#pragma omp parallel for
+    for (int sorted_i = 0; sorted_i < total_numbers; sorted_i += 1)
+#endif
+    {
+        int lo = 0;
+        int hi = cluster_numbers;
+        while (lo + 1 < hi)
+        {
+            const int mid = (lo + hi) >> 1;
+            if (cluster_offsets[mid] <= sorted_i)
+                lo = mid;
+            else
+                hi = mid;
+        }
+        const int atom_i = sort_permutation[sorted_i];
+        const VECTOR center = cluster_centers[lo];
+        sorted_crd[sorted_i] = center + Get_Periodic_Displacement(
+                                            crd[atom_i], center, cell, rcell);
+    }
+}
+
+#ifdef USE_GPU
+static __global__ void Calculate_Uncorrected_Bond_Orders_Clustered_Gmxpacked(
+    int sci_numbers, int packed_partitions, int cluster_numbers,
+    const int* cluster_offsets, const unsigned int* cluster_valid_masks,
+    const unsigned int* cluster_local_masks, const int* super_cluster_offsets,
+    const CLUSTERED_GMXPACKED_SCI* sci_entries,
+    const CLUSTERED_GMXPACKED_CJ* cjpacked_entries,
+    const CLUSTERED_GMXPACKED_EXCLUSION* exclusion_entries,
+    const uint64_t* pair_shift_bits, const int* sorted_atom_ids,
+    const VECTOR* sorted_crd, const int* atom_type, int atom_type_numbers,
+    const float* r_s, const float* r_p, const float* r_pp, const float* bo_1,
+    const float* bo_2, const float* bo_3, const float* bo_4, const float* bo_5,
+    const float* bo_6, const float* ro_pi, const float* ro_pi2, float cutoff,
+    float bo_cut, const LTMatrix3 cell, float* total_bond_order, int* pair_i,
     int* pair_j, float* distances, int max_pairs, int* num_pairs)
 {
-    SIMPLE_DEVICE_FOR(i, atom_numbers)
+    const int sci = blockIdx.x;
+    const int partition = blockIdx.y;
+    const int i_lane = threadIdx.x;
+    const int j_lane = threadIdx.y;
+    if (sci >= sci_numbers || i_lane >= kClusteredClusterSize ||
+        j_lane >= kClusteredClusterSize)
+        return;
+    const CLUSTERED_GMXPACKED_SCI sci_entry = sci_entries[sci];
+    const int cluster_i_begin =
+        super_cluster_offsets[sci_entry.supercluster_id];
+    int cluster_i_end = super_cluster_offsets[sci_entry.supercluster_id + 1];
+    if (cluster_i_end > cluster_numbers) cluster_i_end = cluster_numbers;
+    const int split = j_lane / kClusteredSplitJClusterSize;
+    const int split_j_lane = j_lane % kClusteredSplitJClusterSize;
+    const float cutoff_sq = cutoff * cutoff;
+    for (int packed_idx = sci_entry.cjpacked_begin + partition;
+         packed_idx < sci_entry.cjpacked_end; packed_idx += packed_partitions)
     {
-        int type_i = atom_type[i];
-        if (type_i >= 0 && type_i < atom_type_numbers)
+        const CLUSTERED_GMXPACKED_CJ packed = cjpacked_entries[packed_idx];
+        const CLUSTERED_GMXPACKED_SPLIT split_entry = packed.split[split];
+        unsigned int pair_bits = 0xffffffffu;
+        if (split_entry.exclusion_index != 0)
+            pair_bits =
+                exclusion_entries[split_entry.exclusion_index]
+                    .pair[split_j_lane * kClusteredClusterSize + i_lane];
+        const unsigned int effective_mask = split_entry.imask & pair_bits;
+        for (int jm = 0; jm < kClusteredJGroupSize; jm += 1)
         {
-            VECTOR ri = crd[i];
-            ATOM_GROUP nl_i = nl[i];
-
-            for (int nn = 0; nn < nl_i.atom_numbers; nn++)
+            const int cluster_j = packed.cj[jm];
+            if (cluster_j < 0 ||
+                (cluster_valid_masks[cluster_j] & (1u << j_lane)) == 0u ||
+                (cluster_local_masks[cluster_j] & (1u << j_lane)) == 0u)
+                continue;
+            const int sorted_j = cluster_offsets[cluster_j] + j_lane;
+            const int atom_j = sorted_atom_ids[sorted_j];
+            const int type_j = atom_type[atom_j];
+            if (type_j < 0 || type_j >= atom_type_numbers) continue;
+            const uint64_t shift_bits =
+                pair_shift_bits[packed_idx * kClusteredJGroupSize + jm];
+            for (int i_local = 0; i_local < cluster_i_end - cluster_i_begin;
+                 i_local += 1)
             {
-                int j = nl_i.atom_serial[nn];
-                if (j <= i) continue;  // only process each pair once
+                const unsigned int packed_bit =
+                    1u << (jm * kClusteredSuperClusterClusters + i_local);
+                if ((effective_mask & packed_bit) == 0u ||
+                    (Clustered_Get_Pair_Active_I_Mask(shift_bits, split) &
+                     (1u << i_local)) == 0u)
+                    continue;
+                const int cluster_i = cluster_i_begin + i_local;
+                if ((cluster_valid_masks[cluster_i] & (1u << i_lane)) == 0u ||
+                    (cluster_local_masks[cluster_i] & (1u << i_lane)) == 0u)
+                    continue;
+                const int sorted_i = cluster_offsets[cluster_i] + i_lane;
+                const int atom_i = sorted_atom_ids[sorted_i];
+                if (atom_i == atom_j) continue;
+                const int type_i = atom_type[atom_i];
+                if (type_i < 0 || type_i >= atom_type_numbers) continue;
+                const VECTOR shift = Clustered_Shift_Vector_From_Id(
+                    Clustered_Get_Pair_Shift_Id(shift_bits, i_local), cell);
+                const VECTOR dr =
+                    (sorted_crd[sorted_i] - sorted_crd[sorted_j]) + shift;
+                const float r2 = dr * dr;
+                if (r2 <= 0.0001f || r2 >= cutoff_sq) continue;
+                const float r = sqrtf(r2);
+                const float total_bo = REAXFF_Raw_Bond_Order(
+                    r, type_i, type_j, atom_type_numbers, r_s, r_p, r_pp, bo_1,
+                    bo_2, bo_3, bo_4, bo_5, bo_6, ro_pi, ro_pi2, bo_cut);
+                if (total_bo >= 0.0f)
+                    REAXFF_Emit_Raw_Bond(atom_i, atom_j, r, total_bo,
+                                         total_bond_order, pair_i, pair_j,
+                                         distances, max_pairs, num_pairs);
+            }
+        }
+    }
+}
+#endif
 
-                int type_j = atom_type[j];
-                if (type_j < 0 || type_j >= atom_type_numbers) continue;
-
-                VECTOR rj = crd[j];
-                VECTOR drij = Get_Periodic_Displacement(ri, rj, cell, rcell);
-                float r2 = drij.x * drij.x + drij.y * drij.y + drij.z * drij.z;
-
-                if (r2 < cutoff * cutoff && r2 > 0.0001f)
+#ifdef USE_CPU
+static void Calculate_Uncorrected_Bond_Orders_Clustered_Gmxpacked_CPU(
+    const CLUSTERED_SPATIAL_VIEW& view, const VECTOR* sorted_crd,
+    const int* atom_type, int atom_type_numbers, const float* r_s,
+    const float* r_p, const float* r_pp, const float* bo_1, const float* bo_2,
+    const float* bo_3, const float* bo_4, const float* bo_5, const float* bo_6,
+    const float* ro_pi, const float* ro_pi2, float cutoff, float bo_cut,
+    const LTMatrix3 cell, float* total_bond_order, int* pair_i, int* pair_j,
+    float* distances, int max_pairs, int* num_pairs)
+{
+    const float cutoff_sq = cutoff * cutoff;
+#pragma omp parallel for schedule(dynamic)
+    for (int sci = 0; sci < view.gmxpacked_sci_numbers; sci += 1)
+    {
+        const CLUSTERED_GMXPACKED_SCI entry = view.gmxpacked_sci[sci];
+        const int ci_begin = view.super_cluster_offsets[entry.supercluster_id];
+        const int ci_end =
+            view.super_cluster_offsets[entry.supercluster_id + 1];
+        const int ci_numbers = ci_end - ci_begin;
+        const unsigned int valid_i_cluster_mask =
+            (1u << static_cast<unsigned int>(ci_numbers)) - 1u;
+        const VECTOR shift =
+            Clustered_Shift_Vector_From_Id(entry.shift_id, cell);
+        for (int p = entry.cjpacked_begin; p < entry.cjpacked_end; p += 1)
+        {
+            const CLUSTERED_GMXPACKED_CJ& packed = view.gmxpacked_cjpacked[p];
+            for (int jm = 0; jm < kClusteredJGroupSize; jm += 1)
+            {
+                const int cj = packed.cj[jm];
+                if (cj < 0) continue;
+                const unsigned int jm_shift = static_cast<unsigned int>(
+                    jm * kClusteredSuperClusterClusters);
+                unsigned int active_j_lanes =
+                    view.cluster_valid_masks[cj] & view.cluster_local_masks[cj];
+                while (active_j_lanes != 0u)
                 {
-                    float r = sqrtf(r2);
-
-                    int idx = type_i * atom_type_numbers + type_j;
-
-                    float ros = r_s[idx];
-                    float bo_s = 0.0f;
-                    if (ros > 0.0f)
+                    const int jl = __builtin_ctz(active_j_lanes);
+                    active_j_lanes &= active_j_lanes - 1u;
+                    const int split = jl / kClusteredSplitJClusterSize;
+                    const int split_j_lane =
+                        jl - split * kClusteredSplitJClusterSize;
+                    const CLUSTERED_GMXPACKED_SPLIT& split_entry =
+                        packed.split[split];
+                    const unsigned int active_i_cluster_mask =
+                        (split_entry.imask >> jm_shift) & valid_i_cluster_mask;
+                    if (active_i_cluster_mask == 0u) continue;
+                    const unsigned int* exclusion_pair =
+                        split_entry.exclusion_index != 0
+                            ? view.gmxpacked_exclusions[split_entry
+                                                            .exclusion_index]
+                                      .pair +
+                                  split_j_lane * kClusteredClusterSize
+                            : NULL;
+                    const int sj = view.cluster_offsets[cj] + jl;
+                    const int atom_j = view.sort_permutation[sj];
+                    const int type_j = atom_type[atom_j];
+                    if (type_j < 0 || type_j >= atom_type_numbers) continue;
+                    float total_bond_order_j = 0.0f;
+                    for (int il = 0; il < view.cluster_size; il += 1)
                     {
-                        float C12 = bo_1[idx] * powf(r / ros, bo_2[idx]);
-                        bo_s = (1.0f + bo_cut) * expf(C12);
-                    }
-
-                    float bo_p = 0.0f;
-                    if (ro_pi[type_i] > 0.0f && ro_pi[type_j] > 0.0f)
-                    {
-                        float rop = r_p[idx];
-                        if (rop > 0.0f)
+                        unsigned int active_i_mask = active_i_cluster_mask;
+                        if (exclusion_pair != NULL)
+                            active_i_mask &= exclusion_pair[il] >> jm_shift;
+                        const unsigned int i_lane_bit = 1u << il;
+                        while (active_i_mask != 0u)
                         {
-                            float C34 = bo_3[idx] * powf(r / rop, bo_4[idx]);
-                            bo_p = expf(C34);
+                            const int i_local = __builtin_ctz(active_i_mask);
+                            active_i_mask &= active_i_mask - 1u;
+                            const int ci = ci_begin + i_local;
+                            if ((view.cluster_valid_masks[ci] & i_lane_bit) ==
+                                    0u ||
+                                (view.cluster_local_masks[ci] & i_lane_bit) ==
+                                    0u)
+                                continue;
+                            const int si = view.cluster_offsets[ci] + il;
+                            const int atom_i = view.sort_permutation[si];
+                            if (atom_i == atom_j) continue;
+                            const int type_i = atom_type[atom_i];
+                            if (type_i < 0 || type_i >= atom_type_numbers)
+                                continue;
+                            const VECTOR dr =
+                                (sorted_crd[si] - sorted_crd[sj]) + shift;
+                            const float r2 = dr * dr;
+                            if (r2 <= 0.0001f || r2 >= cutoff_sq) continue;
+                            const float r = sqrtf(r2);
+                            const float total_bo = REAXFF_Raw_Bond_Order(
+                                r, type_i, type_j, atom_type_numbers, r_s, r_p,
+                                r_pp, bo_1, bo_2, bo_3, bo_4, bo_5, bo_6, ro_pi,
+                                ro_pi2, bo_cut);
+                            if (total_bo >= 0.0f)
+                            {
+                                atomicAdd(total_bond_order + atom_i, total_bo);
+                                total_bond_order_j += total_bo;
+                                const int pos = atomicAdd(num_pairs, 1);
+                                if (pos < max_pairs)
+                                {
+                                    pair_i[pos] =
+                                        atom_i < atom_j ? atom_i : atom_j;
+                                    pair_j[pos] =
+                                        atom_i < atom_j ? atom_j : atom_i;
+                                    distances[pos] = r;
+                                }
+                            }
                         }
                     }
-
-                    float bo_p2 = 0.0f;
-                    if (ro_pi2[type_i] > 0.0f && ro_pi2[type_j] > 0.0f)
-                    {
-                        float rop2 = r_pp[idx];
-                        if (rop2 > 0.0f)
-                        {
-                            float C56 = bo_5[idx] * powf(r / rop2, bo_6[idx]);
-                            bo_p2 = expf(C56);
-                        }
-                    }
-
-                    float total_bo = bo_s + bo_p + bo_p2;
-
-                    if (total_bo >= bo_cut)
-                    {
-                        bo_s -= bo_cut;
-                        if (bo_s < 0.0f) bo_s = 0.0f;
-                        total_bo -= bo_cut;
-
-                        atomicAdd(&total_bond_order[i], total_bo);
-                        atomicAdd(&total_bond_order[j], total_bo);
-
-                        int pos = atomicAdd(num_pairs, 1);
-                        if (pos < max_pairs)
-                        {
-                            pair_i[pos] = i;
-                            pair_j[pos] = j;
-                            distances[pos] = r;
-                        }
-                    }
+                    if (total_bond_order_j != 0.0f)
+                        atomicAdd(total_bond_order + atom_j,
+                                  total_bond_order_j);
                 }
             }
         }
     }
 }
+#endif
 
 // Writes corrected BO and derivatives directly to sparse per-bond arrays
 static __global__ void Apply_Bond_Order_Corrections_Kernel(
@@ -327,6 +516,7 @@ static __global__ void Count_Bonds_Per_Atom_Kernel(int num_bonds,
     }
 }
 
+#ifdef USE_CPU
 static __global__ void Exclusive_Prefix_Sum_Kernel(int n, const int* input,
                                                    int* output)
 {
@@ -340,6 +530,7 @@ static __global__ void Exclusive_Prefix_Sum_Kernel(int n, const int* input,
         }
     }
 }
+#endif
 
 static __global__ void Fill_Bond_CSR_Kernel(int num_bonds, const int* bond_i,
                                             const int* bond_j,
@@ -874,6 +1065,9 @@ void REAXFF_BOND_ORDER::Initial(CONTROLLER* controller, int atom_numbers,
     Device_Malloc_Safely((void**)&d_pair_j, sizeof(int) * max_bonds);
     Device_Malloc_Safely((void**)&d_pair_distances, sizeof(float) * max_bonds);
     Device_Malloc_Safely((void**)&d_num_pairs_ptr, sizeof(int));
+    Device_Malloc_Safely((void**)&d_clustered_sorted_crd,
+                         sizeof(VECTOR) * atom_numbers);
+    clustered_scratch_capacity = atom_numbers;
 
     Device_Malloc_Safely((void**)&d_corrected_bo_s, sizeof(float) * max_bonds);
     Device_Malloc_Safely((void**)&d_corrected_bo_pi, sizeof(float) * max_bonds);
@@ -901,30 +1095,6 @@ void REAXFF_BOND_ORDER::Initial(CONTROLLER* controller, int atom_numbers,
     is_initialized = 1;
     controller->printf("  Sparse bond storage: max_bonds = %d\n", max_bonds);
     controller->printf("END INITIALIZING REAXFF_BOND_ORDER\n\n");
-}
-
-void REAXFF_BOND_ORDER::Calculate_Uncorrected_Bond_Orders_GPU(
-    int atom_numbers, const VECTOR* d_crd, const LTMatrix3 cell,
-    const LTMatrix3 rcell, float cutoff, const ATOM_GROUP* d_nl, int* d_pair_i,
-    int* d_pair_j, float* d_distances, int* d_num_pairs_ptr)
-{
-    if (!is_initialized) return;
-
-    dim3 blockSize = {CONTROLLER::device_max_thread};
-    dim3 gridSize = {(atom_numbers + blockSize.x - 1) / blockSize.x};
-
-    deviceMemset(d_total_bond_order, 0, sizeof(float) * atom_numbers);
-
-    int h_num_pairs = 0;
-    deviceMemcpy(d_num_pairs_ptr, &h_num_pairs, sizeof(int),
-                 deviceMemcpyHostToDevice);
-
-    Launch_Device_Kernel(
-        Calculate_Uncorrected_Bond_Orders_Kernel, gridSize, blockSize, 0, NULL,
-        atom_numbers, d_crd, cell, rcell, cutoff, d_atom_type, d_r_s, d_r_p,
-        d_r_pp, d_bo_1, d_bo_2, d_bo_3, d_bo_4, d_bo_5, d_bo_6, d_ro_pi,
-        d_ro_pi2, atom_type_numbers, gp_bo_cut, d_total_bond_order, d_nl,
-        d_pair_i, d_pair_j, d_distances, max_bonds, d_num_pairs_ptr);
 }
 
 void REAXFF_BOND_ORDER::Calculate_Corrected_Bond_Orders_GPU(
@@ -970,8 +1140,15 @@ void REAXFF_BOND_ORDER::Build_Bond_CSR(int atom_numbers, int num_bonds)
                          0, NULL, num_bonds, d_pair_i, d_pair_j, d_bond_count);
 
     // Phase 2: Exclusive prefix sum
+#ifdef USE_CPU
     Launch_Device_Kernel(Exclusive_Prefix_Sum_Kernel, dim3(1), dim3(1), 0, NULL,
                          atom_numbers, d_bond_count, d_bond_offset);
+#else
+    thrust::device_ptr<int> counts(d_bond_count);
+    thrust::device_ptr<int> offsets(d_bond_offset);
+    thrust::exclusive_scan(counts, counts + atom_numbers, offsets);
+    deviceMemset(d_bond_offset + atom_numbers, 0, sizeof(int));
+#endif
 
     // Phase 3: Fill CSR
     deviceMemset(d_fill_count, 0, sizeof(int) * atom_numbers);
@@ -982,7 +1159,7 @@ void REAXFF_BOND_ORDER::Build_Bond_CSR(int atom_numbers, int num_bonds)
 
 void REAXFF_BOND_ORDER::Calculate_Corrected_Bond_Order(
     int atom_numbers, const VECTOR* d_crd, const LTMatrix3 cell,
-    const LTMatrix3 rcell, const ATOM_GROUP* fnl_d_nl, float cutoff)
+    const LTMatrix3 rcell, float cutoff, const CLUSTERED_SPATIAL_VIEW& view)
 {
     if (!is_initialized) return;
 
@@ -994,9 +1171,77 @@ void REAXFF_BOND_ORDER::Calculate_Corrected_Bond_Order(
         return;
     }
 
-    Calculate_Uncorrected_Bond_Orders_GPU(atom_numbers, d_crd, cell, rcell,
-                                          cutoff, fnl_d_nl, d_pair_i, d_pair_j,
-                                          d_pair_distances, d_num_pairs_ptr);
+    if (view.ghost_numbers != 0 || view.local_atom_numbers != atom_numbers ||
+        view.total_atom_numbers != atom_numbers ||
+        clustered_scratch_capacity < atom_numbers)
+        throw std::runtime_error(
+            "clustered ReaxFF bond order requires a single-rank "
+            "all-local spatial view");
+    const char* failure_reason = NULL;
+    CLUSTERED_SPATIAL_VIEW_REQUIREMENTS requirements;
+    requirements.local_atom_numbers = atom_numbers;
+    requirements.ghost_numbers = 0;
+    requirements.cutoff = cutoff;
+    requirements.require_all_local_atoms = true;
+#ifdef USE_CPU
+    requirements.require_backend = true;
+    requirements.backend = CLUSTERED_SPATIAL_BACKEND::CPU;
+    requirements.require_gmxpacked_payload = true;
+#else
+    requirements.require_backend = true;
+#if defined(USE_CUDA)
+    requirements.backend = CLUSTERED_SPATIAL_BACKEND::CUDA;
+#else
+    requirements.backend = CLUSTERED_SPATIAL_BACKEND::HIP;
+#endif
+    requirements.require_same_producer_stream = true;
+    requirements.consumer_stream = NULL;
+    requirements.require_gmxpacked_payload = true;
+    requirements.require_pair_shift_metadata = true;
+    requirements.require_pair_shift_rcell = true;
+    requirements.pair_shift_rcell = rcell;
+#endif
+    if (!Clustered_Validate_Spatial_View(view, requirements, &failure_reason))
+        throw std::runtime_error(
+            std::string("clustered ReaxFF bond order rejected payload: ") +
+            (failure_reason == NULL ? "unknown failure" : failure_reason));
+    deviceMemset(d_total_bond_order, 0, sizeof(float) * atom_numbers);
+    deviceMemset(d_num_pairs_ptr, 0, sizeof(int));
+    if (view.total_atom_numbers > 0)
+    {
+        Launch_Device_Kernel(REAXFF_Gather_Clustered_Coordinates,
+                             (view.total_atom_numbers + 255) / 256, 256, 0,
+                             NULL, view.total_atom_numbers,
+                             view.cluster_numbers, view.sort_permutation,
+                             view.cluster_offsets, view.cluster_centers, d_crd,
+                             cell, rcell, d_clustered_sorted_crd);
+    }
+#ifdef USE_CPU
+    Calculate_Uncorrected_Bond_Orders_Clustered_Gmxpacked_CPU(
+        view, d_clustered_sorted_crd, d_atom_type, atom_type_numbers, d_r_s,
+        d_r_p, d_r_pp, d_bo_1, d_bo_2, d_bo_3, d_bo_4, d_bo_5, d_bo_6, d_ro_pi,
+        d_ro_pi2, cutoff, gp_bo_cut, cell, d_total_bond_order, d_pair_i,
+        d_pair_j, d_pair_distances, max_bonds, d_num_pairs_ptr);
+#else
+    constexpr int packed_partitions = 8;
+    if (view.gmxpacked_sci_numbers > 0)
+    {
+        const dim3 block(kClusteredClusterSize, kClusteredClusterSize, 1);
+        const dim3 grid(view.gmxpacked_sci_numbers, packed_partitions, 1);
+        Launch_Device_Kernel(
+            Calculate_Uncorrected_Bond_Orders_Clustered_Gmxpacked, grid, block,
+            0, NULL, view.gmxpacked_sci_numbers, packed_partitions,
+            view.cluster_numbers, view.cluster_offsets,
+            view.cluster_valid_masks, view.cluster_local_masks,
+            view.super_cluster_offsets, view.gmxpacked_sci,
+            view.gmxpacked_cjpacked, view.gmxpacked_exclusions,
+            view.pair_shift_bits, view.sort_permutation, d_clustered_sorted_crd,
+            d_atom_type, atom_type_numbers, d_r_s, d_r_p, d_r_pp, d_bo_1,
+            d_bo_2, d_bo_3, d_bo_4, d_bo_5, d_bo_6, d_ro_pi, d_ro_pi2, cutoff,
+            gp_bo_cut, cell, d_total_bond_order, d_pair_i, d_pair_j,
+            d_pair_distances, max_bonds, d_num_pairs_ptr);
+    }
+#endif
 
     deviceMemcpy(&h_num_pairs, d_num_pairs_ptr, sizeof(int),
                  deviceMemcpyDeviceToHost);
@@ -1010,29 +1255,19 @@ void REAXFF_BOND_ORDER::Calculate_Corrected_Bond_Order(
             num_pairs, max_bonds);
         num_pairs = max_bonds;
     }
+    h_num_pairs = num_pairs;
 
-    if (num_pairs <= 0)
-    {
-        Build_Bond_CSR(atom_numbers, 0);
-        deviceMemset(d_total_corrected_bond_order, 0,
-                     sizeof(float) * atom_numbers);
-        return;
-    }
-
+    Build_Bond_CSR(atom_numbers, num_pairs);
+    deviceMemset(d_total_corrected_bond_order, 0, sizeof(float) * atom_numbers);
     if (num_pairs > 0)
     {
         Calculate_Corrected_Bond_Orders_GPU(atom_numbers, d_crd, cell, rcell,
                                             cutoff, num_pairs, d_pair_i,
                                             d_pair_j, d_pair_distances);
 
-        // Build CSR bond neighbor lookup
-        Build_Bond_CSR(atom_numbers, num_pairs);
-
         // Reduce corrected BO per atom using CSR
         dim3 blockSize = {CONTROLLER::device_max_thread};
         dim3 gridSize = {(atom_numbers + blockSize.x - 1) / blockSize.x};
-        deviceMemset(d_total_corrected_bond_order, 0,
-                     sizeof(float) * atom_numbers);
         Launch_Device_Kernel(Reduce_Total_Corrected_Bond_Order_Kernel, gridSize,
                              blockSize, 0, NULL, atom_numbers, d_bond_count,
                              d_bond_offset, d_bond_idx, d_corrected_bo_s,
@@ -1070,10 +1305,12 @@ void REAXFF_BOND_ORDER::Calculate_Forces(int atom_numbers, const VECTOR* d_crd,
 void REAXFF_BOND_ORDER::Clear_Derivatives(int atom_numbers, float* d_CdDelta)
 {
     if (!is_initialized) return;
-    int num = h_num_pairs > 0 ? h_num_pairs : max_bonds;
-    deviceMemset(d_dE_dBO_s, 0, sizeof(float) * num);
-    deviceMemset(d_dE_dBO_pi, 0, sizeof(float) * num);
-    deviceMemset(d_dE_dBO_pi2, 0, sizeof(float) * num);
+    if (h_num_pairs > 0)
+    {
+        deviceMemset(d_dE_dBO_s, 0, sizeof(float) * h_num_pairs);
+        deviceMemset(d_dE_dBO_pi, 0, sizeof(float) * h_num_pairs);
+        deviceMemset(d_dE_dBO_pi2, 0, sizeof(float) * h_num_pairs);
+    }
     if (d_CdDelta)
     {
         deviceMemset(d_CdDelta, 0, sizeof(float) * atom_numbers);
@@ -1083,8 +1320,9 @@ void REAXFF_BOND_ORDER::Clear_Derivatives(int atom_numbers, float* d_CdDelta)
 
 void REAXFF_BOND_ORDER::Calculate_Bond_Order(
     int atom_numbers, const VECTOR* d_crd, const LTMatrix3 cell,
-    const LTMatrix3 rcell, const ATOM_GROUP* fnl_d_nl, float cutoff)
+    const LTMatrix3 rcell, float cutoff,
+    const CLUSTERED_SPATIAL_VIEW& clustered_view)
 {
-    Calculate_Corrected_Bond_Order(atom_numbers, d_crd, cell, rcell, fnl_d_nl,
-                                   cutoff);
+    Calculate_Corrected_Bond_Order(atom_numbers, d_crd, cell, rcell, cutoff,
+                                   clustered_view);
 }
