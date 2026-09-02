@@ -358,3 +358,27 @@ B5.7 迁移最后一个 legacy full-neighbor consumer；精确批次父版本为
 - production 使用父提交 `2689f0f` 的保留 binary 与候选 binary，3 systems × NVT/NPT × 2 implementations × 3 runs，每次 10000 steps，共 36/36 valid。median ns/day（父 → 候选）：wat160k NVT `91.521 → 91.547`、NPT `84.166 → 83.319`；wat600k NVT `26.466 → 26.371`、NPT `24.046 → 24.074`；DNA NVT `357.914 → 357.751`、NPT `342.470 → 340.568`。
 - 官方 paired speed delta 为 wat160k NVT `-0.316%`、NPT `-0.694%`；wat600k NVT `-0.297%`、NPT `+0.088%`；DNA NVT `+0.033%`、NPT `-0.291%`。replay + production migration gate 通过，每格均在 3% 门限内。
 - NCU report、临时 PETN runner、父 binary、replay snapshots 与矩阵结果只保留在仓库 `.tmp`，没有进入提交，也没有新增 production probe、gate 或 fallback。
+
+## 18. B6 legacy full-neighbor owner 清理检查点
+
+B6 删除 B5.7 后已经没有 consumer 的 full-neighbor owner；精确批次父版本为 `336d501f`。插件 ABI 仍读取 half-list，因此本批不删除 `NEIGHBOR_LIST` 本体，也不把插件兼容表改造成 clustered consumer。
+
+### 静态闭包与 correctness
+
+- 删除 `SPONGE/neighbor_list/full_neighbor_list.h/.cpp` 及其 CMake/include 接线；同步删除 `is_needed_full`、`cutoff_full`、full-list 初始化、half-to-full build、overflow 与 clear 状态。runtime 从未读取的 `neighbor_list.full` schema 属性一并删除。
+- 非 third-party 源码中 `FULL_NEIGHBOR_LIST`、`full_neighbor_list`、`is_needed_full`、`cutoff_full` 与 `Use Full Neighbor List` 引用均为 0；历史验证文档中的描述保留为迁移记录。Cornerstone 的独立 CPU full-neighborhood 类型不属于该 owner。
+- `Needs_Legacy_Neighbor_List()` 现在只由 `plugin.plugin_numbers > 0` 决定。插件的 count/index ABI 仍读取 `h_nl` 半表；纯 clustered LJ/manybody 不初始化 legacy list。
+- 全新 CPU build 为 137/137，CUDA13 SM89 build 为 267/267。CPU clustered contract/manybody oracle 2/2 通过；沙箱外 CUDA 两项 oracle 2/2 通过。JSON schema 语法与 `git diff --check` 通过。
+
+### NCU 与静态 device 资源
+
+- parent static resource dump 包含两个 full-list kernel 和该 translation unit 的一个 `device_get_built_arch`；candidate 恰好只少这三个 function resource entry，其余记录 exact。CUDA build step 相对 parent 的 269 减少为 267，与两个 kernel 删除一致。
+- wat160k force-only parent/candidate 都以 3900 blocks × 64 threads 启动，72 registers/thread、`1.856 KiB` static shared、`1.024 KiB` driver shared、0 local/spill，理论 occupancy 均为 `58.33%`。
+- parent/candidate 的 executed instructions 均为 `169721907`，branch efficiency 均为 `84.35%`，active/pred-on threads per warp 均为 `24.11/22.92`。achieved occupancy 为 `41.27%/41.14%`，L2 hit 为 `91.22%/91.67%`，duration 为 `301.34/296.42 us`；没有目标 kernel codegen 回退。
+
+### Replay 与 production
+
+- replay 使用精确父 binary 与 candidate，3 systems × 2 output modes × 2 implementations × 3 runs，warmup 200、iterations 2000，共 36/36 valid。官方 paired median delta：wat160k force-only `-0.602%`、full `+0.227%`；wat600k force-only `+0.167%`、full `-0.094%`；DNA force-only `-0.388%`、full `+0.446%`。
+- production 使用同一父/candidate 的 SPONGE binary，3 systems × NVT/NPT × 2 implementations × 3 runs，每次 10000 steps，共 36/36 valid，pre/post idle SM 为 `2–5%`。median ns/day（父 → 候选）：wat160k NVT `92.481 → 92.269`、NPT `84.218 → 84.340`；wat600k NVT `26.473 → 26.525`、NPT `24.019 → 24.036`；DNA NVT `360.079 → 361.305`、NPT `344.845 → 342.549`。
+- 官方 paired speed delta：wat160k NVT `+0.219%`、NPT `-0.051%`；wat600k NVT `+0.276%`、NPT `-0.105%`；DNA NVT `+0.360%`、NPT `-0.393%`。replay + production migration gate 通过。
+- NCU report、resource dump、父 binary 与矩阵产物只保留在仓库 `.tmp`，没有新增 production probe、gate 或 fallback。

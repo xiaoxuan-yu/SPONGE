@@ -1769,16 +1769,6 @@
           "description": "Check neighbor list overflow interval every this many steps.",
           "default": 150
         },
-        "full": {
-          "type": "integer",
-          "enum": [
-            0,
-            1
-          ],
-          "title": "Use Full Neighbor List",
-          "description": "Use full neighbor list or half neighbor list (0/1).",
-          "default": 1
-        },
         "max_atom_in_grid_numbers": {
           "type": "integer",
           "title": "Max Atom In Grid Numbers",

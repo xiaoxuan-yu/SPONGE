@@ -812,21 +812,8 @@ void NEIGHBOR_LIST::Initial(CONTROLLER* controller, int atom_numbers,
                                        "NEIGHBOR_LIST::Initial",
                                        "the box is too small.");
     }
-    if (this->cutoff_full > 0.0f)
-    {
-        controller->printf("    cutoff_full (from module): %f\n",
-                           this->cutoff_full);
-    }
     controller->printf("    is_needed_half: %s\n",
                        is_needed_half ? "true" : "false");
-    controller->printf("    is_needed_full: %s\n",
-                       is_needed_full ? "true" : "false");
-
-    if (this->is_needed_full)
-    {
-        controller->printf("    Initializing full neighbor list...\n");
-        full_neighbor_list.Initial(atom_numbers, max_neighbor_numbers);
-    }
 
     controller->printf("END INITIALIZING NEIGHBOR LIST\n\n");
 }
@@ -868,19 +855,6 @@ void NEIGHBOR_LIST::Update(int* atom_local, int local_atom_numbers,
                        excluded_list_start, excluded_list, excluded_numbers);
     }
 
-    if (this->is_needed_full && full_neighbor_list.is_initialized)
-    {
-        if (this->cutoff_full > 0.0f)
-        {
-            full_neighbor_list.Build_From_Half_With_Cutoff(
-                this->d_nl, local_atom_numbers, crd, cell, rcell,
-                this->cutoff_full + skin);
-        }
-        else
-        {
-            full_neighbor_list.Build_From_Half(this->d_nl, local_atom_numbers);
-        }
-    }
     updator.time_recorder->Stop();
 }
 
@@ -919,16 +893,9 @@ SPONGE will re-initialize the neighbor list module with %s = %d\n\n",
                 (int)(max_ghost_in_grid_numbers * 1.1));
         }
 
-        int h_full_overflow = 0;
-        if (full_neighbor_list.is_initialized)
-        {
-            deviceMemcpy(&h_full_overflow, full_neighbor_list.d_overflow,
-                         sizeof(int), deviceMemcpyDeviceToHost);
-        }
-
         deviceMemcpy(&h_neighbor_list_overflow, d_neighbor_list_overflow,
                      sizeof(int), deviceMemcpyDeviceToHost);
-        if (h_neighbor_list_overflow || h_full_overflow)
+        if (h_neighbor_list_overflow)
         {
             re_initializing = 1;
             controller->commands["neighbor_list_max_neighbor_numbers"] =
@@ -974,7 +941,6 @@ void NEIGHBOR_LIST::Clear()
         Free_Host_And_Device_Pointer(NULL, (void**)&d_neighbor_list_overflow);
         Free_Host_And_Device_Pointer(NULL,
                                      (void**)&d_neighbor_grid_ghost_overflow);
-        full_neighbor_list.Clear();
         grids.Clear();
         updator.Clear();
     }

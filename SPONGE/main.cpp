@@ -117,7 +117,7 @@ bool Needs_Legacy_Neighbor_List()
     {
         return false;
     }
-    return plugin.plugin_numbers > 0 || neighbor_list.is_needed_full;
+    return plugin.plugin_numbers > 0;
 }
 
 float Active_Neighbor_Rebuild_Skin()

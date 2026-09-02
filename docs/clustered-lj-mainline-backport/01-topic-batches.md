@@ -174,7 +174,7 @@ B5.7 实施结果（ReaxFF hydrogen-bond）：
 - source-first NCU 中旧 HB 为 `444.38 us`；最终 map + clustered HB 为 `1.95 + 440.54 us`，总计 `442.49 us`，无 spill。PETN 2000-step 三次交错 A/B 为 `1.1315 → 1.5368 ns/day`，提升 `35.82%`。
 - 相对精确父提交 `2689f0f` 的 replay 36/36、production 36/36 与官方 3% migration gate 均通过；完整数据见验证文档的 B5.7 检查点。
 
-B5 已完成全部 spatial neighbor-list consumer 的 clustered 收口。angle/torsion/over-under 继续直接消费 bond-order CSR，不重新扫描 spatial neighbor list；下一批进入 B6，机械删除已经不可达的 legacy neighbor-list 与冗余 source owner。
+B5 已完成全部 spatial neighbor-list consumer 的 clustered 收口。angle/torsion/over-under 继续直接消费 bond-order CSR，不重新扫描 spatial neighbor list；B6 机械删除已经不可达的 full-list owner。插件 ABI 仍使用的 half-list 保留为唯一 legacy compatibility boundary，不构成 LJ 或 manybody fallback。
 
 ### B6：清理、源码树与最终 source owner
 
@@ -184,6 +184,17 @@ B5 已完成全部 spatial neighbor-list consumer 的 clustered 收口。angle/t
 - 加入最终架构/迁移文档。
 
 本批禁止新算法优化。若清理导致目标 kernel SASS 变化，先回退并拆批。
+
+B6 实施结果（legacy full-neighbor owner）：
+
+- 精确父提交为 `336d501f`。全树审计确认 `FULL_NEIGHBOR_LIST` 没有启用点或生产 consumer；插件只读取 `NEIGHBOR_LIST::h_nl/d_nl` 半表，不读取 full-list storage。
+- 删除 `full_neighbor_list.h/.cpp`、两个 full-list CUDA kernel、`NEIGHBOR_LIST` 中的 full state/build/overflow/clear 闭包、冗余 include/CMake source entry，以及从未被 runtime 解析的 `neighbor_list.full` schema 假入口。
+- `Needs_Legacy_Neighbor_List()` 收窄为仅在加载插件时启用，因此纯 clustered LJ/manybody 运行不再携带不可达的 full-list owner；插件半表 ABI 与更新路径保持。
+- CPU/CUDA13 SM89 全新构建通过；CPU 与沙箱外 CUDA 的 clustered contract/manybody oracle 各 2/2 通过。CUDA build step 从 269 降至 267，静态 resource dump 的唯一差异是两个被删除 kernel 及该 translation unit 的架构探测实例。
+- wat160k force-only 的 parent/candidate NCU 资源与动态指令 exact：72 registers、0 spill、58.33% 理论 occupancy、169721907 executed instructions、84.35% branch efficiency；duration 为 `301.34 → 296.42 us`。
+- 相对精确父提交的 replay 36/36 与 production 36/36 均通过官方 3% migration gate。replay paired delta 为 `-0.602%` 到 `+0.446%`，production paired speed delta 为 `-0.393%` 到 `+0.360%`。
+
+B6 完成后进入 B7；不再把插件 compatibility half-list 与已删除的 full-neighbor 生产路径混称为同一 owner。
 
 ### B7：集成门槛
 

@@ -36,7 +36,6 @@
 #include "manybody/sw.h"
 #include "manybody/tersoff.h"
 #include "nb14/nb14.h"
-#include "neighbor_list/full_neighbor_list.h"
 #include "neighbor_list/neighbor_list.h"
 #include "plugin/plugin.h"
 #include "quantum_chemistry/quantum_chemistry.h"
