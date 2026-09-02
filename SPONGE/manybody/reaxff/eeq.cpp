@@ -197,6 +197,10 @@ void REAXFF_EEQ::Initial(CONTROLLER* controller, int atom_numbers,
     Malloc_Safely((void**)&h_h_firstnbrs, sizeof(int) * atom_numbers);
     Device_Malloc_Safely((void**)&d_h_numnbrs, sizeof(int) * atom_numbers);
     Device_Malloc_Safely((void**)&d_h_firstnbrs, sizeof(int) * atom_numbers);
+    Device_Malloc_Safely((void**)&d_h_fill_count, sizeof(int) * atom_numbers);
+    Device_Malloc_Safely((void**)&d_clustered_sorted_crd,
+                         sizeof(VECTOR) * atom_numbers);
+    clustered_scratch_capacity = atom_numbers;
     deviceMemset(d_q, 0, sizeof(float) * atom_numbers);
     deviceMemset(d_s, 0, sizeof(float) * atom_numbers);
     deviceMemset(d_t, 0, sizeof(float) * atom_numbers);
@@ -245,74 +249,251 @@ static __global__ void EEQ_Matrix_Vector_Multiply(
     }
 }
 
-static __global__ void EEQ_Count_H_Matrix_Entries(
-    int atom_numbers, const VECTOR* crd, const int* atom_types,
-    const float* shield, int atom_type_numbers, const ATOM_GROUP* nl,
-    const LTMatrix3 cell, const LTMatrix3 rcell, float cutoff, int* numnbrs)
+static __device__ __forceinline__ float EEQ_H_Offdiagonal(float r, float r2,
+                                                          float cutoff,
+                                                          float shield_ij)
 {
-    EEQ_SIMPLE_DEVICE_FOR(i, atom_numbers)
+    const float x = r / cutoff;
+    const float x2 = x * x;
+    const float x4 = x2 * x2;
+    const float x5 = x4 * x;
+    const float x6 = x5 * x;
+    const float x7 = x6 * x;
+    const float taper =
+        20.0f * x7 - 70.0f * x6 + 84.0f * x5 - 35.0f * x4 + 1.0f;
+    return taper * (COULOMB_CONSTANT / cbrtf(r2 * r + shield_ij));
+}
+
+template <bool fill>
+static __device__ __forceinline__ void EEQ_Consume_Clustered_Pair(
+    int atom_i, int atom_j, float r, float r2, int type_i, int type_j,
+    int atom_type_numbers, const float* shield, float cutoff, int* numnbrs,
+    const int* firstnbrs, int* fill_count, int* jlist, float* h_val)
+{
+    const float shield_ij = shield[type_i * atom_type_numbers + type_j];
+    if (shield_ij < 0.0f) return;
+    if constexpr (!fill)
     {
-        int count = 0;
-        ATOM_GROUP nl_i = nl[i];
-        VECTOR ri = crd[i];
-        int type_i = atom_types[i];
-        for (int j_idx = 0; j_idx < nl_i.atom_numbers; j_idx++)
-        {
-            int atom_j = nl_i.atom_serial[j_idx];
-            int type_j = atom_types[atom_j];
-            VECTOR rj = crd[atom_j];
-            VECTOR drij = Get_Periodic_Displacement(ri, rj, cell, rcell);
-            float r2 = drij.x * drij.x + drij.y * drij.y + drij.z * drij.z;
-            float r = sqrtf(r2);
-            if (r < cutoff)
-            {
-                float shield_ij = shield[type_i * atom_type_numbers + type_j];
-                if (shield_ij >= 0.0f) count++;
-            }
-        }
-        numnbrs[i] = count;
+        atomicAdd(numnbrs + atom_i, 1);
+        atomicAdd(numnbrs + atom_j, 1);
+    }
+    else
+    {
+        const float value = EEQ_H_Offdiagonal(r, r2, cutoff, shield_ij);
+        const int pos_i = firstnbrs[atom_i] + atomicAdd(fill_count + atom_i, 1);
+        const int pos_j = firstnbrs[atom_j] + atomicAdd(fill_count + atom_j, 1);
+        jlist[pos_i] = atom_j;
+        h_val[pos_i] = value;
+        jlist[pos_j] = atom_i;
+        h_val[pos_j] = value;
     }
 }
 
-static __global__ void EEQ_Fill_H_Matrix(
-    int atom_numbers, const VECTOR* crd, const int* atom_types,
-    const float* shield, int atom_type_numbers, const ATOM_GROUP* nl,
-    const LTMatrix3 cell, const LTMatrix3 rcell, float cutoff,
-    const int* firstnbrs, int* jlist, float* h_val)
+static __global__ void EEQ_Gather_Clustered_Coordinates(
+    int total_numbers, int cluster_numbers, const int* sort_permutation,
+    const int* cluster_offsets, const VECTOR* cluster_centers,
+    const VECTOR* crd, const LTMatrix3 cell, const LTMatrix3 rcell,
+    VECTOR* sorted_crd)
 {
-    EEQ_SIMPLE_DEVICE_FOR(i, atom_numbers)
+#ifdef USE_GPU
+    const int sorted_i = blockDim.x * blockIdx.x + threadIdx.x;
+    if (sorted_i < total_numbers)
+#else
+#pragma omp parallel for
+    for (int sorted_i = 0; sorted_i < total_numbers; sorted_i += 1)
+#endif
     {
-        ATOM_GROUP nl_i = nl[i];
-        VECTOR ri = crd[i];
-        int type_i = atom_types[i];
-        int write_idx = firstnbrs[i];
-        for (int j_idx = 0; j_idx < nl_i.atom_numbers; j_idx++)
+        int lo = 0;
+        int hi = cluster_numbers;
+        while (lo + 1 < hi)
         {
-            int atom_j = nl_i.atom_serial[j_idx];
-            int type_j = atom_types[atom_j];
-            VECTOR rj = crd[atom_j];
-            VECTOR drij = Get_Periodic_Displacement(ri, rj, cell, rcell);
-            float r2 = drij.x * drij.x + drij.y * drij.y + drij.z * drij.z;
-            float r = sqrtf(r2);
-            if (r < cutoff)
+            const int mid = (lo + hi) >> 1;
+            if (cluster_offsets[mid] <= sorted_i)
+                lo = mid;
+            else
+                hi = mid;
+        }
+        const int atom_i = sort_permutation[sorted_i];
+        const VECTOR center = cluster_centers[lo];
+        sorted_crd[sorted_i] = center + Get_Periodic_Displacement(
+                                            crd[atom_i], center, cell, rcell);
+    }
+}
+
+#ifdef USE_GPU
+template <bool fill>
+static __global__ void EEQ_H_Matrix_Clustered_Gmxpacked(
+    int sci_numbers, int packed_partitions, int cluster_numbers,
+    const int* cluster_offsets, const unsigned int* cluster_valid_masks,
+    const unsigned int* cluster_local_masks, const int* super_cluster_offsets,
+    const CLUSTERED_GMXPACKED_SCI* sci_entries,
+    const CLUSTERED_GMXPACKED_CJ* cjpacked_entries,
+    const CLUSTERED_GMXPACKED_EXCLUSION* exclusion_entries,
+    const uint64_t* pair_shift_bits, const int* sorted_atom_ids,
+    const VECTOR* sorted_crd, const int* atom_types, int atom_type_numbers,
+    const float* shield, float cutoff, const LTMatrix3 cell, int* numnbrs,
+    const int* firstnbrs, int* fill_count, int* jlist, float* h_val)
+{
+    const int sci = blockIdx.x;
+    const int partition = blockIdx.y;
+    const int i_lane = threadIdx.x;
+    const int j_lane = threadIdx.y;
+    if (sci >= sci_numbers || i_lane >= kClusteredClusterSize ||
+        j_lane >= kClusteredClusterSize)
+        return;
+    const CLUSTERED_GMXPACKED_SCI entry = sci_entries[sci];
+    const int ci_begin = super_cluster_offsets[entry.supercluster_id];
+    int ci_end = super_cluster_offsets[entry.supercluster_id + 1];
+    if (ci_end > cluster_numbers) ci_end = cluster_numbers;
+    const int split = j_lane / kClusteredSplitJClusterSize;
+    const int split_j_lane = j_lane % kClusteredSplitJClusterSize;
+    const float cutoff_sq = cutoff * cutoff;
+    for (int p = entry.cjpacked_begin + partition; p < entry.cjpacked_end;
+         p += packed_partitions)
+    {
+        const CLUSTERED_GMXPACKED_CJ packed = cjpacked_entries[p];
+        const CLUSTERED_GMXPACKED_SPLIT split_entry = packed.split[split];
+        unsigned int pair_bits = 0xffffffffu;
+        if (split_entry.exclusion_index != 0)
+            pair_bits =
+                exclusion_entries[split_entry.exclusion_index]
+                    .pair[split_j_lane * kClusteredClusterSize + i_lane];
+        const unsigned int effective_mask = split_entry.imask & pair_bits;
+        for (int jm = 0; jm < kClusteredJGroupSize; jm += 1)
+        {
+            const int cj = packed.cj[jm];
+            if (cj < 0 || (cluster_valid_masks[cj] & (1u << j_lane)) == 0u ||
+                (cluster_local_masks[cj] & (1u << j_lane)) == 0u)
+                continue;
+            const int sj = cluster_offsets[cj] + j_lane;
+            const int atom_j = sorted_atom_ids[sj];
+            const int type_j = atom_types[atom_j];
+            if (type_j < 0 || type_j >= atom_type_numbers) continue;
+            const uint64_t shift_bits =
+                pair_shift_bits[p * kClusteredJGroupSize + jm];
+            for (int i_local = 0; i_local < ci_end - ci_begin; i_local += 1)
             {
-                float x = r / cutoff;
-                float x2 = x * x;
-                float x4 = x2 * x2;
-                float x5 = x4 * x;
-                float x6 = x5 * x;
-                float x7 = x6 * x;
-                float taper =
-                    20.0f * x7 - 70.0f * x6 + 84.0f * x5 - 35.0f * x4 + 1.0f;
-                float shield_ij = shield[type_i * atom_type_numbers + type_j];
-                jlist[write_idx] = atom_j;
-                h_val[write_idx] =
-                    taper * (COULOMB_CONSTANT / cbrtf(r2 * r + shield_ij));
-                write_idx++;
+                const unsigned int packed_bit =
+                    1u << (jm * kClusteredSuperClusterClusters + i_local);
+                if ((effective_mask & packed_bit) == 0u ||
+                    (Clustered_Get_Pair_Active_I_Mask(shift_bits, split) &
+                     (1u << i_local)) == 0u)
+                    continue;
+                const int ci = ci_begin + i_local;
+                if ((cluster_valid_masks[ci] & (1u << i_lane)) == 0u ||
+                    (cluster_local_masks[ci] & (1u << i_lane)) == 0u)
+                    continue;
+                const int si = cluster_offsets[ci] + i_lane;
+                const int atom_i = sorted_atom_ids[si];
+                if (atom_i == atom_j) continue;
+                const int type_i = atom_types[atom_i];
+                if (type_i < 0 || type_i >= atom_type_numbers) continue;
+                const VECTOR shift = Clustered_Shift_Vector_From_Id(
+                    Clustered_Get_Pair_Shift_Id(shift_bits, i_local), cell);
+                const VECTOR dr = (sorted_crd[si] - sorted_crd[sj]) + shift;
+                const float r2 = dr * dr;
+                if (r2 <= 0.0f || r2 >= cutoff_sq) continue;
+                EEQ_Consume_Clustered_Pair<fill>(
+                    atom_i, atom_j, sqrtf(r2), r2, type_i, type_j,
+                    atom_type_numbers, shield, cutoff, numnbrs, firstnbrs,
+                    fill_count, jlist, h_val);
             }
         }
     }
 }
+#endif
+
+#ifdef USE_CPU
+template <bool fill>
+static void EEQ_H_Matrix_Clustered_Gmxpacked_CPU(
+    const CLUSTERED_SPATIAL_VIEW& view, const VECTOR* sorted_crd,
+    const int* atom_types, int atom_type_numbers, const float* shield,
+    float cutoff, const LTMatrix3 cell, int* numnbrs, const int* firstnbrs,
+    int* fill_count, int* jlist, float* h_val)
+{
+    const float cutoff_sq = cutoff * cutoff;
+#pragma omp parallel for schedule(dynamic)
+    for (int sci = 0; sci < view.gmxpacked_sci_numbers; sci += 1)
+    {
+        const CLUSTERED_GMXPACKED_SCI entry = view.gmxpacked_sci[sci];
+        const int ci_begin = view.super_cluster_offsets[entry.supercluster_id];
+        const int ci_end =
+            view.super_cluster_offsets[entry.supercluster_id + 1];
+        const int ci_numbers = ci_end - ci_begin;
+        const VECTOR shift =
+            Clustered_Shift_Vector_From_Id(entry.shift_id, cell);
+        for (int p = entry.cjpacked_begin; p < entry.cjpacked_end; p += 1)
+        {
+            const CLUSTERED_GMXPACKED_CJ& packed = view.gmxpacked_cjpacked[p];
+            for (int jm = 0; jm < kClusteredJGroupSize; jm += 1)
+            {
+                const int cj = packed.cj[jm];
+                if (cj < 0) continue;
+                const unsigned int jm_shift = static_cast<unsigned int>(
+                    jm * kClusteredSuperClusterClusters);
+                for (int jl = 0; jl < view.cluster_size; jl += 1)
+                {
+                    const unsigned int j_lane_bit = 1u << jl;
+                    if ((view.cluster_valid_masks[cj] & j_lane_bit) == 0u ||
+                        (view.cluster_local_masks[cj] & j_lane_bit) == 0u)
+                        continue;
+                    const int split = jl / kClusteredSplitJClusterSize;
+                    const int split_j_lane =
+                        jl - split * kClusteredSplitJClusterSize;
+                    const CLUSTERED_GMXPACKED_SPLIT& split_entry =
+                        packed.split[split];
+                    const int sj = view.cluster_offsets[cj] + jl;
+                    const int atom_j = view.sort_permutation[sj];
+                    const int type_j = atom_types[atom_j];
+                    if (type_j < 0 || type_j >= atom_type_numbers) continue;
+                    for (int il = 0; il < view.cluster_size; il += 1)
+                    {
+                        unsigned int pair_bits = 0xffffffffu;
+                        if (split_entry.exclusion_index != 0)
+                        {
+                            pair_bits =
+                                view.gmxpacked_exclusions[split_entry
+                                                              .exclusion_index]
+                                    .pair[split_j_lane * kClusteredClusterSize +
+                                          il];
+                        }
+                        const unsigned int active_i_mask =
+                            (split_entry.imask & pair_bits) >> jm_shift;
+                        if (active_i_mask == 0u) continue;
+                        const unsigned int i_lane_bit = 1u << il;
+                        for (int i_local = 0; i_local < ci_numbers;
+                             i_local += 1)
+                        {
+                            if ((active_i_mask & (1u << i_local)) == 0u)
+                                continue;
+                            const int ci = ci_begin + i_local;
+                            if ((view.cluster_valid_masks[ci] & i_lane_bit) ==
+                                    0u ||
+                                (view.cluster_local_masks[ci] & i_lane_bit) ==
+                                    0u)
+                                continue;
+                            const int si = view.cluster_offsets[ci] + il;
+                            const int atom_i = view.sort_permutation[si];
+                            if (atom_i == atom_j) continue;
+                            const int type_i = atom_types[atom_i];
+                            if (type_i < 0 || type_i >= atom_type_numbers)
+                                continue;
+                            const VECTOR dr =
+                                (sorted_crd[si] - sorted_crd[sj]) + shift;
+                            const float r2 = dr * dr;
+                            if (r2 <= 0.0f || r2 >= cutoff_sq) continue;
+                            EEQ_Consume_Clustered_Pair<fill>(
+                                atom_i, atom_j, sqrtf(r2), r2, type_i, type_j,
+                                atom_type_numbers, shield, cutoff, numnbrs,
+                                firstnbrs, fill_count, jlist, h_val);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+#endif
 
 static __global__ void Vector_Update_P(int n, float* p, const float* r,
                                        float beta)
@@ -511,8 +692,9 @@ static __global__ void EEQ_Distribute_Energy_Kernel(
 static __global__ void EEQ_Calculate_Force_Kernel(
     int atom_numbers, const VECTOR* crd, const int* atom_types,
     const float* shield, int atom_type_numbers, const float* d_charge,
-    VECTOR* frc, const ATOM_GROUP* nl, const LTMatrix3 cell,
-    const LTMatrix3 rcell, float cutoff, LTMatrix3* atom_virial)
+    VECTOR* frc, const int* h_firstnbrs, const int* h_numnbrs,
+    const int* h_jlist, const LTMatrix3 cell, const LTMatrix3 rcell,
+    float cutoff, LTMatrix3* atom_virial)
 {
     EEQ_SIMPLE_DEVICE_FOR(i, atom_numbers)
     {
@@ -520,12 +702,13 @@ static __global__ void EEQ_Calculate_Force_Kernel(
         float qi = d_charge[i];
         if (fabsf(qi) >= 1e-10f)
         {
-            ATOM_GROUP nl_i = nl[i];
             VECTOR ri = crd[i];
+            int first = h_firstnbrs[i];
+            int end = first + h_numnbrs[i];
 
-            for (int j_idx = 0; j_idx < nl_i.atom_numbers; j_idx++)
+            for (int j_idx = first; j_idx < end; j_idx++)
             {
-                int atom_j = nl_i.atom_serial[j_idx];
+                int atom_j = h_jlist[j_idx];
                 if (atom_j <= i) continue;
 
                 float qj = d_charge[atom_j];
@@ -676,21 +859,81 @@ static __global__ void CG_Update_P_Kernel(int n, float* p, const float* r,
 
 void REAXFF_EEQ::Calculate_Charges(int atom_numbers, float* d_charge,
                                    const VECTOR* d_crd, const LTMatrix3 cell,
-                                   const LTMatrix3 rcell,
-                                   const ATOM_GROUP* fnl_d_nl, float cutoff,
+                                   const LTMatrix3 rcell, float cutoff,
+                                   const CLUSTERED_SPATIAL_VIEW& view,
                                    float* d_energy, VECTOR* frc,
                                    int need_virial, LTMatrix3* atom_virial)
 {
-    if (!is_initialized || fnl_d_nl == NULL) return;
+    if (!is_initialized) return;
 
     dim3 blockSize = {std::min(160u, CONTROLLER::device_max_thread)};
     dim3 gridSize = {(atom_numbers + blockSize.x - 1) / blockSize.x};
 
     // ---- Build H matrix CSR ----
-    Launch_Device_Kernel(EEQ_Count_H_Matrix_Entries, gridSize, blockSize, 0,
-                         NULL, atom_numbers, d_crd, d_atom_type, d_shield,
-                         atom_type_numbers, fnl_d_nl, cell, rcell, cutoff,
-                         d_h_numnbrs);
+    if (view.ghost_numbers != 0 || view.local_atom_numbers != atom_numbers ||
+        view.total_atom_numbers != atom_numbers ||
+        clustered_scratch_capacity < atom_numbers)
+        throw std::runtime_error(
+            "clustered ReaxFF EEQ requires a single-rank all-local view");
+    const char* failure_reason = NULL;
+    CLUSTERED_SPATIAL_VIEW_REQUIREMENTS requirements;
+    requirements.local_atom_numbers = atom_numbers;
+    requirements.ghost_numbers = 0;
+    requirements.cutoff = cutoff;
+    requirements.require_all_local_atoms = true;
+    requirements.require_backend = true;
+    requirements.require_gmxpacked_payload = true;
+#ifdef USE_CPU
+    requirements.backend = CLUSTERED_SPATIAL_BACKEND::CPU;
+#else
+#if defined(USE_CUDA)
+    requirements.backend = CLUSTERED_SPATIAL_BACKEND::CUDA;
+#else
+    requirements.backend = CLUSTERED_SPATIAL_BACKEND::HIP;
+#endif
+    requirements.require_same_producer_stream = true;
+    requirements.consumer_stream = NULL;
+    requirements.require_pair_shift_metadata = true;
+    requirements.require_pair_shift_rcell = true;
+    requirements.pair_shift_rcell = rcell;
+#endif
+    if (!Clustered_Validate_Spatial_View(view, requirements, &failure_reason))
+        throw std::runtime_error(
+            std::string("clustered ReaxFF EEQ rejected payload: ") +
+            (failure_reason == NULL ? "unknown failure" : failure_reason));
+
+    deviceMemset(d_h_numnbrs, 0, sizeof(int) * atom_numbers);
+    if (view.total_atom_numbers > 0)
+    {
+        Launch_Device_Kernel(EEQ_Gather_Clustered_Coordinates,
+                             (view.total_atom_numbers + 255) / 256, 256, 0,
+                             NULL, view.total_atom_numbers,
+                             view.cluster_numbers, view.sort_permutation,
+                             view.cluster_offsets, view.cluster_centers, d_crd,
+                             cell, rcell, d_clustered_sorted_crd);
+    }
+#ifdef USE_CPU
+    EEQ_H_Matrix_Clustered_Gmxpacked_CPU<false>(
+        view, d_clustered_sorted_crd, d_atom_type, atom_type_numbers, d_shield,
+        cutoff, cell, d_h_numnbrs, NULL, NULL, NULL, NULL);
+#else
+    constexpr int packed_partitions = 8;
+    if (view.gmxpacked_sci_numbers > 0)
+    {
+        const dim3 pair_block(kClusteredClusterSize, kClusteredClusterSize, 1);
+        const dim3 pair_grid(view.gmxpacked_sci_numbers, packed_partitions, 1);
+        Launch_Device_Kernel(
+            EEQ_H_Matrix_Clustered_Gmxpacked<false>, pair_grid, pair_block, 0,
+            NULL, view.gmxpacked_sci_numbers, packed_partitions,
+            view.cluster_numbers, view.cluster_offsets,
+            view.cluster_valid_masks, view.cluster_local_masks,
+            view.super_cluster_offsets, view.gmxpacked_sci,
+            view.gmxpacked_cjpacked, view.gmxpacked_exclusions,
+            view.pair_shift_bits, view.sort_permutation, d_clustered_sorted_crd,
+            d_atom_type, atom_type_numbers, d_shield, cutoff, cell, d_h_numnbrs,
+            NULL, NULL, NULL, NULL);
+    }
+#endif
 
     int total_nnz = 0;
 #ifndef USE_CPU
@@ -729,10 +972,28 @@ void REAXFF_EEQ::Calculate_Charges(int atom_numbers, float* d_charge,
     }
     if (total_nnz > 0)
     {
-        Launch_Device_Kernel(EEQ_Fill_H_Matrix, gridSize, blockSize, 0, NULL,
-                             atom_numbers, d_crd, d_atom_type, d_shield,
-                             atom_type_numbers, fnl_d_nl, cell, rcell, cutoff,
-                             d_h_firstnbrs, d_h_jlist, d_h_val);
+        deviceMemset(d_h_fill_count, 0, sizeof(int) * atom_numbers);
+#ifdef USE_CPU
+        EEQ_H_Matrix_Clustered_Gmxpacked_CPU<true>(
+            view, d_clustered_sorted_crd, d_atom_type, atom_type_numbers,
+            d_shield, cutoff, cell, d_h_numnbrs, d_h_firstnbrs, d_h_fill_count,
+            d_h_jlist, d_h_val);
+#else
+        const dim3 fill_pair_block(kClusteredClusterSize, kClusteredClusterSize,
+                                   1);
+        const dim3 fill_pair_grid(view.gmxpacked_sci_numbers, packed_partitions,
+                                  1);
+        Launch_Device_Kernel(
+            EEQ_H_Matrix_Clustered_Gmxpacked<true>, fill_pair_grid,
+            fill_pair_block, 0, NULL, view.gmxpacked_sci_numbers,
+            packed_partitions, view.cluster_numbers, view.cluster_offsets,
+            view.cluster_valid_masks, view.cluster_local_masks,
+            view.super_cluster_offsets, view.gmxpacked_sci,
+            view.gmxpacked_cjpacked, view.gmxpacked_exclusions,
+            view.pair_shift_bits, view.sort_permutation, d_clustered_sorted_crd,
+            d_atom_type, atom_type_numbers, d_shield, cutoff, cell, d_h_numnbrs,
+            d_h_firstnbrs, d_h_fill_count, d_h_jlist, d_h_val);
+#endif
     }
 
     // ---- CG solver ----
@@ -968,8 +1229,9 @@ void REAXFF_EEQ::Calculate_Charges(int atom_numbers, float* d_charge,
     {
         Launch_Device_Kernel(EEQ_Calculate_Force_Kernel, gridSize, blockSize, 0,
                              NULL, atom_numbers, d_crd, d_atom_type, d_shield,
-                             atom_type_numbers, d_q, frc, fnl_d_nl, cell, rcell,
-                             cutoff, need_virial ? atom_virial : NULL);
+                             atom_type_numbers, d_q, frc, d_h_firstnbrs,
+                             d_h_numnbrs, d_h_jlist, cell, rcell, cutoff,
+                             need_virial ? atom_virial : NULL);
     }
 
     Launch_Device_Kernel(EEQ_Convert_Charge_Unit, gridSize, blockSize, 0, NULL,

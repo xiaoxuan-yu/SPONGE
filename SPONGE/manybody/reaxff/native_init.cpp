@@ -92,6 +92,11 @@ void Initialize_EEQ(REAXFF_EEQ* eeq, CONTROLLER* controller,
     Device_Malloc_Safely((void**)&eeq->d_h_numnbrs, sizeof(int) * atom_numbers);
     Device_Malloc_Safely((void**)&eeq->d_h_firstnbrs,
                          sizeof(int) * atom_numbers);
+    Device_Malloc_Safely((void**)&eeq->d_h_fill_count,
+                         sizeof(int) * atom_numbers);
+    Device_Malloc_Safely((void**)&eeq->d_clustered_sorted_crd,
+                         sizeof(VECTOR) * atom_numbers);
+    eeq->clustered_scratch_capacity = atom_numbers;
     deviceMemset(eeq->d_q, 0, sizeof(float) * atom_numbers);
     deviceMemset(eeq->d_s, 0, sizeof(float) * atom_numbers);
     deviceMemset(eeq->d_t, 0, sizeof(float) * atom_numbers);

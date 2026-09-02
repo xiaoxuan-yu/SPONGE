@@ -147,7 +147,15 @@ B5.4 实施结果（ReaxFF VDW）：
 - CPU/CUDA PETN/LAMMPS 对照、clustered contract 与 manybody oracle 通过；source/candidate 最终 VDW kernel normalized SASS exact，NCU 无 launch、register、occupancy 或 spill 回退。完整数值见验证文档的 B5.4 检查点。
 - PETN 16240 NVE 2000-step、三次交错 A/B 的 median throughput 为 `0.609 → 0.898 ns/day`，提升 `47.56%`；相对精确父提交 `49298b8` 的 replay 36/36、production 36/36 与官方组合 migration gate 均通过。
 
-B5 后续保持小批提交：下一批迁移 ReaxFF EEQ，再按 BO/bond/HB 依赖顺序收口；每个 device 子批单独执行 source-first NCU、SASS 与完整 A/B gate。
+B5.5 实施结果（ReaxFF EEQ）：
+
+- EEQ 不再读取 legacy full-neighbor `ATOM_GROUP`。CPU/GPU 都从同一 all-local gmxpacked view 构建对称 H-matrix CSR，后续 CG matrix-vector 与 EEQ force 复用该 CSR；其他 ReaxFF consumers 仍保留 legacy list，避免混批。
+- GPU count/fill 使用 8-way packed partitions、per-pair image shift、active mask 与 exclusion；CPU 使用 SCI shift。主线 charge capture 与 native/H5 参数初始化保持，只补齐 clustered coordinate/fill scratch；合法空 SCI payload跳过零尺寸 launch。
+- CPU/CUDA 的三组 EEQ water/LAMMPS charge 对照和 PETN 全 ReaxFF 单帧对照均通过；clustered contract 与 manybody oracle 在 CPU/CUDA 各通过。候选 binary 已无旧 EEQ Count/Fill kernel，clustered H 两个模板实例均为 48 registers、0 local spill。
+- PETN source-first NCU 中，EEQ gather + count + fill + force 总时延由 `1.537–1.542 ms` 降至 `1.263–1.270 ms`，约减少 `17.4–18.1%`；PETN 2000-step 三次交错 A/B 为 `0.9005 → 0.9136 ns/day`，提升 `1.45%`。
+- 相对精确父提交 `580dcb11` 的 replay 36/36、production 36/36 通过；官方组合 migration gate 通过。
+
+B5 后续保持小批提交：下一批按依赖顺序迁移 ReaxFF bond-order/bond，再收口 angle/torsion 与 hydrogen-bond；每个 device 子批单独执行 source-first NCU、SASS 与完整 A/B gate。
 
 ### B6：清理、源码树与最终 source owner
 

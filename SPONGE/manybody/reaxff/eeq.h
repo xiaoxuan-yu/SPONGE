@@ -3,6 +3,7 @@
 
 #include "../../common.h"
 #include "../../control.h"
+#include "../../neighbor_list/contract/view.h"
 
 struct REAXFF_EEQ
 {
@@ -42,7 +43,10 @@ struct REAXFF_EEQ
     int* d_h_firstnbrs = NULL;
     int* d_h_jlist = NULL;
     float* d_h_val = NULL;
+    int* d_h_fill_count = NULL;
     int h_matrix_capacity = 0;
+    VECTOR* d_clustered_sorted_crd = NULL;
+    int clustered_scratch_capacity = 0;
 
     // Device-side CG scalar buffers (GPU optimization: avoid host sync)
     float* d_rr_old = NULL;
@@ -69,10 +73,10 @@ struct REAXFF_EEQ
                  const char* parameter_in_file, const char* type_in_file);
     void Calculate_Charges(int atom_numbers, float* d_charge,
                            const VECTOR* d_crd, const LTMatrix3 cell,
-                           const LTMatrix3 rcell, const ATOM_GROUP* fnl_d_nl,
-                           float cutoff, float* d_energy = NULL,
-                           VECTOR* frc = NULL, int need_virial = 0,
-                           LTMatrix3* atom_virial = NULL);
+                           const LTMatrix3 rcell, float cutoff,
+                           const CLUSTERED_SPATIAL_VIEW& clustered_view,
+                           float* d_energy = NULL, VECTOR* frc = NULL,
+                           int need_virial = 0, LTMatrix3* atom_virial = NULL);
     void Step_Print(CONTROLLER* controller);
     void Capture_Charges(const float* d_charge,
                          std::vector<float>* elementary_charges,

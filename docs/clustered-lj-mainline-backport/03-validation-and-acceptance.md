@@ -277,3 +277,28 @@ B5.4 只迁移 ReaxFF VDW；精确批次父版本为 `49298b8`，性能实现参
 - replay 为 3 systems × 2 output modes × 2 implementations × 3 runs，共 36/36 valid。paired median kernel-time delta：wat160k force-only `+0.158%`、full `-0.209%`；wat600k force-only `-0.280%`、full `+0.061%`；DNA force-only `-1.251%`、full `+0.467%`。
 - production 为 3 systems × NVT/NPT × 2 implementations × 3 runs，每次 10000 steps，共 36/36 valid，pre/post idle SM 均为 `3%`。median ns/day（父版本 → 候选）：wat160k NVT `91.097 → 91.326`、NPT `84.020 → 84.435`；wat600k NVT `26.416 → 26.309`、NPT `24.017 → 24.056`；DNA NVT `356.530 → 359.714`、NPT `341.395 → 343.904`。
 - 对应 throughput delta 为 wat160k NVT `+0.251%`、NPT `+0.494%`；wat600k NVT `-0.405%`、NPT `+0.162%`；DNA NVT `+0.893%`、NPT `+0.735%`。官方 replay + production migration gate 在 3% 合取门限下通过；runner、gate、NCU/SASS 与性能产物均未进入提交，只保留在 `.tmp`。
+
+## 15. B5.5 ReaxFF EEQ 检查点
+
+B5.5 只迁移 ReaxFF EEQ；精确批次父版本为 `580dcb11`，性能实现参考为 `19856de`。bond-order、bond、angle/torsion 与 hydrogen-bond 不在本批改动范围，继续保留 legacy neighbor-list consumer。
+
+### Correctness、初始化与边界
+
+- CPU 与 CUDA13/SM89 的 SPONGE 构建通过，CUDA `NBNXM_MICROBENCH` 保持可构建。三组 water EEQ/LAMMPS charge fixture 与 PETN 16240 全 ReaxFF 单帧 fixture 在 CPU、CUDA 各 4/4 通过；CPU clustered contract/manybody oracle 为 2/2，CUDA contract 与单独重跑的 manybody oracle 均通过。
+- EEQ 的 H-matrix count/fill 直接遍历 gmxpacked payload，并一次生成对称 CSR；CG 的 matrix-vector 与 force 阶段继续消费该 CSR，不再二次扫描 `ATOM_GROUP`。GPU 使用 per-pair shift/active mask/exclusion，CPU 使用 SCI shift。
+- 主线 `Capture_Charges`、H5/native 参数 materialization 与其他 EEQ 数学阶段保持；legacy 与 native 两个 initializer 都申请相同的 fill/coordinate scratch。single-rank all-local、backend、payload generation 与 GPU pair-shift contract 使用已有 view validator 检查；合法空 SCI payload不会发起零尺寸 CUDA launch。
+- 第一次 CUDA manybody oracle 与 PETN throughput 并发时因设备内存分配失败；PETN 结束后单独重跑 1/1 通过，未改变代码或测试门槛。
+
+### Source-first NCU 与 SASS
+
+- 精确父版本的 legacy Count/Fill/Force 都以 102 blocks × 160 threads 启动，duration 分别为 `184.54–189.79 us`、`455.68–458.18 us`、`894.11–896.77 us`；achieved occupancy 约 `10%`，过量 global sectors 占 `81–84%`，0 spill。
+- 候选 gather 为 `7.07–8.19 us`；clustered count `<false>` 为 `189.79–191.68 us`，fill `<true>` 为 `315.30–324.26 us`，两者均以 `(708,8,1)` blocks × `(8,8,1)` threads 启动。force 复用 CSR 后为 `747.46–748.61 us`。整条 EEQ pair path 从 `1.537–1.542 ms` 降至 `1.263–1.270 ms`，约减少 `17.4–18.1%`。
+- NCU 中 clustered count/fill 为 48 registers，理论 occupancy `83.33%`、实际约 `57–79%`，无 local/shared spill；force 保持 38 registers、0 spill。SASS resource dump 显示两个 H template 各有 32-byte stack frame、`LOCAL:0`，不是 spill allocation。
+- CUDA13 SASS 审计确认候选 binary 不再含 `EEQ_Count_H_Matrix_Entries` 或 `EEQ_Fill_H_Matrix`；只包含 gather、clustered H `<false>/<true>` 与 CSR force。候选 force 为 192 条 SASS，与父版本指令数相同，但签名不再含 `ATOM_GROUP`，动态 executed instructions 从约 `44.33M` 降至约 `27.44M`。
+
+### PETN throughput、replay 与 production
+
+- PETN 16240 NVE 使用现有 throughput fixture，2000 steps、parent/current 各三次交错执行。parent elapsed 为 `19.189/19.141/19.382 s`，current 为 `18.998/18.915/18.855 s`；median steps/s 为 `104.227 → 105.741`，median ns/day 为 `0.900514 → 0.913571`，提升 `1.450%`。
+- replay 首轮第 2 cycle 的 DNA full/current 因 post-run idle SM `6%` 超过既有 `5%` 环境门槛中止；GPU idle 恢复到 `3%` 后按完全相同参数和门槛新目录重跑，36/36 valid。官方 paired median kernel-time delta：wat160k force-only `+0.028%`、full `-0.153%`；wat600k force-only `-0.486%`、full `+0.216%`；DNA force-only `+1.701%`、full `+0.474%`。
+- production 为 3 systems × NVT/NPT × 2 implementations × 3 runs，每次 10000 steps，共 36/36 valid。官方 paired speed delta：wat160k NVT `+0.443%`、NPT `+0.718%`；wat600k NVT `-0.208%`、NPT `-0.057%`；DNA NVT `+0.505%`、NPT `+0.066%`。
+- 官方 replay + production migration gate 在每个 cell 的 3% 合取门限下通过；临时 PETN runner、NCU/SASS、snapshots 与矩阵产物均只保留在 `.tmp`，没有新增 production probe、gate 或 fallback。

@@ -169,9 +169,8 @@ void REAXFF::Calculate_Force(DOMAIN_INFORMATION* dd, MD_INFORMATION* md_info,
 {
     eeq.Calculate_Charges(dd->atom_numbers, md_info->d_charge, dd->crd,
                           md_info->pbc.cell, md_info->pbc.rcell,
-                          neighbor_list->full_neighbor_list.d_nl,
-                          md_info->nb.cutoff, dd->d_energy, dd->frc,
-                          md_info->need_pressure, dd->d_virial);
+                          md_info->nb.cutoff, clustered_view, dd->d_energy,
+                          dd->frc, md_info->need_pressure, dd->d_virial);
     if (CONTROLLER::PP_MPI_size == 1 && dd->d_charge != md_info->d_charge)
     {
         dd->Sync_Local_Charge_From_Global(md_info->d_charge);
