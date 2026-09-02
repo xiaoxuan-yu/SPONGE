@@ -140,8 +140,7 @@ struct REAXFF_BOND_ORDER
     float* d_CdDelta_prime = NULL;     // [N]
 
     void Initial(CONTROLLER* controller, int atom_numbers,
-                 const char* parameter_in_file, const char* type_in_file,
-                 const float cutoff, float* cutoff_full);
+                 const char* parameter_in_file, const char* type_in_file);
     void Calculate_Bond_Order(int atom_numbers, const VECTOR* d_crd,
                               const LTMatrix3 cell, const LTMatrix3 rcell,
                               float cutoff,

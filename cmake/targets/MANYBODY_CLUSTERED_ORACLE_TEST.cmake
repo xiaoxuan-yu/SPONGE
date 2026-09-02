@@ -3,6 +3,7 @@ set(SOURCES
     ${PROJECT_ROOT_DIR}/SPONGE/common.cpp
     ${PROJECT_ROOT_DIR}/SPONGE/neighbor_list/contract/view.cpp
     ${PROJECT_ROOT_DIR}/SPONGE/manybody/edip.cpp
+    ${PROJECT_ROOT_DIR}/SPONGE/manybody/reaxff/hydrogen_bond.cpp
     ${PROJECT_ROOT_DIR}/SPONGE/manybody/tersoff.cpp)
 set(TARGET_LINKER_LANGUAGE "${CPP_DIALECT}")
 

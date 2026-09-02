@@ -692,12 +692,22 @@ void Initialize_Hydrogen_Bond(REAXFF_HYDROGEN_BOND* hb, CONTROLLER* controller,
     Host_Copy(&hb->h_hb_entries, sorted_entries);
     Copy_Atom_Types(&hb->h_atom_type, &hb->d_atom_type, definition);
     Malloc_Safely((void**)&hb->h_is_hydrogen, sizeof(int) * atom_numbers);
+    std::vector<int> hydrogen_atoms;
     for (int atom = 0; atom < atom_numbers; ++atom)
     {
         hb->h_is_hydrogen[atom] =
             definition.atoms[definition.atom_type[atom]].name == "H";
+        if (hb->h_is_hydrogen[atom]) hydrogen_atoms.push_back(atom);
     }
     Device_Copy(&hb->d_is_hydrogen, hb->h_is_hydrogen, atom_numbers);
+    hb->hydrogen_numbers = static_cast<int>(hydrogen_atoms.size());
+    if (hb->hydrogen_numbers > 0)
+    {
+        Device_Copy(&hb->d_hydrogen_atoms, hydrogen_atoms.data(),
+                    hb->hydrogen_numbers);
+    }
+    Device_Malloc_Safely((void**)&hb->d_clustered_atom_to_sorted,
+                         sizeof(int) * atom_numbers);
     Device_Copy(&hb->d_hb_info, hb->h_hb_info, n3);
     Device_Copy(&hb->d_hb_entries, hb->h_hb_entries, sorted_entries.size());
     Device_Malloc_Safely((void**)&hb->d_energy_hb_sum, sizeof(float));
@@ -708,11 +718,8 @@ void Initialize_Hydrogen_Bond(REAXFF_HYDROGEN_BOND* hb, CONTROLLER* controller,
 
 void Initial_ReaxFF_From_Native(REAXFF* reaxff, CONTROLLER* controller,
                                 const NativeReaxFFDefinition& definition,
-                                const int atom_numbers, const float cutoff,
-                                float* cutoff_full, bool* need_full_nl_flag)
+                                const int atom_numbers)
 {
-    (void)cutoff;
-    (void)cutoff_full;
     if (static_cast<int>(definition.atom_type.size()) != atom_numbers)
     {
         controller->Throw_SPONGE_Error(
@@ -729,8 +736,6 @@ void Initial_ReaxFF_From_Native(REAXFF* reaxff, CONTROLLER* controller,
     Initialize_Angle(&reaxff->angle, controller, definition, atom_numbers);
     Initialize_Torsion(&reaxff->torsion, controller, definition, atom_numbers);
     Initialize_Hydrogen_Bond(&reaxff->hb, controller, definition, atom_numbers);
-    if (need_full_nl_flag != NULL && reaxff->hb.is_initialized)
-        *need_full_nl_flag = true;
     if (reaxff->bond.is_initialized && reaxff->vdw.is_initialized &&
         reaxff->eeq.is_initialized)
     {

@@ -6,7 +6,7 @@
 - 性能实现检查点：19856deb
 - 计划与审计检查点：71046ec
 - 共同祖先：4c694ebab7032b0ef28d8312115d0f3253800125
-- 状态：B0–B4、B5.1–B5.6 已完成；B5 下一批收口 ReaxFF hydrogen-bond
+- 状态：B0–B4、B5.1–B5.7 已完成；B6 进入 legacy neighbor-list 与源码 owner 清理
 
 ## 目标
 

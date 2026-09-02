@@ -331,3 +331,30 @@ B5.6 迁移 ReaxFF bond-order 的空间遍历，并让 bond energy 直接消费�
 - production 使用同一父/candidate 的 SPONGE binary，3 systems × NVT/NPT × 2 implementations × 3 runs，每次 10000 steps，共 36/36 valid。median ns/day（父版本 → 候选）：wat160k NVT `91.865 → 91.667`、NPT `83.728 → 84.186`；wat600k NVT `26.292 → 26.329`、NPT `23.986 → 23.949`；DNA NVT `359.928 → 359.018`、NPT `341.442 → 342.913`。
 - production paired speed delta：wat160k NVT `-0.215%`、NPT `+0.486%`；wat600k NVT `+0.133%`、NPT `-0.066%`；DNA NVT `-0.362%`、NPT `+0.517%`。所有 36 个进程返回 0，post-idle SM 为 `3–5%`。
 - replay 与 production 均在每个 cell 的 3% 门限下通过；临时 NCU report、SASS/resource dump、PETN runner、snapshot 与矩阵产物只保留在 `.tmp`，没有新增 production probe、gate 或 fallback。
+
+## 17. B5.7 ReaxFF hydrogen-bond 检查点
+
+B5.7 迁移最后一个 legacy full-neighbor consumer；精确批次父版本为 `2689f0f`，实现参考为 `19856de`，并根据本分支 PETN NCU 重新确定 GPU 并行粒度。
+
+### Correctness、数据流与边界
+
+- CPU 与 CUDA13/SM89 的 SPONGE、`CLUSTERED_SPATIAL_VIEW_TEST`、`MANYBODY_CLUSTERED_ORACLE_TEST` 以 24 并行构建通过；CPU CTest 为 2/2，CUDA contract 与 manybody oracle 各 1/1 通过。
+- 新 HB oracle 使用非零参数，覆盖跨周期边界、`r_AH=7.5±0.001 Å`、总能量与 hydrogen atom-energy 归属、三原子合力守恒、角力有限差分及 `dE/dBO_s`；CPU/CUDA 均通过。
+- CPU 从 canonical gmxpacked SCI/CJ pair 同时处理两个端点；GPU 从 compact hydrogen list 出发，通过 atom-to-sorted 映射与 endpoint-incidence center cursor 直接消费同一 payload。pair-shift、active mask、exclusion 与 all-local contract 继续由 clustered view 提供，没有派生 HB neighbor table。
+- ReaxFF build cutoff 取 `max(md_info.nb.cutoff, 7.5 Å)`，且只有 HB 初始化时请求 endpoint incidence，避免较短通用 cutoff 静默漏掉 HB。native/H5 与 legacy-file 初始化路径都建立 compact hydrogen list。
+- `REAXFF::Initial`、native initializer、bond-order initializer 与 `Calculate_Force` 删除仅用于 legacy full list 的 cutoff、flag 和 `NEIGHBOR_LIST*` 裸参数。候选源码中旧 `Calculate_HB_Kernel` 与 ReaxFF `ATOM_GROUP` 引用均为 0，ReaxFF 不再设置 `is_needed_full`。
+
+### Source-first NCU 与静态代码检查
+
+- 精确父版本 legacy `Calculate_HB_Kernel` 为 `444.38 us`，launch `508 × 32`、80 registers、0 spill；achieved occupancy `7.04%`，executed instructions `26.74M`，L1/L2 hit 为 `92.67%/13.76%`。
+- 初始 clustered warp-per-hydrogen 主核为 `508.26 us`、`211.01M` 指令；映射仅 `1.95 us`。NCU 证明回退来自每个 lane 重复 cursor 控制流。单线程与 8-lane 方案分别为 `9.39 ms` 与 `714.18 us`，因并发不足被舍弃，未保留 production gate 或分流。
+- 最终每氢 16 lane、每 block 128 threads；主核 launch 为 560 blocks，`440.54 us`、80 registers、0 spill、29.00% achieved occupancy、145.06M executed instructions，L1/L2 hit 为 `90.44%/94.53%`。atom-to-sorted map 为 `1.95 us`、16 registers、0 spill；总计约 `442.49 us`，相对旧单核低 `0.43%`。
+- 静态 fatbin resource dump 中 map/main 为 `10/96` registers，stack/local/shared 均为 0；SM89 NCU 的实际 JIT 资源为 `16/80` registers，应以设备采样为准。最终候选 binary 已无旧 HB kernel 符号。
+
+### PETN throughput、replay 与 production
+
+- PETN 16240 NVE 使用现有 throughput fixture，2000 steps、parent/current 各三次交错执行。parent elapsed 为 `15.178/15.297/15.271 s`，current 为 `11.264/11.244/11.204 s`；median ns/day 为 `1.131523 → 1.536846`，提升 `35.821%`。PETN 的 HB 能量为 0，因此该结果同时量化空参数/无有效 HB 情况下移除 legacy full-list owner 的收益；非零物理语义由独立 oracle 覆盖。
+- replay 使用父/候选相同的 LJ microbench 闭包（SHA-256 exact），3 systems × 2 output modes × 2 implementations × 3 runs，共 36/36 valid。median avg-ms（父 → 候选）：wat160k force-only `0.314708 → 0.314844`、full `0.810525 → 0.807746`；wat600k force-only `0.965959 → 0.966344`、full `2.826746 → 2.824435`；DNA force-only `0.076065 → 0.076171`、full `0.175282 → 0.175610`。官方 paired delta 依次为 `+0.154/-0.254/+0.040/-0.057/+0.139/+0.187%`。
+- production 使用父提交 `2689f0f` 的保留 binary 与候选 binary，3 systems × NVT/NPT × 2 implementations × 3 runs，每次 10000 steps，共 36/36 valid。median ns/day（父 → 候选）：wat160k NVT `91.521 → 91.547`、NPT `84.166 → 83.319`；wat600k NVT `26.466 → 26.371`、NPT `24.046 → 24.074`；DNA NVT `357.914 → 357.751`、NPT `342.470 → 340.568`。
+- 官方 paired speed delta 为 wat160k NVT `-0.316%`、NPT `-0.694%`；wat600k NVT `-0.297%`、NPT `+0.088%`；DNA NVT `+0.033%`、NPT `-0.291%`。replay + production migration gate 通过，每格均在 3% 门限内。
+- NCU report、临时 PETN runner、父 binary、replay snapshots 与矩阵结果只保留在仓库 `.tmp`，没有进入提交，也没有新增 production probe、gate 或 fallback。

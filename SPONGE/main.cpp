@@ -117,8 +117,7 @@ bool Needs_Legacy_Neighbor_List()
     {
         return false;
     }
-    return plugin.plugin_numbers > 0 || reaxff.is_initialized ||
-           neighbor_list.is_needed_full;
+    return plugin.plugin_numbers > 0 || neighbor_list.is_needed_full;
 }
 
 float Active_Neighbor_Rebuild_Skin()
@@ -1346,18 +1345,17 @@ void Main_Initial(int argc, char* argv[])
         }
         Ensure_Clustered_Neighbor_Provider();
     }
-    reaxff.Initial(&controller, md_info.atom_numbers, md_info.nb.cutoff,
-                   &neighbor_list.cutoff_full, &neighbor_list.is_needed_full);
-    if (reaxff.vdw.is_initialized)
+    reaxff.Initial(&controller, md_info.atom_numbers);
+    if (reaxff.is_initialized)
     {
         if (!md_info.pbc.pbc || CONTROLLER::PP_MPI_size > 1)
         {
             controller.Throw_SPONGE_Error(
                 spongeErrorValueErrorCommand, "Main_Initial",
                 !md_info.pbc.pbc
-                    ? "Clustered ReaxFF VDW requires periodic boundary "
+                    ? "Clustered ReaxFF requires periodic boundary "
                       "conditions.\n"
-                    : "Clustered ReaxFF VDW currently requires single-PP-"
+                    : "Clustered ReaxFF currently requires single-PP-"
                       "rank execution.\n");
         }
         Ensure_Clustered_Neighbor_Provider();
@@ -1527,35 +1525,40 @@ void Main_Calculate_Force()
             md_info.nb.d_excluded_list, md_info.nb.d_excluded_numbers);
 
         CLUSTERED_SPATIAL_VIEW reaxff_clustered_view;
-        if (reaxff.vdw.is_initialized)
+        if (reaxff.is_initialized)
         {
+            float reaxff_view_cutoff = md_info.nb.cutoff;
+            if (reaxff.hb.is_initialized &&
+                reaxff_view_cutoff < kReaxffHydrogenBondCutoff)
+            {
+                reaxff_view_cutoff = kReaxffHydrogenBondCutoff;
+            }
             ClusteredBuildRequest request;
             request.coordinates = dd.crd;
             request.cell = md_info.pbc.cell;
             request.reciprocal_cell = md_info.pbc.rcell;
-            request.cutoff = md_info.nb.cutoff;
+            request.cutoff = reaxff_view_cutoff;
+            request.need_endpoint_incidence = reaxff.hb.is_initialized;
             clustered_neighbor_provider.Build(request);
 
             const CLUSTERED_SPATIAL_VIEW_REQUIREMENTS requirements =
                 Clustered_All_Local_View_Requirements(
-                    dd.atom_numbers, dd.ghost_numbers, md_info.nb.cutoff,
-                    md_info.pbc.rcell);
+                    dd.atom_numbers, dd.ghost_numbers, reaxff_view_cutoff,
+                    md_info.pbc.rcell, reaxff.hb.is_initialized);
             const char* reaxff_clustered_failure_reason = NULL;
             if (!clustered_neighbor_provider.AcquireView(
                     requirements, &reaxff_clustered_view,
                     &reaxff_clustered_failure_reason))
             {
                 throw std::runtime_error(
-                    std::string(
-                        "clustered ReaxFF VDW requires a current clustered "
-                        "payload: ") +
+                    std::string("clustered ReaxFF requires a current clustered "
+                                "payload: ") +
                     (reaxff_clustered_failure_reason == NULL
                          ? "unknown clustered-view failure"
                          : reaxff_clustered_failure_reason));
             }
         }
-        reaxff.Calculate_Force(&dd, &md_info, &neighbor_list,
-                               reaxff_clustered_view);
+        reaxff.Calculate_Force(&dd, &md_info, reaxff_clustered_view);
 
         LJ_NOPBC.LJ_Force_With_Atom_Energy(
             dd.atom_numbers, dd.crd, dd.frc, md_info.need_potential,

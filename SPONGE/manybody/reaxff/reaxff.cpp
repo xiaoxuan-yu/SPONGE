@@ -3,8 +3,7 @@
 #include "native_init.h"
 #include "utils/h5md/topology_manybody_h5_materializer.hpp"
 
-void REAXFF::Initial(CONTROLLER* controller, int atom_numbers, float cutoff,
-                     float* cutoff_full, bool* need_full_nl_flag)
+void REAXFF::Initial(CONTROLLER* controller, int atom_numbers)
 {
     is_initialized = 0;
     const bool has_legacy_parameter =
@@ -36,8 +35,7 @@ void REAXFF::Initial(CONTROLLER* controller, int atom_numbers, float cutoff,
                                            "REAXFF::Initial",
                                            reader.Last_Error().c_str());
         }
-        Initial_ReaxFF_From_Native(this, controller, definition, atom_numbers,
-                                   cutoff, cutoff_full, need_full_nl_flag);
+        Initial_ReaxFF_From_Native(this, controller, definition, atom_numbers);
         Wire_Shared_State();
         is_initialized = 1;
         return;
@@ -52,15 +50,13 @@ void REAXFF::Initial(CONTROLLER* controller, int atom_numbers, float cutoff,
 
     eeq.Initial(controller, atom_numbers, parameter_in_file, type_in_file);
     bond_order.Initial(controller, atom_numbers, parameter_in_file,
-                       type_in_file, cutoff, cutoff_full);
+                       type_in_file);
     bond.Initial(controller, atom_numbers, "REAXFF");
     vdw.Initial(controller, atom_numbers, "REAXFF");
     ovun.Initial(controller, atom_numbers, "REAXFF");
     angle.Initial(controller, atom_numbers, "REAXFF");
     torsion.Initial(controller, atom_numbers, "REAXFF");
     hb.Initial(controller, atom_numbers, "REAXFF");
-    if (need_full_nl_flag != NULL && hb.is_initialized)
-        *need_full_nl_flag = true;
     if (bond.is_initialized && vdw.is_initialized && eeq.is_initialized)
     {
         controller->Step_Print_Initial("REAXFF", "%14.7e");
@@ -164,7 +160,6 @@ void REAXFF::Step_Print(CONTROLLER* controller, const float* d_charge,
 }
 
 void REAXFF::Calculate_Force(DOMAIN_INFORMATION* dd, MD_INFORMATION* md_info,
-                             NEIGHBOR_LIST* neighbor_list,
                              const CLUSTERED_SPATIAL_VIEW& clustered_view)
 {
     eeq.Calculate_Charges(dd->atom_numbers, md_info->d_charge, dd->crd,
@@ -215,11 +210,19 @@ void REAXFF::Calculate_Force(DOMAIN_INFORMATION* dd, MD_INFORMATION* md_info,
         md_info->pbc.rcell, &bond_order, ovun.d_Delta_boc,
         md_info->need_potential, dd->d_energy, md_info->need_pressure,
         dd->d_virial);
-    hb.Calculate_HB_Energy_And_Force(
-        dd->atom_numbers, dd->crd, dd->frc, md_info->pbc.cell,
-        md_info->pbc.rcell, neighbor_list->full_neighbor_list.d_nl, &bond_order,
-        md_info->need_potential, dd->d_energy, md_info->need_pressure,
-        dd->d_virial);
+    const char* hb_failure_reason = NULL;
+    if (!hb.Calculate_HB_Energy_And_Force_Clustered(
+            clustered_view, dd->atom_numbers, dd->crd, dd->frc,
+            md_info->pbc.cell, md_info->pbc.rcell, &bond_order,
+            md_info->need_potential, dd->d_energy, md_info->need_pressure,
+            dd->d_virial, &hb_failure_reason))
+    {
+        throw std::runtime_error(
+            std::string(
+                "clustered ReaxFF hydrogen bond rejected the payload: ") +
+            (hb_failure_reason == NULL ? "unknown clustered HB failure"
+                                       : hb_failure_reason));
+    }
 
     if (bond_order.is_initialized)
     {

@@ -164,7 +164,17 @@ B5.6 实施结果（ReaxFF bond-order/bond）：
 - CPU/CUDA PETN/LAMMPS 单帧对照、clustered contract 与 manybody oracle 通过；source-first NCU 显示 raw BO `969.86 → 179.30 us`、bond energy/derivative `567.36 → 71.10 us`，新 kernel 均无 spill。完整数值见验证文档的 B5.6 检查点。
 - PETN 16240 NVE 2000-step、三次交错 A/B 的 median throughput 为 `0.9134 → 1.1329 ns/day`，提升 `24.01%`；相对精确父提交 `2d772b9a` 的 replay 36/36、production 36/36 均通过 3% gate。
 
-B5 后续保持小批提交：下一批迁移 ReaxFF hydrogen-bond，消除最后一个 legacy full-list consumer；angle/torsion 已直接消费 bond-order CSR，不需要重新扫描 spatial neighbor list。每个 device 子批单独执行 source-first NCU、SASS 与完整 A/B gate。
+B5.7 实施结果（ReaxFF hydrogen-bond）：
+
+- hydrogen-bond 不再申请或消费 legacy full-neighbor `ATOM_GROUP`。CPU 直接遍历 canonical gmxpacked pair 并按两个端点识别氢，GPU 遍历预先压缩的 hydrogen atom list，并通过 endpoint-incidence center cursor 只访问对应 clustered tiles；没有派生第二张邻居表。
+- GPU 以 16 lane 子组处理一个氢。首个 32-lane 版本由 NCU 暴露出控制流重复，8-lane 版本又受 occupancy 限制；最终实现不增加 probe、gate 或 fallback，直接固定在经 microbenchmark/NCU 验证的 16-lane 形态。
+- HB 固定 7.5 Å cutoff 进入 ReaxFF build request；请求取通用 cutoff 与 HB cutoff 的较大值，并只在 HB 初始化时构建 endpoint incidence。native/H5 与 legacy-file initializer 都生成相同的 compact hydrogen list 和 atom-to-sorted workspace。
+- 保留原 HB 能量、角力、virial 与三组 bond-order 导数语义；删除 ReaxFF 对 full-list flag/cutoff owner 的裸参数。非零 HB oracle 覆盖跨 PBC、7.5 Å 内外边界、atom-energy 归属、合力守恒、角力有限差分和 `dE/dBO`，CPU/CUDA 均通过。
+- 候选 binary 已无旧 `Calculate_HB_Kernel`，ReaxFF 源码也不再引用 `ATOM_GROUP`；因此 full neighbor list 已无生产 consumer，B6 可以删除其 owner/state/build/update/overflow/clear 闭包。
+- source-first NCU 中旧 HB 为 `444.38 us`；最终 map + clustered HB 为 `1.95 + 440.54 us`，总计 `442.49 us`，无 spill。PETN 2000-step 三次交错 A/B 为 `1.1315 → 1.5368 ns/day`，提升 `35.82%`。
+- 相对精确父提交 `2689f0f` 的 replay 36/36、production 36/36 与官方 3% migration gate 均通过；完整数据见验证文档的 B5.7 检查点。
+
+B5 已完成全部 spatial neighbor-list consumer 的 clustered 收口。angle/torsion/over-under 继续直接消费 bond-order CSR，不重新扫描 spatial neighbor list；下一批进入 B6，机械删除已经不可达的 legacy neighbor-list 与冗余 source owner。
 
 ### B6：清理、源码树与最终 source owner
 

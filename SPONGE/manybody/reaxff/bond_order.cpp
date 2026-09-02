@@ -649,8 +649,7 @@ static __global__ void REAXFF_Force_Projection_Kernel(
 
 void REAXFF_BOND_ORDER::Initial(CONTROLLER* controller, int atom_numbers,
                                 const char* parameter_in_file,
-                                const char* type_in_file, const float cutoff,
-                                float* cutoff_full)
+                                const char* type_in_file)
 {
     if (parameter_in_file == NULL || type_in_file == NULL)
     {
