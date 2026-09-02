@@ -279,7 +279,9 @@ Build_Gmxpacked_Record_Stream_Compact_Payload(ClusteredNeighborProvider* layout)
 
     if (gmxpacked_cjpacked.empty())
     {
+        gmxpacked_sci.clear();
         gmxpacked_exclusions.clear();
+        split_exclusion_numbers = 0;
     }
 
     summary.compact_sci = static_cast<int>(gmxpacked_sci.size());

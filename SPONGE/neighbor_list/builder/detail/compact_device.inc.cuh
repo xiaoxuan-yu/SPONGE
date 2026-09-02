@@ -928,6 +928,10 @@ static inline __attribute__((always_inline)) bool MaterializeCompactSciAndCj(
                             ClusteredNeighborProviderInternal::Workspace(layout).record_scratch_offsets.data);
     if (ClusteredNeighborProviderInternal::PairList(layout).gmxpacked_sci_numbers <= 0)
     {
+        ClusteredNeighborProviderInternal::PairList(layout).gmxpacked_sci_numbers = 0;
+        ClusteredNeighborProviderInternal::PairList(layout).gmxpacked_cjpacked_numbers = 0;
+        ClusteredNeighborProviderInternal::PairList(layout).gmxpacked_exclusion_numbers = 0;
+        ClusteredNeighborProviderInternal::PairList(layout).gmxpacked_split_exclusion_numbers = 0;
         return false;
     }
 
@@ -962,6 +966,10 @@ static inline __attribute__((always_inline)) bool MaterializeCompactSciAndCj(
                             ClusteredNeighborProviderInternal::Workspace(layout).cjpacked_group_offsets.data);
     if (ClusteredNeighborProviderInternal::PairList(layout).gmxpacked_cjpacked_numbers <= 0)
     {
+        ClusteredNeighborProviderInternal::PairList(layout).gmxpacked_sci_numbers = 0;
+        ClusteredNeighborProviderInternal::PairList(layout).gmxpacked_cjpacked_numbers = 0;
+        ClusteredNeighborProviderInternal::PairList(layout).gmxpacked_exclusion_numbers = 0;
+        ClusteredNeighborProviderInternal::PairList(layout).gmxpacked_split_exclusion_numbers = 0;
         return false;
     }
 

@@ -2,6 +2,7 @@
 #define EAM_FORCE_H
 #include "../common.h"
 #include "../control.h"
+#include "../neighbor_list/contract/view.h"
 
 // Daw and Baskes, Phys. Rev. B 29, 6443 (1984)
 struct EAM_INFORMATION
@@ -16,6 +17,8 @@ struct EAM_INFORMATION
 
     int* h_atom_type = NULL;
     int* d_atom_type = NULL;
+    VECTOR* d_clustered_sorted_crd = NULL;
+    int clustered_scratch_capacity = 0;
 
     int nrho, nr;
     float drho, dr;
@@ -32,16 +35,16 @@ struct EAM_INFORMATION
     float h_energy_sum = 0, *d_energy_sum = NULL;
 
     void Initial(CONTROLLER* controller, const int atom_numbers,
-                 const char* module_name = NULL,
-                 bool* need_full_nl_flag = NULL);
+                 const char* module_name = NULL);
     void Read_Funcfl(FILE* fp, CONTROLLER* controller);
     void Read_Setfl(FILE* fp, CONTROLLER* controller);
 
-    void EAM_Force_With_Atom_Energy_And_Virial(
-        const int atom_numbers, const VECTOR* crd, VECTOR* frc,
-        const LTMatrix3 cell, const LTMatrix3 rcell, const ATOM_GROUP* nl,
-        const int need_atom_energy, float* atom_energy, const int need_virial,
-        LTMatrix3* atom_virial);
+    bool EAM_Force_Clustered(const CLUSTERED_SPATIAL_VIEW& view,
+                             const VECTOR* crd, VECTOR* frc,
+                             const LTMatrix3 cell, const LTMatrix3 rcell,
+                             const int need_atom_energy, float* atom_energy,
+                             const int need_virial, LTMatrix3* atom_virial,
+                             const char** failure_reason = NULL);
 
     void Step_Print(CONTROLLER* controller);
 };

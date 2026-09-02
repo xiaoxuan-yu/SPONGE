@@ -192,3 +192,35 @@ B5.1 将首组三体 manybody consumers 接到唯一 clustered provider；精确
 - production 使用同一父/candidate 的 SPONGE binary，3 systems × NVT/NPT × 2 implementations × 3 runs，每次 10000 steps，共 36/36 valid。四次图形负载越过 5% 的尝试由正式 runner 标无效并重试，未计入矩阵。
 - production paired speed delta：wat160k NVT `+0.325%`、NPT `-0.441%`；wat600k NVT `-0.129%`、NPT `-0.015%`；DNA NVT `-0.208%`、NPT `+0.069%`。
 - 官方 replay + production migration gate 在每个 cell 的 3% 合取门限下通过；未修改 runner、未放宽 idle/performance gate，NCU report、SASS dump 与矩阵产物均只保留在 `.tmp`。
+
+## 12. B5.2 EAM 检查点
+
+B5.2 将 EAM 接到唯一 clustered provider；精确批次父版本为 `722dddc`，性能实现参考为 `19856de`。custom pair 与 ReaxFF 未进入本批。
+
+### Correctness、初始化与空表边界
+
+- CPU 与 CUDA13/SM89 的 SPONGE 构建通过；CUDA `NBNXM_MICROBENCH` 同步重建。
+- Cu funcfl 与 Cu-Ni setfl/alloy 两套现有 LAMMPS fixture 在 CPU、CUDA 各 6/6 通过。GPU 最大 force 差分别约为 `1.75e-2` 与 `1.17e-1`，force cosine 均不低于 `0.999999`；CPU 结果同量级并通过原有容差。
+- EAM 保留主线 `NativeEAMDefinition`、funcfl、setfl/alloy 与 H5 typed reader；只替换邻居消费算法。non-PBC 与 multi-rank 继续显式拒绝，不引入 legacy fallback。
+- 两条 EAM 路径都按 rho accumulation、embedding derivative、pair force 三阶段执行；CUDA 使用 gmxpacked tile，CPU 使用对应 clustered traversal。只有 force-only/full 两种模板实例。
+- H5 restart-load 小体系暴露 builder 曾发布 `sci>0、cj=0` 的 partial payload。CPU payload、host compact 与 device compact 的失败闭包现统一将四个计数归零；修复后 SPONGE 完整执行该 case，原 `clustered spatial view has no gmxpacked pair payload` 异常消失。
+- 空 payload 只跳过 rho 与 pair-force traversal，不跳过逐原子的 embedding 阶段。使用现有 synthetic funcfl（`F(0)=1 eV`）派生的无邻居临时输入与精确父版本对照，10976 原子的 legacy 与 clustered EAM 均报告 `253131.22 kcal/mol`；`dF/dρ` 同样在空表上刷新。
+- opt-in H5 CTest 仍被既有运行时编译 warning 插入 `Read Nk from ...` 日志行所触发的精确字符串断言阻断；SPONGE 返回 0 且完成两帧，故本批不修改 H5 harness，也不把该断言记为 EAM correctness 失败。
+
+### SASS 与 NCU
+
+- source-first NCU 分别覆盖 full 与 force-only case；每个 report 包含 gather、rho、embedding derivative 与 force 四个 kernel，各完成 44 passes。
+- normalized SASS source/candidate exact。full 的指令数与 SHA-256：gather 88 / `8914328d314682c03fe1c28550a779514d0b0e77a7a522019cd904dabb3d55df`，rho 1120 / `e3816cf8527b4f8fb1caf6caf9730360e5dea984eb04e4d7e5d2e4f1e27d1671`，derivative 88 / `1eca499f895c9d4287ec99b8507ac72d5fb16f837ac476077bbe20e615c5882e`，force 1840 / `c53b9db7fda417b80b1438cf4615f1cf3186a19ac33f48fa1e08e211a6fc29bf`。
+- force-only 的指令数与 SHA-256：gather 88 / `d805730e330e32b021eed876e8b0e86824c984c45fef7d698500d3b196a2ce25`，rho 1120 / `f2f486d1885e8008bd0d28650daaf1fe039e2e43ab15a0761d4b1eef28234698`，derivative 80 / `6a40740b0a71816a82a8349bade33e84504e44b3035ed8861f2736e0aba3d1f8`，force 1568 / `9165023ce0ad2c8a2a78c1f14e412c344d075cc33a2e2b952c5230194a8e4ea8`。
+- full 的 register 数为 gather/rho/derivative/force `20/55/19/72`；force-only 对应资源、grid/block 与 source exact，全部 0 spill。
+- 代表 duration（source → candidate，微秒）：full rho `35.232 → 34.464`、derivative `17.600 → 17.632`、force `363.392 → 364.544`；force-only rho `37.22 → 34.34`、derivative `4.45 → 2.05`、force `42.21 → 43.14`。短 gather launch 的计时受 warm/cache 波动影响，但 SASS、资源与 executed instruction exact，无结构性回退。
+- 后续空 payload 修复同时改变 builder 失败收口与 EAM host dispatch，但不改变 kernel body。修复前后 report 再次 source-first NCU：六个模板实例的 normalized SASS、launch 与资源 exact；full force 为 `364.54 → 367.39 us`，force-only force 为 `43.14 → 44.54 us`，其余差异均为短 launch/执行采样波动，无结构性变化。
+
+### Replay 与 production
+
+- replay 使用精确父提交 `722dddc` 与当前 candidate 各自构建的 microbench，3 systems × 2 output modes × 2 implementations × 3 runs，warmup 200、iterations 2000，共 36/36 valid，full 全部 matched；pre/post idle SM 为 `2–3%`。
+- replay paired median kernel-time delta：wat160k force-only `+0.241%`、full `-0.388%`；wat600k force-only `+0.039%`、full `-0.002%`；DNA force-only `-1.214%`、full `+0.760%`。
+- production 使用同一父/candidate 的 SPONGE binary，3 systems × NVT/NPT × 2 implementations × 3 runs，每次 10000 steps，共 36/36 valid；wat 系统走 comb，DNA 走 packed-AB，pre/post idle SM 均不超过 5%。
+- production paired speed delta：wat160k NVT `+0.475%`、NPT `-0.450%`；wat600k NVT `-0.108%`、NPT `+0.076%`；DNA NVT `+0.010%`、NPT `+0.552%`。
+- 空表 host-dispatch 修复发生在正式 A/B 后；六个 A/B case 均不初始化 EAM，microbench target 未改变，且 post-fix EAM SASS/launch/resource exact，因此该矩阵仍直接覆盖受影响的 LJ 生产路径。
+- 官方 replay + production migration gate 在每个 cell 的 3% 合取门限下通过；runner、idle/performance gate、NCU report 与矩阵产物均未进入提交。

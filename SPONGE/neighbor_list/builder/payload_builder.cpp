@@ -171,6 +171,10 @@
         pair_list.gmxpacked_cjpacked_numbers <= 0 ||
         pair_list.gmxpacked_exclusion_numbers <= 0)
     {
+        pair_list.gmxpacked_sci_numbers = 0;
+        pair_list.gmxpacked_cjpacked_numbers = 0;
+        pair_list.gmxpacked_exclusion_numbers = 0;
+        pair_list.gmxpacked_split_exclusion_numbers = 0;
         return false;
     }
 

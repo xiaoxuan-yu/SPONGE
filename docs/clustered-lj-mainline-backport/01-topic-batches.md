@@ -122,7 +122,15 @@ B5.1 实施结果（SW/EDIP/Tersoff）：
 - CPU/CUDA SPONGE、contract 与 manybody oracle 构建/测试通过；SW LAMMPS diamond fixture 通过。source/candidate 的 SW 与 EDIP/Tersoff 目标 SASS exact，NCU launch/resource 无结构性变化。
 - 相对精确父提交 `d7cdb87` 的 replay 36/36、production 36/36 通过；官方组合 migration gate 通过。完整数值见验证文档的 B5.1 检查点。
 
-B5 后续保持小批提交：先迁移 EAM，再处理 custom pair，最后按 VDW/EEQ/BO/bond/HB 依赖顺序收口 ReaxFF；每个 device 子批单独执行 source-first NCU、SASS 与完整 A/B gate。
+B5.2 实施结果（EAM）：
+
+- EAM 不再申请或消费 legacy full neighbor list；主循环从唯一 `ClusteredNeighborProvider` 获取 all-local gmxpacked view，并调用独立的 CPU/GPU clustered EAM 两阶段路径。
+- funcfl、setfl/alloy 与 H5 typed initialization 保持主线实现；迁移只替换 rho、embedding derivative 与 pair-force 的邻居遍历，保留 force-only/full 两种输出语义，不增加 virial-only 变体、fallback 或 evaluator。
+- CPU/GPU 的 Cu funcfl 与 Cu-Ni alloy LAMMPS 对照各 6/6 通过；EAM 目标 kernel 的 source/candidate normalized SASS、launch 与资源一致。完整 NCU 数值见验证文档的 B5.2 检查点。
+- 修复 builder 在合法空 pair list 上遗留 `sci>0、cj=0` 未发布状态的问题；CPU payload、host compact 与 device compact 现在都以 all-valid 或 all-zero 原子计数收口，consumer contract 仍拒绝 partial payload。
+- 相对精确父提交 `722dddc` 的 replay 36/36、production 36/36 通过；官方组合 migration gate 通过。
+
+B5 后续保持小批提交：下一批处理 custom pair，随后按 VDW/EEQ/BO/bond/HB 依赖顺序收口 ReaxFF；每个 device 子批单独执行 source-first NCU、SASS 与完整 A/B gate。
 
 ### B6：清理、源码树与最终 source owner
 

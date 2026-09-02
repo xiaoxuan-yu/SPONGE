@@ -1310,8 +1310,20 @@ void Main_Initial(int argc, char* argv[])
         Ensure_Clustered_Neighbor_Provider();
     }
 
-    eam.Initial(&controller, md_info.atom_numbers, "EAM",
-                &neighbor_list.is_needed_full);
+    eam.Initial(&controller, md_info.atom_numbers, "EAM");
+    if (eam.is_initialized)
+    {
+        if (!md_info.pbc.pbc || CONTROLLER::PP_MPI_size > 1)
+        {
+            controller.Throw_SPONGE_Error(
+                spongeErrorValueErrorCommand, "Main_Initial",
+                !md_info.pbc.pbc
+                    ? "Clustered EAM requires periodic boundary conditions.\n"
+                    : "Clustered EAM requires typed rho/df halo exchange, "
+                      "which is not available for multi-PP-rank execution.\n");
+        }
+        Ensure_Clustered_Neighbor_Provider();
+    }
 
     tersoff.Initial(&controller, md_info.atom_numbers, "TERSOFF");
     if (tersoff.is_initialized)
@@ -1746,11 +1758,45 @@ void Main_Calculate_Force()
                          : edip_clustered_failure_reason));
             }
         }
-        eam.EAM_Force_With_Atom_Energy_And_Virial(
-            dd.atom_numbers, dd.crd, dd.frc, md_info.pbc.cell,
-            md_info.pbc.rcell, neighbor_list.full_neighbor_list.d_nl,
-            md_info.need_potential, dd.d_energy, md_info.need_pressure,
-            dd.d_virial);
+        if (eam.is_initialized)
+        {
+            ClusteredBuildRequest request;
+            request.coordinates = dd.crd;
+            request.cell = md_info.pbc.cell;
+            request.reciprocal_cell = md_info.pbc.rcell;
+            request.cutoff = eam.cut;
+            clustered_neighbor_provider.Build(request);
+            CLUSTERED_SPATIAL_VIEW eam_clustered_view;
+            const CLUSTERED_SPATIAL_VIEW_REQUIREMENTS requirements =
+                Clustered_All_Local_View_Requirements(
+                    eam.atom_numbers, 0, eam.cut, md_info.pbc.rcell);
+            const char* eam_clustered_failure_reason = NULL;
+            if (!clustered_neighbor_provider.AcquireView(
+                    requirements, &eam_clustered_view,
+                    &eam_clustered_failure_reason))
+            {
+                throw std::runtime_error(
+                    std::string("clustered EAM requires a current clustered "
+                                "payload: ") +
+                    (eam_clustered_failure_reason == NULL
+                         ? "unknown clustered-view failure"
+                         : eam_clustered_failure_reason));
+            }
+            if (!eam.EAM_Force_Clustered(
+                    eam_clustered_view, dd.crd, dd.frc,
+                    md_info.pbc.cell, md_info.pbc.rcell,
+                    md_info.need_potential, dd.d_energy,
+                    md_info.need_pressure, dd.d_virial,
+                    &eam_clustered_failure_reason))
+            {
+                throw std::runtime_error(
+                    std::string("clustered EAM rejected the clustered "
+                                "payload: ") +
+                    (eam_clustered_failure_reason == NULL
+                         ? "unknown EAM clustered failure"
+                         : eam_clustered_failure_reason));
+            }
+        }
         if (tersoff.is_initialized)
         {
             ClusteredBuildRequest request;
