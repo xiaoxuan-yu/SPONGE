@@ -205,6 +205,14 @@ B6 完成后进入 B7；不再把插件 compatibility half-list 与已删除的 
 - 36 production；
 - Manager 泄漏和 legacy/native 残留审计。
 
+B7 实施结果：
+
+- B6 的 CPU/CUDA clustered contract 与 manybody oracle 各 2/2 通过；wat160k 代表 kernel 的 parent/candidate NCU、静态资源、36 replay、36 production 与官方 3% gate 共同覆盖最终生产 binary。
+- H5 bundle 标签测试在 CPU/CUDA 各为 19 pass、1 fail、4 skip；唯一未开闸失败是 fixture manifest 保存了旧 checkout 的绝对 provenance。runtime smoke 开闸后，CPU 与精确 parent 同型出现 step-start、manybody runtime 与 SITS 日志断言，VDS 通过；CUDA 的 parent/candidate 均为 step-start 与 EDIP mdout mismatch，restart/VDS 通过。候选没有新增失败。
+- Manager/worker protocol 的源码、target、CLI、benchmark 与 runtime 引用均为 0。非 third-party 的 legacy full-list source/config 引用为 0；Cornerstone 自身的 CPU full-neighborhood 与合法 native input parser 不属于迁移残留。
+- 唯一保留的 legacy neighbor-list owner 服务插件 count/index ABI，初始化只由 `plugin_numbers > 0` 触发；它不是 LJ/manybody fallback。regular LJ 与 soft-LJ 均从唯一 clustered provider 获取 gmxpacked payload。
+- B7 不修改生产源码，不新增 probe、gate、fallback 或架构层；最终验收产物继续只存放在仓库 `.tmp`。
+
 ## 3. 每批提交模板
 
     Batch:

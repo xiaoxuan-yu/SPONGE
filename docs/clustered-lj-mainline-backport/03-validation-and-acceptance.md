@@ -382,3 +382,28 @@ B6 删除 B5.7 后已经没有 consumer 的 full-neighbor owner；精确批次�
 - production 使用同一父/candidate 的 SPONGE binary，3 systems × NVT/NPT × 2 implementations × 3 runs，每次 10000 steps，共 36/36 valid，pre/post idle SM 为 `2–5%`。median ns/day（父 → 候选）：wat160k NVT `92.481 → 92.269`、NPT `84.218 → 84.340`；wat600k NVT `26.473 → 26.525`、NPT `24.019 → 24.036`；DNA NVT `360.079 → 361.305`、NPT `344.845 → 342.549`。
 - 官方 paired speed delta：wat160k NVT `+0.219%`、NPT `-0.051%`；wat600k NVT `+0.276%`、NPT `-0.105%`；DNA NVT `+0.360%`、NPT `-0.393%`。replay + production migration gate 通过。
 - NCU report、resource dump、父 binary 与矩阵产物只保留在仓库 `.tmp`，没有新增 production probe、gate 或 fallback。
+
+## 19. B7 最终集成与残留审计
+
+B7 不再修改 production code；它复用 B6 的精确父版本与候选产物完成最终集成门槛，并对 upstream H5 test baseline 与 backport 排除项做显式 A/B 归因。
+
+### H5 input/restart/materialization
+
+- CPU/CUDA build 均以 `SPONGE_BUILD_TESTS=ON` 成功构建 `sponge_h5_bundle_tests`，各 38/38 build steps。未开启 runtime smoke 时两端均为 24 tests：19 pass、1 fail、4 skip。
+- 唯一静态失败为 `test_h5_io_contract_manifest`：fixture manifest 的 `bundled_mdin`/`case_root` provenance 指向旧 checkout 的绝对路径，而测试期望当前 worktree 路径。该测试不执行 SPONGE，不受 full-neighbor owner 删除影响。
+- CPU runtime smoke 的 candidate 为 VDS 1 pass，step-start、manybody parity、SITS restart 日志 3 fail；把完全相同的三个 test executable 改传精确父 CPU binary 后三项以相同断言失败。restart case 的失败是缺少精确日志字符串，不是 SPONGE 非零退出。
+- CUDA runtime smoke 的 candidate 与精确父 CUDA binary 均为：input/output step-start fail、ReaxFF/EDIP `mdout EDIP mismatch`、restart-load pass、VDS pass。四项 parent/candidate 结果 exact，同样没有候选新增失败。
+- 因此 B7 记录这些 fixture/test baseline，而不越界修改 upstream H5 schema、manifest、VDS step 语义、manybody fixture 或日志断言。
+
+### 最终范围审计
+
+- `SPONGE/manager`、`SPONGE/worker_protocol`、Manager CMake target、CLI、benchmark、schema/runtime 引用均不存在；通用 CV 局部变量或 CUDA worker 术语不构成 Manager 泄漏。
+- 非 third-party production/config 中 `FULL_NEIGHBOR_LIST`、`full_neighbor_list`、`is_needed_full` 与 `cutoff_full` 引用为 0。Cornerstone 的独立 CPU full-neighborhood 是第三方 octree primitive，保留。
+- regular LJ 与 soft-LJ 都要求唯一 `ClusteredNeighborProvider`、gmxpacked payload 与 pair-shift metadata；没有 solvent fast path、virial-only specialization 或 native/legacy LJ fallback。合法 native input parser 与 NO_PBC LJ 不是双路径残留。
+- legacy `NEIGHBOR_LIST` 只在 PBC 且插件数大于 0 时初始化，插件 ABI 读取其 half-list count/index；未初始化时既有 update 调用首行安全返回。该 compatibility boundary 不参与 clustered LJ/manybody。
+
+### 最终判定
+
+- CPU/CUDA correctness、NCU/resource、replay 36/36、production 36/36 与 3% migration gate 均通过。
+- H5 parent/candidate 没有差异；已知失败均在精确父版本复现。
+- Manager 排除与 legacy/native 残留审计通过，backport 可进入主线 review。

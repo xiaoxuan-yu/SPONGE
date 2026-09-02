@@ -6,7 +6,7 @@
 - 性能实现检查点：19856deb
 - 计划与审计检查点：71046ec
 - 共同祖先：4c694ebab7032b0ef28d8312115d0f3253800125
-- 状态：B0–B6 已完成；B7 进入最终集成门槛与残留审计
+- 状态：B0–B7 已完成；backport 已通过最终集成门槛与残留审计
 
 ## 目标
 
@@ -47,4 +47,4 @@
 - source reference 与 backport candidate 的目标 kernel SASS/资源差异可解释；
 - replay 36/36、full 18/18 matched；
 - production 36/36，六个 cell 单独通过 3% gate；
-- mainline tree 不保留 legacy/native neighbor/LJ 双路径。
+- mainline tree 不保留 legacy/native neighbor/LJ 双路径；插件 ABI 所需 half-list 仅作为兼容边界存在。
