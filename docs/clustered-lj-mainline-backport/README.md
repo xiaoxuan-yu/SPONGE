@@ -6,7 +6,7 @@
 - 性能实现检查点：19856deb
 - 计划与审计检查点：71046ec
 - 共同祖先：4c694ebab7032b0ef28d8312115d0f3253800125
-- 状态：B0–B3 已完成；下一批为 B4 Selective Interaction、SITS 与 REST2
+- 状态：B0–B4 已完成；下一批为 B5 custom 与 manybody consumers
 
 ## 目标
 

@@ -40,6 +40,24 @@ struct SELECT
 struct CLASSIC_SITS_INFORMATION;
 struct SITS_INFORMATION;
 
+struct SITS_CLUSTERED_SPARSE_PRODUCT
+{
+    CLUSTERED_GMXPACKED_SCI* d_sci = NULL;
+    CLUSTERED_GMXPACKED_CJ* d_cjpacked = NULL;
+    uint64_t* d_pair_shift_bits = NULL;
+    int* d_build_counts = NULL;
+
+    int sci_capacity = 0;
+    int cjpacked_capacity = 0;
+    int pair_shift_capacity = 0;
+    int build_count_capacity = 0;
+    int sci_numbers = 0;
+    int cjpacked_numbers = 0;
+
+    long long source_provider_incarnation = -1;
+    long long source_payload_generation = -1;
+};
+
 struct CLASSIC_SITS_INFORMATION
 {
     int is_initialized = 0;
@@ -97,7 +115,6 @@ struct CLASSIC_SITS_INFORMATION
     float* nk_record_cpu;
     float* log_norm_record_cpu;
     int h5_nk_pending = 0;
-    int h5_nk_step = 0;
 
     void Initial(CONTROLLER* controller, SITS_INFORMATION* sits);
 
@@ -142,6 +159,8 @@ struct SITS_INFORMATION
     int local_atom_numbers = 0;
     int ghost_numbers = 0;
 
+    SITS_CLUSTERED_SPARSE_PRODUCT clustered_sparse_product;
+
     float pwwp_enhance_factor = 0.5;
     float h_factor = 1.0;
 
@@ -157,38 +176,47 @@ struct SITS_INFORMATION
     void Initial(CONTROLLER* controller, int atom_numbers_,
                  const char* module_name = NULL);
     void Memory_Allocate();
+    void Clear_Clustered_Sparse_Product();
+    bool Export_H5_Restart_State(SpongeH5MD::RestartSitsState* state,
+                                 std::string* error_message) const;
+    bool Apply_H5_Restart_State(const SpongeH5MD::RestartProtocolState& state,
+                                std::string* error_message);
 
     void Reset_Force_Energy(int* md_need_potential);
     void Update_And_Enhance(const int step, float* d_total_potential,
                             const int need_pressure, LTMatrix3* d_total_virial,
                             VECTOR* frc, float beta0);
 
-    void SITS_LJ_Direct_CF_Force_With_Atom_Energy_And_Virial(
+    bool SITS_LJ_Direct_CF_Force_Clustered(
         const int atom_numbers, const int local_atom_numbers,
-        const int solvent_numbers, const int ghost_numbers, const VECTOR* crd,
-        const float* charge, LENNARD_JONES_INFORMATION* lj_info, VECTOR* md_frc,
-        const LTMatrix3 cell, const LTMatrix3 rcell, const ATOM_GROUP* nl,
-        const float cutoff, const float pme_beta, const int need_energy,
-        float* atom_energy_ww, const int need_pressure,
-        LTMatrix3* atom_virial_ww, float* elect_atom_ene);
+        const int ghost_numbers, const VECTOR* crd, const float* charge,
+        LENNARD_JONES_INFORMATION* lj_info, VECTOR* md_frc,
+        const LTMatrix3 cell, const LTMatrix3 rcell, const float cutoff,
+        const float pme_beta, const int need_energy, float* atom_energy_ww,
+        const int need_pressure, LTMatrix3* atom_virial_ww,
+        float* elect_atom_ene, const char** failure_reason);
 
-    void SITS_LJ_Soft_Core_Direct_CF_Force_With_Atom_Energy_And_Virial(
+    bool SITS_LJ_Soft_Core_Direct_CF_Force_Clustered(
         const int atom_numbers, const int local_atom_numbers,
-        const int solvent_numbers, const int ghost_numbers, const VECTOR* crd,
-        const float* charge, LJ_SOFT_CORE* lj_info, VECTOR* frc,
-        const LTMatrix3 cell, const LTMatrix3 rcell, const ATOM_GROUP* nl,
+        const int ghost_numbers, LJ_SOFT_CORE* lj_info, VECTOR* frc,
+        const LTMatrix3 cell, const LTMatrix3 rcell, const float cutoff,
+        const float pme_beta, const int need_energy, float* atom_energy_ww,
+        const int need_pressure,
+        LTMatrix3* atom_virial_ww, float* elect_atom_ene,
+        const char** failure_reason);
+
+    bool REST2_LJ_Direct_CF_Correction_Clustered(
+        const int atom_numbers, const int local_atom_numbers,
+        const int ghost_numbers, LENNARD_JONES_INFORMATION* lj_info,
+        VECTOR* md_frc, const LTMatrix3 cell, const LTMatrix3 rcell,
         const float cutoff, const float pme_beta, const int need_energy,
-        float* atom_energy_ww, const int need_pressure,
-        LTMatrix3* atom_virial_ww, float* elect_atom_ene);
+        float* atom_energy, const int need_pressure, LTMatrix3* atom_virial,
+        float* atom_direct_cf_energy, const int* rest2_atom_sys_mark,
+        const float rest2_lambda_m, const float rest2_sqrt_lambda_m,
+        float* rest2_unscaled_atom_energy,
+        float* rest2_effective_atom_energy, const char** failure_reason);
 
     void Step_Print(CONTROLLER* controller, const float beta0);
-
-    void Check_Solvent(CONTROLLER* controller, int atom_numbers,
-                       int solvent_numbers);
-    bool Export_H5_Restart_State(SpongeH5MD::RestartSitsState* state,
-                                 std::string* error_message) const;
-    bool Apply_H5_Restart_State(const SpongeH5MD::RestartProtocolState& state,
-                                std::string* error_message);
 
     /*
         以下用于区域分解

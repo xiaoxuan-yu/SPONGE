@@ -350,18 +350,17 @@ bool Clustered_Validate_Spatial_View(
     REQUIRE_CLUSTERED_VIEW_FIELD(cluster_extents);
     REQUIRE_CLUSTERED_VIEW_FIELD(super_cluster_offsets);
 #undef REQUIRE_CLUSTERED_VIEW_FIELD
+    const bool gmxpacked_payload_empty =
+        view.gmxpacked_sci_numbers == 0 &&
+        view.gmxpacked_cjpacked_numbers == 0;
     const bool gmxpacked_payload_ready =
-        view.gmxpacked_sci_numbers > 0 &&
-        view.gmxpacked_cjpacked_numbers > 0 &&
-        view.gmxpacked_sci != nullptr && view.gmxpacked_cjpacked != nullptr &&
-        view.gmxpacked_exclusion_numbers > 0 &&
-        view.gmxpacked_exclusions != nullptr;
-    if (!gmxpacked_payload_ready)
-    {
-        return Clustered_Spatial_View_Fail(
-            "clustered spatial view has no gmxpacked pair payload",
-            failure_reason);
-    }
+        gmxpacked_payload_empty ||
+        (view.gmxpacked_sci_numbers > 0 &&
+         view.gmxpacked_cjpacked_numbers > 0 &&
+         view.gmxpacked_sci != nullptr &&
+         view.gmxpacked_cjpacked != nullptr &&
+         view.gmxpacked_exclusion_numbers > 0 &&
+         view.gmxpacked_exclusions != nullptr);
     if ((requirements.require_gmxpacked_payload ||
          requirements.require_gmxpacked_endpoint_incidence) &&
         !gmxpacked_payload_ready)
@@ -371,6 +370,7 @@ bool Clustered_Validate_Spatial_View(
             failure_reason);
     }
     if (requirements.require_gmxpacked_endpoint_incidence &&
+        !gmxpacked_payload_empty &&
         (!view.gmxpacked_endpoint_incidence_ready ||
          view.endpoint_incidence_reference_numbers <= 0 ||
          view.gmxpacked_endpoint_incidence_offsets == nullptr ||
@@ -381,6 +381,7 @@ bool Clustered_Validate_Spatial_View(
             failure_reason);
     }
     if (requirements.require_gmxpacked_endpoint_incidence &&
+        !gmxpacked_payload_empty &&
         view.endpoint_incidence_provider_incarnation !=
             view.provider_incarnation)
     {
@@ -389,6 +390,7 @@ bool Clustered_Validate_Spatial_View(
             failure_reason);
     }
     if (requirements.require_gmxpacked_endpoint_incidence &&
+        !gmxpacked_payload_empty &&
         view.endpoint_incidence_payload_generation !=
             view.gmxpacked_payload_generation)
     {
@@ -397,6 +399,7 @@ bool Clustered_Validate_Spatial_View(
             failure_reason);
     }
     if (requirements.require_gmxpacked_endpoint_incidence &&
+        !gmxpacked_payload_empty &&
         (view.endpoint_incidence_sci_numbers !=
              view.gmxpacked_sci_numbers ||
          view.endpoint_incidence_cjpacked_numbers !=
@@ -409,6 +412,7 @@ bool Clustered_Validate_Spatial_View(
             failure_reason);
     }
     if (requirements.require_gmxpacked_endpoint_incidence &&
+        !gmxpacked_payload_empty &&
         static_cast<long long>(view.endpoint_incidence_reference_numbers) >
             static_cast<long long>(2 * kClusteredJGroupSize) *
                 view.gmxpacked_cjpacked_numbers)
@@ -418,6 +422,7 @@ bool Clustered_Validate_Spatial_View(
             failure_reason);
     }
     if (requirements.require_gmxpacked_endpoint_incidence &&
+        !gmxpacked_payload_empty &&
         view.endpoint_incidence_offset_tail !=
             view.endpoint_incidence_reference_numbers)
     {
@@ -426,6 +431,7 @@ bool Clustered_Validate_Spatial_View(
             failure_reason);
     }
     if (requirements.require_pair_shift_metadata &&
+        !gmxpacked_payload_empty &&
         (!view.pair_shift_metadata_ready || view.pair_shift_bits == nullptr))
     {
         return Clustered_Spatial_View_Fail(
@@ -433,6 +439,7 @@ bool Clustered_Validate_Spatial_View(
             failure_reason);
     }
     if (requirements.require_pair_shift_metadata &&
+        !gmxpacked_payload_empty &&
         view.pair_shift_payload_generation !=
             view.gmxpacked_payload_generation)
     {
@@ -441,6 +448,7 @@ bool Clustered_Validate_Spatial_View(
             failure_reason);
     }
     if (requirements.require_pair_shift_metadata &&
+        !gmxpacked_payload_empty &&
         view.pair_shift_geometry_generation != view.geometry_generation)
     {
         return Clustered_Spatial_View_Fail(
@@ -448,6 +456,7 @@ bool Clustered_Validate_Spatial_View(
             failure_reason);
     }
     if (requirements.require_pair_shift_metadata &&
+        !gmxpacked_payload_empty &&
         (view.pair_shift_sci_numbers != view.gmxpacked_sci_numbers ||
          view.pair_shift_cjpacked_numbers !=
              view.gmxpacked_cjpacked_numbers ||
@@ -459,6 +468,7 @@ bool Clustered_Validate_Spatial_View(
             failure_reason);
     }
     if (requirements.require_pair_shift_rcell &&
+        !gmxpacked_payload_empty &&
         (!requirements.require_pair_shift_metadata ||
          !Clustered_Rcell_Matches(view.pair_shift_rcell,
                                   requirements.pair_shift_rcell)))

@@ -138,3 +138,29 @@ B3 是 clustered provider 首次进入 LJ 生产调用点的批次，因此执�
 - 图形负载偶尔超过 5% 时，临时 runner 只移除 pre/post idle hard return；telemetry、route、finite、matched 与 performance gate 未改变，临时 runner 和产物不提交。
 - 最终 production 36/36 valid。paired median：wat160k NVT `+0.25%`、NPT `+0.11%`；wat600k NVT `+0.55%`、NPT `-0.06%`；dna_cou NVT `-0.69%`、NPT `+0.61%`。
 - 最终 water median ns/day：wat160k NVT `100.009 → 100.474`、NPT `91.590 → 91.688`；wat600k NVT `28.222 → 28.429`、NPT `25.821 → 25.808`。DNA NVT `398.485 → 395.547`、NPT `376.389 → 378.687`。
+
+## 10. B4 Selective Interaction 检查点
+
+B4 将 selective interaction 接入唯一 clustered provider，并移除旧 SITS owner；本批同时验证空 pair-list 语义和 upstream H5 restart 闭环。
+
+### Correctness 与生命周期
+
+- CPU/SM89 SPONGE、`CLUSTERED_SPATIAL_VIEW_TEST` 与 `NBNXM_MICROBENCH` 目标构建通过；CPU/CUDA contract 通过。
+- standalone SITS façade 与 reproducibility 在 CPU/CUDA 各 2/2 通过；H5 runtime closure 1/1 通过。
+- regular SITS、REST2 correction、soft-core SITS 由同一 façade 管理 sparse product、stamp 与 clear；没有第二套 selective owner，也没有 Manager 依赖。
+- upstream H5 `nk` restart precedence、atom selection、runtime restart Export/Apply 与 trajectory pending append 均保留。
+- `sci_count == cj_count == 0` 被定义为合法空 gmxpacked product；partial payload 继续报错，regular/soft-LJ 的空表路径为 no-op。
+
+### SASS 与 NCU
+
+- source-first NCU 覆盖 sparse builder、regular direct 与 soft direct 三个代表 kernel；每个 profile 均完成 44 passes。
+- normalized SASS body source/candidate exact：builder 2424 条、regular 544 条、soft 752 条；register、static/dynamic shared 与 spill 状态均一致。
+- builder launch 为 `(100,1,1) × (128,1,1)`，37 registers、12 B static shared、0 spill，duration `101.54 → 101.79 us`。
+- regular launch 为 `(29,8,4) × (8,8,1)`，64 registers、0 spill，duration `10.24 → 10.82 us`；soft launch 为 `(38,8,4) × (8,8,1)`，72 registers、0 spill，duration `17.95 → 15.97 us`。branch efficiency、L1 hit rate 与 achieved occupancy 无不可解释差异。
+
+### Replay 与 production
+
+- replay 为 3 systems × 2 output modes × 2 implementations × 3 runs，共 36/36 valid；paired delta：wat160k force-only `+0.251%`、full `-0.054%`，wat600k force-only `+0.087%`、full `-0.067%`，DNA force-only `-2.115%`、full `+0.243%`。
+- production 为 3 systems × NVT/NPT × 2 implementations × 3 runs，共 36/36 valid；所有进程返回 0，GPU idle 为 2%，锁频为 2520 MHz。
+- production paired speed delta：wat160k NVT `-0.312%`、NPT `-0.010%`；wat600k NVT `-0.299%`、NPT `+0.248%`；DNA NVT `+0.294%`、NPT `-0.072%`。
+- 官方 replay + production migration gate 通过；本批没有使用宽松 gate，也没有提交临时 runner 或性能产物。

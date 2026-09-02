@@ -93,6 +93,16 @@ B3 实施结果：
 
 旧 SPONGE/SITS 中 upstream H5 状态逻辑需要迁入新 owner，而不是保留两套 SITS。
 
+B4 实施结果：
+
+- 新建唯一的 `Selective_Interaction` owner/façade，合并 regular SITS、REST2 correction 与 soft-core SITS；删除旧 `SPONGE/SITS` owner，不引入 Manager 类型、worker protocol 或 Manager 构建依赖。
+- sparse clustered product 的构建、stamp、失效与释放由 façade 统一管理；GPU 与两条 CPU 路径均保留，主循环只执行一次 selective dispatch。
+- upstream H5 `nk` restart 优先级、atom selection、runtime restart 导入导出与 trajectory pending append 迁入新 owner，H5 runtime closure 通过。
+- clustered contract 明确允许 `sci_count == cj_count == 0` 的合法空 pair list；regular/soft-LJ GPU 对空表执行 no-op，同时继续拒绝 partial payload。selective dispatch 额外要求实际 LJ operator 可用，避免仅配置 SITS 时误入 direct LJ 路径。
+- CPU/SM89 SPONGE 与 contract target 构建通过；CPU/CUDA contract、standalone SITS façade/reproducibility 及 H5 runtime closure 均通过。
+- source/candidate 的 sparse builder、regular direct、soft direct 三个代表 kernel normalized SASS 完全一致：分别为 2424、544、752 条指令，register/shared/spill 资源相同。NCU 中 builder 约 `101.54 → 101.79 us`，regular `10.24 → 10.82 us`，soft `17.95 → 15.97 us`，无 spill 或 launch 形态变化。
+- replay 36/36 valid，六格 paired delta 为 `-2.115%` 到 `+0.251%`；production 36/36 valid，六格 paired speed delta 为 `-0.312%` 到 `+0.294%`，组合 migration gate 通过。
+
 ### B5：custom 与 manybody consumers
 
 - custom pair；

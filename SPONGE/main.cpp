@@ -57,7 +57,7 @@ SOFT_WALLS soft_walls;
 LENNARD_JONES_NO_PBC_INFORMATION LJ_NOPBC;
 COULOMB_FORCE_NO_PBC_INFORMATION CF_NOPBC;
 GENERALIZED_BORN_INFORMATION gb;
-SITS_INFORMATION sits;
+SELECTIVE_INTERACTION selective_interaction;
 DIHEDRAL sits_dihedral;
 NON_BOND_14 sits_nb14;
 CMAP sits_cmap;
@@ -94,7 +94,6 @@ bool Needs_Legacy_Neighbor_List()
         return false;
     }
     return plugin.plugin_numbers > 0 ||
-           (sits.is_initialized && sits.selectively_applied) ||
            pairwise_force.is_initialized || reaxff.is_initialized ||
            neighbor_list.is_needed_full;
 }
@@ -1085,6 +1084,7 @@ void Apply_H5_Protocol_Restart_State()
     {
         return;
     }
+    SITS_INFORMATION& sits = selective_interaction.sits;
     if (sits.is_initialized &&
         controller.Command_Exist(sits.module_name, "nk_in_file"))
     {
@@ -1220,8 +1220,8 @@ void Main_Initial(int argc, char* argv[])
         pairwise_force.Initial(&controller);
         nb14.Initial(&controller, lj.h_LJ_A, lj.h_LJ_B, lj.h_atom_LJ_type);
 
-        sits.Initial(&controller, md_info.atom_numbers);
-        if (sits.is_initialized && sits.selectively_applied)
+        selective_interaction.Initial(&controller, md_info.atom_numbers);
+        if (selective_interaction.Uses_SITS_Listed_Forces())
         {
             sits_dihedral.Initial(&controller, "sits_dihedral");
             sits_nb14.Initial(&controller, lj.h_LJ_A, lj.h_LJ_B,
@@ -1240,7 +1240,7 @@ void Main_Initial(int argc, char* argv[])
         }
         nb14.Initial(&controller, LJ_NOPBC.h_LJ_A, LJ_NOPBC.h_LJ_B,
                      LJ_NOPBC.h_atom_LJ_type);
-        sits.Initial(&controller, md_info.atom_numbers);
+        selective_interaction.Initial(&controller, md_info.atom_numbers);
     }
 
     bond.Initial(&controller, &md_info.sys.connectivity,
@@ -1342,10 +1342,12 @@ void Main_Initial(int argc, char* argv[])
     md_info.output.Initial_H5_Restart(&controller);
     md_info.output.Initial_H5_Nose_Hoover_Chain(
         &controller, nhc.is_initialized ? nhc.chain_length : 0);
+    const SITS_INFORMATION& active_sits = selective_interaction.sits;
     md_info.output.Initial_H5_Sits_Nk(
-        &controller, sits.is_initialized ? sits.module_name : NULL,
-        sits.is_initialized && sits.classic_sits.is_initialized
-            ? sits.classic_sits.k_numbers
+        &controller,
+        active_sits.is_initialized ? active_sits.module_name : NULL,
+        active_sits.is_initialized && active_sits.classic_sits.is_initialized
+            ? active_sits.classic_sits.k_numbers
             : 0);
     md_info.output.Initial_H5_Metadynamics(&controller, meta.is_initialized);
     md_info.output.Initial_H5_Qc(&controller, qc.is_initialized);
@@ -1404,7 +1406,7 @@ void Main_Calculate_Force()
     {
         md_info.need_kinetic = 1;
     }
-    sits.Reset_Force_Energy(&md_info.need_potential);
+    selective_interaction.Reset_Force_Energy(&md_info.need_potential);
 
     controller.Get_Time_Recorder("Calculate_Force")->Start();
     pm.Get_Atoms(&controller, md_info.crd, md_info.d_charge, dd.atom_numbers,
@@ -1447,49 +1449,135 @@ void Main_Calculate_Force()
                 dd.d_energy, md_info.need_pressure, dd.d_virial);
         }
 
-        if (sits.is_initialized && sits.selectively_applied)
+        if (selective_interaction.Uses_SITS_Listed_Forces())
         {
             sits_dihedral.Dihedral_Force_With_Atom_Energy_And_Virial(
                 dd.crd, md_info.pbc.cell, md_info.pbc.rcell,
-                sits.pw_select.select_force[0], md_info.need_potential,
-                sits.pw_select.select_atom_energy[0], md_info.need_pressure,
-                sits.pw_select.select_atom_virial_tensor[0]);
+                selective_interaction.Select_Force(), md_info.need_potential,
+                selective_interaction.Select_Atom_Energy(),
+                md_info.need_pressure,
+                selective_interaction.Select_Atom_Virial_Tensor());
             sits_nb14.Non_Bond_14_LJ_CF_Force_With_Atom_Energy_And_Virial(
                 dd.crd, dd.d_charge, md_info.pbc.cell, md_info.pbc.rcell,
-                sits.pw_select.select_force[0], md_info.need_potential,
-                sits.pw_select.select_atom_energy[0], md_info.need_pressure,
-                sits.pw_select.select_atom_virial_tensor[0]);
+                selective_interaction.Select_Force(), md_info.need_potential,
+                selective_interaction.Select_Atom_Energy(),
+                md_info.need_pressure,
+                selective_interaction.Select_Atom_Virial_Tensor());
             sits_cmap.CMAP_Force_With_Atom_Energy_And_Virial(
                 dd.crd, md_info.pbc.cell, md_info.pbc.rcell,
-                sits.pw_select.select_force[0], md_info.need_potential,
-                sits.pw_select.select_atom_energy[0], md_info.need_pressure,
-                sits.pw_select.select_atom_virial_tensor[0]);
-            sits.SITS_LJ_Direct_CF_Force_With_Atom_Energy_And_Virial(
-                md_info.atom_numbers, dd.atom_numbers, 0, dd.ghost_numbers,
-                dd.crd, dd.d_charge, &lj, dd.frc, md_info.pbc.cell,
-                md_info.pbc.rcell, neighbor_list.d_nl, md_info.nb.cutoff,
-                pm.beta, md_info.need_potential, dd.d_energy,
-                md_info.need_pressure, dd.d_virial, pm.d_direct_atom_energy);
-            sits.SITS_LJ_Soft_Core_Direct_CF_Force_With_Atom_Energy_And_Virial(
-                md_info.atom_numbers, dd.atom_numbers, 0, dd.ghost_numbers, dd.crd,
-                dd.d_charge, &lj_soft, dd.frc, md_info.pbc.cell,
-                md_info.pbc.rcell, neighbor_list.d_nl, md_info.nb.cutoff,
-                pm.beta, md_info.need_potential, dd.d_energy,
-                md_info.need_pressure, dd.d_virial, pm.d_direct_atom_energy);
+                selective_interaction.Select_Force(), md_info.need_potential,
+                selective_interaction.Select_Atom_Energy(),
+                md_info.need_pressure,
+                selective_interaction.Select_Atom_Virial_Tensor());
+        }
+        const bool sits_clustered_direct =
+            selective_interaction.Has_SITS_Direct_LJ_Coulomb() &&
+            !selective_interaction.Has_REST2_Direct_LJ_Coulomb();
+        const bool has_direct_lj_operator =
+            lj.is_initialized || lj_soft.is_initialized;
+        if (selective_interaction.Has_Direct_LJ_Coulomb() &&
+            has_direct_lj_operator)
+        {
+            if (sits_clustered_direct)
+            {
+                const char* failure_reason = NULL;
+                if (lj_soft.is_initialized)
+                {
+                    lj_soft
+                        .LJ_Soft_Core_PME_Direct_Force_With_Atom_Energy_And_Virial(
+                            md_info.atom_numbers, dd.atom_numbers,
+                            dd.ghost_numbers, dd.crd, dd.d_charge, dd.frc,
+                            md_info.pbc.cell, md_info.pbc.rcell, pm.beta,
+                            md_info.need_potential, dd.d_energy,
+                            md_info.need_pressure, dd.d_virial,
+                            pm.d_direct_atom_energy);
+                    if (!selective_interaction
+                             .LJ_Soft_Core_Direct_CF_Force_Clustered(
+                                 md_info.atom_numbers, dd.atom_numbers,
+                                 dd.ghost_numbers, &lj_soft, dd.frc,
+                                 md_info.pbc.cell, md_info.pbc.rcell,
+                                 md_info.nb.cutoff, pm.beta,
+                                 md_info.need_potential, dd.d_energy,
+                                 md_info.need_pressure, dd.d_virial,
+                                 pm.d_direct_atom_energy, &failure_reason))
+                    {
+                        throw std::runtime_error(
+                            std::string(
+                                "clustered-native SITS soft-LJ dispatch "
+                                "rejected the clustered payload: ") +
+                            (failure_reason == NULL
+                                 ? "unknown SITS soft-LJ failure"
+                                 : failure_reason));
+                    }
+                }
+                else
+                {
+                    lj.LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
+                        md_info.atom_numbers, dd.atom_numbers,
+                        dd.ghost_numbers, dd.crd, dd.d_charge, dd.frc,
+                        md_info.pbc.cell, md_info.pbc.rcell, pm.beta,
+                        md_info.need_potential, dd.d_energy,
+                        md_info.need_pressure, dd.d_virial,
+                        pm.d_direct_atom_energy);
+                    if (!selective_interaction.LJ_Direct_CF_Force_Clustered(
+                            md_info.atom_numbers, dd.atom_numbers,
+                            dd.ghost_numbers, dd.crd, dd.d_charge, &lj, dd.frc,
+                            md_info.pbc.cell, md_info.pbc.rcell,
+                            md_info.nb.cutoff, pm.beta,
+                            md_info.need_potential, dd.d_energy,
+                            md_info.need_pressure, dd.d_virial,
+                            pm.d_direct_atom_energy, &failure_reason))
+                    {
+                        throw std::runtime_error(
+                            std::string(
+                                "clustered-native SITS dispatch rejected "
+                                "the clustered payload: ") +
+                            (failure_reason == NULL ? "unknown SITS failure"
+                                                    : failure_reason));
+                    }
+                }
+            }
+            else
+            {
+                const char* failure_reason = NULL;
+                if (!selective_interaction.LJ_Direct_CF_Force_Clustered(
+                        md_info.atom_numbers, dd.atom_numbers,
+                        dd.ghost_numbers, dd.crd, dd.d_charge, &lj, dd.frc,
+                        md_info.pbc.cell, md_info.pbc.rcell,
+                        md_info.nb.cutoff, pm.beta, md_info.need_potential,
+                        dd.d_energy, md_info.need_pressure, dd.d_virial,
+                        pm.d_direct_atom_energy, &failure_reason))
+                {
+                    throw std::runtime_error(
+                        std::string(
+                            "clustered-native REST2 dispatch rejected the "
+                            "clustered payload: ") +
+                        (failure_reason == NULL ? "unknown REST2 failure"
+                                                : failure_reason));
+                }
+                selective_interaction
+                    .LJ_Soft_Core_Direct_CF_Force_With_Atom_Energy_And_Virial(
+                        md_info.atom_numbers, dd.atom_numbers,
+                        dd.ghost_numbers, dd.crd, dd.d_charge, &lj_soft,
+                        dd.frc, md_info.pbc.cell, md_info.pbc.rcell, pm.beta,
+                        md_info.need_potential, dd.d_energy,
+                        md_info.need_pressure, dd.d_virial,
+                        pm.d_direct_atom_energy);
+            }
         }
         else
         {
             lj.LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
-                md_info.atom_numbers, dd.atom_numbers, dd.ghost_numbers, dd.crd,
-                dd.d_charge, dd.frc, md_info.pbc.cell, md_info.pbc.rcell,
-                pm.beta, md_info.need_potential,
+                md_info.atom_numbers, dd.atom_numbers, dd.ghost_numbers,
+                dd.crd, dd.d_charge, dd.frc, md_info.pbc.cell,
+                md_info.pbc.rcell, pm.beta, md_info.need_potential,
                 dd.d_energy, md_info.need_pressure, dd.d_virial,
                 pm.d_direct_atom_energy);
 
             lj_soft.LJ_Soft_Core_PME_Direct_Force_With_Atom_Energy_And_Virial(
-                md_info.atom_numbers, dd.atom_numbers, dd.ghost_numbers, dd.crd,
-                dd.d_charge, dd.frc, md_info.pbc.cell, md_info.pbc.rcell,
-                pm.beta, md_info.need_potential,
+                md_info.atom_numbers, dd.atom_numbers, dd.ghost_numbers,
+                dd.crd, dd.d_charge, dd.frc, md_info.pbc.cell,
+                md_info.pbc.rcell, pm.beta, md_info.need_potential,
                 dd.d_energy, md_info.need_pressure, dd.d_virial,
                 pm.d_direct_atom_energy);
         }
@@ -1617,16 +1705,19 @@ void Main_Calculate_Force()
                                    dd.atom_numbers);
             }
         }
-        sits.Update_And_Enhance(
+        selective_interaction.Update_And_Enhance(
             md_info.sys.steps, md_info.sys.d_potential, md_info.need_pressure,
             dd.d_virial, dd.frc,
             1.0f / (CONSTANT_kB * md_info.sys.target_temperature));
-        if (sits.is_initialized && sits.classic_sits.h5_nk_pending)
+        SITS_INFORMATION& active_sits = selective_interaction.sits;
+        if (active_sits.is_initialized &&
+            active_sits.classic_sits.h5_nk_pending)
         {
             md_info.output.Append_H5_Sits_Nk_Frame(
-                &controller, sits.module_name, sits.classic_sits.nk_record_cpu,
-                sits.classic_sits.k_numbers);
-            sits.classic_sits.h5_nk_pending = 0;
+                &controller, active_sits.module_name,
+                active_sits.classic_sits.nk_record_cpu,
+                active_sits.classic_sits.k_numbers);
+            active_sits.classic_sits.h5_nk_pending = 0;
         }
         vatom.Force_Redistribute(dd.crd, md_info.pbc.cell, md_info.pbc.rcell,
                                  dd.frc);
@@ -1734,8 +1825,9 @@ void Main_Refresh_Local_State(bool rebuild_dd)
     constrain.Get_Local(dd.atom_local_id, dd.atom_local_label, dd.atom_numbers);
     settle.Get_Local(dd.atom_local_id, dd.atom_local_label, dd.atom_numbers);
     vatom.Get_Local(dd.atom_local_id, dd.atom_local_label, dd.atom_numbers);
-    sits.Get_Local(dd.atom_local, dd.atom_numbers, dd.ghost_numbers);
-    if (sits.is_initialized && sits.selectively_applied)
+    selective_interaction.Get_Local(dd.atom_local, dd.atom_numbers,
+                                    dd.ghost_numbers);
+    if (selective_interaction.Uses_SITS_Listed_Forces())
     {
         sits_dihedral.Get_Local(dd.atom_local, dd.atom_numbers,
                                 dd.ghost_numbers, dd.atom_local_label,
@@ -1912,8 +2004,9 @@ void Main_Print()
             lj.Step_Print(&controller);
             lj_soft.Step_Print(&controller);
             pm.Step_Print(&controller);
-            sits.Step_Print(&controller, 1.0f / md_info.sys.target_temperature /
-                                             CONSTANT_kB);
+            selective_interaction.Step_Print(
+                &controller, 1.0f / md_info.sys.target_temperature /
+                                 CONSTANT_kB);
         }
         sits_dihedral.Step_Print(&controller, false);
         sits_nb14.Step_Print(&controller, false);
@@ -2031,10 +2124,12 @@ void Main_Print()
         SpongeH5MD::RestartSitsState h5_sits_state;
         const SpongeH5MD::RestartSitsState* h5_sits_state_pointer = NULL;
         std::string h5_sits_error;
-        if (sits.is_initialized && md_info.output.h5_restart_enabled &&
+        const SITS_INFORMATION& active_sits = selective_interaction.sits;
+        if (active_sits.is_initialized && md_info.output.h5_restart_enabled &&
             CONTROLLER::MPI_rank == 0)
         {
-            if (!sits.Export_H5_Restart_State(&h5_sits_state, &h5_sits_error))
+            if (!active_sits.Export_H5_Restart_State(&h5_sits_state,
+                                                     &h5_sits_error))
             {
                 controller.Throw_SPONGE_Error(spongeErrorValueErrorCommand,
                                               "Main_Print",
@@ -2112,6 +2207,7 @@ void Main_Clear()
         md_info.sys.steps, md_info.sys.speed_time_factor,
         md_info.sys.speed_unit_name.c_str(), md_info.mode);
 
+    selective_interaction.Clear_Clustered_Sparse_Product();
     clustered_lj_workspace.Clear();
     clustered_neighbor_provider.Clear();
     lj.clustered_neighbor_provider = NULL;

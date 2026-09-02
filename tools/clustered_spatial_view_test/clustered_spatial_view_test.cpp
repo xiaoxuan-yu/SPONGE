@@ -116,6 +116,29 @@ void Test_Validation_Contract()
     Expect_Valid("valid gmxpacked view", fixture.view, requirements);
 
     {
+        auto empty = fixture.view;
+        empty.gmxpacked_sci_numbers = 0;
+        empty.gmxpacked_cjpacked_numbers = 0;
+        empty.gmxpacked_exclusion_numbers = 0;
+        empty.gmxpacked_sci = nullptr;
+        empty.gmxpacked_cjpacked = nullptr;
+        empty.gmxpacked_exclusions = nullptr;
+        auto need_empty_payload = requirements;
+        need_empty_payload.require_gmxpacked_endpoint_incidence = true;
+        need_empty_payload.require_pair_shift_metadata = true;
+        need_empty_payload.require_pair_shift_rcell = true;
+        Expect_Valid("empty gmxpacked payload", empty, need_empty_payload);
+    }
+    {
+        auto partial = fixture.view;
+        partial.gmxpacked_sci_numbers = 0;
+        Expect_Invalid(
+            "partial gmxpacked payload",
+            "clustered spatial view has no gmxpacked pair payload", partial,
+            requirements);
+    }
+
+    {
         auto view = fixture.view;
         view.ready = false;
         Expect_Invalid("not-ready view", "clustered spatial view is not ready",

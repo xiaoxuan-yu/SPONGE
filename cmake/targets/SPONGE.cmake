@@ -40,7 +40,9 @@ set(SPONGE_SOURCES
     ${PROJECT_ROOT_DIR}/SPONGE/bias/steer.cpp
     ${PROJECT_ROOT_DIR}/SPONGE/bias/restrain_cv.cpp
     ${PROJECT_ROOT_DIR}/SPONGE/bias/sinkmeta.cpp
-    ${PROJECT_ROOT_DIR}/SPONGE/SITS/SITS.cpp
+    ${PROJECT_ROOT_DIR}/SPONGE/Selective_Interaction/REST2.cpp
+    ${PROJECT_ROOT_DIR}/SPONGE/Selective_Interaction/SITS.cpp
+    ${PROJECT_ROOT_DIR}/SPONGE/Selective_Interaction/Selective_Interaction.cpp
     ${PROJECT_ROOT_DIR}/SPONGE/custom_force/listed_forces.cpp
     ${PROJECT_ROOT_DIR}/SPONGE/custom_force/pairwise_force.cpp
     ${PROJECT_ROOT_DIR}/SPONGE/wall/soft_wall.cpp

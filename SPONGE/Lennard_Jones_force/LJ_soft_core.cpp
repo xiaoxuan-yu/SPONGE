@@ -1317,8 +1317,11 @@ void LJ_SOFT_CORE::LJ_Soft_Core_PME_Direct_Force_With_Atom_Energy_And_Virial(
             }
 #else
             if (clustered_view.gmxpacked_sci_numbers <= 0 ||
-                clustered_view.gmxpacked_cjpacked_numbers <= 0 ||
-                clustered_view.gmxpacked_sci == NULL ||
+                clustered_view.gmxpacked_cjpacked_numbers <= 0)
+            {
+                return;
+            }
+            if (clustered_view.gmxpacked_sci == NULL ||
                 clustered_view.gmxpacked_cjpacked == NULL ||
                 clustered_view.gmxpacked_exclusions == NULL ||
                 clustered_workspace->d_sorted_frc == NULL)

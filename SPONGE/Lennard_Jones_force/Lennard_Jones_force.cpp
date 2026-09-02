@@ -1348,6 +1348,11 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
             return;
 #endif
 #ifndef USE_CPU
+            if (clustered_view.gmxpacked_sci_numbers <= 0 ||
+                clustered_view.gmxpacked_cjpacked_numbers <= 0)
+            {
+                return;
+            }
             const ClusteredRegularLJKernelInput kernel_input = {
                 cell,
                 d_LJ_AB_packed,
