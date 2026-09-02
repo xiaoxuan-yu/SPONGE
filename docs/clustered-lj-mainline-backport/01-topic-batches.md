@@ -72,6 +72,18 @@ B2.2 实施结果：
 
 冲突处理必须保留 upstream H5 input/restart/materialization。不得恢复 native/legacy LJ、solvent fast path或 virial-only variant。
 
+B3 实施结果：
+
+- 从 `19856de` 恢复 clustered workspace/gather、regular LJ、standalone soft-LJ 与 warp-record kernel；默认 binary 只保留 force-only/full 两种 output 语义，删除 solvent fast path，不恢复 virial-only specialization。
+- `main.cpp` 保留 upstream H5 input/restart/finalize 与 force-field materialization，建立唯一 Provider/workspace owner；纯 clustered-LJ 体系不再初始化第二套 legacy neighbor list。legacy list 暂只服务尚未进入 B4/B5 的消费者，不作为 LJ fallback。
+- PBC 大位移检查读取实际活动邻居表的 effective rebuild skin。pure clustered 路径使用 Provider skin；仍有 legacy consumer 时继续使用 legacy skin，避免两套安全半径分叉。
+- 每步 force reset 显式清除 `need_pressure`，保证 force-only/full dispatch 不受上一步 barostat/output 请求污染。
+- 生产 A/B 首轮定位出主线既有 `PME_Final` launch-grid 错误：kernel 以 `threadIdx.y` 映射原子，却按 `blockSize.x` 计算 grid，形成 16 倍过度 launch。该独立 prerequisite 修复为按 `blockSize.y` 计算；NCU 从 `(82272,1,1)`/约 `471 us` 恢复到 reference 的 `(5142,1,1)`/约 `332 us`。
+- CPU 与 SM89 SPONGE/contract 构建通过；pair oracle 6/6 exact，soft-LJ oracle 通过；source/candidate 的 14 个 B3 target 实例 normalized SASS body/resource exact。
+- NCU 对 regular force-only/full 的资源与主要指标无不可解释差异；修复后的 `PME_Final` 同 launch 为 candidate `331.744 us`、reference `331.968 us`。
+- replay 36/36、full 18/18 matched；六格 median throughput delta 为 `-0.51%` 到 `+0.61%`。
+- production 36/36；paired median 为 wat160k NVT `+0.25%`、NPT `+0.11%`，wat600k NVT `+0.55%`、NPT `-0.06%`，DNA NVT `-0.69%`、NPT `+0.61%`，全部通过 3% gate。
+
 ### B4：Selective Interaction、SITS 与 REST2
 
 - 新 Selective_Interaction 目录；

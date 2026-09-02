@@ -21,5 +21,5 @@ struct periodic_box_condition_information
     void PBC_Check();
     LTMatrix3 Get_Cell(VECTOR box_length, VECTOR box_angle);
     void Update_Box(LTMatrix3 g);
-    bool Check_Change_Large();
+    bool Check_Change_Large(float neighbor_skin);
 };

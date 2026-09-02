@@ -3,6 +3,7 @@
 #include "utils/h5md/h5_legacy_sidecar.hpp"
 #include "utils/h5md/input_validation.hpp"
 #include "utils/h5md/topology_native_h5_reader.hpp"
+#include "neighbor_list/provider/config.h"
 #include "xponge/load/common.hpp"
 
 #define SUBPACKAGE_HINT \
@@ -30,7 +31,6 @@ MC_BAROSTAT_INFORMATION mc_baro;
 NEIGHBOR_LIST neighbor_list;
 LENNARD_JONES_INFORMATION lj;
 LJ_SOFT_CORE lj_soft;
-SOLVENT_LENNARD_JONES solvent_lj;
 Particle_Mesh pm;
 ANGLE angle;
 UREY_BRADLEY urey_bradley;
@@ -50,6 +50,8 @@ RESTRAIN_CV restrain_cv;
 META meta;
 LISTED_FORCES listed_forces;
 PAIRWISE_FORCE pairwise_force;
+ClusteredNeighborProvider clustered_neighbor_provider;
+LJClusteredWorkspace clustered_lj_workspace;
 HARD_WALL hard_wall;
 SOFT_WALLS soft_walls;
 LENNARD_JONES_NO_PBC_INFORMATION LJ_NOPBC;
@@ -71,6 +73,42 @@ deviceStream_t main_stream;
 
 namespace
 {
+void Ensure_Clustered_Neighbor_Provider()
+{
+    if (!clustered_neighbor_provider.IsInitialized())
+    {
+        const ClusteredBuildConfig config = ResolveClusteredNeighborConfig(
+            &controller, "clustered_spatial_service");
+        clustered_neighbor_provider.Initialize(&controller, config);
+    }
+    if (!clustered_lj_workspace.IsBoundTo(&clustered_neighbor_provider))
+    {
+        clustered_lj_workspace.Initialize(&clustered_neighbor_provider);
+    }
+}
+
+bool Needs_Legacy_Neighbor_List()
+{
+    if (!md_info.pbc.pbc)
+    {
+        return false;
+    }
+    return plugin.plugin_numbers > 0 ||
+           (sits.is_initialized && sits.selectively_applied) ||
+           pairwise_force.is_initialized || reaxff.is_initialized ||
+           neighbor_list.is_needed_full;
+}
+
+float Active_Neighbor_Rebuild_Skin()
+{
+    if (!neighbor_list.is_initialized &&
+        clustered_neighbor_provider.IsInitialized())
+    {
+        return clustered_neighbor_provider.RebuildSkin();
+    }
+    return md_info.nb.skin;
+}
+
 bool Requests_H5_Dynamic_State(
     const SpongeH5InputContract::RestartLoadPolicy policy)
 {
@@ -1161,6 +1199,21 @@ void Main_Initial(int argc, char* argv[])
     {
         lj.Initial(&controller, md_info.nb.cutoff);
         lj_soft.Initial(&controller, md_info.nb.cutoff);
+        if (lj.is_initialized || lj_soft.is_initialized)
+        {
+            Ensure_Clustered_Neighbor_Provider();
+        }
+        if (lj.is_initialized)
+        {
+            lj.clustered_neighbor_provider = &clustered_neighbor_provider;
+            lj.clustered_workspace = &clustered_lj_workspace;
+        }
+        if (lj_soft.is_initialized)
+        {
+            lj_soft.clustered_neighbor_provider =
+                &clustered_neighbor_provider;
+            lj_soft.clustered_workspace = &clustered_lj_workspace;
+        }
         pm.Initial(&controller, md_info.atom_numbers, md_info.pbc.cell,
                    md_info.pbc.rcell, md_info.sys.box_length, md_info.nb.cutoff,
                    md_info.no_direct_interaction_virtual_atom_numbers);
@@ -1175,8 +1228,6 @@ void Main_Initial(int argc, char* argv[])
                               lj.h_atom_LJ_type, "sits_nb14");
             sits_cmap.Initial(&controller, "sits_cmap");
         }
-        sits.Check_Solvent(&controller, md_info.atom_numbers,
-                           solvent_lj.solvent_numbers);
     }
     else
     {
@@ -1252,7 +1303,7 @@ void Main_Initial(int argc, char* argv[])
                   &md_info.sys.freedom, &md_info.sys.connectivity);
     vatom.Coordinate_Refresh(md_info.crd, md_info.pbc.cell, md_info.pbc.rcell);
 
-    if (md_info.pbc.pbc)
+    if (Needs_Legacy_Neighbor_List())
     {
         neighbor_list.Initial(&controller, md_info.atom_numbers,
                               md_info.nb.cutoff, md_info.nb.skin,
@@ -1274,11 +1325,6 @@ void Main_Initial(int argc, char* argv[])
     vatom.update_ug_connectivity(&md_info.ug.connectivity);
     md_info.ug.Read_Update_Group(md_info.atom_numbers);
     md_info.mol.Initial(&controller);
-    if (md_info.pbc.pbc)
-    {
-        solvent_lj.Initial(&controller, &lj, &lj_soft, &md_info,
-                           md_info.mode >= md_info.NVT);
-    }
     Main_Process_Management();
 
     if (CONTROLLER::MPI_rank < CONTROLLER::PP_MPI_size)
@@ -1419,15 +1465,13 @@ void Main_Calculate_Force()
                 sits.pw_select.select_atom_energy[0], md_info.need_pressure,
                 sits.pw_select.select_atom_virial_tensor[0]);
             sits.SITS_LJ_Direct_CF_Force_With_Atom_Energy_And_Virial(
-                md_info.atom_numbers, dd.atom_numbers,
-                solvent_lj.local_solvent_numbers, dd.ghost_numbers, dd.crd,
-                dd.d_charge, &lj, dd.frc, md_info.pbc.cell, md_info.pbc.rcell,
-                neighbor_list.d_nl, md_info.nb.cutoff, pm.beta,
-                md_info.need_potential, dd.d_energy, md_info.need_pressure,
-                dd.d_virial, pm.d_direct_atom_energy);
+                md_info.atom_numbers, dd.atom_numbers, 0, dd.ghost_numbers,
+                dd.crd, dd.d_charge, &lj, dd.frc, md_info.pbc.cell,
+                md_info.pbc.rcell, neighbor_list.d_nl, md_info.nb.cutoff,
+                pm.beta, md_info.need_potential, dd.d_energy,
+                md_info.need_pressure, dd.d_virial, pm.d_direct_atom_energy);
             sits.SITS_LJ_Soft_Core_Direct_CF_Force_With_Atom_Energy_And_Virial(
-                md_info.atom_numbers, dd.atom_numbers,
-                solvent_lj.local_solvent_numbers, dd.ghost_numbers, dd.crd,
+                md_info.atom_numbers, dd.atom_numbers, 0, dd.ghost_numbers, dd.crd,
                 dd.d_charge, &lj_soft, dd.frc, md_info.pbc.cell,
                 md_info.pbc.rcell, neighbor_list.d_nl, md_info.nb.cutoff,
                 pm.beta, md_info.need_potential, dd.d_energy,
@@ -1436,26 +1480,19 @@ void Main_Calculate_Force()
         else
         {
             lj.LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
-                md_info.atom_numbers, dd.atom_numbers,
-                solvent_lj.local_solvent_numbers, dd.ghost_numbers, dd.crd,
+                md_info.atom_numbers, dd.atom_numbers, dd.ghost_numbers, dd.crd,
                 dd.d_charge, dd.frc, md_info.pbc.cell, md_info.pbc.rcell,
-                neighbor_list.d_nl, pm.beta, md_info.need_potential,
+                pm.beta, md_info.need_potential,
                 dd.d_energy, md_info.need_pressure, dd.d_virial,
                 pm.d_direct_atom_energy);
 
             lj_soft.LJ_Soft_Core_PME_Direct_Force_With_Atom_Energy_And_Virial(
-                md_info.atom_numbers, dd.atom_numbers,
-                solvent_lj.local_solvent_numbers, dd.ghost_numbers, dd.crd,
+                md_info.atom_numbers, dd.atom_numbers, dd.ghost_numbers, dd.crd,
                 dd.d_charge, dd.frc, md_info.pbc.cell, md_info.pbc.rcell,
-                neighbor_list.d_nl, pm.beta, md_info.need_potential,
+                pm.beta, md_info.need_potential,
                 dd.d_energy, md_info.need_pressure, dd.d_virial,
                 pm.d_direct_atom_energy);
         }
-        solvent_lj.LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
-            dd.atom_numbers, dd.res_numbers, dd.res_start, dd.crd, dd.d_charge,
-            dd.frc, md_info.pbc.cell, md_info.pbc.rcell, neighbor_list.d_nl,
-            pm.beta, md_info.need_potential, dd.d_energy, md_info.need_pressure,
-            dd.d_virial, pm.d_direct_atom_energy);
 
         lj.Long_Range_Correction(
             md_info.need_pressure, dd.d_virial, md_info.need_potential,
@@ -1661,12 +1698,22 @@ void Main_Refresh_Local_State(bool rebuild_dd)
 
     lj.Get_Local(dd.atom_local, dd.atom_numbers, dd.ghost_numbers);
     lj_soft.Get_Local(dd.atom_local, dd.atom_numbers, dd.ghost_numbers);
-    solvent_lj.Get_Local(dd.res_numbers, dd.res_len, dd.atom_numbers,
-                         dd.d_mass);
+    ClusteredDomainBinding clustered_domain;
+    clustered_domain.local_atom_count = dd.atom_numbers;
+    clustered_domain.direct_local_atom_count = dd.atom_numbers;
+    clustered_domain.ghost_atom_count = dd.ghost_numbers;
+    clustered_domain.atom_local = dd.atom_local;
+    clustered_domain.excluded_list_start = dd.d_excluded_list_start;
+    clustered_domain.excluded_list = dd.d_excluded_list;
+    clustered_domain.excluded_numbers = dd.d_excluded_numbers;
     listed_forces.Get_Local(dd.atom_local, dd.atom_numbers, dd.ghost_numbers,
                             dd.atom_local_label, dd.atom_local_id);
     pairwise_force.Get_Local(dd.atom_local, dd.atom_numbers, dd.ghost_numbers,
                              dd.atom_local_label, dd.atom_local_id);
+    if (clustered_neighbor_provider.IsInitialized())
+    {
+        clustered_neighbor_provider.BindDomain(clustered_domain);
+    }
 
     angle.Get_Local(dd.atom_local, dd.atom_numbers, dd.ghost_numbers,
                     dd.atom_local_label, dd.atom_local_id);
@@ -2065,6 +2112,12 @@ void Main_Clear()
         md_info.sys.steps, md_info.sys.speed_time_factor,
         md_info.sys.speed_unit_name.c_str(), md_info.mode);
 
+    clustered_lj_workspace.Clear();
+    clustered_neighbor_provider.Clear();
+    lj.clustered_neighbor_provider = NULL;
+    lj.clustered_workspace = NULL;
+    lj_soft.clustered_neighbor_provider = NULL;
+    lj_soft.clustered_workspace = NULL;
     controller.Clear();
 }
 
@@ -2086,7 +2139,8 @@ float Main_Box_Change(LTMatrix3 g, int scale_box, int scale_crd, int scale_vel)
     }
 
     // 大幅度放缩盒子时，重新初始化相关模块
-    if (scale_box && md_info.pbc.Check_Change_Large())
+    if (scale_box &&
+        md_info.pbc.Check_Change_Large(Active_Neighbor_Rebuild_Skin()))
     {
         Main_Box_Change_Largely();
     }
@@ -2118,8 +2172,12 @@ void Main_Box_Change_Largely()
                                      dd.atom_local_id, main_stream);
     }
     neighbor_list.Clear();
-    neighbor_list.Initial(&controller, md_info.atom_numbers, md_info.nb.cutoff,
-                          md_info.nb.skin, md_info.pbc.cell, md_info.pbc.rcell);
+    if (Needs_Legacy_Neighbor_List())
+    {
+        neighbor_list.Initial(&controller, md_info.atom_numbers,
+                              md_info.nb.cutoff, md_info.nb.skin,
+                              md_info.pbc.cell, md_info.pbc.rcell);
+    }
     pm.Clear();
     pm.Initial(&controller, md_info.atom_numbers, md_info.pbc.cell,
                md_info.pbc.rcell, md_info.sys.box_length, md_info.nb.cutoff,

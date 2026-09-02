@@ -41,6 +41,7 @@ class ClusteredNeighborProvider
 
     bool IsInitialized() const { return initialized_; }
     int TotalAtomNumbers() const { return spatial_.total_atom_numbers; }
+    float RebuildSkin() const { return effective_rebuild_skin_; }
 
 private:
     friend struct ClusteredNeighborProviderInternal;

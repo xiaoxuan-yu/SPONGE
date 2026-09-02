@@ -1124,7 +1124,7 @@ void Particle_Mesh::PME_Reciprocal_Force_With_Energy_And_Virial(
             // 计算势能和力
             blockSize = {8, CONTROLLER::device_max_thread / 8};
             Launch_Device_Kernel(PME_Final,
-                                 (atom_numbers + blockSize.x - 1) / blockSize.x,
+                                 (atom_numbers + blockSize.y - 1) / blockSize.y,
                                  blockSize, 0, NULL, PME_atom_near, charge,
                                  PME_FBCFQ, force_backup, PME_frxyz, rcell,
                                  fftx, ffty, fftz, atom_numbers, PME_Nall);

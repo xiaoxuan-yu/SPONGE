@@ -6,7 +6,7 @@
 - 性能实现检查点：19856deb
 - 计划与审计检查点：71046ec
 - 共同祖先：4c694ebab7032b0ef28d8312115d0f3253800125
-- 状态：B0/B1/B2.1 已提交；B2.2 provider lifecycle 与 builder foundation 已完成 CPU/CUDA 构建、contract 和父版本 SASS 对照，等待主题提交
+- 状态：B0–B3 已完成；下一批为 B4 Selective Interaction、SITS 与 REST2
 
 ## 目标
 

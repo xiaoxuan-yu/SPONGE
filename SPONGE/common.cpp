@@ -82,6 +82,20 @@ int atomicExch(int* address, int val)
     return old;
 }
 
+int atomicMax(int* address, int val)
+{
+    int old;
+#pragma omp critical(sponge_atomic_max_int)
+    {
+        old = *address;
+        if (val > old)
+        {
+            *address = val;
+        }
+    }
+    return old;
+}
+
 void deviceMemcpy(void* to, const void* from, size_t size,
                   deviceMemcpyKind kind)
 {

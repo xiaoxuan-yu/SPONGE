@@ -4,7 +4,7 @@
 #include "Domain_decomposition/Domain_decomposition.h"
 #include "Lennard_Jones_force/LJ_soft_core.h"
 #include "Lennard_Jones_force/Lennard_Jones_force.h"
-#include "Lennard_Jones_force/solvent_LJ.h"
+#include "Lennard_Jones_force/clustered/workspace.h"
 #include "MD_core/MD_core.h"
 #include "NO_PBC/Coulomb_Force_No_PBC.h"
 #include "NO_PBC/Lennard_Jones_force_No_PBC.h"

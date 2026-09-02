@@ -147,6 +147,133 @@ struct VECTOR_LJ_SOFT_TYPE
                powf(dr_soft_core, -4.0f) * sigma;
     }
 };
+
+template <bool full_output>
+__device__ __host__ __forceinline__ void Compute_Clustered_Soft_Core_Pair(
+    const VECTOR_LJ_SOFT_TYPE& r1, const VECTOR_LJ_SOFT_TYPE& r2,
+    const float dx, const float dy, const float dz, const float dr2,
+    const float AA, const float AB, const float BA, const float BB,
+    const float lambda, const float alpha, const float p,
+    const float input_sigma_6, const float input_sigma_6_min,
+    const float pme_beta, const float ij_factor, VECTOR* pair_force,
+    float* pair_lj_energy, float* pair_coulomb_energy,
+    LTMatrix3* pair_virial)
+{
+    const float lambda_ = 1.0f - lambda;
+#ifdef USE_GPU
+    const float inv_r = rsqrtf(dr2);
+#else
+    const float inv_r = 1.0f / sqrtf(dr2);
+#endif
+    const float inv_r2 = inv_r * inv_r;
+    const float inv_r6 = inv_r2 * inv_r2 * inv_r2;
+    const float dr_abs = dr2 * inv_r;
+    const float charge_product = r1.charge * r2.charge;
+    float force_abs = 0.0f;
+    float lj_energy = 0.0f;
+    float coulomb_energy = 0.0f;
+
+    if (BA * AA != 0.0f || BA + AA == 0.0f)
+    {
+        const float inv_r8 = inv_r6 * inv_r2;
+        force_abs =
+            (lambda_ * (AB - AA * inv_r6) +
+             lambda * (BB - BA * inv_r6)) *
+            inv_r8;
+        const float beta_dr = pme_beta * dr_abs;
+        const float erfc_beta_dr = erfcf(beta_dr);
+        force_abs -=
+            charge_product * inv_r * inv_r2 *
+            (beta_dr * TWO_DIVIDED_BY_SQRT_PI *
+                 expf(-beta_dr * beta_dr) +
+             erfc_beta_dr);
+        if constexpr (full_output)
+        {
+            lj_energy =
+                (lambda_ *
+                     (0.083333333f * AA * inv_r6 - 0.166666667f * AB) +
+                 lambda *
+                     (0.083333333f * BA * inv_r6 - 0.166666667f * BB)) *
+                inv_r6;
+            coulomb_energy = charge_product * erfc_beta_dr * inv_r;
+        }
+    }
+    else
+    {
+        const float dr4 = dr2 * dr2;
+        const float dr6 = dr4 * dr2;
+        const float sigma_A = Get_Soft_Core_Sigma(
+            AA, AB, input_sigma_6, input_sigma_6_min);
+        const float sigma_B = Get_Soft_Core_Sigma(
+            BA, BB, input_sigma_6, input_sigma_6_min);
+        const float soft6_A =
+            dr6 + alpha * powf(lambda, p) * sigma_A;
+        const float soft6_B =
+            dr6 + alpha * powf(lambda_, p) * sigma_B;
+        const float inv_soft6_A = 1.0f / soft6_A;
+        const float inv_soft6_B = 1.0f / soft6_B;
+        const float inv_soft12_A = inv_soft6_A * inv_soft6_A;
+        const float inv_soft12_B = inv_soft6_B * inv_soft6_B;
+        const float soft_A = powf(soft6_A, 0.16666667f);
+        const float soft_B = powf(soft6_B, 0.16666667f);
+        const float beta_soft_A = pme_beta * soft_A;
+        const float beta_soft_B = pme_beta * soft_B;
+        const float erfc_soft_A = erfcf(beta_soft_A);
+        const float erfc_soft_B = erfcf(beta_soft_B);
+
+        force_abs =
+            lambda_ * dr4 * (AB - AA * inv_soft6_A) * inv_soft12_A +
+            lambda * dr4 * (BB - BA * inv_soft6_B) * inv_soft12_B;
+        force_abs -=
+            lambda_ * charge_product * dr4 *
+            (TWO_DIVIDED_BY_SQRT_PI * pme_beta *
+                 expf(-beta_soft_A * beta_soft_A) +
+             erfc_soft_A / soft_A) *
+            inv_soft6_A;
+        force_abs -=
+            lambda * charge_product * dr4 *
+            (TWO_DIVIDED_BY_SQRT_PI * pme_beta *
+                 expf(-beta_soft_B * beta_soft_B) +
+             erfc_soft_B / soft_B) *
+            inv_soft6_B;
+        if constexpr (full_output)
+        {
+            lj_energy =
+                lambda_ *
+                    (0.083333333f * AA * inv_soft6_A -
+                     0.166666667f * AB) *
+                    inv_soft6_A +
+                lambda *
+                    (0.083333333f * BA * inv_soft6_B -
+                     0.166666667f * BB) *
+                    inv_soft6_B;
+            coulomb_energy =
+                charge_product *
+                (lambda_ * erfc_soft_A / soft_A +
+                 lambda * erfc_soft_B / soft_B);
+        }
+    }
+
+    pair_force->x = force_abs * dx;
+    pair_force->y = force_abs * dy;
+    pair_force->z = force_abs * dz;
+    if constexpr (full_output)
+    {
+        *pair_lj_energy = ij_factor * lj_energy;
+        *pair_coulomb_energy = ij_factor * coulomb_energy;
+        *pair_virial = {
+            -ij_factor * pair_force->x * dx,
+            -ij_factor *
+                (pair_force->x * dy + pair_force->y * dx),
+            -ij_factor * pair_force->y * dy,
+            -ij_factor *
+                (pair_force->x * dz + pair_force->z * dx),
+            -ij_factor *
+                (pair_force->y * dz + pair_force->z * dy),
+            -ij_factor * pair_force->z * dz};
+    }
+}
+
 __global__ void Copy_LJ_Type_And_Mask_To_New_Crd(const int atom_numbers,
                                                  VECTOR_LJ_SOFT_TYPE* new_crd,
                                                  const int* LJ_type_A,
@@ -156,8 +283,6 @@ __global__ void Copy_Crd_And_Charge_To_New_Crd(const int atom_numbers,
                                                const VECTOR* crd,
                                                VECTOR_LJ_SOFT_TYPE* new_crd,
                                                const float* charge);
-__global__ void Copy_Crd_To_New_Crd(const int atom_numbers, const VECTOR* crd,
-                                    VECTOR_LJ_SOFT_TYPE* new_crd);
 #endif
 
 struct LJ_SOFT_CORE
@@ -222,17 +347,12 @@ struct LJ_SOFT_CORE
     float sigma_min;
     float sigma_6_min;
 
-    float* h_sigma_of_dH_dlambda_lj = NULL;
-    float* d_sigma_of_dH_dlambda_lj = NULL;
-
-    float* h_sigma_of_dH_dlambda_direct = NULL;
-    float* d_sigma_of_dH_dlambda_direct = NULL;
-
     float cutoff = 10.0;
+    ClusteredNeighborProvider* clustered_neighbor_provider = NULL;
+    LJClusteredWorkspace* clustered_workspace = NULL;
     VECTOR_LJ_SOFT_TYPE* crd_with_parameters = NULL;
     float h_LJ_long_energy = 0.0;
     float long_range_factor = 0.0;
-    float long_range_factor_TI = 0.0;
 
     void Initial(CONTROLLER* controller, float cutoff,
                  char* module_name = NULL);
@@ -245,9 +365,9 @@ struct LJ_SOFT_CORE
 
     void LJ_Soft_Core_PME_Direct_Force_With_Atom_Energy_And_Virial(
         const int atom_numbers, const int local_atom_numbers,
-        const int solvent_numbers, const int ghost_numbers, const VECTOR* crd,
-        const float* charge, VECTOR* frc, const LTMatrix3 cell,
-        const LTMatrix3 rcell, const ATOM_GROUP* nl, const float pme_beta,
+        const int ghost_numbers, const VECTOR* crd, const float* charge,
+        VECTOR* frc, const LTMatrix3 cell, const LTMatrix3 rcell,
+        const float pme_beta,
         const int need_atom_energy, float* atom_energy, const int need_virial,
         LTMatrix3* atom_lj_virial, float* atom_direct_pme_energy);
 
@@ -256,12 +376,6 @@ struct LJ_SOFT_CORE
     void Long_Range_Correction(int need_pressure, LTMatrix3* d_virial,
                                int need_potential, float* d_potential,
                                const float volume);
-
-    float Get_Partial_H_Partial_Lambda_With_Columb_Direct(
-        const int solvent_numbers, const VECTOR* crd, const LTMatrix3 cell,
-        const LTMatrix3 rcell, const float* charge, const ATOM_GROUP* nl,
-        const float* charge_B_A, const float pme_beta,
-        const int charge_perturbated);
 
     /*
         以下用于区域分解

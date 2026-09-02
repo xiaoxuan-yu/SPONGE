@@ -1,6 +1,7 @@
 ﻿#pragma once
 #include "../common.h"
 #include "../control.h"
+#include "clustered/workspace.h"
 
 // 用于计算LJ_Force时使用的坐标和记录的原子LJ种类序号与原子电荷
 #ifndef VECTOR_LJ_DEFINE
@@ -88,7 +89,7 @@ struct LENNARD_JONES_INFORMATION
     char module_name[CHAR_LENGTH_MAX];
     int is_initialized = 0;
     int is_controller_printf_initialized = 0;
-    int last_modify_date = 20260216;
+    int last_modify_date = 20260528;
 
     // a = LJ_A between atom[i] and atom[j]
     // b = LJ_B between atom[i] and atom[j]
@@ -105,6 +106,9 @@ struct LENNARD_JONES_INFORMATION
     float* h_LJ_B = NULL;  // LJ的B系数
     float* d_LJ_A = NULL;  // LJ的A系数
     float* d_LJ_B = NULL;  // LJ的B系数
+    float2* d_LJ_AB_packed = NULL;  // clustered record kernels use packed A/B
+    float2* d_LJ_AB_matrix = NULL;  // row-major atom_type_numbers^2 A/B table
+    bool gmxpacked_lj_comb_table_compatible = false;
 
     float* h_LJ_energy_atom = NULL;  // 每个原子的LJ的能量
     float h_LJ_energy_sum = 0;       // 所有原子的LJ能量和
@@ -122,7 +126,8 @@ struct LENNARD_JONES_INFORMATION
     void Parameter_Host_To_Device();
 
     float cutoff = 10.0;
-    VECTOR_LJ* crd_with_LJ_parameters = NULL;
+    ClusteredNeighborProvider* clustered_neighbor_provider = NULL;
+    LJClusteredWorkspace* clustered_workspace = NULL;
 
     /*
         以下用于区域分解
@@ -133,33 +138,14 @@ struct LENNARD_JONES_INFORMATION
         NULL;  // 局域原子的坐标，电荷LJ_type打包
     void Get_Local(int* atom_local, int local_atom_numbers,
                    int ghost_numbers);  // 获取局域粒子信息
-
     // 可以根据外界传入的need_atom_energy和need_virial，选择性计算能量和维里。其中的维里对PME直接部分计算的原子能量，在和PME其他部分加和后即维里。
     void LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
         const int atom_numbers, const int local_atom_numbers,
-        const int solvent_numbers, const int ghost_numbers, const VECTOR* crd,
-        const float* charge, VECTOR* frc, const LTMatrix3 cell,
-        const LTMatrix3 rcell, const ATOM_GROUP* nl, const float pme_beta,
+        const int ghost_numbers, const VECTOR* crd, const float* charge,
+        VECTOR* frc, const LTMatrix3 cell, const LTMatrix3 rcell,
+        const float pme_beta,
         const int need_atom_energy, float* atom_energy, const int need_virial,
         LTMatrix3* atom_virial, float* atom_direct_pme_energy);
-
-#ifdef KPCCL_TASKLOOP
-    void LJ_PME_Direct_Force_With_Atom_Energy_And_Virial_Init(
-        const int atom_numbers, const int local_atom_numbers,
-        const int ghost_numbers, const VECTOR* crd, const float* charge,
-        VECTOR* frc, const LTMatrix3 cell, const LTMatrix3 rcell,
-        const ATOM_GROUP* nl, const float pme_beta, const int need_atom_energy,
-        float* atom_energy, const int need_virial, LTMatrix3* atom_virial,
-        float* atom_direct_pme_energy);
-
-    void LJ_PME_Direct_Force_With_Atom_Energy_And_Virial_KPCCL(
-        const int atom_numbers, const int local_atom_numbers,
-        const int ghost_numbers, const VECTOR* crd, const float* charge,
-        VECTOR* frc, const LTMatrix3 cell, const LTMatrix3 rcell,
-        const ATOM_GROUP* nl, const float pme_beta, const int need_atom_energy,
-        float* atom_energy, const int need_virial, LTMatrix3* atom_virial,
-        float* atom_direct_pme_energy);
-#endif
 
     // 长程能量和维里修正
     float long_range_factor = 0;

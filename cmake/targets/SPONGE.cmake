@@ -9,7 +9,8 @@ set(SPONGE_SOURCES
     ${PROJECT_ROOT_DIR}/SPONGE/neighbor_list/full_neighbor_list.cpp
     ${PROJECT_ROOT_DIR}/SPONGE/Lennard_Jones_force/Lennard_Jones_force.cpp
     ${PROJECT_ROOT_DIR}/SPONGE/Lennard_Jones_force/LJ_soft_core.cpp
-    ${PROJECT_ROOT_DIR}/SPONGE/Lennard_Jones_force/solvent_LJ.cpp
+    ${PROJECT_ROOT_DIR}/SPONGE/Lennard_Jones_force/clustered/workspace.cpp
+    ${PROJECT_ROOT_DIR}/SPONGE/Lennard_Jones_force/clustered/gather.cpp
     ${PROJECT_ROOT_DIR}/SPONGE/thermostat/Middle_Langevin_MD.cpp
     ${PROJECT_ROOT_DIR}/SPONGE/thermostat/Andersen_thermostat.cpp
     ${PROJECT_ROOT_DIR}/SPONGE/thermostat/Berendsen_thermostat.cpp

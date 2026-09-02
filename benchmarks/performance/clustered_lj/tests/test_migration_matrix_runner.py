@@ -211,12 +211,14 @@ def test_stage_uses_tracked_inputs_and_generates_ensemble_mdin(tmp_path):
     water_mdin = (water_dir / "mdin.spg.toml").read_text()
     assert 'mode = "npt"' in water_mdin
     assert "step_limit = 10000" in water_mdin
+    assert "skin = 2.0" in water_mdin
     assert 'barostat = "andersen_barostat"' in water_mdin
     assert 'direct_kernel = "clustered"' in water_mdin
 
     assert (dna_dir / "2m2c_LJ.txt").is_symlink()
     dna_mdin = (dna_dir / "mdin.spg.toml").read_text()
     assert 'mode = "nvt"' in dna_mdin
+    assert "skin = 2.0" in dna_mdin
     assert 'velocity_in_file = "Pmin_velocity.txt"' in dna_mdin
     assert "barostat =" not in dna_mdin
 

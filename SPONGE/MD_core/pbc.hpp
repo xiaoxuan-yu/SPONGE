@@ -136,10 +136,11 @@ void MD_INFORMATION::periodic_box_condition_information::Update_Box(LTMatrix3 g)
     md_info->sys.box_angle.z = gamma * CONSTANT_RAD_TO_DEG;
 }
 
-bool MD_INFORMATION::periodic_box_condition_information::Check_Change_Large()
+bool MD_INFORMATION::periodic_box_condition_information::Check_Change_Large(
+    float neighbor_skin)
 {
     bool result = false;
-    float grid_length = 0.5f * (md_info->nb.cutoff + md_info->nb.skin);
+    float grid_length = 0.5f * (md_info->nb.cutoff + neighbor_skin);
     float* cell = (float*)&this->cell;
     float* cell0 = (float*)&this->cell0;
     int i1, i0;
@@ -150,7 +151,7 @@ bool MD_INFORMATION::periodic_box_condition_information::Check_Change_Large()
         i0 = cell0[i] / grid_length;
         f1 = cell[i];
         f0 = cell0[i];
-        if (fabsf(f1 - f0) > 0.5f * md_info->nb.skin && i1 != i0)
+        if (fabsf(f1 - f0) > 0.5f * neighbor_skin && i1 != i0)
         {
             result = true;
         }

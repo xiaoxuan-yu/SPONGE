@@ -113,3 +113,28 @@
 - production 36/36；
 - Manager/worker泄漏检查为空；
 - legacy/native双路径检查为空。
+
+## 9. B3 集成检查点
+
+B3 是 clustered provider 首次进入 LJ 生产调用点的批次，因此执行完整 device 与运行时门槛。
+
+### Correctness 与 binary
+
+- CPU/CUDA SPONGE 与 `CLUSTERED_SPATIAL_VIEW_TEST` 均以 24 并行构建；contract 1/1 通过，SM89 ELF 检查通过。
+- wat160k、wat600k、dna_cou 的 force-only/full snapshot pair oracle 6/6 exact；full output 3/3 matched。
+- standalone soft-LJ CUDA oracle 通过，最大绝对误差 `0.03`，容差 `2`。
+- benchmark runner 单元测试 20/20 通过。
+
+### SASS 与 NCU
+
+- source/candidate 的 14 个 regular/soft-LJ、gather 与 microbench target 实例 normalized SASS body hash、register、stack、shared 和 local resource exact。
+- regular force-only/full 代表 NCU 中 grid/block/resource 相同，duration 与主要 compute/memory/stall 指标在测量波动内。
+- 整步 NCU 发现 production 回退来自非 LJ 的 `PME_Final` host launch：block 为 `(8,128)`，原子索引使用 `threadIdx.y`，主线却按 `blockSize.x` 计算 grid。修复前 candidate 为 82,272 blocks、约 `471 us`；修复后与 reference 同为 5,142 blocks，定向 full profile 为 `331.744 us` 对 `331.968 us`。
+
+### Replay 与 production
+
+- replay 使用同一批新鲜 canonical snapshots，3 systems × 2 output modes × 2 implementations × 3 runs，共 36/36 valid，full 18/18 matched；六格 median throughput delta 均在 `-0.51%` 到 `+0.61%`。
+- production 输入显式固定 `skin=2.0`，避免 source/mainline 默认值差异污染 A/B；reference 仅在临时 benchmark worktree 中对齐 mainline barostat 与 thermostat RNG，未进入候选提交。
+- 图形负载偶尔超过 5% 时，临时 runner 只移除 pre/post idle hard return；telemetry、route、finite、matched 与 performance gate 未改变，临时 runner 和产物不提交。
+- 最终 production 36/36 valid。paired median：wat160k NVT `+0.25%`、NPT `+0.11%`；wat600k NVT `+0.55%`、NPT `-0.06%`；dna_cou NVT `-0.69%`、NPT `+0.61%`。
+- 最终 water median ns/day：wat160k NVT `100.009 → 100.474`、NPT `91.590 → 91.688`；wat600k NVT `28.222 → 28.429`、NPT `25.821 → 25.808`。DNA NVT `398.485 → 395.547`、NPT `376.389 → 378.687`。
