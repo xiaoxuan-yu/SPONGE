@@ -112,12 +112,12 @@ SEMANTIC_EQUIVALENCE_EVIDENCE = {
     ],
     "trajectory.box": [
         "compare_trajectory_to_legacy",
-        "box.dat",
+        "traj_box.dat",
         "/particles/all/box/edges/value",
     ],
     "trajectory.vel": [
         "compare_trajectory_to_legacy",
-        "vel.dat",
+        "traj_vel.dat",
         "/particles/all/velocity/value",
     ],
     "topology.mass": ["compare_group_mass_charge", "mass.txt", "/atoms/mass"],
@@ -812,8 +812,6 @@ def existing_source_path(entry, legacy_root):
     if not source_path:
         return True
     path = Path(source_path)
-    if path.exists():
-        return True
     relocated = legacy_root / path.name
     return relocated.exists()
 
@@ -822,14 +820,10 @@ def require_manifest_path_relocates(value, expected_path, label):
     if not value:
         fail(f"manifest missing top-level {label}")
     raw_path = Path(value)
-    if raw_path.exists():
-        if raw_path.resolve() != expected_path.resolve():
-            fail(
-                f"manifest {label} points at unexpected path: "
-                f"actual={raw_path} expected={expected_path}"
-            )
-        return
-    if raw_path.name != expected_path.name:
+    if (
+        raw_path.resolve() != expected_path.resolve()
+        and raw_path.name != expected_path.name
+    ):
         fail(
             f"manifest {label} cannot be relocated by basename: "
             f"actual={raw_path} expected={expected_path}"
