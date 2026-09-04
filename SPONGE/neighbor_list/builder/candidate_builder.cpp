@@ -1523,7 +1523,7 @@ static __global__ void Dedicated_Count_Nbnxm_Payload_Fixed_Light(
 
 #endif
 
-
+#ifndef USE_CPU
 void Launch_Clustered_Gmxpacked_Candidate_Leaf_Root_Child_Device_Counter_Count(
     int collect_blocks, int builder_block_size, int candidate_sci_numbers,
     const int* sci_supercluster_ids, const VECTOR* super_cluster_centers,
@@ -1540,7 +1540,6 @@ void Launch_Clustered_Gmxpacked_Candidate_Leaf_Root_Child_Device_Counter_Count(
     int* task_leaf_counts, const int* root_child_task_sci_ids,
     const int* root_child_task_nodes)
 {
-#ifndef USE_CPU
     auto* kernel =
         use_fast_node_overlap
             ? Count_Candidate_Leaf_Root_Child_Device_Counter_Subgroup<true>
@@ -1555,36 +1554,6 @@ void Launch_Clustered_Gmxpacked_Candidate_Leaf_Root_Child_Device_Counter_Count(
         candidate_shift_ids, task_capacity, task_counter, task_work_cursor,
         counts,
         task_leaf_counts, root_child_task_sci_ids, root_child_task_nodes);
-#else
-    (void)collect_blocks;
-    (void)builder_block_size;
-    (void)candidate_sci_numbers;
-    (void)sci_supercluster_ids;
-    (void)super_cluster_centers;
-    (void)super_cluster_sizes;
-    (void)super_cluster_offsets;
-    (void)leaf_cluster_starts;
-    (void)leaf_cluster_ends;
-    (void)cell;
-    (void)cutoff;
-    (void)cluster_centers;
-    (void)cluster_extents;
-    (void)cluster_valid_masks;
-    (void)cluster_local_masks;
-    (void)node_prefixes;
-    (void)child_offsets;
-    (void)parents;
-    (void)internal_to_leaf;
-    (void)candidate_shift_ids;
-    (void)use_fast_node_overlap;
-    (void)task_capacity;
-    (void)task_counter;
-    (void)task_work_cursor;
-    (void)counts;
-    (void)task_leaf_counts;
-    (void)root_child_task_sci_ids;
-    (void)root_child_task_nodes;
-#endif
 }
 
 void Launch_Clustered_Gmxpacked_Candidate_Leaf_Root_Child_Device_Counter_Emit(
@@ -1605,7 +1574,6 @@ void Launch_Clustered_Gmxpacked_Candidate_Leaf_Root_Child_Device_Counter_Emit(
     const int* root_child_task_sci_ids,
     const int* root_child_task_nodes)
 {
-#ifndef USE_CPU
     auto* kernel =
         use_fast_node_overlap
             ? Emit_Candidate_Leaf_Root_Child_Device_Counter_Subgroup<true>
@@ -1621,39 +1589,6 @@ void Launch_Clustered_Gmxpacked_Candidate_Leaf_Root_Child_Device_Counter_Emit(
         emit_counts,
         candidate_leaf_offsets, candidate_leaf_ids, task_leaf_offsets,
         emit_overflow, root_child_task_sci_ids, root_child_task_nodes);
-#else
-    (void)collect_blocks;
-    (void)builder_block_size;
-    (void)candidate_sci_numbers;
-    (void)sci_supercluster_ids;
-    (void)super_cluster_centers;
-    (void)super_cluster_sizes;
-    (void)super_cluster_offsets;
-    (void)leaf_cluster_starts;
-    (void)leaf_cluster_ends;
-    (void)cell;
-    (void)cutoff;
-    (void)cluster_centers;
-    (void)cluster_extents;
-    (void)cluster_valid_masks;
-    (void)cluster_local_masks;
-    (void)node_prefixes;
-    (void)child_offsets;
-    (void)parents;
-    (void)internal_to_leaf;
-    (void)candidate_shift_ids;
-    (void)use_fast_node_overlap;
-    (void)task_capacity;
-    (void)task_counter;
-    (void)task_work_cursor;
-    (void)emit_counts;
-    (void)candidate_leaf_offsets;
-    (void)candidate_leaf_ids;
-    (void)task_leaf_offsets;
-    (void)emit_overflow;
-    (void)root_child_task_sci_ids;
-    (void)root_child_task_nodes;
-#endif
 }
 
 void Launch_Clustered_Gmxpacked_Candidate_Leaf_Root_Child_Task_Build(
@@ -1665,7 +1600,6 @@ void Launch_Clustered_Gmxpacked_Candidate_Leaf_Root_Child_Task_Build(
     int* task_counter, int* task_overflow, int* task_sci_ids, int* task_nodes,
     int task_split_depth)
 {
-#ifndef USE_CPU
     auto* kernel = use_fast_node_overlap
                        ? Build_Candidate_Leaf_Root_Child_Tasks<true>
                        : Build_Candidate_Leaf_Root_Child_Tasks<false>;
@@ -1675,24 +1609,6 @@ void Launch_Clustered_Gmxpacked_Candidate_Leaf_Root_Child_Task_Build(
         super_cluster_sizes, node_prefixes, child_offsets, candidate_shift_ids,
         task_capacity, task_counter, task_overflow,
         task_sci_ids, task_nodes, task_split_depth);
-#else
-    (void)task_build_blocks;
-    (void)task_build_block_size;
-    (void)candidate_sci_numbers;
-    (void)sci_supercluster_ids;
-    (void)super_cluster_centers;
-    (void)super_cluster_sizes;
-    (void)node_prefixes;
-    (void)child_offsets;
-    (void)candidate_shift_ids;
-    (void)use_fast_node_overlap;
-    (void)task_capacity;
-    (void)task_counter;
-    (void)task_overflow;
-    (void)task_sci_ids;
-    (void)task_nodes;
-    (void)task_split_depth;
-#endif
 }
 
 void Launch_Clustered_Gmxpacked_Candidate_Leaf_Root_Child_Device_Counter_Fused(
@@ -1713,7 +1629,6 @@ void Launch_Clustered_Gmxpacked_Candidate_Leaf_Root_Child_Device_Counter_Fused(
     int* fused_leaf_ids, const int* root_child_task_sci_ids,
     const int* root_child_task_nodes)
 {
-#ifndef USE_CPU
     auto* kernel =
         use_fast_node_overlap
             ? Fused_Candidate_Leaf_Root_Child_Device_Counter_Subgroup<true>
@@ -1730,42 +1645,6 @@ void Launch_Clustered_Gmxpacked_Candidate_Leaf_Root_Child_Device_Counter_Fused(
         task_leaf_counts, fused_record_capacity, fused_record_cursor,
         fused_record_overflow, fused_task_ids, fused_leaf_ranks, fused_leaf_ids,
         root_child_task_sci_ids, root_child_task_nodes);
-#else
-    (void)collect_blocks;
-    (void)builder_block_size;
-    (void)candidate_sci_numbers;
-    (void)sci_supercluster_ids;
-    (void)super_cluster_centers;
-    (void)super_cluster_sizes;
-    (void)super_cluster_offsets;
-    (void)leaf_cluster_starts;
-    (void)leaf_cluster_ends;
-    (void)cell;
-    (void)cutoff;
-    (void)cluster_centers;
-    (void)cluster_extents;
-    (void)cluster_valid_masks;
-    (void)cluster_local_masks;
-    (void)node_prefixes;
-    (void)child_offsets;
-    (void)parents;
-    (void)internal_to_leaf;
-    (void)candidate_shift_ids;
-    (void)use_fast_node_overlap;
-    (void)task_capacity;
-    (void)task_counter;
-    (void)task_work_cursor;
-    (void)counts;
-    (void)task_leaf_counts;
-    (void)fused_record_capacity;
-    (void)fused_record_cursor;
-    (void)fused_record_overflow;
-    (void)fused_task_ids;
-    (void)fused_leaf_ranks;
-    (void)fused_leaf_ids;
-    (void)root_child_task_sci_ids;
-    (void)root_child_task_nodes;
-#endif
 }
 
 void Launch_Clustered_Gmxpacked_Count_Fixed_Light_Dedicated_Cooperative(
@@ -1793,7 +1672,6 @@ void Launch_Clustered_Gmxpacked_Count_Fixed_Light_Dedicated_Cooperative(
     int count_source_fragment_capacity, int* count_source_fragment_cursor,
     int* count_source_fragment_overflow_rows)
 {
-#ifndef USE_CPU
     auto* kernel = Dedicated_Count_Nbnxm_Payload_Fixed_Light<true>;
     Launch_Device_Kernel(
         kernel,
@@ -1813,46 +1691,6 @@ void Launch_Clustered_Gmxpacked_Count_Fixed_Light_Dedicated_Cooperative(
         accumulate_record_stream_source_rows_by_candidate,
         count_light_source_fragments, count_source_fragment_capacity,
         count_source_fragment_cursor, count_source_fragment_overflow_rows);
-#else
-    (void)candidate_sci_blocks;
-    (void)builder_block_size;
-    (void)candidate_sci_numbers;
-    (void)cluster_size;
-    (void)local_atom_numbers;
-    (void)record_stream_cutoff;
-    (void)cell;
-    (void)rcell;
-    (void)crd;
-    (void)permutation;
-    (void)cluster_offsets;
-    (void)leaf_cluster_starts;
-    (void)leaf_cluster_ends;
-    (void)super_cluster_offsets;
-    (void)cluster_to_supercluster;
-    (void)sci_supercluster_ids;
-    (void)candidate_leaf_offsets;
-    (void)candidate_leaf_ids;
-    (void)candidate_leaf_cluster_stride;
-    (void)candidate_leaf_prev_running_max_ends;
-    (void)candidate_leaf_reach_masks;
-    (void)cluster_valid_masks;
-    (void)cluster_local_masks;
-    (void)cluster_centers;
-    (void)cluster_molecule_signatures;
-    (void)cluster_molecule_ids;
-    (void)excluded_list_start;
-    (void)excluded_list;
-    (void)excluded_numbers;
-    (void)max_leaf_cluster_span;
-    (void)sci_shift_flags;
-    (void)cjpacked_group_counts;
-    (void)exclusion_counts;
-    (void)record_stream_source_rows;
-    (void)record_stream_source_counts_by_candidate;
-    (void)accumulate_record_stream_source_rows_by_candidate;
-    (void)count_light_source_fragments;
-    (void)count_source_fragment_capacity;
-    (void)count_source_fragment_cursor;
-    (void)count_source_fragment_overflow_rows;
-#endif
 }
+
+#endif

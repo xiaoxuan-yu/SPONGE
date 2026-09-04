@@ -16,6 +16,7 @@ struct CLUSTERED_GMXPACKED_COUNT_SOURCE_FRAGMENT
     unsigned long long exclusion_masks[kClusteredSuperClusterClusters] = {};
 };
 
+#ifndef USE_CPU
 void Launch_Clustered_Gmxpacked_Candidate_Leaf_Root_Child_Task_Build(
     int task_build_blocks, int task_build_block_size, int candidate_sci_numbers,
     const int* sci_supercluster_ids, const VECTOR* super_cluster_centers,
@@ -101,3 +102,4 @@ void Launch_Clustered_Gmxpacked_Count_Fixed_Light_Dedicated_Cooperative(
     CLUSTERED_GMXPACKED_COUNT_SOURCE_FRAGMENT* count_light_source_fragments,
     int count_source_fragment_capacity, int* count_source_fragment_cursor,
     int* count_source_fragment_overflow_rows);
+#endif

@@ -581,6 +581,7 @@ SITS_Clustered_Pair_View_Requirements(int local_atom_numbers, int ghost_numbers,
     return requirements;
 }
 
+#ifndef USE_CPU
 template <SITS_CLUSTERED_OPERATOR_MODE mode>
 static __global__ void SITS_Clustered_Gmxpacked_Direct_Device(
     const int sci_numbers, const int packed_partitions,
@@ -605,7 +606,6 @@ static __global__ void SITS_Clustered_Gmxpacked_Direct_Device(
     float* rest2_unscaled_atom_energy, float* rest2_effective_atom_energy,
     const float rest2_lambda_m, const float rest2_sqrt_lambda_m)
 {
-#ifdef USE_GPU
     constexpr bool soft_core =
         mode == SITS_CLUSTERED_OPERATOR_MODE::SOFT_CORE_CORRECTION;
     constexpr bool rest2_correction =
@@ -803,51 +803,8 @@ static __global__ void SITS_Clustered_Gmxpacked_Direct_Device(
             }
         }
     }
-#else
-    (void)sci_numbers;
-    (void)packed_partitions;
-    (void)cluster_numbers;
-    (void)local_atom_numbers;
-    (void)cluster_offsets;
-    (void)cluster_valid_masks;
-    (void)cluster_local_masks;
-    (void)super_cluster_offsets;
-    (void)sci_entries;
-    (void)cjpacked_entries;
-    (void)exclusion_entries;
-    (void)pair_shift_bits;
-    (void)sorted_atom_ids;
-    (void)sorted_xq;
-    (void)sorted_lj_type;
-    (void)sorted_soft_crd;
-    (void)atom_local;
-    (void)atom_sys_mark;
-    (void)cell;
-    (void)lj_ab_packed;
-    (void)lj_aa;
-    (void)lj_ab;
-    (void)lj_ba;
-    (void)lj_bb;
-    (void)lambda;
-    (void)alpha;
-    (void)soft_p;
-    (void)sigma_6;
-    (void)sigma_6_min;
-    (void)cutoff;
-    (void)frc;
-    (void)frc_enhancing;
-    (void)pme_beta;
-    (void)atom_energy;
-    (void)atom_energy_enhancing;
-    (void)atom_virial;
-    (void)atom_virial_enhancing;
-    (void)atom_direct_cf_energy;
-    (void)atom_ene_lj;
-    (void)pwwp_factor;
-    (void)store_energy;
-    (void)store_virial;
-#endif
 }
+#endif
 
 #ifdef USE_CPU
 template <SITS_CLUSTERED_OPERATOR_MODE mode>

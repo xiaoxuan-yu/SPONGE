@@ -29,6 +29,7 @@ struct LJ_CLUSTERED_GMXPACKED_CANDIDATE_LEAF_PROBE_STATS
     int accepted_leaves = 0;
 };
 
+#ifndef USE_CPU
 void Launch_Clustered_Gmxpacked_Candidate_Leaf_Probe(
     ClusteredGmxpackedCandidateLeafProbeMode mode,
     int candidate_sci_blocks, int builder_block_size,
@@ -49,3 +50,4 @@ void Launch_Clustered_Gmxpacked_Candidate_Leaf_Probe(
     const int* candidate_sci_index_map = nullptr,
     const int* root_child_task_sci_ids = nullptr,
     const int* root_child_task_nodes = nullptr);
+#endif

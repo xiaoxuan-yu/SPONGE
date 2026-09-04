@@ -442,8 +442,6 @@ static __global__ void Probe_Candidate_Leaf_Collect_Fixed_Shift_Subgroup(
 
 } // namespace
 
-#endif
-
 void Launch_Clustered_Gmxpacked_Candidate_Leaf_Probe(
     ClusteredGmxpackedCandidateLeafProbeMode mode,
     int candidate_sci_blocks, int builder_block_size, int candidate_sci_numbers,
@@ -464,7 +462,6 @@ void Launch_Clustered_Gmxpacked_Candidate_Leaf_Probe(
     const int* candidate_sci_index_map, const int* root_child_task_sci_ids,
     const int* root_child_task_nodes)
 {
-#ifndef USE_CPU
 #define LAUNCH_CANDIDATE_LEAF_PROBE(SCREEN, EMIT)                         \
     do                                                                     \
     {                                                                      \
@@ -553,39 +550,6 @@ void Launch_Clustered_Gmxpacked_Candidate_Leaf_Probe(
     }
     }
 #undef LAUNCH_CANDIDATE_LEAF_PROBE
-#else
-    (void)mode;
-    (void)candidate_sci_blocks;
-    (void)builder_block_size;
-    (void)candidate_sci_numbers;
-    (void)sci_supercluster_ids;
-    (void)super_cluster_centers;
-    (void)super_cluster_sizes;
-    (void)super_cluster_offsets;
-    (void)leaf_cluster_starts;
-    (void)leaf_cluster_ends;
-    (void)cell;
-    (void)cutoff;
-    (void)cluster_centers;
-    (void)cluster_extents;
-    (void)cluster_valid_masks;
-    (void)cluster_local_masks;
-    (void)node_prefixes;
-    (void)child_offsets;
-    (void)parents;
-    (void)internal_to_leaf;
-    (void)candidate_shift_ids;
-    (void)use_fast_node_overlap;
-    (void)use_cooperative_traversal;
-    (void)use_root_child_split;
-    (void)onepass_capacity;
-    (void)probe_counts;
-    (void)probe_records;
-    (void)probe_cursor;
-    (void)probe_overflow;
-    (void)probe_stats;
-    (void)candidate_sci_index_map;
-    (void)root_child_task_sci_ids;
-    (void)root_child_task_nodes;
-#endif
 }
+
+#endif
