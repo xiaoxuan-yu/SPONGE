@@ -96,7 +96,8 @@ std::string Manifest_String_Field(const std::string& entry,
 }
 
 void Require_Manifest_Entry_Fields(const std::string& entry,
-                                   const ManifestRequirement& requirement)
+                                   const ManifestRequirement& requirement,
+                                   const std::filesystem::path& legacy_root)
 {
     const std::vector<std::string> common_fields = {
         "contract_id",  "status",          "component",   "direction",
@@ -114,8 +115,10 @@ void Require_Manifest_Entry_Fields(const std::string& entry,
         const auto source_key = Manifest_String_Field(entry, "source_key");
         const auto source_path = Manifest_String_Field(entry, "source_path");
         REQUIRE_TRUE(!source_key.empty());
-        REQUIRE_TRUE(std::filesystem::path(source_path).is_absolute());
-        REQUIRE_TRUE(std::filesystem::exists(source_path));
+        const std::filesystem::path manifest_source(source_path);
+        REQUIRE_TRUE(manifest_source.is_absolute());
+        REQUIRE_TRUE(
+            std::filesystem::exists(legacy_root / manifest_source.filename()));
     }
 
     if (status == "sidecar_embedded")
@@ -433,16 +436,17 @@ void Test_Full_Contract_Rerun_H5_Files_Cover_Required_Bundle_Paths()
 
 void Test_Full_Contract_Rerun_Manifest_Covers_Planned_Buckets()
 {
-    const auto full = SpongeH5InputMatrix::Full_Contract_Rerun_Path() /
-                      "bundled_input_with_legacy_sidecar";
+    const auto fixture_root = SpongeH5InputMatrix::Full_Contract_Rerun_Path();
+    const auto full = fixture_root / "bundled_input_with_legacy_sidecar";
+    const auto legacy_root = fixture_root / "legacy_input";
     const auto manifest = Read_Text_File(full / "manifest.json");
 
     for (const auto& requirement : Full_Contract_Manifest_Requirements())
     {
         Require_Manifest_Entry(manifest, requirement);
         Require_Manifest_Entry_Fields(
-            Manifest_Entry_Text(manifest, requirement.contract_id),
-            requirement);
+            Manifest_Entry_Text(manifest, requirement.contract_id), requirement,
+            legacy_root);
     }
 }
 
@@ -496,8 +500,10 @@ void Test_Full_Contract_Rerun_Legacy_Output_Sidecar_Plan_Is_Preserved()
         const auto entry =
             Manifest_Entry_Text(manifest, requirement.contract_id);
         Require_Manifest_Entry_Fields(
-            entry, {"legacy output sidecars", requirement.contract_id,
-                    "legacy_output_sidecar_preserved"});
+            entry,
+            {"legacy output sidecars", requirement.contract_id,
+             "legacy_output_sidecar_preserved"},
+            legacy);
         REQUIRE_EQ(Manifest_String_Field(entry, "component"),
                    std::string("output"));
         REQUIRE_EQ(Manifest_String_Field(entry, "direction"),

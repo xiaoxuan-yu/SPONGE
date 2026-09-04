@@ -2391,7 +2391,9 @@ def compare_restart_structural_to_legacy(h5dump, legacy_root, bundle_root):
     )
 
 
-def compare_embedded_sidecar_text(h5dump, manifest_path, bundle_root):
+def compare_embedded_sidecar_text(
+    h5dump, manifest_path, bundle_root, legacy_root
+):
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     checked_count = 0
     for entry in manifest.get("entries", []):
@@ -2409,7 +2411,7 @@ def compare_embedded_sidecar_text(h5dump, manifest_path, bundle_root):
             fail(
                 f"embedded sidecar H5 file is missing for {contract_id}: {h5_path}"
             )
-        source = Path(source_path)
+        source = legacy_root / Path(source_path).name
         if not source.is_file():
             fail(
                 f"embedded sidecar source file is missing for {contract_id}: {source}"
@@ -2848,6 +2850,7 @@ def compare_group_restart_protocol_sidecars(h5dump, fixture_root, group):
         h5dump,
         case_root / "manifest.json",
         case_root / "bundle",
+        fixture_root / group / "legacy_input",
     )
 
 
