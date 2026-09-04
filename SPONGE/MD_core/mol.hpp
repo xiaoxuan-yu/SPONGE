@@ -654,14 +654,16 @@ static void Get_Atom_Group_From_Edges(const int atom_numbers, const int* edges,
 }
 
 static void Get_Molecule_Atoms(CONTROLLER* controller, int atom_numbers,
-                               CONECT connectivity, CPP_ATOM_GROUP& mol_atoms,
+                               const CONECT& connectivity,
+                               CPP_ATOM_GROUP& mol_atoms,
                                std::vector<int>& molecule_belongings)
 {
     // 分子拓扑是一个无向图，邻接表进行描述
     int edge_numbers = 0;
     for (int i = 0; i < atom_numbers; i++)
     {
-        edge_numbers += connectivity[i].size();
+        auto it = connectivity.find(i);
+        if (it != connectivity.end()) edge_numbers += it->second.size();
     }
     edge_numbers *= 2;
     int* first_edge = NULL;  // 每个原子的第一个边（链表的头）
@@ -676,12 +678,13 @@ static void Get_Molecule_Atoms(CONTROLLER* controller, int atom_numbers,
         first_edge[i] = -1;
     }
     int atom_i, atom_j, edge_count = 0;
-    for (int atom_i = 0; atom_i < atom_numbers; atom_i++)
+    for (atom_i = 0; atom_i < atom_numbers; atom_i++)
     {
-        std::set<int> conect_i = connectivity[atom_i];
-        for (auto iter = conect_i.begin(); iter != conect_i.end(); iter++)
+        auto it = connectivity.find(atom_i);
+        if (it == connectivity.end()) continue;
+        for (int atom_j_value : it->second)
         {
-            atom_j = *iter;
+            atom_j = atom_j_value;
             edge_next[edge_count] = first_edge[atom_i];
             first_edge[atom_i] = edge_count;
             edges[edge_count] = atom_j;
@@ -724,11 +727,9 @@ static void Get_Molecule_Atoms(CONTROLLER* controller, int atom_numbers,
     free(edge_next);
 }
 
-static std::vector<int> Check_Periodic_Molecules(CPP_ATOM_GROUP mol_atoms,
-                                                 const CONECT connectivity,
-                                                 const VECTOR* crd,
-                                                 const LTMatrix3 cell,
-                                                 const LTMatrix3 rcell)
+static std::vector<int> Check_Periodic_Molecules(
+    const CPP_ATOM_GROUP& mol_atoms, const CONECT& connectivity,
+    const VECTOR* crd, const LTMatrix3 cell, const LTMatrix3 rcell)
 {
     std::vector<int> periodic_mols;
     int max_atom_idx = -1;
@@ -746,6 +747,7 @@ static std::vector<int> Check_Periodic_Molecules(CPP_ATOM_GROUP mol_atoms,
 
     std::vector<int> mark(max_atom_idx + 1, 0);
     std::vector<int> visited(max_atom_idx + 1, 0);
+    std::vector<VECTOR> mapped(max_atom_idx + 1);
     std::deque<int> queue;
 
     for (int i = 0; i < mol_atoms.size(); i++)
@@ -770,7 +772,6 @@ static std::vector<int> Check_Periodic_Molecules(CPP_ATOM_GROUP mol_atoms,
         frac0.z = frac0.z - floorf(frac0.z);
         VECTOR mapped_anchor = frac0 * cell;
 
-        std::vector<VECTOR> mapped(max_atom_idx + 1);
         mapped[anchor] = mapped_anchor;
         visited[anchor] = 1;
         queue.clear();
@@ -821,7 +822,7 @@ static std::vector<int> Check_Periodic_Molecules(CPP_ATOM_GROUP mol_atoms,
 }
 
 static void Move_Crd_Nearest_From_Connectivity(
-    CPP_ATOM_GROUP mol_atoms, const CONECT connectivity, VECTOR* crd,
+    const CPP_ATOM_GROUP& mol_atoms, const CONECT& connectivity, VECTOR* crd,
     const LTMatrix3 cell, const LTMatrix3 rcell,
     std::vector<int> periodic_molecules)
 {
