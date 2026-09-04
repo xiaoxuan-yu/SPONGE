@@ -1,5 +1,9 @@
 #pragma once
 
+#ifndef USE_GPU
+#error "clustered_lj_warp_record_kernel.cuh is GPU-only"
+#endif
+
 // Shared by the production LJ translation unit and NBNXM_MICROBENCH.
 // Keep policy decisions and host dispatch outside this file.
 enum class ClusteredRegularLJOutputMode
@@ -93,7 +97,6 @@ Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb_ForceOnly_Warp_Record_Device(
         "virial compact output");
     constexpr int max_super_cluster_atoms =
         kClusteredClusterSize * kClusteredSuperClusterClusters;
-#ifdef USE_GPU
     const int sci = sci_work_parts == 1
                         ? static_cast<int>(blockIdx.x)
                         : static_cast<int>(blockIdx.x) / sci_work_parts;
@@ -112,38 +115,6 @@ Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb_ForceOnly_Warp_Record_Device(
     {
         return;
     }
-#else
-    (void)sci_numbers;
-    (void)cluster_size;
-    (void)super_cluster_clusters;
-    (void)cluster_numbers;
-    (void)cluster_offsets;
-    (void)cluster_valid_masks;
-    (void)cluster_local_masks;
-    (void)super_cluster_offsets;
-    (void)sci_entries;
-    (void)cjpacked_entries;
-    (void)exclusion_entries;
-    (void)pair_shift_bits;
-    (void)sci_shift_safe_flags;
-    (void)sci_shift_safe_value;
-    (void)sorted_atom_ids;
-    (void)sorted_xq;
-    (void)sorted_lj_type;
-    (void)sorted_lj_comb;
-    (void)cell;
-    (void)LJ_type_AB_packed;
-    (void)cutoff;
-    (void)frc;
-    (void)pme_beta;
-    (void)atom_energy;
-    (void)atom_virial;
-    (void)atom_direct_cf_energy;
-    (void)atom_LJ_ene;
-    (void)store_energy;
-    (void)store_virial;
-    return;
-#endif
 
     const int i_lane = threadIdx.x;
     const int j_lane = threadIdx.y;

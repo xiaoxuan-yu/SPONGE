@@ -3,7 +3,7 @@
 - 日期：2026-09-03
 - 范围：`backport/clustered-lj-mainline` 最终 consumer 状态
 - 性质：后续问题记录、设计边界与实施日志；不改变 B0–B7 backport 验收结论
-- 状态：C1、C2、C3、C4 已完成并通过独立验收
+- 状态：C1、C2、C3、C4、C5 已完成并通过独立验收
 
 ## 0. 结论
 
@@ -924,7 +924,33 @@ C4 接受“无新增 kernel 改写”的决定。最终保留的源码变化仍
 primitive、C2 CPU adapters 与 C3 CSR storage/device scan；C4 的容量 8 实验已回退，
 没有新增 production probe、degree dispatch、dual path 或环境变量。
 
-## 11. 源码布局与规模
+## 11. C5 GPU-only header 边界清理
+
+C5 的精确父提交为 `8b9aeeb`。`clustered_lj_warp_record_kernel.cuh` 只有两个真实
+include 点：生产 `Lennard_Jones_force.cpp` 在 `#ifndef USE_CPU` 下包含它，另一个是
+CUDA 源文件 `nbnxm_microbench.cu`。CPU production 已由
+`Cpu_Gmxpacked_Clustered_Lennard_Jones_And_Direct_Coulomb()` 独立实现和 dispatch。
+
+该 header 原先的 `#else` 只把参数转换为 `(void)` 后返回，不执行 CPU 计算；而分支
+结束后的代码仍引用只在 GPU 分支声明的 `sci/tid` 以及 `threadIdx`、`__shared__`、
+`__syncthreads()`，因此它也不是可编译的 host fallback。C5 删除这段不可达分支，并在
+header 顶部增加 `USE_GPU` 编译契约，使错误 include 立即失败。
+
+验证结果：
+
+- CPU 的 SPONGE、contract、manybody oracle target 无需因该 header 重编译；测试
+  2/2 通过；
+- CUDA `sm_89` 的 SPONGE 与 NBNXM_MICROBENCH 重新编译通过，GPU contract/manybody
+  oracle 2/2 通过；
+- 清理前后 SPONGE SHA-256 均为
+  `c50d3c2487420fa5064e91dc76526417220a8af5b14a9efe1e7cf2ef56f99746`；
+- 清理前后 NBNXM_MICROBENCH SHA-256 均为
+  `6f216573adff293128cddc125cc0c7bf7ab566f9ba0ae86fc0db5cf513b727f9`。
+
+完整 binary bit-identical，因此 C1–C4 的 SASS/resource、NCU、replay 与 production
+结论仍直接适用；无需重复性能矩阵。
+
+## 12. 源码布局与规模
 
 相关实现按职责分为五层：
 
@@ -966,7 +992,7 @@ provider/builder/contract 目录的当前 `wc -l -c` 汇总如下。builder 包�
 | `neighbor_list/contract/` | 1,602 | 59,556 |
 | **合计** | **16,803** | **744,470** |
 
-以下为当前 C1+C2+C3 工作树中主要 contract、consumer 与测试文件的明细：
+以下为当前 C1–C5 工作树中主要 contract、consumer 与测试文件的明细：
 
 | 文件 | 行数 | 字节数 |
 |---|---:|---:|
@@ -974,7 +1000,7 @@ provider/builder/contract 目录的当前 `wc -l -c` 汇总如下。builder 包�
 | `neighbor_list/contract/cpu_traversal.h` | 372 | 14,354 |
 | `manybody/clustered_gmxpacked_cpu.h` | 5 | 216 |
 | `manybody/clustered_csr.h` | 258 | 7,407 |
-| `Lennard_Jones_force/clustered_lj_warp_record_kernel.cuh` | 680 | 38,589 |
+| `Lennard_Jones_force/clustered_lj_warp_record_kernel.cuh` | 651 | 37,881 |
 | `Lennard_Jones_force/Lennard_Jones_force.cpp` | 1,292 | 50,799 |
 | `Lennard_Jones_force/LJ_soft_core.cpp` | 1,322 | 56,696 |
 | `Selective_Interaction/SITS.cpp` | 2,858 | 111,758 |
@@ -988,14 +1014,15 @@ provider/builder/contract 目录的当前 `wc -l -c` 汇总如下。builder 包�
 | `manybody/reaxff/hydrogen_bond.cpp` | 733 | 30,471 |
 | `clustered_spatial_view_test.cpp` | 1,302 | 55,587 |
 | `manybody_clustered_oracle_test.cpp` | 1,212 | 48,794 |
-| **合计** | **18,426** | **755,302** |
+| **合计** | **18,397** | **754,594** |
 
 最大的实现面是 builder（约 12.2k 行），最大的单 consumer 文件是 SITS。C3 新增
 258 行公共 CSR header，同时令 SW/EDIP/Tersoff 三个 `.cpp` 合计减少 113 行；加入
-60 行 stamp/scan 边界测试后，选定文件合计为 18,426 行、755,302 B。该数字只反映
-重复生命周期代码收口和新增验证，不作为性能或可维护性的单独验收依据。
+60 行 stamp/scan 边界测试后，C5 又删除 29 行、708 B 的不可达 header 分支；选定
+文件合计为 18,397 行、754,594 B。该数字只反映重复生命周期代码收口、新增验证和
+死分支清理，不作为性能或可维护性的单独验收依据。
 
-## 12. 代码证据索引
+## 13. 代码证据索引
 
 | 主题 | 主要位置 |
 |---|---|
