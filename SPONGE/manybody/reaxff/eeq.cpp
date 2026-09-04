@@ -1,5 +1,7 @@
 ﻿#include "eeq.h"
 
+#include "../clustered_gmxpacked_cpu.h"
+
 #define COULOMB_CONSTANT (332.05221729f)
 #ifdef USE_CPU
 #define EEQ_SIMPLE_DEVICE_FOR(i, N)                           \
@@ -352,13 +354,8 @@ static __global__ void EEQ_H_Matrix_Clustered_Gmxpacked(
          p += packed_partitions)
     {
         const CLUSTERED_GMXPACKED_CJ packed = cjpacked_entries[p];
-        const CLUSTERED_GMXPACKED_SPLIT split_entry = packed.split[split];
-        unsigned int pair_bits = 0xffffffffu;
-        if (split_entry.exclusion_index != 0)
-            pair_bits =
-                exclusion_entries[split_entry.exclusion_index]
-                    .pair[split_j_lane * kClusteredClusterSize + i_lane];
-        const unsigned int effective_mask = split_entry.imask & pair_bits;
+        const unsigned int effective_mask = Clustered_Gmxpacked_Effective_Imask(
+            packed, exclusion_entries, split, split_j_lane, i_lane);
         for (int jm = 0; jm < kClusteredJGroupSize; jm += 1)
         {
             const int cj = packed.cj[jm];
@@ -373,11 +370,8 @@ static __global__ void EEQ_H_Matrix_Clustered_Gmxpacked(
                 pair_shift_bits[p * kClusteredJGroupSize + jm];
             for (int i_local = 0; i_local < ci_end - ci_begin; i_local += 1)
             {
-                const unsigned int packed_bit =
-                    1u << (jm * kClusteredSuperClusterClusters + i_local);
-                if ((effective_mask & packed_bit) == 0u ||
-                    (Clustered_Get_Pair_Active_I_Mask(shift_bits, split) &
-                     (1u << i_local)) == 0u)
+                if (!Clustered_Gmxpacked_I_Entry_Is_Active(
+                        effective_mask, shift_bits, split, jm, i_local))
                     continue;
                 const int ci = ci_begin + i_local;
                 if ((cluster_valid_masks[ci] & (1u << i_lane)) == 0u ||
@@ -416,81 +410,54 @@ static void EEQ_H_Matrix_Clustered_Gmxpacked_CPU(
     for (int sci = 0; sci < view.gmxpacked_sci_numbers; sci += 1)
     {
         const CLUSTERED_GMXPACKED_SCI entry = view.gmxpacked_sci[sci];
-        const int ci_begin = view.super_cluster_offsets[entry.supercluster_id];
-        const int ci_end =
-            view.super_cluster_offsets[entry.supercluster_id + 1];
-        const int ci_numbers = ci_end - ci_begin;
         const VECTOR shift =
             Clustered_Shift_Vector_From_Id(entry.shift_id, cell);
-        for (int p = entry.cjpacked_begin; p < entry.cjpacked_end; p += 1)
+        int atom_j = -1;
+        int type_j = -1;
+        int sorted_j = -1;
+        auto begin_j = [&](const CLUSTERED_GMXPACKED_CPU_J_CANDIDATE& pair_j)
         {
-            const CLUSTERED_GMXPACKED_CJ& packed = view.gmxpacked_cjpacked[p];
-            for (int jm = 0; jm < kClusteredJGroupSize; jm += 1)
+            if (!pair_j.j_is_local)
             {
-                const int cj = packed.cj[jm];
-                if (cj < 0) continue;
-                const unsigned int jm_shift = static_cast<unsigned int>(
-                    jm * kClusteredSuperClusterClusters);
-                for (int jl = 0; jl < view.cluster_size; jl += 1)
-                {
-                    const unsigned int j_lane_bit = 1u << jl;
-                    if ((view.cluster_valid_masks[cj] & j_lane_bit) == 0u ||
-                        (view.cluster_local_masks[cj] & j_lane_bit) == 0u)
-                        continue;
-                    const int split = jl / kClusteredSplitJClusterSize;
-                    const int split_j_lane =
-                        jl - split * kClusteredSplitJClusterSize;
-                    const CLUSTERED_GMXPACKED_SPLIT& split_entry =
-                        packed.split[split];
-                    const int sj = view.cluster_offsets[cj] + jl;
-                    const int atom_j = view.sort_permutation[sj];
-                    const int type_j = atom_types[atom_j];
-                    if (type_j < 0 || type_j >= atom_type_numbers) continue;
-                    for (int il = 0; il < view.cluster_size; il += 1)
-                    {
-                        unsigned int pair_bits = 0xffffffffu;
-                        if (split_entry.exclusion_index != 0)
-                        {
-                            pair_bits =
-                                view.gmxpacked_exclusions[split_entry
-                                                              .exclusion_index]
-                                    .pair[split_j_lane * kClusteredClusterSize +
-                                          il];
-                        }
-                        const unsigned int active_i_mask =
-                            (split_entry.imask & pair_bits) >> jm_shift;
-                        if (active_i_mask == 0u) continue;
-                        const unsigned int i_lane_bit = 1u << il;
-                        for (int i_local = 0; i_local < ci_numbers;
-                             i_local += 1)
-                        {
-                            if ((active_i_mask & (1u << i_local)) == 0u)
-                                continue;
-                            const int ci = ci_begin + i_local;
-                            if ((view.cluster_valid_masks[ci] & i_lane_bit) ==
-                                    0u ||
-                                (view.cluster_local_masks[ci] & i_lane_bit) ==
-                                    0u)
-                                continue;
-                            const int si = view.cluster_offsets[ci] + il;
-                            const int atom_i = view.sort_permutation[si];
-                            if (atom_i == atom_j) continue;
-                            const int type_i = atom_types[atom_i];
-                            if (type_i < 0 || type_i >= atom_type_numbers)
-                                continue;
-                            const VECTOR dr =
-                                (sorted_crd[si] - sorted_crd[sj]) + shift;
-                            const float r2 = dr * dr;
-                            if (r2 <= 0.0f || r2 >= cutoff_sq) continue;
-                            EEQ_Consume_Clustered_Pair<fill>(
-                                atom_i, atom_j, sqrtf(r2), r2, type_i, type_j,
-                                atom_type_numbers, shield, cutoff, numnbrs,
-                                firstnbrs, fill_count, jlist, h_val);
-                        }
-                    }
-                }
+                return false;
             }
-        }
+            sorted_j = pair_j.sorted_j;
+            atom_j = view.sort_permutation[sorted_j];
+            type_j = atom_types[atom_j];
+            return type_j >= 0 && type_j < atom_type_numbers;
+        };
+        auto consume_pair =
+            [&](const CLUSTERED_GMXPACKED_CPU_PAIR_CANDIDATE& pair)
+        {
+            if (!pair.i_is_local)
+            {
+                return;
+            }
+            const int atom_i = view.sort_permutation[pair.sorted_i];
+            if (atom_i == atom_j)
+            {
+                return;
+            }
+            const int type_i = atom_types[atom_i];
+            if (type_i < 0 || type_i >= atom_type_numbers)
+            {
+                return;
+            }
+            const VECTOR dr =
+                (sorted_crd[pair.sorted_i] - sorted_crd[sorted_j]) + shift;
+            const float r2 = dr * dr;
+            if (r2 <= 0.0f || r2 >= cutoff_sq)
+            {
+                return;
+            }
+            EEQ_Consume_Clustered_Pair<fill>(atom_i, atom_j, sqrtf(r2), r2,
+                                             type_i, type_j, atom_type_numbers,
+                                             shield, cutoff, numnbrs, firstnbrs,
+                                             fill_count, jlist, h_val);
+        };
+        auto end_j = [](const CLUSTERED_GMXPACKED_CPU_J_CANDIDATE&) {};
+        Clustered_Gmxpacked_CPU_For_Each_Pair_In_SCI(view, sci, begin_j,
+                                                     consume_pair, end_j);
     }
 }
 #endif

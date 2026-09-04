@@ -323,22 +323,10 @@ Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb_ForceOnly_Warp_Record_Device(
         {
             continue;
         }
-        const int exclusion_index = packed->split[split].exclusion_index;
-        unsigned int pair_bits = 0xffffffffu;
-        if constexpr (sci_shift_only)
-        {
-            if (exclusion_index != 0)
-            {
-                pair_bits = exclusion_entries[exclusion_index]
-                                .pair[split_j_lane * cluster_stride + i_lane];
-            }
-        }
-        else if (exclusion_index != 0 && exclusion_entries != NULL)
-        {
-            pair_bits = exclusion_entries[exclusion_index]
-                            .pair[split_j_lane * cluster_stride + i_lane];
-        }
-        const unsigned int effective_mask = imask & pair_bits;
+        const unsigned int effective_mask =
+            Clustered_Gmxpacked_Effective_Imask(
+                *packed, exclusion_entries, split, split_j_lane, i_lane,
+                cluster_stride);
 #define CLUSTERED_GMXPACKED_COMPUTE_I(I)                                    \
     {                                                                       \
         const unsigned int packed_bit =                                      \

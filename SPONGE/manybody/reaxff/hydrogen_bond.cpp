@@ -1,5 +1,7 @@
 ﻿#include "hydrogen_bond.h"
 
+#include "../clustered_gmxpacked_cpu.h"
+
 static __device__ __forceinline__ float REAXFF_Consume_HB_Acceptor(
     int h, int a, const VECTOR* crd, const int* atom_type,
     const REAXFF_HB_Info* hb_info, const REAXFF_HB_Entry* hb_entries,
@@ -324,76 +326,38 @@ static void Calculate_HB_Clustered_Gmxpacked_CPU(
 #pragma omp parallel for schedule(dynamic)
     for (int sci = 0; sci < view.gmxpacked_sci_numbers; sci += 1)
     {
-        const CLUSTERED_GMXPACKED_SCI entry = view.gmxpacked_sci[sci];
-        const int ci_begin = view.super_cluster_offsets[entry.supercluster_id];
-        const int ci_end =
-            view.super_cluster_offsets[entry.supercluster_id + 1];
-        const int ci_numbers = ci_end - ci_begin;
-        const unsigned int valid_i_cluster_mask =
-            (1u << static_cast<unsigned int>(ci_numbers)) - 1u;
-        for (int p = entry.cjpacked_begin; p < entry.cjpacked_end; p += 1)
+        int atom_j = -1;
+        auto begin_j = [&](const CLUSTERED_GMXPACKED_CPU_J_CANDIDATE& pair_j)
         {
-            const CLUSTERED_GMXPACKED_CJ& packed = view.gmxpacked_cjpacked[p];
-            for (int jm = 0; jm < kClusteredJGroupSize; jm += 1)
+            if (!pair_j.j_is_local)
             {
-                const int cj = packed.cj[jm];
-                if (cj < 0) continue;
-                const unsigned int jm_shift = static_cast<unsigned int>(
-                    jm * kClusteredSuperClusterClusters);
-                unsigned int active_j_lanes =
-                    view.cluster_valid_masks[cj] & view.cluster_local_masks[cj];
-                while (active_j_lanes != 0u)
-                {
-                    const int jl = __builtin_ctz(active_j_lanes);
-                    active_j_lanes &= active_j_lanes - 1u;
-                    const int split = jl / kClusteredSplitJClusterSize;
-                    const int split_j_lane =
-                        jl - split * kClusteredSplitJClusterSize;
-                    const CLUSTERED_GMXPACKED_SPLIT& split_entry =
-                        packed.split[split];
-                    const unsigned int active_i_cluster_mask =
-                        (split_entry.imask >> jm_shift) & valid_i_cluster_mask;
-                    if (active_i_cluster_mask == 0u) continue;
-                    const unsigned int* exclusion_pair =
-                        split_entry.exclusion_index != 0
-                            ? view.gmxpacked_exclusions[split_entry
-                                                            .exclusion_index]
-                                      .pair +
-                                  split_j_lane * kClusteredClusterSize
-                            : NULL;
-                    const int atom_j =
-                        view.sort_permutation[view.cluster_offsets[cj] + jl];
-                    for (int il = 0; il < view.cluster_size; il += 1)
-                    {
-                        unsigned int active_i_mask = active_i_cluster_mask;
-                        if (exclusion_pair != NULL)
-                            active_i_mask &= exclusion_pair[il] >> jm_shift;
-                        while (active_i_mask != 0u)
-                        {
-                            const int i_local = __builtin_ctz(active_i_mask);
-                            active_i_mask &= active_i_mask - 1u;
-                            const int ci = ci_begin + i_local;
-                            if (!Clustered_Lane_Is_Valid(
-                                    view.cluster_valid_masks[ci], il) ||
-                                !Clustered_Lane_Is_Local(
-                                    view.cluster_local_masks[ci], il))
-                                continue;
-                            const int atom_i =
-                                view.sort_permutation[view.cluster_offsets[ci] +
-                                                      il];
-                            if (atom_i == atom_j) continue;
-                            REAXFF_Consume_HB_Pair(
-                                atom_i, atom_j, crd, atom_type, is_hydrogen,
-                                hb_info, hb_entries, atom_type_numbers, bo_s,
-                                bo_pi, bo_pi2, d_dE_dBO_s, d_dE_dBO_pi,
-                                d_dE_dBO_pi2, cell, rcell, atom_energy, frc,
-                                atom_virial, energy_sum, bond_count,
-                                bond_offset, bond_nbr, bond_idx_arr);
-                        }
-                    }
-                }
+                return false;
             }
-        }
+            atom_j = view.sort_permutation[pair_j.sorted_j];
+            return true;
+        };
+        auto consume_pair =
+            [&](const CLUSTERED_GMXPACKED_CPU_PAIR_CANDIDATE& pair)
+        {
+            if (!pair.i_is_local)
+            {
+                return;
+            }
+            const int atom_i = view.sort_permutation[pair.sorted_i];
+            if (atom_i == atom_j)
+            {
+                return;
+            }
+            REAXFF_Consume_HB_Pair(atom_i, atom_j, crd, atom_type, is_hydrogen,
+                                   hb_info, hb_entries, atom_type_numbers, bo_s,
+                                   bo_pi, bo_pi2, d_dE_dBO_s, d_dE_dBO_pi,
+                                   d_dE_dBO_pi2, cell, rcell, atom_energy, frc,
+                                   atom_virial, energy_sum, bond_count,
+                                   bond_offset, bond_nbr, bond_idx_arr);
+        };
+        auto end_j = [](const CLUSTERED_GMXPACKED_CPU_J_CANDIDATE&) {};
+        Clustered_Gmxpacked_CPU_For_Each_Pair_In_SCI(view, sci, begin_j,
+                                                     consume_pair, end_j);
     }
 }
 #endif

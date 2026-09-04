@@ -29,6 +29,7 @@
 | [01-topic-batches.md](01-topic-batches.md) | 主题批次、依赖顺序、提交边界和停止条件 |
 | [02-conflict-map.md](02-conflict-map.md) | 与最新主线的重叠文件、三方合并规则与 Manager 泄漏检查 |
 | [03-validation-and-acceptance.md](03-validation-and-acceptance.md) | CPU/CUDA correctness、SASS、NCU、replay 与 production 验收 |
+| [04-consumer-follow-ups.md](04-consumer-follow-ups.md) | consumer 多体性能问题、primitive 抽取设计、迁移批次与验收门槛 |
 
 ## 实施原则
 

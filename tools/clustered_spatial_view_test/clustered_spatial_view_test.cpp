@@ -1,6 +1,12 @@
 #include <cstdio>
 #include <cstring>
+#include <vector>
 
+#if defined(__CUDACC__)
+#include <cuda_runtime.h>
+#endif
+
+#include "neighbor_list/contract/cpu_traversal.h"
 #include "neighbor_list/contract/view.h"
 #include "neighbor_list/provider/internal.h"
 
@@ -132,10 +138,9 @@ void Test_Validation_Contract()
     {
         auto partial = fixture.view;
         partial.gmxpacked_sci_numbers = 0;
-        Expect_Invalid(
-            "partial gmxpacked payload",
-            "clustered spatial view has no gmxpacked pair payload", partial,
-            requirements);
+        Expect_Invalid("partial gmxpacked payload",
+                       "clustered spatial view has no gmxpacked pair payload",
+                       partial, requirements);
     }
 
     {
@@ -605,8 +610,8 @@ void Test_Pair_Shift_And_Exclusion_Decoding()
     view.pair_shift_metadata_ready = true;
     view.pair_shift_bits = pair_shift_bits;
 
-    const unsigned int pair_bits = exclusions[1].pair[pair_word];
-    const unsigned int effective_mask = packed.split[split].imask & pair_bits;
+    const unsigned int effective_mask = Clustered_Gmxpacked_Effective_Imask(
+        packed, exclusions, split, split_j_lane, i_lane);
     Check((effective_mask & (1u << 0)) == 0u,
           "gmxpacked exclusion removes the selected i-cluster pair");
     Check((effective_mask & (1u << 1)) != 0u,
@@ -623,6 +628,517 @@ void Test_Pair_Shift_And_Exclusion_Decoding()
     const VECTOR x_shift = Clustered_Shift_Vector_From_Id(22, cell);
     Check(x_shift.x == 10.0f && x_shift.y == 0.0f && x_shift.z == 0.0f,
           "non-central pair shift maps through the current cell");
+}
+
+void Test_Gmxpacked_Effective_Mask_And_Active_I_Decoding()
+{
+    CLUSTERED_GMXPACKED_CJ packed = {};
+    const unsigned int split_0_i0 = 1u << 0;
+    const unsigned int split_0_i7_jm1 = 1u
+                                        << (Clustered_Jm_Imask_Shift(1) + 7u);
+    const unsigned int split_1_i3_jm2 = 1u
+                                        << (Clustered_Jm_Imask_Shift(2) + 3u);
+    const unsigned int split_1_i7_jm3 = 1u
+                                        << (Clustered_Jm_Imask_Shift(3) + 7u);
+    packed.split[0].imask = split_0_i0 | split_0_i7_jm1;
+    packed.split[0].exclusion_index = 0;
+    packed.split[1].imask = split_1_i3_jm2 | split_1_i7_jm3;
+    packed.split[1].exclusion_index = 1;
+
+    CLUSTERED_GMXPACKED_EXCLUSION exclusions[2] = {};
+    for (int pair = 0; pair < kClusteredGmxpackedExclusionPairCount; pair += 1)
+    {
+        exclusions[1].pair[pair] = 0xffffffffu;
+    }
+    const int split_1_j_lane = 6;
+    const int split_1_local_lane = split_1_j_lane - kClusteredSplitJClusterSize;
+    const int i_lane = 5;
+    const int exclusion_word =
+        split_1_local_lane * kClusteredClusterSize + i_lane;
+    exclusions[1].pair[exclusion_word] &= ~split_1_i3_jm2;
+
+    const unsigned int split_0_effective =
+        Clustered_Gmxpacked_Effective_Imask(packed, exclusions, 0, 0, i_lane);
+    Check(split_0_effective == packed.split[0].imask,
+          "zero exclusion index preserves the complete split imask");
+
+    const unsigned int split_1_effective = Clustered_Gmxpacked_Effective_Imask(
+        packed, exclusions, 1, split_1_local_lane, i_lane);
+    Check((split_1_effective & split_1_i3_jm2) == 0u,
+          "non-zero exclusion index removes the selected packed entry");
+    Check((split_1_effective & split_1_i7_jm3) != 0u,
+          "non-zero exclusion index preserves an unrelated packed entry");
+
+    uint64_t marker_absent = 0ull;
+    Check(Clustered_Gmxpacked_I_Entry_Is_Active(split_0_effective,
+                                                marker_absent, 0, 0, 0),
+          "absent active marker accepts an enabled split-0 entry");
+    Check(Clustered_Gmxpacked_I_Entry_Is_Active(split_0_effective,
+                                                marker_absent, 0, 1, 7),
+          "absent active marker accepts all enabled I clusters");
+
+    uint64_t marker_present = 0ull;
+    Clustered_Set_Pair_Active_I_Masks(&marker_present, 0x01u, 0x80u);
+    Check(Clustered_Get_Pair_Active_I_Mask(marker_present, 0) == 0x01u &&
+              Clustered_Get_Pair_Active_I_Mask(marker_present, 1) == 0x80u,
+          "active marker preserves independent split masks");
+    Check(Clustered_Gmxpacked_I_Entry_Is_Active(split_0_effective,
+                                                marker_present, 0, 0, 0),
+          "split-0 active mask retains its selected I cluster");
+    Check(!Clustered_Gmxpacked_I_Entry_Is_Active(split_0_effective,
+                                                 marker_present, 0, 1, 7),
+          "split-0 active mask rejects an unselected I cluster");
+    Check(Clustered_Gmxpacked_I_Entry_Is_Active(split_1_effective,
+                                                marker_present, 1, 3, 7),
+          "split-1 active mask independently retains its selected I cluster");
+    Check(!Clustered_Gmxpacked_I_Entry_Is_Active(split_1_effective,
+                                                 marker_present, 1, 2, 3),
+          "exclusion remains authoritative when the active mask allows I");
+}
+
+#if defined(__CUDACC__)
+struct Gmxpacked_Primitive_Parity_Input
+{
+    CLUSTERED_GMXPACKED_CJ packed = {};
+    CLUSTERED_GMXPACKED_EXCLUSION exclusions[2] = {};
+    uint64_t pair_shift_bits = 0ull;
+    int split = 0;
+    int split_j_lane = 0;
+    int i_lane = 0;
+    int i_cluster_size = kClusteredClusterSize;
+    int jm = 0;
+    int i_local = 0;
+    bool use_exclusions = false;
+};
+
+struct Gmxpacked_Primitive_Parity_Output
+{
+    unsigned int effective_imask = 0u;
+    unsigned int active = 0u;
+};
+
+__global__ void Evaluate_Gmxpacked_Primitives_On_Device(
+    int case_count, const Gmxpacked_Primitive_Parity_Input* inputs,
+    Gmxpacked_Primitive_Parity_Output* outputs)
+{
+    const int case_id = blockIdx.x * blockDim.x + threadIdx.x;
+    if (case_id >= case_count)
+    {
+        return;
+    }
+    const Gmxpacked_Primitive_Parity_Input& input = inputs[case_id];
+    const CLUSTERED_GMXPACKED_EXCLUSION* exclusions =
+        input.use_exclusions ? input.exclusions : nullptr;
+    const unsigned int effective_imask = Clustered_Gmxpacked_Effective_Imask(
+        input.packed, exclusions, input.split, input.split_j_lane, input.i_lane,
+        input.i_cluster_size);
+    outputs[case_id].effective_imask = effective_imask;
+    outputs[case_id].active = Clustered_Gmxpacked_I_Entry_Is_Active(
+                                  effective_imask, input.pair_shift_bits,
+                                  input.split, input.jm, input.i_local)
+                                  ? 1u
+                                  : 0u;
+}
+
+bool Check_Cuda(cudaError_t error, const char* label)
+{
+    const bool success = error == cudaSuccess;
+    Check(success, label);
+    return success;
+}
+
+void Test_Gmxpacked_Primitive_Host_Device_Parity()
+{
+    constexpr int case_count = 6;
+    Gmxpacked_Primitive_Parity_Input inputs[case_count] = {};
+    const unsigned int split_0_i0 = 1u << 0;
+    const unsigned int split_1_i3_jm2 = 1u
+                                        << (Clustered_Jm_Imask_Shift(2) + 3u);
+    const unsigned int split_1_i7_jm3 = 1u
+                                        << (Clustered_Jm_Imask_Shift(3) + 7u);
+
+    for (int case_id = 0; case_id < case_count; case_id += 1)
+    {
+        for (int pair = 0; pair < kClusteredGmxpackedExclusionPairCount;
+             pair += 1)
+        {
+            inputs[case_id].exclusions[1].pair[pair] = 0xffffffffu;
+        }
+    }
+
+    inputs[0].packed.split[0].imask = split_0_i0;
+    inputs[0].jm = 0;
+    inputs[0].i_local = 0;
+
+    inputs[1] = inputs[0];
+    Clustered_Set_Pair_Active_I_Masks(&inputs[1].pair_shift_bits, 0x02u, 0xffu);
+
+    inputs[2].packed.split[1].imask = split_1_i3_jm2 | split_1_i7_jm3;
+    inputs[2].packed.split[1].exclusion_index = 1;
+    inputs[2].split = 1;
+    inputs[2].split_j_lane = 2;
+    inputs[2].i_lane = 5;
+    inputs[2].jm = 2;
+    inputs[2].i_local = 3;
+    inputs[2].use_exclusions = true;
+    inputs[2]
+        .exclusions[1]
+        .pair[inputs[2].split_j_lane * kClusteredClusterSize +
+              inputs[2].i_lane] &= ~split_1_i3_jm2;
+    Clustered_Set_Pair_Active_I_Masks(&inputs[2].pair_shift_bits, 0xffu, 0x08u);
+
+    inputs[3] = inputs[2];
+    inputs[3].jm = 3;
+    inputs[3].i_local = 7;
+    Clustered_Set_Pair_Active_I_Masks(&inputs[3].pair_shift_bits, 0xffu, 0x80u);
+
+    inputs[4] = inputs[2];
+    inputs[4].use_exclusions = false;
+
+    inputs[5].packed.split[1].imask = split_0_i0;
+    inputs[5].packed.split[1].exclusion_index = 1;
+    inputs[5].split = 1;
+    inputs[5].split_j_lane = 1;
+    inputs[5].i_lane = 3;
+    inputs[5].i_cluster_size = 4;
+    inputs[5].jm = 0;
+    inputs[5].i_local = 0;
+    inputs[5].use_exclusions = true;
+    inputs[5]
+        .exclusions[1]
+        .pair[inputs[5].split_j_lane * inputs[5].i_cluster_size +
+              inputs[5].i_lane] &= ~split_0_i0;
+
+    Gmxpacked_Primitive_Parity_Output expected[case_count] = {};
+    for (int case_id = 0; case_id < case_count; case_id += 1)
+    {
+        const Gmxpacked_Primitive_Parity_Input& input = inputs[case_id];
+        const CLUSTERED_GMXPACKED_EXCLUSION* exclusions =
+            input.use_exclusions ? input.exclusions : nullptr;
+        expected[case_id].effective_imask = Clustered_Gmxpacked_Effective_Imask(
+            input.packed, exclusions, input.split, input.split_j_lane,
+            input.i_lane, input.i_cluster_size);
+        expected[case_id].active =
+            Clustered_Gmxpacked_I_Entry_Is_Active(
+                expected[case_id].effective_imask, input.pair_shift_bits,
+                input.split, input.jm, input.i_local)
+                ? 1u
+                : 0u;
+    }
+
+    Gmxpacked_Primitive_Parity_Input* device_inputs = nullptr;
+    Gmxpacked_Primitive_Parity_Output* device_outputs = nullptr;
+    if (!Check_Cuda(cudaMalloc(reinterpret_cast<void**>(&device_inputs),
+                               sizeof(inputs)),
+                    "allocate CUDA primitive parity inputs"))
+    {
+        return;
+    }
+    if (!Check_Cuda(cudaMalloc(reinterpret_cast<void**>(&device_outputs),
+                               sizeof(expected)),
+                    "allocate CUDA primitive parity outputs"))
+    {
+        cudaFree(device_inputs);
+        return;
+    }
+
+    bool success = Check_Cuda(cudaMemcpy(device_inputs, inputs, sizeof(inputs),
+                                         cudaMemcpyHostToDevice),
+                              "copy CUDA primitive parity inputs");
+    if (success)
+    {
+        Evaluate_Gmxpacked_Primitives_On_Device<<<1, 32>>>(
+            case_count, device_inputs, device_outputs);
+        success = Check_Cuda(cudaGetLastError(),
+                             "launch CUDA primitive parity kernel") &&
+                  Check_Cuda(cudaDeviceSynchronize(),
+                             "synchronize CUDA primitive parity kernel");
+    }
+
+    Gmxpacked_Primitive_Parity_Output actual[case_count] = {};
+    if (success)
+    {
+        success = Check_Cuda(cudaMemcpy(actual, device_outputs, sizeof(actual),
+                                        cudaMemcpyDeviceToHost),
+                             "copy CUDA primitive parity outputs");
+    }
+    if (success)
+    {
+        for (int case_id = 0; case_id < case_count; case_id += 1)
+        {
+            Check(actual[case_id].effective_imask ==
+                      expected[case_id].effective_imask,
+                  "CUDA effective-imask result matches host");
+            Check(actual[case_id].active == expected[case_id].active,
+                  "CUDA active-I result matches host");
+        }
+    }
+
+    Check_Cuda(cudaFree(device_outputs), "free CUDA primitive parity outputs");
+    Check_Cuda(cudaFree(device_inputs), "free CUDA primitive parity inputs");
+}
+#else
+void Test_Gmxpacked_Primitive_Host_Device_Parity() {}
+#endif
+
+void Test_Gmxpacked_CPU_Pair_Mask_Orientation()
+{
+    CLUSTERED_GMXPACKED_CJ packed = {};
+    const unsigned int packed_bit = 1u;
+    packed.split[0].imask = packed_bit;
+    packed.split[1].imask = packed_bit;
+
+    CLUSTERED_GMXPACKED_EXCLUSION exclusions[2] = {};
+    Check(Clustered_Gmxpacked_CPU_Pair_Mask(packed, packed_bit, exclusions) ==
+              0xffffffffffffffffull,
+          "CPU pair mask maps two unexcluded splits to all I/J lane pairs");
+
+    packed.split[1].exclusion_index = 1;
+    for (int pair = 0; pair < kClusteredGmxpackedExclusionPairCount; pair += 1)
+    {
+        exclusions[1].pair[pair] = 0xffffffffu;
+    }
+    const int selected_i_lane = 7;
+    const int selected_j_lane = 6;
+    const int selected_split_j_lane =
+        selected_j_lane - kClusteredSplitJClusterSize;
+    exclusions[1].pair[selected_split_j_lane * kClusteredClusterSize +
+                       selected_i_lane] &= ~packed_bit;
+    const uint64_t selected_lane_bit =
+        1ull << (selected_i_lane * kClusteredClusterSize + selected_j_lane);
+    const uint64_t selective_mask =
+        Clustered_Gmxpacked_CPU_Pair_Mask(packed, packed_bit, exclusions);
+    Check((selective_mask & selected_lane_bit) == 0ull,
+          "CPU pair mask removes the selected split-1 I/J orientation");
+    Check((selective_mask &
+           (1ull << (selected_i_lane * kClusteredClusterSize + 5))) != 0ull,
+          "CPU pair mask preserves the adjacent split-1 J lane");
+    Check((selective_mask &
+           (1ull << ((selected_i_lane - 1) * kClusteredClusterSize +
+                     selected_j_lane))) != 0ull,
+          "CPU pair mask preserves the adjacent I lane");
+
+    for (int pair = 0; pair < kClusteredGmxpackedExclusionPairCount; pair += 1)
+    {
+        exclusions[1].pair[pair] = 0u;
+    }
+    Check(Clustered_Gmxpacked_CPU_Pair_Mask(packed, packed_bit, exclusions) ==
+              0x0f0f0f0f0f0f0f0full,
+          "CPU pair mask keeps only split 0 when split 1 is fully excluded");
+
+    CLUSTERED_GMXPACKED_CJ compact_packed = {};
+    compact_packed.split[0].imask = packed_bit;
+    compact_packed.split[0].exclusion_index = 1;
+    CLUSTERED_GMXPACKED_EXCLUSION compact_exclusions[2] = {};
+    constexpr int compact_cluster_size = 4;
+    for (int pair = 0;
+         pair < kClusteredSplitJClusterSize * compact_cluster_size; pair += 1)
+    {
+        compact_exclusions[1].pair[pair] = 0xffffffffu;
+    }
+    compact_exclusions[1].pair[2 * compact_cluster_size + 3] &= ~packed_bit;
+    const uint64_t compact_mask = Clustered_Gmxpacked_CPU_Pair_Mask(
+        compact_packed, packed_bit, compact_exclusions, compact_cluster_size);
+    Check((compact_mask & (1ull << (3 * kClusteredClusterSize + 2))) == 0ull,
+          "CPU pair mask honors a dynamic exclusion-word stride");
+    Check((compact_mask & (1ull << (2 * kClusteredClusterSize + 2))) != 0ull,
+          "dynamic exclusion stride preserves an adjacent I lane");
+}
+
+void Test_Gmxpacked_CPU_Pair_Iterator()
+{
+    int cluster_offsets[3] = {0, 2, 4};
+    unsigned int cluster_valid_masks[2] = {0x3u, 0x3u};
+    unsigned int cluster_local_masks[2] = {0x3u, 0x1u};
+    int super_cluster_offsets[2] = {0, 1};
+    CLUSTERED_GMXPACKED_SCI sci_entries[1] = {};
+    sci_entries[0].shift_id = 22;
+    sci_entries[0].cjpacked_end = 1;
+    CLUSTERED_GMXPACKED_CJ packed_entries[1] = {};
+    packed_entries[0].cj[0] = 1;
+    packed_entries[0].split[0].imask = 1u;
+    packed_entries[0].split[0].exclusion_index = 1;
+    CLUSTERED_GMXPACKED_EXCLUSION exclusions[2] = {};
+    for (int pair = 0; pair < kClusteredGmxpackedExclusionPairCount; pair += 1)
+    {
+        exclusions[1].pair[pair] = 0xffffffffu;
+    }
+    exclusions[1].pair[1] &= ~1u;
+
+    CLUSTERED_SPATIAL_VIEW view = {};
+    view.cluster_size = kClusteredClusterSize;
+    view.cluster_numbers = 2;
+    view.gmxpacked_sci_numbers = 1;
+    view.cluster_offsets = cluster_offsets;
+    view.cluster_valid_masks = cluster_valid_masks;
+    view.cluster_local_masks = cluster_local_masks;
+    view.super_cluster_offsets = super_cluster_offsets;
+    view.gmxpacked_sci = sci_entries;
+    view.gmxpacked_cjpacked = packed_entries;
+    view.gmxpacked_exclusions = exclusions;
+
+    std::vector<CLUSTERED_GMXPACKED_CPU_PAIR_CANDIDATE> candidates;
+    int begin_count = 0;
+    int end_count = 0;
+    auto begin_j = [&](const CLUSTERED_GMXPACKED_CPU_J_CANDIDATE& pair_j)
+    {
+        begin_count += 1;
+        Check(pair_j.shift_id == 22,
+              "CPU iterator preserves the SCI periodic-image identity");
+        return true;
+    };
+    auto consume_pair = [&](const CLUSTERED_GMXPACKED_CPU_PAIR_CANDIDATE& pair)
+    { candidates.push_back(pair); };
+    auto end_j = [&](const CLUSTERED_GMXPACKED_CPU_J_CANDIDATE&)
+    { end_count += 1; };
+    Clustered_Gmxpacked_CPU_For_Each_Pair_In_SCI(view, 0, begin_j, consume_pair,
+                                                 end_j);
+
+    Check(begin_count == 2 && end_count == 2,
+          "CPU iterator visits each structurally valid J lane once");
+    Check(candidates.size() == 3,
+          "CPU iterator applies a partial exclusion without dropping adjacent "
+          "pairs");
+    if (candidates.size() == 3)
+    {
+        Check(candidates[0].j.j_lane == 0 && candidates[0].i_lane == 0,
+              "CPU iterator preserves J/I lane order before an exclusion");
+        Check(candidates[1].j.j_lane == 1 && candidates[1].i_lane == 0 &&
+                  candidates[2].j.j_lane == 1 && candidates[2].i_lane == 1,
+              "CPU iterator preserves lane order after an exclusion");
+        Check(candidates[0].j.j_is_local && !candidates[1].j.j_is_local &&
+                  candidates[0].i_is_local && candidates[0].packed_bit == 1u,
+              "CPU iterator reports ownership and packed identity without "
+              "filtering model policy");
+        Check(candidates[0].sorted_i == 0 && candidates[0].j.sorted_j == 2,
+              "CPU iterator resolves clustered sorted indices");
+    }
+
+    int accepted_local_j_pairs = 0;
+    int accepted_local_j_ends = 0;
+    auto accept_local_j = [](const CLUSTERED_GMXPACKED_CPU_J_CANDIDATE& pair_j)
+    { return pair_j.j_is_local; };
+    auto count_local_pair = [&](const CLUSTERED_GMXPACKED_CPU_PAIR_CANDIDATE&)
+    { accepted_local_j_pairs += 1; };
+    auto end_local_j = [&](const CLUSTERED_GMXPACKED_CPU_J_CANDIDATE&)
+    { accepted_local_j_ends += 1; };
+    Clustered_Gmxpacked_CPU_For_Each_Pair_In_SCI(view, 0, accept_local_j,
+                                                 count_local_pair, end_local_j);
+    Check(accepted_local_j_pairs == 1 && accepted_local_j_ends == 1,
+          "CPU iterator lets a consumer reject a complete ghost J entry");
+
+    std::vector<CLUSTERED_GMXPACKED_CPU_I_TILE_CANDIDATE> tiles;
+    auto collect_tile =
+        [&](const CLUSTERED_GMXPACKED_CPU_I_TILE_CANDIDATE& tile)
+    { tiles.push_back(tile); };
+    Clustered_Gmxpacked_CPU_For_Each_I_Tile_In_SCI(view, 0, collect_tile);
+    Check(tiles.size() == 1,
+          "CPU I-tile iterator emits one active packed relation");
+    if (tiles.size() == 1)
+    {
+        const uint64_t excluded_lane = 1ull << (1 * kClusteredClusterSize + 0);
+        Check(tiles[0].cluster_i == 0 && tiles[0].cluster_j == 1 &&
+                  tiles[0].i_local == 0 && tiles[0].packed_bit == 1u &&
+                  tiles[0].shift_id == 22,
+              "CPU I-tile iterator preserves row-oriented tile identity");
+        Check((tiles[0].pair_mask & excluded_lane) == 0ull,
+              "CPU I-tile iterator carries the authoritative exclusion mask");
+    }
+
+    int local_i_count = 0;
+    int j_tile_count = 0;
+    unsigned int i0_j_mask = 0u;
+    unsigned int i1_j_mask = 0u;
+    auto consume_local_i =
+        [&](const CLUSTERED_GMXPACKED_CPU_LOCAL_I_CANDIDATE& pair_i)
+    {
+        local_i_count += 1;
+        auto consume_j_tile =
+            [&](const CLUSTERED_GMXPACKED_CPU_J_TILE_CANDIDATE& tile)
+        {
+            j_tile_count += 1;
+            Check(
+                Clustered_Gmxpacked_CPU_J_Tile_Pair_Shift_Id(view, tile) == 22,
+                "CPU J-tile iterator falls back to the SCI shift");
+            if (pair_i.i_lane == 0)
+            {
+                i0_j_mask = tile.active_j_mask;
+            }
+            else if (pair_i.i_lane == 1)
+            {
+                i1_j_mask = tile.active_j_mask;
+            }
+        };
+        Clustered_Gmxpacked_CPU_For_Each_J_Tile_For_Local_I(view, pair_i,
+                                                            consume_j_tile);
+    };
+    Clustered_Gmxpacked_CPU_For_Each_Local_I_In_SCI(view, 0, consume_local_i);
+    Check(local_i_count == 2 && j_tile_count == 2,
+          "CPU I-major adapters preserve local I and packed J boundaries");
+    Check((i0_j_mask & 0x3u) == 0x3u && (i1_j_mask & 0x3u) == 0x2u,
+          "CPU J-tile iterator combines valid lanes with partial exclusion");
+
+    uint64_t pair_shift_bits[kClusteredJGroupSize] = {};
+    Clustered_Set_Pair_Shift_Id(&pair_shift_bits[0], 0, 5);
+    view.pair_shift_metadata_ready = true;
+    view.pair_shift_bits = pair_shift_bits;
+    int pair_specific_shift = -1;
+    auto capture_pair_shift =
+        [&](const CLUSTERED_GMXPACKED_CPU_LOCAL_I_CANDIDATE& pair_i)
+    {
+        if (pair_i.i_lane != 0)
+        {
+            return;
+        }
+        auto capture_j_tile =
+            [&](const CLUSTERED_GMXPACKED_CPU_J_TILE_CANDIDATE& tile)
+        {
+            pair_specific_shift =
+                Clustered_Gmxpacked_CPU_J_Tile_Pair_Shift_Id(view, tile);
+        };
+        Clustered_Gmxpacked_CPU_For_Each_J_Tile_For_Local_I(view, pair_i,
+                                                            capture_j_tile);
+    };
+    Clustered_Gmxpacked_CPU_For_Each_Local_I_In_SCI(view, 0,
+                                                    capture_pair_shift);
+    Check(pair_specific_shift == 5,
+          "CPU J-tile iterator exposes pair-specific shift metadata");
+    view.pair_shift_metadata_ready = false;
+    view.pair_shift_bits = nullptr;
+
+    packed_entries[0].cj[0] = 0;
+    packed_entries[0].split[0].exclusion_index = 0;
+    int owned_pairs = 0;
+    auto accept_any_j = [](const CLUSTERED_GMXPACKED_CPU_J_CANDIDATE&)
+    { return true; };
+    auto count_owned_pair =
+        [&](const CLUSTERED_GMXPACKED_CPU_PAIR_CANDIDATE& pair)
+    {
+        if (Clustered_Local_I_Owns_Pair(pair.cluster_i, pair.i_lane,
+                                        pair.j.cluster_j, pair.j.j_lane,
+                                        pair.j.j_is_local))
+        {
+            owned_pairs += 1;
+        }
+    };
+    auto ignore_end = [](const CLUSTERED_GMXPACKED_CPU_J_CANDIDATE&) {};
+    Clustered_Gmxpacked_CPU_For_Each_Pair_In_SCI(view, 0, accept_any_j,
+                                                 count_owned_pair, ignore_end);
+    Check(owned_pairs == 1,
+          "CPU iterator leaves self/reverse suppression to ownership policy");
+
+    view.gmxpacked_sci_numbers = 0;
+    int empty_pairs = 0;
+    for (int sci = 0; sci < view.gmxpacked_sci_numbers; sci += 1)
+    {
+        auto count_empty_pair =
+            [&](const CLUSTERED_GMXPACKED_CPU_PAIR_CANDIDATE&)
+        { empty_pairs += 1; };
+        Clustered_Gmxpacked_CPU_For_Each_Pair_In_SCI(
+            view, sci, accept_any_j, count_empty_pair, ignore_end);
+    }
+    Check(empty_pairs == 0,
+          "an empty CPU pair payload remains a no-op at the SCI boundary");
 }
 
 void Test_Local_Ghost_Pair_Ownership()
@@ -767,6 +1283,10 @@ int main()
     Test_Validation_Contract();
     Test_Gmxpacked_Endpoint_Incidence_Contract();
     Test_Pair_Shift_And_Exclusion_Decoding();
+    Test_Gmxpacked_Effective_Mask_And_Active_I_Decoding();
+    Test_Gmxpacked_Primitive_Host_Device_Parity();
+    Test_Gmxpacked_CPU_Pair_Mask_Orientation();
+    Test_Gmxpacked_CPU_Pair_Iterator();
     Test_Local_Ghost_Pair_Ownership();
     Test_Pair_Shift_Cache_Lifecycle();
     Test_Clustered_Parameter_Object_Defaults();

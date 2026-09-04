@@ -390,56 +390,35 @@ static __device__ __forceinline__ float ters_bij_d(float zeta,
 }
 
 static __host__ __device__ __forceinline__ bool
-Tersoff_Clustered_Neighbor_Within_Cut(
-    const int type_i, const int type_j, const float distance_squared,
-    const float* center_cutoffs, const int atom_type_numbers,
-    const float margin = 0.0f)
+Tersoff_Clustered_Neighbor_Within_Cut(const int type_i, const int type_j,
+                                      const float distance_squared,
+                                      const float* center_cutoffs,
+                                      const int atom_type_numbers,
+                                      const float margin = 0.0f)
 {
     const float cutoff =
         center_cutoffs[type_i * atom_type_numbers + type_j] + margin;
     return cutoff > 0.0f && distance_squared <= cutoff * cutoff;
 }
 
-template <typename T>
-static void Tersoff_Reserve_Clustered_Neighbor_Buffer(
-    T** pointer, int* capacity, const int required)
-{
-    if (required <= *capacity && *pointer != NULL)
-    {
-        return;
-    }
-    Free_Single_Device_Pointer(reinterpret_cast<void**>(pointer));
-    *capacity = 0;
-    if (required > 0)
-    {
-        Device_Malloc_Safely(
-            reinterpret_cast<void**>(pointer),
-            sizeof(T) * static_cast<size_t>(required));
-        *capacity = required;
-    }
-}
-
 #ifdef USE_GPU
 template <bool fill>
 static __global__ void Tersoff_Build_Clustered_Center_Atoms(
-    const CLUSTERED_SPATIAL_VIEW view, const VECTOR* crd,
-    const LTMatrix3 cell, const int* atom_types,
-    const float* center_cutoffs, const int atom_type_numbers,
-    const int packed_partitions, const int* neighbor_offsets,
-    int* neighbor_atoms, int* neighbor_counts)
+    const CLUSTERED_SPATIAL_VIEW view, const VECTOR* crd, const LTMatrix3 cell,
+    const int* atom_types, const float* center_cutoffs,
+    const int atom_type_numbers, const int packed_partitions,
+    const int* neighbor_offsets, int* neighbor_atoms, int* neighbor_counts)
 {
     const int sci = static_cast<int>(blockIdx.x);
     const int packed_partition = static_cast<int>(blockIdx.y);
     const int i_lane = static_cast<int>(threadIdx.x);
     const int j_lane = static_cast<int>(threadIdx.y);
-    if (sci >= view.gmxpacked_sci_numbers ||
-        i_lane >= kClusteredClusterSize ||
+    if (sci >= view.gmxpacked_sci_numbers || i_lane >= kClusteredClusterSize ||
         j_lane >= kClusteredClusterSize)
     {
         return;
     }
-    const CLUSTERED_GMXPACKED_SCI sci_entry =
-        view.gmxpacked_sci[sci];
+    const CLUSTERED_GMXPACKED_SCI sci_entry = view.gmxpacked_sci[sci];
     const int cluster_i_begin =
         view.super_cluster_offsets[sci_entry.supercluster_id];
     int cluster_i_end =
@@ -449,73 +428,46 @@ static __global__ void Tersoff_Build_Clustered_Center_Atoms(
         cluster_i_end = view.cluster_numbers;
     }
     const int split = j_lane / kClusteredSplitJClusterSize;
-    const int split_j_lane =
-        j_lane - split * kClusteredSplitJClusterSize;
+    const int split_j_lane = j_lane - split * kClusteredSplitJClusterSize;
     const unsigned int i_lane_bit = 1u << i_lane;
     const unsigned int j_lane_bit = 1u << j_lane;
 
-    for (int packed_idx =
-             sci_entry.cjpacked_begin + packed_partition;
-         packed_idx < sci_entry.cjpacked_end;
-         packed_idx += packed_partitions)
+    for (int packed_idx = sci_entry.cjpacked_begin + packed_partition;
+         packed_idx < sci_entry.cjpacked_end; packed_idx += packed_partitions)
     {
         const CLUSTERED_GMXPACKED_CJ packed =
             view.gmxpacked_cjpacked[packed_idx];
-        const CLUSTERED_GMXPACKED_SPLIT split_entry =
-            packed.split[split];
-        unsigned int pair_bits = 0xffffffffu;
-        if (split_entry.exclusion_index != 0)
-        {
-            pair_bits =
-                view.gmxpacked_exclusions[split_entry.exclusion_index]
-                    .pair[split_j_lane * kClusteredClusterSize +
-                          i_lane];
-        }
-        const unsigned int effective_mask =
-            split_entry.imask & pair_bits;
+        const unsigned int effective_mask = Clustered_Gmxpacked_Effective_Imask(
+            packed, view.gmxpacked_exclusions, split, split_j_lane, i_lane);
         for (int jm = 0; jm < kClusteredJGroupSize; jm += 1)
         {
             const int cluster_j = packed.cj[jm];
             if (cluster_j < 0 ||
-                (view.cluster_valid_masks[cluster_j] &
-                 j_lane_bit) == 0u ||
-                (view.cluster_local_masks[cluster_j] &
-                 j_lane_bit) == 0u)
+                (view.cluster_valid_masks[cluster_j] & j_lane_bit) == 0u ||
+                (view.cluster_local_masks[cluster_j] & j_lane_bit) == 0u)
             {
                 continue;
             }
-            const int sorted_j =
-                view.cluster_offsets[cluster_j] + j_lane;
+            const int sorted_j = view.cluster_offsets[cluster_j] + j_lane;
             const int atom_j = view.sort_permutation[sorted_j];
             const int type_j = atom_types[atom_j];
             const uint64_t shift_bits =
-                view.pair_shift_bits[
-                    packed_idx * kClusteredJGroupSize + jm];
-            for (int i_local = 0;
-                 i_local < cluster_i_end - cluster_i_begin;
+                view.pair_shift_bits[packed_idx * kClusteredJGroupSize + jm];
+            for (int i_local = 0; i_local < cluster_i_end - cluster_i_begin;
                  i_local += 1)
             {
-                const unsigned int packed_bit =
-                    1u << (jm * kClusteredSuperClusterClusters +
-                           i_local);
-                if ((effective_mask & packed_bit) == 0u ||
-                    (Clustered_Get_Pair_Active_I_Mask(
-                         shift_bits, split) &
-                     (1u << static_cast<unsigned int>(i_local))) ==
-                        0u)
+                if (!Clustered_Gmxpacked_I_Entry_Is_Active(
+                        effective_mask, shift_bits, split, jm, i_local))
                 {
                     continue;
                 }
                 const int cluster_i = cluster_i_begin + i_local;
-                if ((view.cluster_valid_masks[cluster_i] &
-                     i_lane_bit) == 0u ||
-                    (view.cluster_local_masks[cluster_i] &
-                     i_lane_bit) == 0u)
+                if ((view.cluster_valid_masks[cluster_i] & i_lane_bit) == 0u ||
+                    (view.cluster_local_masks[cluster_i] & i_lane_bit) == 0u)
                 {
                     continue;
                 }
-                const int sorted_i =
-                    view.cluster_offsets[cluster_i] + i_lane;
+                const int sorted_i = view.cluster_offsets[cluster_i] + i_lane;
                 const int atom_i = view.sort_permutation[sorted_i];
                 if (atom_i == atom_j) continue;
                 const int type_i = atom_types[atom_i];
@@ -523,35 +475,27 @@ static __global__ void Tersoff_Build_Clustered_Center_Atoms(
                     Clustered_Get_Pair_Shift_Id(shift_bits, i_local);
                 const VECTOR shift =
                     Clustered_Shift_Vector_From_Id(shift_id, cell);
-                const VECTOR displacement =
-                    (crd[atom_i] - crd[atom_j]) + shift;
-                const float distance_squared =
-                    displacement * displacement;
+                const VECTOR displacement = (crd[atom_i] - crd[atom_j]) + shift;
+                const float distance_squared = displacement * displacement;
                 if (Tersoff_Clustered_Neighbor_Within_Cut(
-                        type_i, type_j, distance_squared,
-                        center_cutoffs, atom_type_numbers,
-                        view.rebuild_skin))
+                        type_i, type_j, distance_squared, center_cutoffs,
+                        atom_type_numbers, view.rebuild_skin))
                 {
-                    const int slot =
-                        atomicAdd(neighbor_counts + atom_i, 1);
+                    const int slot = atomicAdd(neighbor_counts + atom_i, 1);
                     if constexpr (fill)
                     {
-                        neighbor_atoms[
-                            neighbor_offsets[atom_i] + slot] =
+                        neighbor_atoms[neighbor_offsets[atom_i] + slot] =
                             atom_j;
                     }
                 }
                 if (Tersoff_Clustered_Neighbor_Within_Cut(
-                        type_j, type_i, distance_squared,
-                        center_cutoffs, atom_type_numbers,
-                        view.rebuild_skin))
+                        type_j, type_i, distance_squared, center_cutoffs,
+                        atom_type_numbers, view.rebuild_skin))
                 {
-                    const int slot =
-                        atomicAdd(neighbor_counts + atom_j, 1);
+                    const int slot = atomicAdd(neighbor_counts + atom_j, 1);
                     if constexpr (fill)
                     {
-                        neighbor_atoms[
-                            neighbor_offsets[atom_j] + slot] =
+                        neighbor_atoms[neighbor_offsets[atom_j] + slot] =
                             atom_i;
                     }
                 }
@@ -561,172 +505,115 @@ static __global__ void Tersoff_Build_Clustered_Center_Atoms(
 }
 #else
 static bool Tersoff_Build_Gmxpacked_Center_Atoms_CPU(
-    TERSOFF_INFORMATION* tersoff,
-    const CLUSTERED_SPATIAL_VIEW& view, const VECTOR* crd,
-    const LTMatrix3 cell,
+    TERSOFF_INFORMATION* tersoff, const CLUSTERED_SPATIAL_VIEW& view,
+    const VECTOR* crd, const LTMatrix3 cell,
     std::vector<std::vector<int>>* center_atoms)
 {
     if (center_atoms == NULL) return false;
-    center_atoms->assign(
-        static_cast<size_t>(tersoff->atom_numbers), {});
+    center_atoms->assign(static_cast<size_t>(tersoff->atom_numbers), {});
     for (int sci = 0; sci < view.gmxpacked_sci_numbers; sci += 1)
     {
         const CLUSTERED_GMXPACKED_SCI sci_entry = view.gmxpacked_sci[sci];
-        const int cluster_i_begin =
-            view.super_cluster_offsets[sci_entry.supercluster_id];
-        const int cluster_i_end =
-            view.super_cluster_offsets[sci_entry.supercluster_id + 1];
-        const int cluster_i_numbers = cluster_i_end - cluster_i_begin;
         const VECTOR shift =
             Clustered_Shift_Vector_From_Id(sci_entry.shift_id, cell);
-        for (int i_local = 0; i_local < cluster_i_numbers; i_local += 1)
+        auto consume_tile =
+            [&](const CLUSTERED_GMXPACKED_CPU_I_TILE_CANDIDATE& tile)
         {
-            const int cluster_i = cluster_i_begin + i_local;
-            for (int packed_idx = sci_entry.cjpacked_begin;
-                 packed_idx < sci_entry.cjpacked_end; packed_idx += 1)
+            const int cluster_i = tile.cluster_i;
+            const int cluster_j = tile.cluster_j;
+            const unsigned int valid_local_j_mask =
+                view.cluster_valid_masks[cluster_j] &
+                view.cluster_local_masks[cluster_j];
+            for (int i_lane = 0; i_lane < view.cluster_size; i_lane += 1)
             {
-                const CLUSTERED_GMXPACKED_CJ& packed =
-                    view.gmxpacked_cjpacked[packed_idx];
-                for (int jm = 0; jm < kClusteredJGroupSize; jm += 1)
+                const unsigned int i_lane_bit = 1u << i_lane;
+                if ((view.cluster_valid_masks[cluster_i] & i_lane_bit) == 0u ||
+                    (view.cluster_local_masks[cluster_i] & i_lane_bit) == 0u)
                 {
-                    const int cluster_j = packed.cj[jm];
-                    if (cluster_j < 0) continue;
-                    const unsigned int packed_bit =
-                        1u << (jm * kClusteredSuperClusterClusters + i_local);
-                    const uint64_t pair_mask =
-                        Clustered_Gmxpacked_CPU_Pair_Mask(
-                            packed, packed_bit, view.gmxpacked_exclusions);
-                    if (pair_mask == 0ull) continue;
-                    const unsigned int valid_local_j_mask =
-                        view.cluster_valid_masks[cluster_j] &
-                        view.cluster_local_masks[cluster_j];
-                    for (int i_lane = 0;
-                         i_lane < view.cluster_size; i_lane += 1)
+                    continue;
+                }
+                const int sorted_i = view.cluster_offsets[cluster_i] + i_lane;
+                const int atom_i = view.sort_permutation[sorted_i];
+                const int type_i = tersoff->d_atom_type[atom_i];
+                unsigned int active_j_mask =
+                    static_cast<unsigned int>(
+                        tile.pair_mask >> (i_lane * kClusteredClusterSize)) &
+                    valid_local_j_mask;
+                while (active_j_mask != 0u)
+                {
+                    const int j_lane = __builtin_ctz(active_j_mask);
+                    active_j_mask &= active_j_mask - 1u;
+                    const int sorted_j =
+                        view.cluster_offsets[cluster_j] + j_lane;
+                    const int atom_j = view.sort_permutation[sorted_j];
+                    if (atom_i == atom_j) continue;
+                    const int type_j = tersoff->d_atom_type[atom_j];
+                    const VECTOR displacement =
+                        (crd[atom_i] - crd[atom_j]) + shift;
+                    const float distance_squared = displacement * displacement;
+                    if (Tersoff_Clustered_Neighbor_Within_Cut(
+                            type_i, type_j, distance_squared,
+                            tersoff->d_center_cutoffs,
+                            tersoff->atom_type_numbers, view.rebuild_skin))
                     {
-                        const unsigned int i_lane_bit =
-                            1u << i_lane;
-                        if ((view.cluster_valid_masks[cluster_i] &
-                             i_lane_bit) == 0u ||
-                            (view.cluster_local_masks[cluster_i] &
-                             i_lane_bit) == 0u)
-                        {
-                            continue;
-                        }
-                        const int sorted_i =
-                            view.cluster_offsets[cluster_i] + i_lane;
-                        const int atom_i = view.sort_permutation[sorted_i];
-                        const int type_i = tersoff->d_atom_type[atom_i];
-                        unsigned int active_j_mask =
-                            static_cast<unsigned int>(
-                                pair_mask >>
-                                (i_lane * kClusteredClusterSize)) &
-                            valid_local_j_mask;
-                        while (active_j_mask != 0u)
-                        {
-                            const int j_lane =
-                                __builtin_ctz(active_j_mask);
-                            active_j_mask &= active_j_mask - 1u;
-                            const int sorted_j =
-                                view.cluster_offsets[cluster_j] + j_lane;
-                            const int atom_j = view.sort_permutation[sorted_j];
-                            if (atom_i == atom_j) continue;
-                            const int type_j = tersoff->d_atom_type[atom_j];
-                            const VECTOR displacement =
-                                (crd[atom_i] - crd[atom_j]) +
-                                shift;
-                            const float distance_squared =
-                                displacement * displacement;
-                            if (Tersoff_Clustered_Neighbor_Within_Cut(
-                                    type_i, type_j,
-                                    distance_squared,
-                                    tersoff->d_center_cutoffs,
-                                    tersoff->atom_type_numbers,
-                                    view.rebuild_skin))
-                            {
-                                (*center_atoms)[atom_i].push_back(
-                                    atom_j);
-                            }
-                            if (Tersoff_Clustered_Neighbor_Within_Cut(
-                                    type_j, type_i,
-                                    distance_squared,
-                                    tersoff->d_center_cutoffs,
-                                    tersoff->atom_type_numbers,
-                                    view.rebuild_skin))
-                            {
-                                (*center_atoms)[atom_j].push_back(
-                                    atom_i);
-                            }
-                        }
+                        (*center_atoms)[atom_i].push_back(atom_j);
+                    }
+                    if (Tersoff_Clustered_Neighbor_Within_Cut(
+                            type_j, type_i, distance_squared,
+                            tersoff->d_center_cutoffs,
+                            tersoff->atom_type_numbers, view.rebuild_skin))
+                    {
+                        (*center_atoms)[atom_j].push_back(atom_i);
                     }
                 }
             }
-        }
+        };
+        Clustered_Gmxpacked_CPU_For_Each_I_Tile_In_SCI(view, sci, consume_tile);
     }
     return true;
 }
 #endif
 
 static bool Tersoff_Ensure_Clustered_Center_Atoms(
-    TERSOFF_INFORMATION* tersoff,
-    const CLUSTERED_SPATIAL_VIEW& view, const VECTOR* crd,
-    const LTMatrix3 cell)
+    TERSOFF_INFORMATION* tersoff, const CLUSTERED_SPATIAL_VIEW& view,
+    const VECTOR* crd, const LTMatrix3 cell)
 {
-    const long long payload_generation = view.gmxpacked_payload_generation;
-    if (tersoff->clustered_neighbor_provider_incarnation ==
-            view.provider_incarnation &&
-        tersoff->clustered_neighbor_payload_generation ==
-            payload_generation)
+    ClusteredCSRStorage& storage = tersoff->clustered_neighbors;
+    if (tersoff->clustered_neighbor_stamp.Matches(view))
     {
         return true;
     }
-    Tersoff_Reserve_Clustered_Neighbor_Buffer(
-        &tersoff->d_clustered_neighbor_counts,
-        &tersoff->clustered_neighbor_counts_capacity,
-        tersoff->atom_numbers);
-    Tersoff_Reserve_Clustered_Neighbor_Buffer(
-        &tersoff->d_clustered_neighbor_offsets,
-        &tersoff->clustered_neighbor_offsets_capacity,
-        tersoff->atom_numbers + 1);
+    storage.ReserveCounts(tersoff->atom_numbers);
+    storage.ReserveOffsets(tersoff->atom_numbers + 1);
 
 #ifdef USE_CPU
     std::vector<std::vector<int>> center_atoms;
-    if (!Tersoff_Build_Gmxpacked_Center_Atoms_CPU(
-            tersoff, view, crd, cell, &center_atoms))
+    if (!Tersoff_Build_Gmxpacked_Center_Atoms_CPU(tersoff, view, crd, cell,
+                                                  &center_atoms))
     {
         return false;
     }
-    std::vector<int> host_counts(
-        static_cast<size_t>(tersoff->atom_numbers), 0);
+    std::vector<int> host_counts(static_cast<size_t>(tersoff->atom_numbers), 0);
     for (int atom_i = 0; atom_i < tersoff->atom_numbers; atom_i += 1)
     {
-        host_counts[atom_i] =
-            static_cast<int>(center_atoms[atom_i].size());
+        host_counts[atom_i] = static_cast<int>(center_atoms[atom_i].size());
     }
 #else
-    deviceMemset(
-        tersoff->d_clustered_neighbor_counts, 0,
-        sizeof(int) * static_cast<size_t>(tersoff->atom_numbers));
+    deviceMemset(storage.counts, 0,
+                 sizeof(int) * static_cast<size_t>(tersoff->atom_numbers));
     constexpr int packed_partitions = 16;
-    const dim3 pair_block(
-        static_cast<unsigned int>(kClusteredClusterSize),
-        static_cast<unsigned int>(kClusteredClusterSize), 1u);
-    const dim3 pair_grid(
-        static_cast<unsigned int>(view.gmxpacked_sci_numbers),
-        static_cast<unsigned int>(packed_partitions), 1u);
-    Launch_Device_Kernel(
-        Tersoff_Build_Clustered_Center_Atoms<false>,
-        pair_grid, pair_block, 0, NULL, view, crd, cell,
-        tersoff->d_atom_type, tersoff->d_center_cutoffs,
-        tersoff->atom_type_numbers, packed_partitions, NULL, NULL,
-        tersoff->d_clustered_neighbor_counts);
-    std::vector<int> host_counts(
-        static_cast<size_t>(tersoff->atom_numbers), 0);
-    deviceMemcpy(
-        host_counts.data(), tersoff->d_clustered_neighbor_counts,
-        sizeof(int) * static_cast<size_t>(tersoff->atom_numbers),
-        deviceMemcpyDeviceToHost);
+    const dim3 pair_block(static_cast<unsigned int>(kClusteredClusterSize),
+                          static_cast<unsigned int>(kClusteredClusterSize), 1u);
+    const dim3 pair_grid(static_cast<unsigned int>(view.gmxpacked_sci_numbers),
+                         static_cast<unsigned int>(packed_partitions), 1u);
+    Launch_Device_Kernel(Tersoff_Build_Clustered_Center_Atoms<false>, pair_grid,
+                         pair_block, 0, NULL, view, crd, cell,
+                         tersoff->d_atom_type, tersoff->d_center_cutoffs,
+                         tersoff->atom_type_numbers, packed_partitions, NULL,
+                         NULL, storage.counts);
 #endif
 
+#ifdef USE_CPU
     std::vector<int> host_offsets(
         static_cast<size_t>(tersoff->atom_numbers + 1), 0);
     long long total = 0;
@@ -738,16 +625,17 @@ static bool Tersoff_Ensure_Clustered_Center_Atoms(
         if (total > INT_MAX) return false;
     }
     host_offsets[tersoff->atom_numbers] = static_cast<int>(total);
-    tersoff->clustered_neighbor_numbers = static_cast<int>(total);
-    deviceMemcpy(
-        tersoff->d_clustered_neighbor_offsets, host_offsets.data(),
-        sizeof(int) *
-            static_cast<size_t>(tersoff->atom_numbers + 1),
-        deviceMemcpyHostToDevice);
-    Tersoff_Reserve_Clustered_Neighbor_Buffer(
-        &tersoff->d_clustered_neighbor_atoms,
-        &tersoff->clustered_neighbor_atoms_capacity,
-        tersoff->clustered_neighbor_numbers);
+    storage.item_count = static_cast<int>(total);
+    deviceMemcpy(storage.offsets, host_offsets.data(),
+                 sizeof(int) * static_cast<size_t>(tersoff->atom_numbers + 1),
+                 deviceMemcpyHostToDevice);
+#else
+    if (!Clustered_CSR_Device_Exclusive_Scan(&storage, tersoff->atom_numbers))
+    {
+        return false;
+    }
+#endif
+    storage.ReserveItems(storage.item_count);
 
 #ifdef USE_CPU
     for (int atom_i = 0; atom_i < tersoff->atom_numbers; atom_i += 1)
@@ -755,50 +643,37 @@ static bool Tersoff_Ensure_Clustered_Center_Atoms(
         const std::vector<int>& row = center_atoms[atom_i];
         if (!row.empty())
         {
-            deviceMemcpy(
-                tersoff->d_clustered_neighbor_atoms +
-                    host_offsets[atom_i],
-                row.data(), sizeof(int) * row.size(),
-                deviceMemcpyHostToDevice);
+            deviceMemcpy(storage.items + host_offsets[atom_i], row.data(),
+                         sizeof(int) * row.size(), deviceMemcpyHostToDevice);
         }
     }
 #else
-    if (tersoff->clustered_neighbor_numbers > 0)
+    if (storage.item_count > 0)
     {
-        deviceMemset(
-            tersoff->d_clustered_neighbor_counts, 0,
-            sizeof(int) *
-                static_cast<size_t>(tersoff->atom_numbers));
-        Launch_Device_Kernel(
-            Tersoff_Build_Clustered_Center_Atoms<true>,
-            pair_grid, pair_block, 0, NULL, view, crd, cell,
-            tersoff->d_atom_type, tersoff->d_center_cutoffs,
-            tersoff->atom_type_numbers, packed_partitions,
-            tersoff->d_clustered_neighbor_offsets,
-            tersoff->d_clustered_neighbor_atoms,
-            tersoff->d_clustered_neighbor_counts);
+        deviceMemset(storage.counts, 0,
+                     sizeof(int) * static_cast<size_t>(tersoff->atom_numbers));
+        Launch_Device_Kernel(Tersoff_Build_Clustered_Center_Atoms<true>,
+                             pair_grid, pair_block, 0, NULL, view, crd, cell,
+                             tersoff->d_atom_type, tersoff->d_center_cutoffs,
+                             tersoff->atom_type_numbers, packed_partitions,
+                             storage.offsets, storage.items, storage.counts);
     }
 #endif
-    tersoff->clustered_neighbor_provider_incarnation =
-        view.provider_incarnation;
-    tersoff->clustered_neighbor_payload_generation =
-        payload_generation;
+    tersoff->clustered_neighbor_stamp.Capture(view);
     return true;
 }
 
 template <bool full_output>
 static __global__ void Tersoff_Force_CUDA(
     const int atom_numbers, const VECTOR* crd, VECTOR* frc,
-    const LTMatrix3 cell, const LTMatrix3 rcell,
-    const int* neighbor_offsets, const int* neighbor_atoms,
-    int* atom_types, float* params, int* map, int ntypes, float* atom_energy,
-    LTMatrix3* atom_virial, float* d_energy_sum,
+    const LTMatrix3 cell, const LTMatrix3 rcell, const int* neighbor_offsets,
+    const int* neighbor_atoms, int* atom_types, float* params, int* map,
+    int ntypes, float* atom_energy, LTMatrix3* atom_virial, float* d_energy_sum,
     const bool store_energy, const bool store_virial)
 {
 #ifdef USE_GPU
-    const int i =
-        static_cast<int>(threadIdx.y) +
-        static_cast<int>(blockDim.y * blockIdx.x);
+    const int i = static_cast<int>(threadIdx.y) +
+                  static_cast<int>(blockDim.y * blockIdx.x);
     if (i < atom_numbers)
 #else
     SIMPLE_DEVICE_FOR(i, atom_numbers)
@@ -850,10 +725,7 @@ static __global__ void Tersoff_Force_CUDA(
             {
                 if (store_virial)
                 {
-                    vi =
-                        vi +
-                        Get_Virial_From_Force_Dis(
-                            f_rep * drij, drij);
+                    vi = vi + Get_Virial_From_Force_Dis(f_rep * drij, drij);
                 }
             }
 
@@ -915,10 +787,8 @@ static __global__ void Tersoff_Force_CUDA(
             {
                 if (store_virial)
                 {
-                    vi =
-                        vi +
-                        Get_Virial_From_Force_Dis(
-                            f_attr_direct * drij, drij);
+                    vi = vi +
+                         Get_Virial_From_Force_Dis(f_attr_direct * drij, drij);
                 }
             }
 
@@ -981,14 +851,8 @@ static __global__ void Tersoff_Force_CUDA(
                 {
                     if (store_virial)
                     {
-                        vi =
-                            vi -
-                            Get_Virial_From_Force_Dis(
-                                drij, fj_tri);
-                        vi =
-                            vi -
-                            Get_Virial_From_Force_Dis(
-                                drik, fk_tri);
+                        vi = vi - Get_Virial_From_Force_Dis(drij, fj_tri);
+                        vi = vi - Get_Virial_From_Force_Dis(drik, fk_tri);
                     }
                 }
             }
@@ -1164,11 +1028,9 @@ void TERSOFF_INFORMATION::Initial(CONTROLLER* controller, int atom_numbers,
         }
     }
 
-    const int center_cutoff_count =
-        atom_type_numbers * atom_type_numbers;
-    Malloc_Safely(
-        reinterpret_cast<void**>(&h_center_cutoffs),
-        sizeof(float) * static_cast<size_t>(center_cutoff_count));
+    const int center_cutoff_count = atom_type_numbers * atom_type_numbers;
+    Malloc_Safely(reinterpret_cast<void**>(&h_center_cutoffs),
+                  sizeof(float) * static_cast<size_t>(center_cutoff_count));
     for (int i = 0; i < center_cutoff_count; i += 1)
     {
         h_center_cutoffs[i] = 0.0f;
@@ -1176,25 +1038,19 @@ void TERSOFF_INFORMATION::Initial(CONTROLLER* controller, int atom_numbers,
     cut = 0.0f;
     for (int type_i = 0; type_i < atom_type_numbers; type_i += 1)
     {
-        for (int type_k = 0; type_k < atom_type_numbers;
-             type_k += 1)
+        for (int type_k = 0; type_k < atom_type_numbers; type_k += 1)
         {
             float center_cutoff = 0.0f;
-            for (int type_j = 0; type_j < atom_type_numbers;
-                 type_j += 1)
+            for (int type_j = 0; type_j < atom_type_numbers; type_j += 1)
             {
                 const int param_index =
-                    h_map[type_i * atom_type_numbers *
-                              atom_type_numbers +
+                    h_map[type_i * atom_type_numbers * atom_type_numbers +
                           type_j * atom_type_numbers + type_k];
                 if (param_index < 0) continue;
-                const float* param =
-                    h_params + param_index * PARAM_STRIDE;
-                center_cutoff =
-                    fmaxf(center_cutoff, param[p_R] + param[p_D]);
+                const float* param = h_params + param_index * PARAM_STRIDE;
+                center_cutoff = fmaxf(center_cutoff, param[p_R] + param[p_D]);
             }
-            h_center_cutoffs[
-                type_i * atom_type_numbers + type_k] =
+            h_center_cutoffs[type_i * atom_type_numbers + type_k] =
                 center_cutoff;
             cut = fmaxf(cut, center_cutoff);
         }
@@ -1206,8 +1062,7 @@ void TERSOFF_INFORMATION::Initial(CONTROLLER* controller, int atom_numbers,
     Device_Malloc_And_Copy_Safely((void**)&d_map, h_map,
                                   sizeof(int) * map_size);
     Device_Malloc_And_Copy_Safely(
-        reinterpret_cast<void**>(&d_center_cutoffs),
-        h_center_cutoffs,
+        reinterpret_cast<void**>(&d_center_cutoffs), h_center_cutoffs,
         sizeof(float) * static_cast<size_t>(center_cutoff_count));
     Device_Malloc_Safely((void**)&d_energy_sum, sizeof(float));
 
@@ -1231,9 +1086,8 @@ void TERSOFF_INFORMATION::Initial(CONTROLLER* controller, int atom_numbers,
 
 bool TERSOFF_INFORMATION::TERSOFF_Force_Clustered(
     const CLUSTERED_SPATIAL_VIEW& view, const VECTOR* crd, VECTOR* frc,
-    const LTMatrix3 cell, const LTMatrix3 rcell,
-    const int need_atom_energy, float* atom_energy,
-    const int need_virial, LTMatrix3* atom_virial,
+    const LTMatrix3 cell, const LTMatrix3 rcell, const int need_atom_energy,
+    float* atom_energy, const int need_virial, LTMatrix3* atom_virial,
     const char** failure_reason)
 {
     if (failure_reason != NULL) *failure_reason = NULL;
@@ -1243,12 +1097,10 @@ bool TERSOFF_INFORMATION::TERSOFF_Force_Clustered(
         (need_virial && atom_virial == NULL))
     {
         if (failure_reason != NULL)
-            *failure_reason =
-                "Tersoff clustered force received null buffers";
+            *failure_reason = "Tersoff clustered force received null buffers";
         return false;
     }
-    if (!Tersoff_Ensure_Clustered_Center_Atoms(
-            this, view, crd, cell))
+    if (!Tersoff_Ensure_Clustered_Center_Atoms(this, view, crd, cell))
     {
         if (failure_reason != NULL)
             *failure_reason =
@@ -1260,15 +1112,12 @@ bool TERSOFF_INFORMATION::TERSOFF_Force_Clustered(
         deviceMemset(d_energy_sum, 0, sizeof(float));
     }
 #ifdef USE_GPU
-    dim3 blockSize(
-        static_cast<unsigned int>(CONTROLLER::device_warp),
-        static_cast<unsigned int>(
-            CONTROLLER::device_max_thread /
-            CONTROLLER::device_warp));
-    dim3 gridSize(
-        static_cast<unsigned int>(
-            (atom_numbers + static_cast<int>(blockSize.y) - 1) /
-            static_cast<int>(blockSize.y)));
+    dim3 blockSize(static_cast<unsigned int>(CONTROLLER::device_warp),
+                   static_cast<unsigned int>(CONTROLLER::device_max_thread /
+                                             CONTROLLER::device_warp));
+    dim3 gridSize(static_cast<unsigned int>(
+        (atom_numbers + static_cast<int>(blockSize.y) - 1) /
+        static_cast<int>(blockSize.y)));
 #else
     dim3 blockSize(128);
     dim3 gridSize((atom_numbers + blockSize.x - 1) / blockSize.x);
@@ -1280,13 +1129,11 @@ bool TERSOFF_INFORMATION::TERSOFF_Force_Clustered(
         force_kernel = Tersoff_Force_CUDA<true>;
     }
 
-    Launch_Device_Kernel(force_kernel, gridSize, blockSize, 0, NULL,
-                         atom_numbers, crd, frc, cell, rcell,
-                         d_clustered_neighbor_offsets,
-                         d_clustered_neighbor_atoms, d_atom_type,
-                         d_params, d_map, atom_type_numbers,
-                         atom_energy, atom_virial, d_energy_sum,
-                         need_atom_energy != 0, need_virial != 0);
+    Launch_Device_Kernel(
+        force_kernel, gridSize, blockSize, 0, NULL, atom_numbers, crd, frc,
+        cell, rcell, clustered_neighbors.offsets, clustered_neighbors.items,
+        d_atom_type, d_params, d_map, atom_type_numbers, atom_energy,
+        atom_virial, d_energy_sum, need_atom_energy != 0, need_virial != 0);
     return true;
 }
 

@@ -1,4 +1,5 @@
 #include <array>
+#include <climits>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -8,6 +9,7 @@
 #include <vector>
 
 #include "control.h"
+#include "manybody/clustered_csr.h"
 #include "manybody/edip.h"
 #include "manybody/reaxff/hydrogen_bond.h"
 #include "manybody/tersoff.h"
@@ -124,6 +126,64 @@ void Device_Free(T** pointer)
     *pointer = nullptr;
 #else
     Free_Single_Device_Pointer(reinterpret_cast<void**>(pointer));
+#endif
+}
+
+void Test_Clustered_CSR_Primitives()
+{
+    CLUSTERED_SPATIAL_VIEW view = {};
+    view.provider_incarnation = 17;
+    view.gmxpacked_payload_generation = 23;
+    ClusteredPayloadStamp stamp;
+    Check(!stamp.Matches(view), "CSR stamp starts invalid");
+    stamp.Capture(view);
+    Check(stamp.Matches(view), "CSR stamp captures provider payload identity");
+    view.gmxpacked_payload_generation += 1;
+    Check(!stamp.Matches(view), "CSR stamp rejects a new payload generation");
+    stamp.Reset();
+    Check(stamp.provider_incarnation == -1 && stamp.payload_generation == -1,
+          "CSR stamp reset restores the invalid sentinel");
+
+#ifdef USE_GPU
+    ClusteredCSRStorage storage;
+    storage.ReserveOffsets(1);
+    deviceMemset(storage.offsets, 0x7f, sizeof(int));
+    Check(Clustered_CSR_Device_Exclusive_Scan(&storage, 0),
+          "CSR device scan accepts zero rows");
+    Check(storage.item_count == 0 && Device_Read(storage.offsets, 1)[0] == 0,
+          "CSR zero-row scan writes an empty offset tail");
+
+    const std::vector<int> sparse_counts = {2, 0, 3, 1};
+    storage.ReserveCounts(static_cast<int>(sparse_counts.size()));
+    storage.ReserveOffsets(static_cast<int>(sparse_counts.size()) + 1);
+    deviceMemcpy(storage.counts, sparse_counts.data(),
+                 sizeof(int) * sparse_counts.size(), deviceMemcpyHostToDevice);
+    Check(Clustered_CSR_Device_Exclusive_Scan(
+              &storage, static_cast<int>(sparse_counts.size())),
+          "CSR device scan accepts sparse nonnegative counts");
+    Check(
+        Device_Read(storage.offsets, 5) == std::vector<int>({0, 2, 2, 5, 6}) &&
+            storage.item_count == 6,
+        "CSR device scan writes exclusive offsets and the tail total");
+
+    const std::vector<int> negative_counts = {2, -1, 3};
+    deviceMemcpy(storage.counts, negative_counts.data(),
+                 sizeof(int) * negative_counts.size(),
+                 deviceMemcpyHostToDevice);
+    Check(!Clustered_CSR_Device_Exclusive_Scan(
+              &storage, static_cast<int>(negative_counts.size())) &&
+              storage.item_count == 0,
+          "CSR device scan rejects a negative row count");
+
+    const std::vector<int> overflowing_counts = {INT_MAX, 1};
+    deviceMemcpy(storage.counts, overflowing_counts.data(),
+                 sizeof(int) * overflowing_counts.size(),
+                 deviceMemcpyHostToDevice);
+    Check(!Clustered_CSR_Device_Exclusive_Scan(
+              &storage, static_cast<int>(overflowing_counts.size())) &&
+              storage.item_count == 0,
+          "CSR device scan rejects an item total above INT_MAX");
+    storage.Clear();
 #endif
 }
 
@@ -623,9 +683,7 @@ void Release_Edip(EDIP_INFORMATION* edip)
     Device_Free(&edip->d_parameters);
     Device_Free(&edip->z);
     edip->dE_dz = nullptr;
-    Device_Free(&edip->d_clustered_neighbor_counts);
-    Device_Free(&edip->d_clustered_neighbor_offsets);
-    Device_Free(&edip->d_clustered_neighbor_atoms);
+    edip->clustered_neighbors.Clear();
 }
 
 void Test_Edip_Oracle(const Clustered_Fixture& fixture,
@@ -658,8 +716,8 @@ void Test_Edip_Oracle(const Clustered_Fixture& fixture,
         std::fprintf(stderr, "EDIP rejection: %s\n", failure_reason);
 
     const Rows actual_rows = Read_Rows(
-        edip.d_clustered_neighbor_offsets, edip.d_clustered_neighbor_atoms,
-        kAtomCount, edip.clustered_neighbor_numbers);
+        edip.clustered_neighbors.offsets, edip.clustered_neighbors.items,
+        kAtomCount, edip.clustered_neighbors.item_count);
     const Rows expected_rows = Edip_Oracle_Rows(coordinates, types, parameters);
     Check_Rows(actual_rows, expected_rows,
                "EDIP canonical directed center-neighbor rows");
@@ -893,9 +951,7 @@ void Release_Tersoff(TERSOFF_INFORMATION* tersoff)
     Device_Free(&tersoff->d_params);
     Device_Free(&tersoff->d_map);
     Device_Free(&tersoff->d_center_cutoffs);
-    Device_Free(&tersoff->d_clustered_neighbor_counts);
-    Device_Free(&tersoff->d_clustered_neighbor_offsets);
-    Device_Free(&tersoff->d_clustered_neighbor_atoms);
+    tersoff->clustered_neighbors.Clear();
 }
 
 void Test_Tersoff_Oracle(const Clustered_Fixture& fixture,
@@ -927,10 +983,9 @@ void Test_Tersoff_Oracle(const Clustered_Fixture& fixture,
     if (!accepted && failure_reason != nullptr)
         std::fprintf(stderr, "Tersoff rejection: %s\n", failure_reason);
 
-    const Rows actual_rows =
-        Read_Rows(tersoff.d_clustered_neighbor_offsets,
-                  tersoff.d_clustered_neighbor_atoms, kAtomCount,
-                  tersoff.clustered_neighbor_numbers);
+    const Rows actual_rows = Read_Rows(
+        tersoff.clustered_neighbors.offsets, tersoff.clustered_neighbors.items,
+        kAtomCount, tersoff.clustered_neighbors.item_count);
     const Rows expected_rows =
         Tersoff_Oracle_Rows(coordinates, types, parameters);
     Check_Rows(actual_rows, expected_rows,
@@ -1132,6 +1187,7 @@ void Test_Reaxff_Hb_Oracle()
 
 int main()
 {
+    Test_Clustered_CSR_Primitives();
     const std::vector<VECTOR> coordinates = Test_Coordinates();
     const std::vector<int> types = Test_Types();
     const LTMatrix3 cell = Diagonal_Matrix(10.0f);

@@ -3,6 +3,7 @@
 #include "../common.h"
 #include "../control.h"
 #include "../neighbor_list/contract/view.h"
+#include "clustered_csr.h"
 
 // Stillinger and Weber, Phys Rev B, 31, 5262 (1985).
 struct STILLINGER_WEBER_INFORMATION
@@ -28,15 +29,8 @@ struct STILLINGER_WEBER_INFORMATION
     float* d_energy_atom = NULL;
     float* d_energy_sum = NULL;
 
-    long long clustered_neighbor_provider_incarnation = -1;
-    long long clustered_neighbor_payload_generation = -1;
-    int clustered_neighbor_numbers = 0;
-    int* d_clustered_neighbor_counts = NULL;
-    int clustered_neighbor_counts_capacity = 0;
-    int* d_clustered_neighbor_offsets = NULL;
-    int clustered_neighbor_offsets_capacity = 0;
-    int* d_clustered_neighbor_atoms = NULL;
-    int clustered_neighbor_atoms_capacity = 0;
+    ClusteredPayloadStamp clustered_neighbor_stamp = {};
+    ClusteredCSRStorage clustered_neighbors = {};
 
     void Initial(CONTROLLER* controller, const char* module_name = NULL);
 

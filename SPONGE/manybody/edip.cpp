@@ -5,8 +5,7 @@
 #include "clustered_gmxpacked_cpu.h"
 #endif
 
-void EDIP_INFORMATION::Initial(CONTROLLER* controller,
-                               const char* module_name)
+void EDIP_INFORMATION::Initial(CONTROLLER* controller, const char* module_name)
 {
     if (module_name == NULL)
     {
@@ -246,41 +245,22 @@ void EDIP_INFORMATION::Initial(CONTROLLER* controller,
 }
 
 static __host__ __device__ __forceinline__ bool
-EDIP_Clustered_Neighbor_Within_Cut(
-    const int type_i, const int type_j,
-    const float distance_squared, const float* parameters,
-    const int atom_type_numbers, const float margin = 0.0f)
+EDIP_Clustered_Neighbor_Within_Cut(const int type_i, const int type_j,
+                                   const float distance_squared,
+                                   const float* parameters,
+                                   const int atom_type_numbers,
+                                   const float margin = 0.0f)
 {
     const int pair_index = type_i * atom_type_numbers + type_j;
     const float cutoff = parameters[8 * pair_index + 2] + margin;
     return distance_squared < cutoff * cutoff;
 }
 
-template <typename T>
-static void EDIP_Reserve_Clustered_Neighbor_Buffer(
-    T** pointer, int* capacity, const int required)
-{
-    if (required <= *capacity && *pointer != NULL)
-    {
-        return;
-    }
-    Free_Single_Device_Pointer(reinterpret_cast<void**>(pointer));
-    *capacity = 0;
-    if (required > 0)
-    {
-        Device_Malloc_Safely(
-            reinterpret_cast<void**>(pointer),
-            sizeof(T) * static_cast<size_t>(required));
-        *capacity = required;
-    }
-}
-
 #ifdef USE_GPU
 template <bool fill>
 static __global__ void EDIP_Build_Clustered_Center_Atoms(
-    const CLUSTERED_SPATIAL_VIEW view, const VECTOR* crd,
-    const LTMatrix3 cell, const int* atom_types,
-    const float* parameters, const int atom_type_numbers,
+    const CLUSTERED_SPATIAL_VIEW view, const VECTOR* crd, const LTMatrix3 cell,
+    const int* atom_types, const float* parameters, const int atom_type_numbers,
     const int packed_partitions, const int* neighbor_offsets,
     int* neighbor_atoms, int* neighbor_counts)
 {
@@ -288,14 +268,12 @@ static __global__ void EDIP_Build_Clustered_Center_Atoms(
     const int packed_partition = static_cast<int>(blockIdx.y);
     const int i_lane = static_cast<int>(threadIdx.x);
     const int j_lane = static_cast<int>(threadIdx.y);
-    if (sci >= view.gmxpacked_sci_numbers ||
-        i_lane >= kClusteredClusterSize ||
+    if (sci >= view.gmxpacked_sci_numbers || i_lane >= kClusteredClusterSize ||
         j_lane >= kClusteredClusterSize)
     {
         return;
     }
-    const CLUSTERED_GMXPACKED_SCI sci_entry =
-        view.gmxpacked_sci[sci];
+    const CLUSTERED_GMXPACKED_SCI sci_entry = view.gmxpacked_sci[sci];
     const int cluster_i_begin =
         view.super_cluster_offsets[sci_entry.supercluster_id];
     int cluster_i_end =
@@ -305,112 +283,74 @@ static __global__ void EDIP_Build_Clustered_Center_Atoms(
         cluster_i_end = view.cluster_numbers;
     }
     const int split = j_lane / kClusteredSplitJClusterSize;
-    const int split_j_lane =
-        j_lane - split * kClusteredSplitJClusterSize;
+    const int split_j_lane = j_lane - split * kClusteredSplitJClusterSize;
     const unsigned int i_lane_bit = 1u << i_lane;
     const unsigned int j_lane_bit = 1u << j_lane;
 
-    for (int packed_idx =
-             sci_entry.cjpacked_begin + packed_partition;
-         packed_idx < sci_entry.cjpacked_end;
-         packed_idx += packed_partitions)
+    for (int packed_idx = sci_entry.cjpacked_begin + packed_partition;
+         packed_idx < sci_entry.cjpacked_end; packed_idx += packed_partitions)
     {
         const CLUSTERED_GMXPACKED_CJ packed =
             view.gmxpacked_cjpacked[packed_idx];
-        const CLUSTERED_GMXPACKED_SPLIT split_entry =
-            packed.split[split];
-        unsigned int pair_bits = 0xffffffffu;
-        if (split_entry.exclusion_index != 0)
-        {
-            pair_bits =
-                view.gmxpacked_exclusions[split_entry.exclusion_index]
-                    .pair[split_j_lane * kClusteredClusterSize +
-                          i_lane];
-        }
-        const unsigned int effective_mask =
-            split_entry.imask & pair_bits;
+        const unsigned int effective_mask = Clustered_Gmxpacked_Effective_Imask(
+            packed, view.gmxpacked_exclusions, split, split_j_lane, i_lane);
         for (int jm = 0; jm < kClusteredJGroupSize; jm += 1)
         {
             const int cluster_j = packed.cj[jm];
             if (cluster_j < 0 ||
-                (view.cluster_valid_masks[cluster_j] &
-                 j_lane_bit) == 0u ||
-                (view.cluster_local_masks[cluster_j] &
-                 j_lane_bit) == 0u)
+                (view.cluster_valid_masks[cluster_j] & j_lane_bit) == 0u ||
+                (view.cluster_local_masks[cluster_j] & j_lane_bit) == 0u)
             {
                 continue;
             }
-            const int sorted_j =
-                view.cluster_offsets[cluster_j] + j_lane;
-            const int atom_j =
-                view.sort_permutation[sorted_j];
+            const int sorted_j = view.cluster_offsets[cluster_j] + j_lane;
+            const int atom_j = view.sort_permutation[sorted_j];
             const int type_j = atom_types[atom_j];
             const uint64_t shift_bits =
-                view.pair_shift_bits[
-                    packed_idx * kClusteredJGroupSize + jm];
-            for (int i_local = 0;
-                 i_local < cluster_i_end - cluster_i_begin;
+                view.pair_shift_bits[packed_idx * kClusteredJGroupSize + jm];
+            for (int i_local = 0; i_local < cluster_i_end - cluster_i_begin;
                  i_local += 1)
             {
-                const unsigned int packed_bit =
-                    1u << (jm * kClusteredSuperClusterClusters +
-                           i_local);
-                if ((effective_mask & packed_bit) == 0u ||
-                    (Clustered_Get_Pair_Active_I_Mask(
-                         shift_bits, split) &
-                     (1u << static_cast<unsigned int>(i_local))) ==
-                        0u)
+                if (!Clustered_Gmxpacked_I_Entry_Is_Active(
+                        effective_mask, shift_bits, split, jm, i_local))
                 {
                     continue;
                 }
                 const int cluster_i = cluster_i_begin + i_local;
-                if ((view.cluster_valid_masks[cluster_i] &
-                     i_lane_bit) == 0u ||
-                    (view.cluster_local_masks[cluster_i] &
-                     i_lane_bit) == 0u)
+                if ((view.cluster_valid_masks[cluster_i] & i_lane_bit) == 0u ||
+                    (view.cluster_local_masks[cluster_i] & i_lane_bit) == 0u)
                 {
                     continue;
                 }
-                const int sorted_i =
-                    view.cluster_offsets[cluster_i] + i_lane;
-                const int atom_i =
-                    view.sort_permutation[sorted_i];
+                const int sorted_i = view.cluster_offsets[cluster_i] + i_lane;
+                const int atom_i = view.sort_permutation[sorted_i];
                 if (atom_i == atom_j) continue;
                 const int type_i = atom_types[atom_i];
                 const int shift_id =
-                    Clustered_Get_Pair_Shift_Id(
-                        shift_bits, i_local);
+                    Clustered_Get_Pair_Shift_Id(shift_bits, i_local);
                 const VECTOR shift =
                     Clustered_Shift_Vector_From_Id(shift_id, cell);
-                const VECTOR displacement =
-                    (crd[atom_i] - crd[atom_j]) + shift;
-                const float distance_squared =
-                    displacement * displacement;
+                const VECTOR displacement = (crd[atom_i] - crd[atom_j]) + shift;
+                const float distance_squared = displacement * displacement;
                 if (EDIP_Clustered_Neighbor_Within_Cut(
                         type_i, type_j, distance_squared, parameters,
-                        atom_type_numbers,
-                        view.rebuild_skin))
+                        atom_type_numbers, view.rebuild_skin))
                 {
-                    const int slot =
-                        atomicAdd(neighbor_counts + atom_i, 1);
+                    const int slot = atomicAdd(neighbor_counts + atom_i, 1);
                     if constexpr (fill)
                     {
-                        neighbor_atoms[
-                            neighbor_offsets[atom_i] + slot] =
+                        neighbor_atoms[neighbor_offsets[atom_i] + slot] =
                             atom_j;
                     }
                 }
                 if (EDIP_Clustered_Neighbor_Within_Cut(
                         type_j, type_i, distance_squared, parameters,
-                        atom_type_numbers,
-                        view.rebuild_skin))
+                        atom_type_numbers, view.rebuild_skin))
                 {
-                    const int slot =
-                        atomicAdd(neighbor_counts + atom_j, 1);
+                    const int slot = atomicAdd(neighbor_counts + atom_j, 1);
                     if constexpr (fill)
                     {
-                        neighbor_atoms[
-                            neighbor_offsets[atom_j] + slot] =
+                        neighbor_atoms[neighbor_offsets[atom_j] + slot] =
                             atom_i;
                     }
                 }
@@ -425,106 +365,65 @@ static bool EDIP_Build_Gmxpacked_Center_Atoms_CPU(
     std::vector<std::vector<int>>* center_atoms)
 {
     if (center_atoms == NULL) return false;
-    center_atoms->assign(
-        static_cast<size_t>(edip->atom_numbers), {});
+    center_atoms->assign(static_cast<size_t>(edip->atom_numbers), {});
     for (int sci = 0; sci < view.gmxpacked_sci_numbers; sci += 1)
     {
         const CLUSTERED_GMXPACKED_SCI sci_entry = view.gmxpacked_sci[sci];
-        const int cluster_i_begin =
-            view.super_cluster_offsets[sci_entry.supercluster_id];
-        const int cluster_i_end =
-            view.super_cluster_offsets[sci_entry.supercluster_id + 1];
-        const int cluster_i_numbers = cluster_i_end - cluster_i_begin;
         const VECTOR shift =
-            Clustered_Shift_Vector_From_Id(
-                sci_entry.shift_id, cell);
-        for (int i_local = 0; i_local < cluster_i_numbers; i_local += 1)
+            Clustered_Shift_Vector_From_Id(sci_entry.shift_id, cell);
+        auto consume_tile =
+            [&](const CLUSTERED_GMXPACKED_CPU_I_TILE_CANDIDATE& tile)
         {
-            const int cluster_i = cluster_i_begin + i_local;
-            for (int packed_idx = sci_entry.cjpacked_begin;
-                 packed_idx < sci_entry.cjpacked_end;
-                 packed_idx += 1)
+            const int cluster_i = tile.cluster_i;
+            const int cluster_j = tile.cluster_j;
+            const unsigned int valid_local_j_mask =
+                view.cluster_valid_masks[cluster_j] &
+                view.cluster_local_masks[cluster_j];
+            for (int i_lane = 0; i_lane < view.cluster_size; i_lane += 1)
             {
-                const CLUSTERED_GMXPACKED_CJ& packed =
-                    view.gmxpacked_cjpacked[packed_idx];
-                for (int jm = 0; jm < kClusteredJGroupSize;
-                     jm += 1)
+                const unsigned int i_lane_bit = 1u << i_lane;
+                if ((view.cluster_valid_masks[cluster_i] & i_lane_bit) == 0u ||
+                    (view.cluster_local_masks[cluster_i] & i_lane_bit) == 0u)
                 {
-                    const int cluster_j = packed.cj[jm];
-                    if (cluster_j < 0) continue;
-                    const unsigned int packed_bit =
-                        1u << (jm * kClusteredSuperClusterClusters + i_local);
-                    const uint64_t pair_mask =
-                        Clustered_Gmxpacked_CPU_Pair_Mask(
-                            packed, packed_bit, view.gmxpacked_exclusions);
-                    if (pair_mask == 0ull) continue;
-                    const unsigned int valid_local_j_mask =
-                        view.cluster_valid_masks[cluster_j] &
-                        view.cluster_local_masks[cluster_j];
-                    for (int i_lane = 0;
-                         i_lane < view.cluster_size; i_lane += 1)
+                    continue;
+                }
+                const int sorted_i = view.cluster_offsets[cluster_i] + i_lane;
+                const int atom_i = view.sort_permutation[sorted_i];
+                const int type_i = edip->d_atom_type[atom_i];
+                unsigned int active_j_mask =
+                    static_cast<unsigned int>(
+                        tile.pair_mask >> (i_lane * kClusteredClusterSize)) &
+                    valid_local_j_mask;
+                while (active_j_mask != 0u)
+                {
+                    const int j_lane = __builtin_ctz(active_j_mask);
+                    active_j_mask &= active_j_mask - 1u;
+                    const int sorted_j =
+                        view.cluster_offsets[cluster_j] + j_lane;
+                    const int atom_j = view.sort_permutation[sorted_j];
+                    if (atom_i == atom_j) continue;
+                    const int type_j = edip->d_atom_type[atom_j];
+                    const VECTOR displacement =
+                        (crd[atom_i] - crd[atom_j]) + shift;
+                    const float distance_squared = displacement * displacement;
+                    if (EDIP_Clustered_Neighbor_Within_Cut(
+                            type_i, type_j, distance_squared,
+                            edip->d_parameters, edip->atom_type_numbers,
+                            view.rebuild_skin))
                     {
-                        const unsigned int i_lane_bit =
-                            1u << i_lane;
-                        if ((view.cluster_valid_masks[cluster_i] &
-                             i_lane_bit) == 0u ||
-                            (view.cluster_local_masks[cluster_i] &
-                             i_lane_bit) == 0u)
-                        {
-                            continue;
-                        }
-                        const int sorted_i =
-                            view.cluster_offsets[cluster_i] + i_lane;
-                        const int atom_i =
-                            view.sort_permutation[sorted_i];
-                        const int type_i =
-                            edip->d_atom_type[atom_i];
-                        unsigned int active_j_mask =
-                            static_cast<unsigned int>(
-                                pair_mask >>
-                                (i_lane * kClusteredClusterSize)) &
-                            valid_local_j_mask;
-                        while (active_j_mask != 0u)
-                        {
-                            const int j_lane =
-                                __builtin_ctz(active_j_mask);
-                            active_j_mask &= active_j_mask - 1u;
-                            const int sorted_j =
-                                view.cluster_offsets[cluster_j] +
-                                j_lane;
-                            const int atom_j =
-                                view.sort_permutation[sorted_j];
-                            if (atom_i == atom_j) continue;
-                            const int type_j =
-                                edip->d_atom_type[atom_j];
-                            const VECTOR displacement =
-                                (crd[atom_i] - crd[atom_j]) +
-                                shift;
-                            const float distance_squared =
-                                displacement * displacement;
-                            if (EDIP_Clustered_Neighbor_Within_Cut(
-                                    type_i, type_j, distance_squared,
-                                    edip->d_parameters,
-                                    edip->atom_type_numbers,
-                                    view.rebuild_skin))
-                            {
-                                (*center_atoms)[atom_i].push_back(
-                                    atom_j);
-                            }
-                            if (EDIP_Clustered_Neighbor_Within_Cut(
-                                    type_j, type_i, distance_squared,
-                                    edip->d_parameters,
-                                    edip->atom_type_numbers,
-                                    view.rebuild_skin))
-                            {
-                                (*center_atoms)[atom_j].push_back(
-                                    atom_i);
-                            }
-                        }
+                        (*center_atoms)[atom_i].push_back(atom_j);
+                    }
+                    if (EDIP_Clustered_Neighbor_Within_Cut(
+                            type_j, type_i, distance_squared,
+                            edip->d_parameters, edip->atom_type_numbers,
+                            view.rebuild_skin))
+                    {
+                        (*center_atoms)[atom_j].push_back(atom_i);
                     }
                 }
             }
-        }
+        };
+        Clustered_Gmxpacked_CPU_For_Each_I_Tile_In_SCI(view, sci, consume_tile);
     }
     return true;
 }
@@ -534,64 +433,43 @@ static bool EDIP_Ensure_Clustered_Center_Atoms(
     EDIP_INFORMATION* edip, const CLUSTERED_SPATIAL_VIEW& view,
     const VECTOR* crd, const LTMatrix3 cell)
 {
-    const long long payload_generation = view.gmxpacked_payload_generation;
-    if (edip->clustered_neighbor_provider_incarnation ==
-            view.provider_incarnation &&
-        edip->clustered_neighbor_payload_generation ==
-            payload_generation)
+    ClusteredCSRStorage& storage = edip->clustered_neighbors;
+    if (edip->clustered_neighbor_stamp.Matches(view))
     {
         return true;
     }
-    EDIP_Reserve_Clustered_Neighbor_Buffer(
-        &edip->d_clustered_neighbor_counts,
-        &edip->clustered_neighbor_counts_capacity,
-        edip->atom_numbers);
-    EDIP_Reserve_Clustered_Neighbor_Buffer(
-        &edip->d_clustered_neighbor_offsets,
-        &edip->clustered_neighbor_offsets_capacity,
-        edip->atom_numbers + 1);
+    storage.ReserveCounts(edip->atom_numbers);
+    storage.ReserveOffsets(edip->atom_numbers + 1);
 
 #ifdef USE_CPU
     std::vector<std::vector<int>> center_atoms;
-    if (!EDIP_Build_Gmxpacked_Center_Atoms_CPU(
-            edip, view, crd, cell, &center_atoms))
+    if (!EDIP_Build_Gmxpacked_Center_Atoms_CPU(edip, view, crd, cell,
+                                               &center_atoms))
     {
         return false;
     }
-    std::vector<int> host_counts(
-        static_cast<size_t>(edip->atom_numbers), 0);
+    std::vector<int> host_counts(static_cast<size_t>(edip->atom_numbers), 0);
     for (int atom_i = 0; atom_i < edip->atom_numbers; atom_i += 1)
     {
-        host_counts[atom_i] =
-            static_cast<int>(center_atoms[atom_i].size());
+        host_counts[atom_i] = static_cast<int>(center_atoms[atom_i].size());
     }
 #else
-    deviceMemset(
-        edip->d_clustered_neighbor_counts, 0,
-        sizeof(int) * static_cast<size_t>(edip->atom_numbers));
+    deviceMemset(storage.counts, 0,
+                 sizeof(int) * static_cast<size_t>(edip->atom_numbers));
     constexpr int packed_partitions = 16;
-    const dim3 pair_block(
-        static_cast<unsigned int>(kClusteredClusterSize),
-        static_cast<unsigned int>(kClusteredClusterSize), 1u);
-    const dim3 pair_grid(
-        static_cast<unsigned int>(view.gmxpacked_sci_numbers),
-        static_cast<unsigned int>(packed_partitions), 1u);
+    const dim3 pair_block(static_cast<unsigned int>(kClusteredClusterSize),
+                          static_cast<unsigned int>(kClusteredClusterSize), 1u);
+    const dim3 pair_grid(static_cast<unsigned int>(view.gmxpacked_sci_numbers),
+                         static_cast<unsigned int>(packed_partitions), 1u);
     Launch_Device_Kernel(
-        EDIP_Build_Clustered_Center_Atoms<false>,
-        pair_grid, pair_block, 0, NULL, view, crd, cell,
-        edip->d_atom_type, edip->d_parameters,
-        edip->atom_type_numbers, packed_partitions, NULL, NULL,
-        edip->d_clustered_neighbor_counts);
-    std::vector<int> host_counts(
-        static_cast<size_t>(edip->atom_numbers), 0);
-    deviceMemcpy(
-        host_counts.data(), edip->d_clustered_neighbor_counts,
-        sizeof(int) * static_cast<size_t>(edip->atom_numbers),
-        deviceMemcpyDeviceToHost);
+        EDIP_Build_Clustered_Center_Atoms<false>, pair_grid, pair_block, 0,
+        NULL, view, crd, cell, edip->d_atom_type, edip->d_parameters,
+        edip->atom_type_numbers, packed_partitions, NULL, NULL, storage.counts);
 #endif
 
-    std::vector<int> host_offsets(
-        static_cast<size_t>(edip->atom_numbers + 1), 0);
+#ifdef USE_CPU
+    std::vector<int> host_offsets(static_cast<size_t>(edip->atom_numbers + 1),
+                                  0);
     long long total = 0;
     for (int atom_i = 0; atom_i < edip->atom_numbers; atom_i += 1)
     {
@@ -601,16 +479,17 @@ static bool EDIP_Ensure_Clustered_Center_Atoms(
         if (total > INT_MAX) return false;
     }
     host_offsets[edip->atom_numbers] = static_cast<int>(total);
-    edip->clustered_neighbor_numbers = static_cast<int>(total);
-    deviceMemcpy(
-        edip->d_clustered_neighbor_offsets, host_offsets.data(),
-        sizeof(int) *
-            static_cast<size_t>(edip->atom_numbers + 1),
-        deviceMemcpyHostToDevice);
-    EDIP_Reserve_Clustered_Neighbor_Buffer(
-        &edip->d_clustered_neighbor_atoms,
-        &edip->clustered_neighbor_atoms_capacity,
-        edip->clustered_neighbor_numbers);
+    storage.item_count = static_cast<int>(total);
+    deviceMemcpy(storage.offsets, host_offsets.data(),
+                 sizeof(int) * static_cast<size_t>(edip->atom_numbers + 1),
+                 deviceMemcpyHostToDevice);
+#else
+    if (!Clustered_CSR_Device_Exclusive_Scan(&storage, edip->atom_numbers))
+    {
+        return false;
+    }
+#endif
+    storage.ReserveItems(storage.item_count);
 
 #ifdef USE_CPU
     for (int atom_i = 0; atom_i < edip->atom_numbers; atom_i += 1)
@@ -618,34 +497,23 @@ static bool EDIP_Ensure_Clustered_Center_Atoms(
         const std::vector<int>& row = center_atoms[atom_i];
         if (!row.empty())
         {
-            deviceMemcpy(
-                edip->d_clustered_neighbor_atoms +
-                    host_offsets[atom_i],
-                row.data(), sizeof(int) * row.size(),
-                deviceMemcpyHostToDevice);
+            deviceMemcpy(storage.items + host_offsets[atom_i], row.data(),
+                         sizeof(int) * row.size(), deviceMemcpyHostToDevice);
         }
     }
 #else
-    if (edip->clustered_neighbor_numbers > 0)
+    if (storage.item_count > 0)
     {
-        deviceMemset(
-            edip->d_clustered_neighbor_counts, 0,
-            sizeof(int) *
-                static_cast<size_t>(edip->atom_numbers));
-        Launch_Device_Kernel(
-            EDIP_Build_Clustered_Center_Atoms<true>,
-            pair_grid, pair_block, 0, NULL, view, crd, cell,
-            edip->d_atom_type, edip->d_parameters,
-            edip->atom_type_numbers, packed_partitions,
-            edip->d_clustered_neighbor_offsets,
-            edip->d_clustered_neighbor_atoms,
-            edip->d_clustered_neighbor_counts);
+        deviceMemset(storage.counts, 0,
+                     sizeof(int) * static_cast<size_t>(edip->atom_numbers));
+        Launch_Device_Kernel(EDIP_Build_Clustered_Center_Atoms<true>, pair_grid,
+                             pair_block, 0, NULL, view, crd, cell,
+                             edip->d_atom_type, edip->d_parameters,
+                             edip->atom_type_numbers, packed_partitions,
+                             storage.offsets, storage.items, storage.counts);
     }
 #endif
-    edip->clustered_neighbor_provider_incarnation =
-        view.provider_incarnation;
-    edip->clustered_neighbor_payload_generation =
-        payload_generation;
+    edip->clustered_neighbor_stamp.Capture(view);
     return true;
 }
 
@@ -683,8 +551,8 @@ static __global__
         VECTOR temp1_force, temp2_force;
         LTMatrix3 local_virial = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
 #ifdef USE_GPU
-        for (int j = neighbor_begin + threadIdx.x;
-             j < neighbor_end; j += blockDim.x)
+        for (int j = neighbor_begin + threadIdx.x; j < neighbor_end;
+             j += blockDim.x)
 #else
         for (int j = neighbor_begin; j < neighbor_end; j++)
 #endif
@@ -725,10 +593,8 @@ static __global__
                 if constexpr (full_output)
                 {
                     if (store_virial)
-                        local_virial =
-                            local_virial -
-                            Get_Virial_From_Force_Dis(
-                                temp1_force, drij);
+                        local_virial = local_virial - Get_Virial_From_Force_Dis(
+                                                          temp1_force, drij);
                 }
             }
 
@@ -789,10 +655,8 @@ static __global__
                         {
                             local_virial =
                                 local_virial -
-                                Get_Virial_From_Force_Dis(
-                                    temp1_force, drij) -
-                                Get_Virial_From_Force_Dis(
-                                    temp2_force, drik);
+                                Get_Virial_From_Force_Dis(temp1_force, drij) -
+                                Get_Virial_From_Force_Dis(temp2_force, drik);
                         }
                     }
                 }
@@ -812,8 +676,7 @@ static __global__
             }
             if (store_virial)
             {
-                Warp_Sum_To(
-                    atom_virial + atom_i, local_virial, warpSize);
+                Warp_Sum_To(atom_virial + atom_i, local_virial, warpSize);
             }
         }
     }
@@ -822,10 +685,9 @@ static __global__
 static __global__ void Get_Z(const int atom_numbers, const VECTOR* crd,
                              const LTMatrix3 cell, const LTMatrix3 rcell,
                              const int* neighbor_offsets,
-                             const int* neighbor_atoms,
-                             const float* parameters,
-                             const int atom_type_numbers,
-                             const int* atom_types, float* z)
+                             const int* neighbor_atoms, const float* parameters,
+                             const int atom_type_numbers, const int* atom_types,
+                             float* z)
 {
 #ifdef USE_GPU
     int atom_i = threadIdx.y + blockDim.y * blockIdx.x, atom_j;
@@ -842,8 +704,8 @@ static __global__ void Get_Z(const int atom_numbers, const VECTOR* crd,
         float local_z = 0, a, c, alpha, r;
         VECTOR ri = crd[atom_i], dr;
 #ifdef USE_GPU
-        for (int j = neighbor_begin + threadIdx.x;
-             j < neighbor_end; j += blockDim.x)
+        for (int j = neighbor_begin + threadIdx.x; j < neighbor_end;
+             j += blockDim.x)
 #else
         for (int j = neighbor_begin; j < neighbor_end; j++)
 #endif
@@ -876,9 +738,8 @@ static __global__ __launch_bounds__(1024) void Redistribute_Z_to_Atoms(
     const int atom_numbers, const VECTOR* crd, const LTMatrix3 cell,
     const LTMatrix3 rcell, const int* neighbor_offsets,
     const int* neighbor_atoms, const float* parameters,
-    const int atom_type_numbers, const int* atom_types,
-    const float* dE_dz, VECTOR* frc, LTMatrix3* atom_virial,
-    const bool store_virial)
+    const int atom_type_numbers, const int* atom_types, const float* dE_dz,
+    VECTOR* frc, LTMatrix3* atom_virial, const bool store_virial)
 {
 #ifdef USE_GPU
     int atom_i = threadIdx.y + blockDim.y * blockIdx.x, atom_j;
@@ -899,8 +760,8 @@ static __global__ __launch_bounds__(1024) void Redistribute_Z_to_Atoms(
         VECTOR local_frc = {0.0f, 0.0f, 0.0f}, f;
         LTMatrix3 local_virial(0.0f);
 #ifdef USE_GPU
-        for (int j = neighbor_begin + threadIdx.x;
-             j < neighbor_end; j += blockDim.x)
+        for (int j = neighbor_begin + threadIdx.x; j < neighbor_end;
+             j += blockDim.x)
 #else
         for (int j = neighbor_begin; j < neighbor_end; j++)
 #endif
@@ -925,8 +786,7 @@ static __global__ __launch_bounds__(1024) void Redistribute_Z_to_Atoms(
                 {
                     if (store_virial && atom_j > atom_i)
                         local_virial =
-                            local_virial -
-                            Get_Virial_From_Force_Dis(f, dr);
+                            local_virial - Get_Virial_From_Force_Dis(f, dr);
                 }
             }
         }
@@ -934,17 +794,15 @@ static __global__ __launch_bounds__(1024) void Redistribute_Z_to_Atoms(
         if constexpr (full_output)
         {
             if (store_virial)
-                Warp_Sum_To(
-                    atom_virial + atom_i, local_virial, warpSize);
+                Warp_Sum_To(atom_virial + atom_i, local_virial, warpSize);
         }
     }
 }
 
 bool EDIP_INFORMATION::EDIP_Force_Clustered(
     const CLUSTERED_SPATIAL_VIEW& view, const VECTOR* crd, VECTOR* frc,
-    const LTMatrix3 cell, const LTMatrix3 rcell,
-    const int need_atom_energy, float* atom_energy,
-    const int need_virial, LTMatrix3* atom_virial,
+    const LTMatrix3 cell, const LTMatrix3 rcell, const int need_atom_energy,
+    float* atom_energy, const int need_virial, LTMatrix3* atom_virial,
     const char** failure_reason)
 {
     if (failure_reason != NULL) *failure_reason = NULL;
@@ -954,16 +812,12 @@ bool EDIP_INFORMATION::EDIP_Force_Clustered(
         (need_virial && atom_virial == NULL))
     {
         if (failure_reason != NULL)
-            *failure_reason =
-                "EDIP clustered force received null buffers";
+            *failure_reason = "EDIP clustered force received null buffers";
         return false;
     }
     if (need_atom_energy)
-        deviceMemset(
-            d_energy_sum, 0,
-            sizeof(float) * (this->atom_numbers + 1));
-    if (!EDIP_Ensure_Clustered_Center_Atoms(
-            this, view, crd, cell))
+        deviceMemset(d_energy_sum, 0, sizeof(float) * (this->atom_numbers + 1));
+    if (!EDIP_Ensure_Clustered_Center_Atoms(this, view, crd, cell))
     {
         if (failure_reason != NULL)
             *failure_reason =
@@ -983,25 +837,21 @@ bool EDIP_INFORMATION::EDIP_Force_Clustered(
     }
 
     deviceMemset(this->z, 0, sizeof(float) * atom_numbers * 2);
+    Launch_Device_Kernel(Get_Z, gridSize, blockSize, 0, NULL, atom_numbers, crd,
+                         cell, rcell, clustered_neighbors.offsets,
+                         clustered_neighbors.items, this->d_parameters,
+                         this->atom_type_numbers, this->d_atom_type, this->z);
     Launch_Device_Kernel(
-        Get_Z, gridSize, blockSize, 0, NULL, atom_numbers, crd,
-        cell, rcell, d_clustered_neighbor_offsets,
-        d_clustered_neighbor_atoms, this->d_parameters,
-        this->atom_type_numbers, this->d_atom_type, this->z);
-    Launch_Device_Kernel(f1, gridSize, blockSize, 0, NULL, atom_numbers, crd,
-                         frc, cell, rcell, z, dE_dz,
-                         d_clustered_neighbor_offsets,
-                         d_clustered_neighbor_atoms, atom_energy,
-                         atom_virial, this->d_atom_type, this->d_parameters,
-                         this->atom_type_numbers, this->pair_type_numbers,
-                         this->d_energy_atom,
-                         need_atom_energy != 0, need_virial != 0);
-    Launch_Device_Kernel(
-        f2, gridSize, blockSize, 0, NULL, atom_numbers, crd,
-        cell, rcell, d_clustered_neighbor_offsets,
-        d_clustered_neighbor_atoms, this->d_parameters,
-        this->atom_type_numbers, this->d_atom_type,
-        this->dE_dz, frc, atom_virial, need_virial != 0);
+        f1, gridSize, blockSize, 0, NULL, atom_numbers, crd, frc, cell, rcell,
+        z, dE_dz, clustered_neighbors.offsets, clustered_neighbors.items,
+        atom_energy, atom_virial, this->d_atom_type, this->d_parameters,
+        this->atom_type_numbers, this->pair_type_numbers, this->d_energy_atom,
+        need_atom_energy != 0, need_virial != 0);
+    Launch_Device_Kernel(f2, gridSize, blockSize, 0, NULL, atom_numbers, crd,
+                         cell, rcell, clustered_neighbors.offsets,
+                         clustered_neighbors.items, this->d_parameters,
+                         this->atom_type_numbers, this->d_atom_type,
+                         this->dE_dz, frc, atom_virial, need_virial != 0);
     return true;
 }
 

@@ -3,6 +3,7 @@
 #include "../common.h"
 #include "../control.h"
 #include "../neighbor_list/contract/view.h"
+#include "clustered_csr.h"
 
 //  Justo et al, Phys Rev B, 58, 2539 (1998).
 struct EDIP_INFORMATION
@@ -31,24 +32,17 @@ struct EDIP_INFORMATION
     float* d_energy_atom = NULL;
     float* d_energy_sum = NULL;
 
-    long long clustered_neighbor_provider_incarnation = -1;
-    long long clustered_neighbor_payload_generation = -1;
-    int clustered_neighbor_numbers = 0;
-    int* d_clustered_neighbor_counts = NULL;
-    int clustered_neighbor_counts_capacity = 0;
-    int* d_clustered_neighbor_offsets = NULL;
-    int clustered_neighbor_offsets_capacity = 0;
-    int* d_clustered_neighbor_atoms = NULL;
-    int clustered_neighbor_atoms_capacity = 0;
+    ClusteredPayloadStamp clustered_neighbor_stamp = {};
+    ClusteredCSRStorage clustered_neighbors = {};
 
     void Initial(CONTROLLER* controller, const char* module_name = NULL);
 
-    bool EDIP_Force_Clustered(
-        const CLUSTERED_SPATIAL_VIEW& view, const VECTOR* crd, VECTOR* frc,
-        const LTMatrix3 cell, const LTMatrix3 rcell,
-        const int need_atom_energy, float* atom_energy,
-        const int need_virial, LTMatrix3* atom_virial,
-        const char** failure_reason = NULL);
+    bool EDIP_Force_Clustered(const CLUSTERED_SPATIAL_VIEW& view,
+                              const VECTOR* crd, VECTOR* frc,
+                              const LTMatrix3 cell, const LTMatrix3 rcell,
+                              const int need_atom_energy, float* atom_energy,
+                              const int need_virial, LTMatrix3* atom_virial,
+                              const char** failure_reason = NULL);
 
     void Step_Print(CONTROLLER* controller);
 };

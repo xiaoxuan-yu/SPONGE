@@ -1,5 +1,7 @@
 ﻿#include "vdw.h"
 
+#include "../clustered_gmxpacked_cpu.h"
+
 static const int p_rvdw = 0;
 static const int p_epsilon = 1;
 static const int p_alpha = 2;
@@ -122,15 +124,8 @@ static __global__ void REAXFF_VDW_Clustered_Gmxpacked(
          packed_idx < sci_entry.cjpacked_end; packed_idx += packed_partitions)
     {
         const CLUSTERED_GMXPACKED_CJ packed = cjpacked_entries[packed_idx];
-        const CLUSTERED_GMXPACKED_SPLIT split_entry = packed.split[split];
-        unsigned int pair_bits = 0xffffffffu;
-        if (split_entry.exclusion_index != 0)
-        {
-            pair_bits =
-                exclusion_entries[split_entry.exclusion_index]
-                    .pair[split_j_lane * kClusteredClusterSize + i_lane];
-        }
-        const unsigned int effective_mask = split_entry.imask & pair_bits;
+        const unsigned int effective_mask = Clustered_Gmxpacked_Effective_Imask(
+            packed, exclusion_entries, split, split_j_lane, i_lane);
         for (int jm = 0; jm < kClusteredJGroupSize; jm += 1)
         {
             const int cluster_j = packed.cj[jm];
@@ -154,11 +149,8 @@ static __global__ void REAXFF_VDW_Clustered_Gmxpacked(
             for (int i_local = 0; i_local < cluster_i_end - cluster_i_begin;
                  i_local += 1)
             {
-                const unsigned int packed_bit =
-                    1u << (jm * kClusteredSuperClusterClusters + i_local);
-                if ((effective_mask & packed_bit) == 0u ||
-                    (Clustered_Get_Pair_Active_I_Mask(shift_bits, split) &
-                     (1u << static_cast<unsigned int>(i_local))) == 0u)
+                if (!Clustered_Gmxpacked_I_Entry_Is_Active(
+                        effective_mask, shift_bits, split, jm, i_local))
                 {
                     continue;
                 }
@@ -257,153 +249,102 @@ static void REAXFF_VDW_Clustered_Gmxpacked_CPU(
     for (int sci = 0; sci < view.gmxpacked_sci_numbers; sci += 1)
     {
         const CLUSTERED_GMXPACKED_SCI sci_entry = view.gmxpacked_sci[sci];
-        const int cluster_i_begin =
-            view.super_cluster_offsets[sci_entry.supercluster_id];
-        const int cluster_i_end =
-            view.super_cluster_offsets[sci_entry.supercluster_id + 1];
-        const int cluster_i_numbers = cluster_i_end - cluster_i_begin;
         const VECTOR shift =
             Clustered_Shift_Vector_From_Id(sci_entry.shift_id, cell);
-        for (int packed_idx = sci_entry.cjpacked_begin;
-             packed_idx < sci_entry.cjpacked_end; packed_idx += 1)
+        int atom_j = -1;
+        int type_j = -1;
+        VECTOR rj = {};
+        VECTOR force_j = {};
+        float energy_j = 0.0f;
+        float pair_energy_sum = 0.0f;
+        LTMatrix3 virial_j = {};
+
+        auto begin_j = [&](const CLUSTERED_GMXPACKED_CPU_J_CANDIDATE& pair_j)
         {
-            const CLUSTERED_GMXPACKED_CJ& packed =
-                view.gmxpacked_cjpacked[packed_idx];
-            for (int jm = 0; jm < kClusteredJGroupSize; jm += 1)
+            if (!pair_j.j_is_local)
             {
-                const int cluster_j = packed.cj[jm];
-                if (cluster_j < 0) continue;
-                const unsigned int jm_shift = static_cast<unsigned int>(
-                    jm * kClusteredSuperClusterClusters);
-                for (int j_lane = 0; j_lane < view.cluster_size; j_lane += 1)
+                return false;
+            }
+            atom_j = sorted_atom_ids[pair_j.sorted_j];
+            type_j = atom_types[atom_j];
+            rj = sorted_crd[pair_j.sorted_j];
+            force_j = {0.0f, 0.0f, 0.0f};
+            energy_j = 0.0f;
+            pair_energy_sum = 0.0f;
+            virial_j = {};
+            return true;
+        };
+        auto consume_pair =
+            [&](const CLUSTERED_GMXPACKED_CPU_PAIR_CANDIDATE& pair)
+        {
+            if (!pair.i_is_local)
+            {
+                return;
+            }
+            const int atom_i = sorted_atom_ids[pair.sorted_i];
+            const int type_i = atom_types[atom_i];
+            const VECTOR drij = (sorted_crd[pair.sorted_i] - rj) + shift;
+            const float rij_sq = drij * drij;
+            if (rij_sq <= 0.0f || rij_sq >= cutoff_sq)
+            {
+                return;
+            }
+            const float rij = sqrtf(rij_sq);
+            const float* param =
+                params + (type_i * ntypes + type_j) * PARAM_STRIDE;
+            const SADfloat<1> energy_sad =
+                reax_vdw_energy_sad(SADfloat<1>(rij, 0), param, cutoff, p_vdw1);
+            const VECTOR force_i = (-energy_sad.dval[0] / rij) * drij;
+            atomicAdd(frc + atom_i, force_i);
+            force_j = force_j - force_i;
+            if constexpr (full_output)
+            {
+                const int owner = atom_i < atom_j ? atom_i : atom_j;
+                if (store_energy)
                 {
-                    if (!Clustered_Lane_Is_Valid(
-                            view.cluster_valid_masks[cluster_j], j_lane) ||
-                        !Clustered_Lane_Is_Local(
-                            view.cluster_local_masks[cluster_j], j_lane))
+                    if (owner == atom_j)
                     {
-                        continue;
+                        energy_j += energy_sad.val;
                     }
-                    const int split = j_lane / kClusteredSplitJClusterSize;
-                    const int split_j_lane =
-                        j_lane - split * kClusteredSplitJClusterSize;
-                    const CLUSTERED_GMXPACKED_SPLIT& split_entry =
-                        packed.split[split];
-                    const int sorted_j =
-                        view.cluster_offsets[cluster_j] + j_lane;
-                    const int atom_j = sorted_atom_ids[sorted_j];
-                    const int type_j = atom_types[atom_j];
-                    const VECTOR rj = sorted_crd[sorted_j];
-                    VECTOR force_j = {0.0f, 0.0f, 0.0f};
-                    float energy_j = 0.0f;
-                    float pair_energy_sum = 0.0f;
-                    LTMatrix3 virial_j = {};
-                    for (int i_lane = 0; i_lane < view.cluster_size;
-                         i_lane += 1)
+                    else
                     {
-                        unsigned int pair_bits = 0xffffffffu;
-                        if (split_entry.exclusion_index != 0)
-                        {
-                            pair_bits =
-                                view.gmxpacked_exclusions[split_entry
-                                                              .exclusion_index]
-                                    .pair[split_j_lane * kClusteredClusterSize +
-                                          i_lane];
-                        }
-                        const unsigned int active_i_mask =
-                            (split_entry.imask & pair_bits) >> jm_shift;
-                        if (active_i_mask == 0u) continue;
-                        for (int i_local = 0; i_local < cluster_i_numbers;
-                             i_local += 1)
-                        {
-                            if ((active_i_mask &
-                                 (1u << static_cast<unsigned int>(i_local))) ==
-                                0u)
-                            {
-                                continue;
-                            }
-                            const int cluster_i = cluster_i_begin + i_local;
-                            if (!Clustered_Lane_Is_Valid(
-                                    view.cluster_valid_masks[cluster_i],
-                                    i_lane) ||
-                                !Clustered_Lane_Is_Local(
-                                    view.cluster_local_masks[cluster_i],
-                                    i_lane))
-                            {
-                                continue;
-                            }
-                            const int sorted_i =
-                                view.cluster_offsets[cluster_i] + i_lane;
-                            const int atom_i = sorted_atom_ids[sorted_i];
-                            const int type_i = atom_types[atom_i];
-                            const VECTOR drij =
-                                (sorted_crd[sorted_i] - rj) + shift;
-                            const float rij_sq = drij * drij;
-                            if (rij_sq <= 0.0f || rij_sq >= cutoff_sq)
-                            {
-                                continue;
-                            }
-                            const float rij = sqrtf(rij_sq);
-                            const float* param =
-                                params +
-                                (type_i * ntypes + type_j) * PARAM_STRIDE;
-                            const SADfloat<1> energy_sad = reax_vdw_energy_sad(
-                                SADfloat<1>(rij, 0), param, cutoff, p_vdw1);
-                            const VECTOR force_i =
-                                (-energy_sad.dval[0] / rij) * drij;
-                            atomicAdd(frc + atom_i, force_i);
-                            force_j = force_j - force_i;
-                            if constexpr (full_output)
-                            {
-                                const int owner =
-                                    atom_i < atom_j ? atom_i : atom_j;
-                                if (store_energy)
-                                {
-                                    if (owner == atom_j)
-                                    {
-                                        energy_j += energy_sad.val;
-                                    }
-                                    else
-                                    {
-                                        atomicAdd(atom_energy + owner,
-                                                  energy_sad.val);
-                                    }
-                                    pair_energy_sum += energy_sad.val;
-                                }
-                                if (store_virial)
-                                {
-                                    const LTMatrix3 pair_virial =
-                                        Get_Virial_From_Force_Dis(force_i,
-                                                                  drij);
-                                    if (owner == atom_j)
-                                    {
-                                        virial_j = virial_j + pair_virial;
-                                    }
-                                    else
-                                    {
-                                        atomicAdd(atom_virial + owner,
-                                                  pair_virial);
-                                    }
-                                }
-                            }
-                        }
+                        atomicAdd(atom_energy + owner, energy_sad.val);
                     }
-                    atomicAdd(frc + atom_j, force_j);
-                    if constexpr (full_output)
+                    pair_energy_sum += energy_sad.val;
+                }
+                if (store_virial)
+                {
+                    const LTMatrix3 pair_virial =
+                        Get_Virial_From_Force_Dis(force_i, drij);
+                    if (owner == atom_j)
                     {
-                        if (store_energy)
-                        {
-                            atomicAdd(atom_energy + atom_j, energy_j);
-                            atomicAdd(energy_sum, pair_energy_sum);
-                        }
-                        if (store_virial)
-                        {
-                            atomicAdd(atom_virial + atom_j, virial_j);
-                        }
+                        virial_j = virial_j + pair_virial;
+                    }
+                    else
+                    {
+                        atomicAdd(atom_virial + owner, pair_virial);
                     }
                 }
             }
-        }
+        };
+        auto end_j = [&](const CLUSTERED_GMXPACKED_CPU_J_CANDIDATE&)
+        {
+            atomicAdd(frc + atom_j, force_j);
+            if constexpr (full_output)
+            {
+                if (store_energy)
+                {
+                    atomicAdd(atom_energy + atom_j, energy_j);
+                    atomicAdd(energy_sum, pair_energy_sum);
+                }
+                if (store_virial)
+                {
+                    atomicAdd(atom_virial + atom_j, virial_j);
+                }
+            }
+        };
+        Clustered_Gmxpacked_CPU_For_Each_Pair_In_SCI(view, sci, begin_j,
+                                                     consume_pair, end_j);
     }
 }
 #endif

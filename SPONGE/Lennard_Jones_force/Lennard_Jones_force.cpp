@@ -4,6 +4,8 @@
 #include <cstdint>
 #include <stdexcept>
 #include <type_traits>
+
+#include "../neighbor_list/contract/cpu_traversal.h"
 #include "../xponge/load/native/lj.hpp"
 #include "../xponge/xponge.h"
 // #include "assert.h"
@@ -49,8 +51,9 @@ Clustered_Gmxpacked_Get_LJ_Type_MinMax(const int a, const int b)
     return (hi * (hi + 1) >> 1) + lo;
 }
 
-static bool Clustered_Gmxpacked_Lj_Comb_Table_Compatible(
-    const float* lj_a, const float* lj_b, int atom_type_numbers)
+static bool Clustered_Gmxpacked_Lj_Comb_Table_Compatible(const float* lj_a,
+                                                         const float* lj_b,
+                                                         int atom_type_numbers)
 {
     if (lj_a == NULL || lj_b == NULL || atom_type_numbers <= 0)
     {
@@ -74,18 +77,14 @@ static bool Clustered_Gmxpacked_Lj_Comb_Table_Compatible(
             {
                 return false;
             }
-            const float expected_a =
-                sqrtf(fmaxf(lj_a[self_i], 0.0f)) *
-                sqrtf(fmaxf(lj_a[self_j], 0.0f));
-            const float expected_b =
-                sqrtf(fmaxf(lj_b[self_i], 0.0f)) *
-                sqrtf(fmaxf(lj_b[self_j], 0.0f));
+            const float expected_a = sqrtf(fmaxf(lj_a[self_i], 0.0f)) *
+                                     sqrtf(fmaxf(lj_a[self_j], 0.0f));
+            const float expected_b = sqrtf(fmaxf(lj_b[self_i], 0.0f)) *
+                                     sqrtf(fmaxf(lj_b[self_j], 0.0f));
             const float scale_a = fmaxf(1.0f, fabsf(lj_a[pair]));
             const float scale_b = fmaxf(1.0f, fabsf(lj_b[pair]));
-            if (fabsf(expected_a - lj_a[pair]) >
-                    abs_tol + rel_tol * scale_a ||
-                fabsf(expected_b - lj_b[pair]) >
-                    abs_tol + rel_tol * scale_b)
+            if (fabsf(expected_a - lj_a[pair]) > abs_tol + rel_tol * scale_a ||
+                fabsf(expected_b - lj_b[pair]) > abs_tol + rel_tol * scale_b)
             {
                 return false;
             }
@@ -105,10 +104,9 @@ static __device__ __forceinline__ unsigned int Clustered_Subgroup_Mask(
     return width_mask << (subgroup * static_cast<unsigned int>(subgroup_width));
 }
 
-static __device__ __forceinline__
-    void Reduce_Clustered_Subgroup_Vector_Components(float& x, float& y,
-                                                     float& z, int lane,
-                                                     int subgroup_width)
+static __device__ __forceinline__ void
+Reduce_Clustered_Subgroup_Vector_Components(float& x, float& y, float& z,
+                                            int lane, int subgroup_width)
 {
     const unsigned int subgroup_mask =
         Clustered_Subgroup_Mask(lane, subgroup_width);
@@ -120,10 +118,9 @@ static __device__ __forceinline__
     }
 }
 
-static __device__ __forceinline__
-    void Reduce_Clustered_Warp_Vector_Over_J_Components(float& x, float& y,
-                                                        float& z,
-                                                        int subgroup_width)
+static __device__ __forceinline__ void
+Reduce_Clustered_Warp_Vector_Over_J_Components(float& x, float& y, float& z,
+                                               int subgroup_width)
 {
     for (int delta = warpSize >> 1; delta >= subgroup_width; delta >>= 1)
     {
@@ -138,10 +135,7 @@ struct Clustered_Energy_Buffer
 {
     float unused;
 
-    __device__ __forceinline__ float& operator[](int)
-    {
-        return unused;
-    }
+    __device__ __forceinline__ float& operator[](int) { return unused; }
 
     __device__ __forceinline__ const float& operator[](int) const
     {
@@ -241,14 +235,13 @@ static __device__ __forceinline__ T Clustered_Load_ReadOnly(const T* ptr)
 
 static __device__ __forceinline__ float
 Reduce_Clustered_Subgroup_Vector_To_Component(float x, float y, float z,
-                                               int component_lane, int lane,
-                                               int subgroup_width)
+                                              int component_lane, int lane,
+                                              int subgroup_width)
 {
     const unsigned int subgroup_mask =
         Clustered_Subgroup_Mask(lane, subgroup_width);
     const int subgroup_leader = lane - lane % subgroup_width;
-    Reduce_Clustered_Subgroup_Vector_Components(x, y, z, lane,
-                                                subgroup_width);
+    Reduce_Clustered_Subgroup_Vector_Components(x, y, z, lane, subgroup_width);
     x = deviceShfl(subgroup_mask, x, subgroup_leader, warpSize);
     y = deviceShfl(subgroup_mask, y, subgroup_leader, warpSize);
     z = deviceShfl(subgroup_mask, z, subgroup_leader, warpSize);
@@ -263,9 +256,9 @@ Reduce_Clustered_Subgroup_Vector_To_Component(float x, float y, float z,
     return z;
 }
 
-static __device__ __forceinline__ float
-Reduce_Clustered_Warp_I_To_Component(float x, float y, float z, int i_lane,
-                                      int component_lane, int subgroup_width)
+static __device__ __forceinline__ float Reduce_Clustered_Warp_I_To_Component(
+    float x, float y, float z, int i_lane, int component_lane,
+    int subgroup_width)
 {
     Reduce_Clustered_Warp_Vector_Over_J_Components(x, y, z, subgroup_width);
     x = deviceShfl(FULL_MASK, x, i_lane, warpSize);
@@ -310,8 +303,8 @@ static __device__ __forceinline__ float Reduce_Clustered_Warp_Float_Over_J(
     return value;
 }
 
-static __device__ __forceinline__ LTMatrix3 Reduce_Clustered_Warp_Virial_Over_J(
-    LTMatrix3 value, int subgroup_width)
+static __device__ __forceinline__ LTMatrix3
+Reduce_Clustered_Warp_Virial_Over_J(LTMatrix3 value, int subgroup_width)
 {
     for (int delta = warpSize >> 1; delta >= subgroup_width; delta >>= 1)
     {
@@ -325,20 +318,20 @@ static __device__ __forceinline__ LTMatrix3 Reduce_Clustered_Warp_Virial_Over_J(
     return value;
 }
 
-static __device__ __forceinline__ float4 Pack_Clustered_Virial_Lo(
-    LTMatrix3 value)
+static __device__ __forceinline__ float4
+Pack_Clustered_Virial_Lo(LTMatrix3 value)
 {
     return {value.a11, value.a21, value.a22, value.a31};
 }
 
-static __device__ __forceinline__ float2 Pack_Clustered_Virial_Hi(
-    LTMatrix3 value)
+static __device__ __forceinline__ float2
+Pack_Clustered_Virial_Hi(LTMatrix3 value)
 {
     return {value.a32, value.a33};
 }
 
-static __device__ __forceinline__ LTMatrix3 Unpack_Clustered_Virial(
-    float4 lo, float2 hi)
+static __device__ __forceinline__ LTMatrix3 Unpack_Clustered_Virial(float4 lo,
+                                                                    float2 hi)
 {
     return {lo.x, lo.y, lo.z, lo.w, hi.x, hi.y};
 }
@@ -351,8 +344,8 @@ static __global__ void device_add(float* variable, const float adder)
     variable[0] += adder;
 }
 
-static __host__ __device__ __forceinline__ VECTOR_LJ Make_Packed_LJ_Atom(
-    const float4 xq, const int lj_type)
+static __host__ __device__ __forceinline__ VECTOR_LJ
+Make_Packed_LJ_Atom(const float4 xq, const int lj_type)
 {
     VECTOR_LJ atom = {};
     atom.crd = {xq.x, xq.y, xq.z};
@@ -368,15 +361,14 @@ Get_Clustered_Shifted_Displacement(const VECTOR_LJ r2, const VECTOR_LJ r1,
     return (r2.crd - r1.crd) - shift_vec;
 }
 
-static __device__ __forceinline__ float
-Get_Clustered_LJ_Force_Abs(const float inv_r2, const float inv_r6,
-                           const float A, const float B)
+static __device__ __forceinline__ float Get_Clustered_LJ_Force_Abs(
+    const float inv_r2, const float inv_r6, const float A, const float B)
 {
     return (B - A * inv_r6) * inv_r6 * inv_r2;
 }
 
-static __device__ __forceinline__ float
-Get_Clustered_LJ_Energy(const float inv_r6, const float A, const float B)
+static __device__ __forceinline__ float Get_Clustered_LJ_Energy(
+    const float inv_r6, const float A, const float B)
 {
     return (0.083333333f * A * inv_r6 - 0.166666667f * B) * inv_r6;
 }
@@ -387,8 +379,8 @@ static __device__ __forceinline__ float Get_Clustered_Direct_Coulomb_Energy(
     return charge_product * erfcf(beta_dr) * inv_r;
 }
 
-static __host__ __device__ __forceinline__ float
-Clustered_PME_Corr_F(const float z2)
+static __host__ __device__ __forceinline__ float Clustered_PME_Corr_F(
+    const float z2)
 {
     constexpr float FN6 = -1.7357322914161492954e-8F;
     constexpr float FN5 = 1.4703624142580877519e-6F;
@@ -422,9 +414,11 @@ Clustered_PME_Corr_F(const float z2)
 }
 
 static __device__ __forceinline__ float
-Get_Clustered_Direct_Coulomb_Force_Abs_PME_Corr(
-    const float charge_product, const float inv_r, const float inv_r2,
-    const float beta2_r2, const float beta3)
+Get_Clustered_Direct_Coulomb_Force_Abs_PME_Corr(const float charge_product,
+                                                const float inv_r,
+                                                const float inv_r2,
+                                                const float beta2_r2,
+                                                const float beta3)
 {
     return charge_product *
            (inv_r * inv_r2 + Clustered_PME_Corr_F(beta2_r2) * beta3);
@@ -433,201 +427,126 @@ Get_Clustered_Direct_Coulomb_Force_Abs_PME_Corr(
 #ifdef USE_CPU
 template <bool full_output>
 static void Cpu_Gmxpacked_Clustered_Lennard_Jones_And_Direct_Coulomb(
-    const int sci_numbers, const int cluster_size,
-    const int local_atom_numbers, const int* cluster_offsets,
-    const unsigned int* cluster_valid_masks,
-    const unsigned int* cluster_local_masks,
-    const int* super_cluster_offsets,
-    const LJ_CLUSTERED_GMXPACKED_SCI* sci_entries,
-    const LJ_CLUSTERED_GMXPACKED_CJ* cj_packed_entries,
-    const LJ_CLUSTERED_GMXPACKED_EXCLUSION* exclusion_entries,
+    const CLUSTERED_SPATIAL_VIEW& view, const int local_atom_numbers,
     const int* sorted_atom_ids, const float4* sorted_xq,
     const int* sorted_lj_type, const LTMatrix3 cell, const float* LJ_type_A,
     const float* LJ_type_B, const float cutoff, VECTOR* frc,
     const float pme_beta, float* atom_energy, LTMatrix3* atom_virial,
-    float* atom_direct_cf_energy, float* atom_LJ_ene,
-    const bool store_energy, const bool store_virial)
+    float* atom_direct_cf_energy, float* atom_LJ_ene, const bool store_energy,
+    const bool store_virial)
 {
     constexpr int max_cluster_size = kClusteredClusterSize;
     const float cutoff_sq = cutoff * cutoff;
+    const int sci_numbers = view.gmxpacked_sci_numbers;
+    const int cluster_size = view.cluster_size;
+    const int* cluster_offsets = view.cluster_offsets;
 
 #pragma omp parallel for schedule(dynamic)
     for (int sci = 0; sci < sci_numbers; sci += 1)
     {
-        const LJ_CLUSTERED_GMXPACKED_SCI sci_entry = sci_entries[sci];
-        const int super_i = sci_entry.supercluster_id;
-        const int cluster_i_start = super_cluster_offsets[super_i];
-        const int cluster_i_end = super_cluster_offsets[super_i + 1];
+        const LJ_CLUSTERED_GMXPACKED_SCI sci_entry = view.gmxpacked_sci[sci];
         const VECTOR pair_shift_vec =
             Clustered_Shift_Vector_From_Id(sci_entry.shift_id, cell);
-
-        for (int cluster_i = cluster_i_start; cluster_i < cluster_i_end;
-             cluster_i += 1)
+        auto consume_i =
+            [&](const CLUSTERED_GMXPACKED_CPU_LOCAL_I_CANDIDATE& pair_i)
         {
-            const unsigned int valid_mask_i = cluster_valid_masks[cluster_i];
-            const unsigned int local_mask_i = cluster_local_masks[cluster_i];
-            const int i_local = cluster_i - cluster_i_start;
-            for (int lane_i = 0; lane_i < cluster_size; lane_i += 1)
+            const int sorted_atom_i = pair_i.sorted_i;
+            const int atom_i = sorted_atom_ids[sorted_atom_i];
+            const VECTOR_LJ r1 = Make_Packed_LJ_Atom(
+                sorted_xq[sorted_atom_i], sorted_lj_type[sorted_atom_i]);
+            VECTOR frc_i = {0.0f, 0.0f, 0.0f};
+            float energy_lj = 0.0f;
+            float energy_coulomb = 0.0f;
+            LTMatrix3 virial = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+
+            auto consume_tile =
+                [&](const CLUSTERED_GMXPACKED_CPU_J_TILE_CANDIDATE& tile)
             {
-                if (!Clustered_Lane_Is_Valid(valid_mask_i, lane_i) ||
-                    !Clustered_Lane_Is_Local(local_mask_i, lane_i))
+                const int cluster_j = tile.cluster_j;
+                VECTOR frc_j[max_cluster_size] = {};
+                unsigned int active_force_j_mask = 0u;
+                unsigned int pair_j_mask = tile.active_j_mask;
+                while (pair_j_mask != 0u)
                 {
-                    continue;
-                }
-                const int sorted_atom_i = cluster_offsets[cluster_i] + lane_i;
-                const int atom_i = sorted_atom_ids[sorted_atom_i];
-                const VECTOR_LJ r1 = Make_Packed_LJ_Atom(
-                    sorted_xq[sorted_atom_i], sorted_lj_type[sorted_atom_i]);
-                VECTOR frc_i = {0.0f, 0.0f, 0.0f};
-                float energy_lj = 0.0f;
-                float energy_coulomb = 0.0f;
-                LTMatrix3 virial = {0.0f, 0.0f, 0.0f,
-                                    0.0f, 0.0f, 0.0f};
-
-                for (int packed_idx = sci_entry.cjpacked_begin;
-                     packed_idx < sci_entry.cjpacked_end; packed_idx += 1)
-                {
-                    const LJ_CLUSTERED_GMXPACKED_CJ& packed =
-                        cj_packed_entries[packed_idx];
-                    for (int jm = 0; jm < kClusteredJGroupSize; jm += 1)
+                    const int lane_j = __builtin_ctz(pair_j_mask);
+                    pair_j_mask &= pair_j_mask - 1u;
+                    const int sorted_atom_j =
+                        cluster_offsets[cluster_j] + lane_j;
+                    const int atom_j = sorted_atom_ids[sorted_atom_j];
+                    const VECTOR_LJ r2 =
+                        Make_Packed_LJ_Atom(sorted_xq[sorted_atom_j],
+                                            sorted_lj_type[sorted_atom_j]);
+                    const VECTOR dr = Get_Clustered_Shifted_Displacement(
+                        r2, r1, pair_shift_vec);
+                    const float dr2 = dr * dr;
+                    if (dr2 >= cutoff_sq || dr2 == 0.0f)
                     {
-                        const int cluster_j = packed.cj[jm];
-                        if (cluster_j < 0)
-                        {
-                            continue;
-                        }
-                        VECTOR frc_j[max_cluster_size] = {};
-                        unsigned int active_j_mask = 0u;
+                        continue;
+                    }
 
-                        for (int split = 0;
-                             split < kClusteredWarpSplitCount; split += 1)
-                        {
-                            const unsigned int packed_imask =
-                                packed.split[split].imask;
-                            const unsigned int record_imask =
-                                (packed_imask >>
-                                 Clustered_Jm_Imask_Shift(jm)) &
-                                ((1u << kClusteredSuperClusterClusters) - 1u);
-                            if ((record_imask &
-                                 (1u << static_cast<unsigned int>(i_local))) ==
-                                0u)
-                            {
-                                continue;
-                            }
-                            const int exclusion_index =
-                                packed.split[split].exclusion_index;
-                            for (int split_j_lane = 0;
-                                 split_j_lane < kClusteredSplitJClusterSize;
-                                 split_j_lane += 1)
-                            {
-                                unsigned int pair_bits = 0xffffffffu;
-                                if (exclusion_index != 0)
-                                {
-                                    pair_bits =
-                                        exclusion_entries[exclusion_index]
-                                            .pair[split_j_lane * cluster_size +
-                                                  lane_i];
-                                }
-                                if (((packed_imask & pair_bits) &
-                                     (1u << static_cast<unsigned int>(
-                                          Clustered_Jm_Imask_Shift(jm) +
-                                          i_local))) == 0u)
-                                {
-                                    continue;
-                                }
-                                const int lane_j =
-                                    split * kClusteredSplitJClusterSize +
-                                    split_j_lane;
-                                const int sorted_atom_j =
-                                    cluster_offsets[cluster_j] + lane_j;
-                                const int atom_j =
-                                    sorted_atom_ids[sorted_atom_j];
-                                const VECTOR_LJ r2 = Make_Packed_LJ_Atom(
-                                    sorted_xq[sorted_atom_j],
-                                    sorted_lj_type[sorted_atom_j]);
-                                const VECTOR dr =
-                                    Get_Clustered_Shifted_Displacement(
-                                        r2, r1, pair_shift_vec);
-                                const float dr2 = dr * dr;
-                                if (dr2 >= cutoff_sq || dr2 == 0.0f)
-                                {
-                                    continue;
-                                }
+                    const float dr_abs = sqrtf(dr2);
+                    const int atom_pair_LJ_type =
+                        Get_LJ_Type(r1.LJ_type, r2.LJ_type);
+                    const float A = LJ_type_A[atom_pair_LJ_type];
+                    const float B = LJ_type_B[atom_pair_LJ_type];
+                    const float ij_factor =
+                        atom_j < local_atom_numbers ? 1.0f : 0.5f;
+                    float frc_abs = Get_LJ_Force(r1, r2, dr_abs, A, B);
+                    frc_abs -=
+                        Get_Direct_Coulomb_Force(r1, r2, dr_abs, pme_beta);
+                    const VECTOR frc_lin = frc_abs * dr;
+                    frc_i = frc_i + frc_lin;
+                    if (atom_j < local_atom_numbers)
+                    {
+                        frc_j[lane_j] = frc_j[lane_j] - frc_lin;
+                        active_force_j_mask |=
+                            1u << static_cast<unsigned int>(lane_j);
+                    }
 
-                                const float dr_abs = sqrtf(dr2);
-                                const int atom_pair_LJ_type =
-                                    Get_LJ_Type(r1.LJ_type, r2.LJ_type);
-                                const float A = LJ_type_A[atom_pair_LJ_type];
-                                const float B = LJ_type_B[atom_pair_LJ_type];
-                                const float ij_factor =
-                                    atom_j < local_atom_numbers ? 1.0f : 0.5f;
-                                float frc_abs =
-                                    Get_LJ_Force(r1, r2, dr_abs, A, B);
-                                frc_abs -= Get_Direct_Coulomb_Force(
-                                    r1, r2, dr_abs, pme_beta);
-                                const VECTOR frc_lin = frc_abs * dr;
-                                frc_i = frc_i + frc_lin;
-                                if (atom_j < local_atom_numbers)
-                                {
-                                    frc_j[lane_j] =
-                                        frc_j[lane_j] - frc_lin;
-                                    active_j_mask |=
-                                        1u << static_cast<unsigned int>(lane_j);
-                                }
-
-                                if constexpr (full_output)
-                                {
-                                    virial =
-                                        virial -
-                                        ij_factor *
-                                            Get_Virial_From_Force_Dis(frc_lin,
-                                                                      dr);
-                                    energy_lj +=
-                                        ij_factor *
-                                        Get_LJ_Energy(r1, r2, dr_abs, A, B);
-                                    energy_coulomb +=
-                                        ij_factor *
-                                        Get_Direct_Coulomb_Energy(
-                                            r1, r2, dr_abs, pme_beta);
-                                }
-                            }
-                        }
-
-                        for (int lane_j = 0; lane_j < cluster_size;
-                             lane_j += 1)
-                        {
-                            if ((active_j_mask &
-                                 (1u << static_cast<unsigned int>(lane_j))) ==
-                                0u)
-                            {
-                                continue;
-                            }
-                            const int sorted_atom_j =
-                                cluster_offsets[cluster_j] + lane_j;
-                            const int atom_j = sorted_atom_ids[sorted_atom_j];
-                            atomicAdd(frc + atom_j, frc_j[lane_j]);
-                        }
+                    if constexpr (full_output)
+                    {
+                        virial = virial - ij_factor * Get_Virial_From_Force_Dis(
+                                                          frc_lin, dr);
+                        energy_lj +=
+                            ij_factor * Get_LJ_Energy(r1, r2, dr_abs, A, B);
+                        energy_coulomb +=
+                            ij_factor *
+                            Get_Direct_Coulomb_Energy(r1, r2, dr_abs, pme_beta);
                     }
                 }
 
-                atomicAdd(frc + atom_i, frc_i);
-                if constexpr (full_output)
+                for (int lane_j = 0; lane_j < cluster_size; lane_j += 1)
                 {
-                    if (store_energy)
+                    if ((active_force_j_mask &
+                         (1u << static_cast<unsigned int>(lane_j))) == 0u)
                     {
-                        atomicAdd(atom_energy + atom_i,
-                                  energy_lj + energy_coulomb);
-                        atomicAdd(atom_LJ_ene + atom_i, energy_lj);
-                        atomicAdd(atom_direct_cf_energy + atom_i,
-                                  energy_coulomb);
+                        continue;
                     }
-                    if (store_virial)
-                    {
-                        atomicAdd(atom_virial + atom_i, virial);
-                    }
+                    const int sorted_atom_j =
+                        cluster_offsets[cluster_j] + lane_j;
+                    const int atom_j = sorted_atom_ids[sorted_atom_j];
+                    atomicAdd(frc + atom_j, frc_j[lane_j]);
+                }
+            };
+            Clustered_Gmxpacked_CPU_For_Each_J_Tile_For_Local_I(view, pair_i,
+                                                                consume_tile);
+
+            atomicAdd(frc + atom_i, frc_i);
+            if constexpr (full_output)
+            {
+                if (store_energy)
+                {
+                    atomicAdd(atom_energy + atom_i, energy_lj + energy_coulomb);
+                    atomicAdd(atom_LJ_ene + atom_i, energy_lj);
+                    atomicAdd(atom_direct_cf_energy + atom_i, energy_coulomb);
+                }
+                if (store_virial)
+                {
+                    atomicAdd(atom_virial + atom_i, virial);
                 }
             }
-        }
+        };
+        Clustered_Gmxpacked_CPU_For_Each_Local_I_In_SCI(view, sci, consume_i);
     }
 }
 #endif
@@ -653,30 +572,29 @@ struct ClusteredRegularLJKernelInput
 template <typename Kernel>
 static void Launch_Clustered_Regular_LJ_Kernel(
     Kernel kernel, dim3 grid_size, dim3 block_size,
-    const CLUSTERED_SPATIAL_VIEW& view,
-    const LJClusteredWorkspace& workspace, const float2* sorted_lj_comb,
-    const uint64_t* pair_shift_bits, const int* sci_shift_flags,
-    int sci_shift_only,
+    const CLUSTERED_SPATIAL_VIEW& view, const LJClusteredWorkspace& workspace,
+    const float2* sorted_lj_comb, const uint64_t* pair_shift_bits,
+    const int* sci_shift_flags, int sci_shift_only,
     const ClusteredRegularLJKernelInput& input)
 {
     Launch_Device_Kernel(
         kernel, grid_size, block_size, 0, NULL, view.gmxpacked_sci_numbers,
         view.cluster_size, view.super_cluster_clusters, view.cluster_numbers,
-        view.cluster_offsets, view.cluster_valid_masks, view.cluster_local_masks,
-        view.super_cluster_offsets, view.gmxpacked_sci,
-        view.gmxpacked_cjpacked, view.gmxpacked_exclusions, pair_shift_bits,
-        sci_shift_flags, sci_shift_only, workspace.d_sorted_atom_ids,
-        workspace.d_sorted_xq, workspace.d_sorted_lj_type,
-        sorted_lj_comb, input.cell, input.lj_ab_table,
-        input.cutoff, input.force, input.pme_beta, input.atom_energy,
-        input.atom_virial, input.atom_direct_pme_energy, input.atom_lj_energy,
-        input.store_energy, input.store_virial);
+        view.cluster_offsets, view.cluster_valid_masks,
+        view.cluster_local_masks, view.super_cluster_offsets,
+        view.gmxpacked_sci, view.gmxpacked_cjpacked, view.gmxpacked_exclusions,
+        pair_shift_bits, sci_shift_flags, sci_shift_only,
+        workspace.d_sorted_atom_ids, workspace.d_sorted_xq,
+        workspace.d_sorted_lj_type, sorted_lj_comb, input.cell,
+        input.lj_ab_table, input.cutoff, input.force, input.pme_beta,
+        input.atom_energy, input.atom_virial, input.atom_direct_pme_energy,
+        input.atom_lj_energy, input.store_energy, input.store_virial);
 }
 
 static void Launch_Clustered_Regular_LJ_Full_Dense(
-    const CLUSTERED_SPATIAL_VIEW& view,
-    const LJClusteredWorkspace& workspace, bool use_lj_comb,
-    dim3 block_size, const ClusteredRegularLJKernelInput& input)
+    const CLUSTERED_SPATIAL_VIEW& view, const LJClusteredWorkspace& workspace,
+    bool use_lj_comb, dim3 block_size,
+    const ClusteredRegularLJKernelInput& input)
 {
     const int* sci_shift_flags = view.gmxpacked_sci_shift_safe_flags;
     constexpr unsigned int kAbForceOnlySciWorkParts = 4u;
@@ -692,13 +610,13 @@ static void Launch_Clustered_Regular_LJ_Full_Dense(
         static_cast<unsigned int>(view.gmxpacked_sci_numbers) * sci_work_parts,
         1u, 1u};
 
-#define CLUSTERED_GMXPACKED_SPLIT_FULL_DENSE_KERNEL(OUTPUT_MODE, SHIFT_MODE)                                  \
-    (use_lj_comb                                                                                                         \
-         ? Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb_ForceOnly_Warp_Record_Device<                               \
-               OUTPUT_MODE, ClusteredRegularLJParameterMode::COMBINATION,                                                \
-               ClusteredRegularLJLayoutMode::FULL_LOCAL_DENSE, SHIFT_MODE>                                               \
-         : Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb_ForceOnly_Warp_Record_Device<                               \
-               OUTPUT_MODE, ClusteredRegularLJParameterMode::AB_TABLE,                                                   \
+#define CLUSTERED_GMXPACKED_SPLIT_FULL_DENSE_KERNEL(OUTPUT_MODE, SHIFT_MODE)              \
+    (use_lj_comb                                                                          \
+         ? Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb_ForceOnly_Warp_Record_Device< \
+               OUTPUT_MODE, ClusteredRegularLJParameterMode::COMBINATION,                 \
+               ClusteredRegularLJLayoutMode::FULL_LOCAL_DENSE, SHIFT_MODE>                \
+         : Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb_ForceOnly_Warp_Record_Device< \
+               OUTPUT_MODE, ClusteredRegularLJParameterMode::AB_TABLE,                    \
                ClusteredRegularLJLayoutMode::FULL_LOCAL_DENSE, SHIFT_MODE>)
     auto fast_kernel = CLUSTERED_GMXPACKED_SPLIT_FULL_DENSE_KERNEL(
         ClusteredRegularLJOutputMode::FORCE_ONLY,
@@ -728,8 +646,7 @@ static void Launch_Clustered_Regular_LJ_Full_Dense(
                 ClusteredRegularLJOutputMode::FULL,
                 ClusteredRegularLJParameterMode::AB_TABLE,
                 ClusteredRegularLJLayoutMode::FULL_LOCAL_DENSE,
-                ClusteredRegularLJShiftMode::SCI_SHIFT_ONLY, VECTOR, 4,
-                false>;
+                ClusteredRegularLJShiftMode::SCI_SHIFT_ONLY, VECTOR, 4, false>;
         slow_kernel =
             Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb_ForceOnly_Warp_Record_Device<
                 ClusteredRegularLJOutputMode::FULL,
@@ -748,19 +665,19 @@ static void Launch_Clustered_Regular_LJ_Full_Dense(
     }
 #undef CLUSTERED_GMXPACKED_SPLIT_FULL_DENSE_KERNEL
 
-    Launch_Clustered_Regular_LJ_Kernel(
-        fast_kernel, grid_size, block_size, view, workspace,
-        workspace.d_sorted_lj_comb, NULL, sci_shift_flags, 1, input);
-    Launch_Clustered_Regular_LJ_Kernel(
-        slow_kernel, grid_size, block_size, view, workspace,
-        workspace.d_sorted_lj_comb, view.pair_shift_bits, sci_shift_flags, 0,
-        input);
+    Launch_Clustered_Regular_LJ_Kernel(fast_kernel, grid_size, block_size, view,
+                                       workspace, workspace.d_sorted_lj_comb,
+                                       NULL, sci_shift_flags, 1, input);
+    Launch_Clustered_Regular_LJ_Kernel(slow_kernel, grid_size, block_size, view,
+                                       workspace, workspace.d_sorted_lj_comb,
+                                       view.pair_shift_bits, sci_shift_flags, 0,
+                                       input);
 }
 
 static void Launch_Clustered_Regular_LJ_Dense_Offset(
-    const CLUSTERED_SPATIAL_VIEW& view,
-    const LJClusteredWorkspace& workspace, bool use_lj_comb,
-    dim3 block_size, const ClusteredRegularLJKernelInput& input)
+    const CLUSTERED_SPATIAL_VIEW& view, const LJClusteredWorkspace& workspace,
+    bool use_lj_comb, dim3 block_size,
+    const ClusteredRegularLJKernelInput& input)
 {
     constexpr unsigned int kAbSciWorkParts = 4u;
     const bool full_output = input.store_energy || input.store_virial;
@@ -770,14 +687,15 @@ static void Launch_Clustered_Regular_LJ_Dense_Offset(
         1u, 1u};
     const int* sci_shift_flags = view.gmxpacked_sci_shift_safe_flags;
 
-#define CLUSTERED_GMXPACKED_SPLIT_DENSE_OFFSET_KERNEL(OUTPUT_MODE, SHIFT_MODE)                                              \
-    (use_lj_comb                                                                                                            \
-         ? Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb_ForceOnly_Warp_Record_Device<                                  \
-               OUTPUT_MODE, ClusteredRegularLJParameterMode::COMBINATION,                                                   \
-               ClusteredRegularLJLayoutMode::DENSE_OFFSET, SHIFT_MODE>                                                      \
-         : Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb_ForceOnly_Warp_Record_Device<                                  \
-               OUTPUT_MODE, ClusteredRegularLJParameterMode::AB_TABLE,                                                      \
-               ClusteredRegularLJLayoutMode::DENSE_OFFSET, SHIFT_MODE, VECTOR, 4>)
+#define CLUSTERED_GMXPACKED_SPLIT_DENSE_OFFSET_KERNEL(OUTPUT_MODE, SHIFT_MODE)            \
+    (use_lj_comb                                                                          \
+         ? Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb_ForceOnly_Warp_Record_Device< \
+               OUTPUT_MODE, ClusteredRegularLJParameterMode::COMBINATION,                 \
+               ClusteredRegularLJLayoutMode::DENSE_OFFSET, SHIFT_MODE>                    \
+         : Nbnxm_Clustered_Lennard_Jones_And_Direct_Coulomb_ForceOnly_Warp_Record_Device< \
+               OUTPUT_MODE, ClusteredRegularLJParameterMode::AB_TABLE,                    \
+               ClusteredRegularLJLayoutMode::DENSE_OFFSET, SHIFT_MODE, VECTOR,            \
+               4>)
     auto fast_kernel = CLUSTERED_GMXPACKED_SPLIT_DENSE_OFFSET_KERNEL(
         ClusteredRegularLJOutputMode::FORCE_ONLY,
         ClusteredRegularLJShiftMode::SCI_SHIFT_ONLY);
@@ -795,19 +713,19 @@ static void Launch_Clustered_Regular_LJ_Dense_Offset(
     }
 #undef CLUSTERED_GMXPACKED_SPLIT_DENSE_OFFSET_KERNEL
 
-    Launch_Clustered_Regular_LJ_Kernel(
-        fast_kernel, grid_size, block_size, view, workspace,
-        workspace.d_sorted_lj_comb, NULL, sci_shift_flags, 1, input);
-    Launch_Clustered_Regular_LJ_Kernel(
-        slow_kernel, grid_size, block_size, view, workspace,
-        workspace.d_sorted_lj_comb, view.pair_shift_bits, sci_shift_flags, 0,
-        input);
+    Launch_Clustered_Regular_LJ_Kernel(fast_kernel, grid_size, block_size, view,
+                                       workspace, workspace.d_sorted_lj_comb,
+                                       NULL, sci_shift_flags, 1, input);
+    Launch_Clustered_Regular_LJ_Kernel(slow_kernel, grid_size, block_size, view,
+                                       workspace, workspace.d_sorted_lj_comb,
+                                       view.pair_shift_bits, sci_shift_flags, 0,
+                                       input);
 }
 
 static void Launch_Clustered_Regular_LJ_Regular(
-    const CLUSTERED_SPATIAL_VIEW& view,
-    const LJClusteredWorkspace& workspace, bool use_lj_comb,
-    dim3 block_size, const ClusteredRegularLJKernelInput& input)
+    const CLUSTERED_SPATIAL_VIEW& view, const LJClusteredWorkspace& workspace,
+    bool use_lj_comb, dim3 block_size,
+    const ClusteredRegularLJKernelInput& input)
 {
     const bool full_output = input.store_energy || input.store_virial;
     const dim3 grid_size = {
@@ -850,9 +768,9 @@ static void Launch_Clustered_Regular_LJ_Regular(
                 ClusteredRegularLJLayoutMode::REGULAR,
                 ClusteredRegularLJShiftMode::PAIR_SHIFT>;
     }
-    Launch_Clustered_Regular_LJ_Kernel(
-        kernel, grid_size, block_size, view, workspace, NULL,
-        view.pair_shift_bits, NULL, 0, input);
+    Launch_Clustered_Regular_LJ_Kernel(kernel, grid_size, block_size, view,
+                                       workspace, NULL, view.pair_shift_bits,
+                                       NULL, 0, input);
 }
 
 static void Launch_Clustered_Regular_LJ(
@@ -875,11 +793,9 @@ static void Launch_Clustered_Regular_LJ(
     const bool full_output =
         requested_input.store_energy || requested_input.store_virial;
     const bool has_payload =
-        view.gmxpacked_sci_numbers > 0 &&
-        view.gmxpacked_cjpacked_numbers > 0 &&
+        view.gmxpacked_sci_numbers > 0 && view.gmxpacked_cjpacked_numbers > 0 &&
         view.gmxpacked_exclusion_numbers > 0 && view.gmxpacked_sci != NULL &&
-        view.gmxpacked_cjpacked != NULL &&
-        view.gmxpacked_exclusions != NULL &&
+        view.gmxpacked_cjpacked != NULL && view.gmxpacked_exclusions != NULL &&
         workspace.d_sorted_atom_ids != NULL && workspace.d_sorted_xq != NULL &&
         workspace.d_sorted_lj_type != NULL &&
         (!use_lj_comb || workspace.d_sorted_lj_comb != NULL) &&
@@ -891,9 +807,8 @@ static void Launch_Clustered_Regular_LJ(
         view.cluster_size == kClusteredClusterSize &&
         view.super_cluster_clusters == kClusteredSuperClusterClusters &&
         view.cluster_numbers > 0;
-    const bool use_fast =
-        use_direct && fast_layout_compatible &&
-        view.gmxpacked_sci_shift_safe_flags != NULL;
+    const bool use_fast = use_direct && fast_layout_compatible &&
+                          view.gmxpacked_sci_shift_safe_flags != NULL;
     const bool use_full_local_dense =
         use_fast && view.ghost_numbers == 0 &&
         view.local_atom_numbers == view.total_atom_numbers &&
@@ -939,9 +854,8 @@ static void Launch_Clustered_Regular_LJ(
         kernel_input.force = workspace.d_sorted_frc;
     }
 
-    const dim3 block_size = {
-        static_cast<unsigned int>(view.cluster_size),
-        static_cast<unsigned int>(view.cluster_size), 1u};
+    const dim3 block_size = {static_cast<unsigned int>(view.cluster_size),
+                             static_cast<unsigned int>(view.cluster_size), 1u};
     if (workspace.direct_kernel_time_recorder != NULL)
     {
         workspace.direct_kernel_time_recorder->Start();
@@ -952,18 +866,18 @@ static void Launch_Clustered_Regular_LJ(
     }
     if (use_full_local_dense)
     {
-        Launch_Clustered_Regular_LJ_Full_Dense(
-            view, workspace, use_lj_comb, block_size, kernel_input);
+        Launch_Clustered_Regular_LJ_Full_Dense(view, workspace, use_lj_comb,
+                                               block_size, kernel_input);
     }
     else if (use_fast)
     {
-        Launch_Clustered_Regular_LJ_Dense_Offset(
-            view, workspace, use_lj_comb, block_size, kernel_input);
+        Launch_Clustered_Regular_LJ_Dense_Offset(view, workspace, use_lj_comb,
+                                                 block_size, kernel_input);
     }
     else
     {
-        Launch_Clustered_Regular_LJ_Regular(
-            view, workspace, use_lj_comb, block_size, kernel_input);
+        Launch_Clustered_Regular_LJ_Regular(view, workspace, use_lj_comb,
+                                            block_size, kernel_input);
     }
     if (workspace.gmxpacked_kernel_launch_time_recorder != NULL)
     {
@@ -1090,8 +1004,8 @@ void LENNARD_JONES_INFORMATION::Initial(CONTROLLER* controller, float cutoff,
             h_atom_LJ_type[i] = lj_to_use->atom_type[i];
         }
         gmxpacked_lj_comb_table_compatible =
-            Clustered_Gmxpacked_Lj_Comb_Table_Compatible(
-                h_LJ_A, h_LJ_B, atom_type_numbers);
+            Clustered_Gmxpacked_Lj_Comb_Table_Compatible(h_LJ_A, h_LJ_B,
+                                                         atom_type_numbers);
         Parameter_Host_To_Device();
         is_initialized = 1;
     }
@@ -1198,8 +1112,8 @@ void LENNARD_JONES_INFORMATION::Long_Range_Correction(int need_pressure,
 void LENNARD_JONES_INFORMATION::Parameter_Host_To_Device()
 {
     std::vector<float2> h_LJ_AB_packed((size_t)pair_type_numbers);
-    std::vector<float2> h_LJ_AB_matrix(
-        (size_t)atom_type_numbers * (size_t)atom_type_numbers);
+    std::vector<float2> h_LJ_AB_matrix((size_t)atom_type_numbers *
+                                       (size_t)atom_type_numbers);
     for (int i = 0; i < pair_type_numbers; i += 1)
     {
         h_LJ_AB_packed[(size_t)i] = {h_LJ_A[i], h_LJ_B[i]};
@@ -1237,14 +1151,13 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
     const int atom_numbers, const int local_atom_numbers,
     const int ghost_numbers, const VECTOR* crd, const float* charge,
     VECTOR* frc, const LTMatrix3 cell, const LTMatrix3 rcell,
-    const float pme_beta,
-    const int need_atom_energy, float* atom_energy, const int need_virial,
-    LTMatrix3* atom_virial, float* atom_direct_pme_energy)
+    const float pme_beta, const int need_atom_energy, float* atom_energy,
+    const int need_virial, LTMatrix3* atom_virial,
+    float* atom_direct_pme_energy)
 {
     if (is_initialized)
     {
-        if (clustered_neighbor_provider == NULL ||
-            clustered_workspace == NULL)
+        if (clustered_neighbor_provider == NULL || clustered_workspace == NULL)
         {
             throw std::runtime_error(
                 "regular LJ requires the clustered spatial service");
@@ -1263,9 +1176,9 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
         clustered_neighbor_provider->Build(request);
         if (clustered_neighbor_provider->TotalAtomNumbers() > 0)
         {
-            clustered_workspace->Gather_Plain(
-                crd, charge, crd_with_LJ_parameters_local, cell, rcell,
-                d_LJ_AB_packed);
+            clustered_workspace->Gather_Plain(crd, charge,
+                                              crd_with_LJ_parameters_local,
+                                              cell, rcell, d_LJ_AB_packed);
             CLUSTERED_SPATIAL_VIEW_REQUIREMENTS requirements;
             requirements.local_atom_numbers = local_atom_numbers;
             requirements.ghost_numbers = ghost_numbers;
@@ -1300,8 +1213,7 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
         {
             const bool clustered_gather_ready =
                 clustered_workspace->Plain_Gather_Ready_For_Current_Step();
-            if (!clustered_gather_ready)
-                return;
+            if (!clustered_gather_ready) return;
 #ifdef USE_CPU
             if (clustered_view.gmxpacked_sci_numbers <= 0 ||
                 clustered_view.gmxpacked_cjpacked_numbers <= 0 ||
@@ -1313,8 +1225,7 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
                 return;
             }
             auto cpu_f =
-                Cpu_Gmxpacked_Clustered_Lennard_Jones_And_Direct_Coulomb<
-                    false>;
+                Cpu_Gmxpacked_Clustered_Lennard_Jones_And_Direct_Coulomb<false>;
             if (need_atom_energy || need_virial)
             {
                 cpu_f =
@@ -1325,22 +1236,13 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
             {
                 clustered_workspace->direct_kernel_time_recorder->Start();
             }
-            cpu_f(
-                clustered_view.gmxpacked_sci_numbers,
-                clustered_view.cluster_size, local_atom_numbers,
-                clustered_view.cluster_offsets,
-                clustered_view.cluster_valid_masks,
-                clustered_view.cluster_local_masks,
-                clustered_view.super_cluster_offsets,
-                clustered_view.gmxpacked_sci,
-                clustered_view.gmxpacked_cjpacked,
-                clustered_view.gmxpacked_exclusions,
-                clustered_workspace->d_sorted_atom_ids,
-                clustered_workspace->d_sorted_xq,
-                clustered_workspace->d_sorted_lj_type, cell, d_LJ_A,
-                d_LJ_B, cutoff, frc, pme_beta, atom_energy, atom_virial,
-                atom_direct_pme_energy, d_LJ_energy_atom,
-                need_atom_energy != 0, need_virial != 0);
+            cpu_f(clustered_view, local_atom_numbers,
+                  clustered_workspace->d_sorted_atom_ids,
+                  clustered_workspace->d_sorted_xq,
+                  clustered_workspace->d_sorted_lj_type, cell, d_LJ_A, d_LJ_B,
+                  cutoff, frc, pme_beta, atom_energy, atom_virial,
+                  atom_direct_pme_energy, d_LJ_energy_atom,
+                  need_atom_energy != 0, need_virial != 0);
             if (clustered_workspace->direct_kernel_time_recorder != NULL)
             {
                 clustered_workspace->direct_kernel_time_recorder->Stop();
@@ -1365,9 +1267,9 @@ void LENNARD_JONES_INFORMATION::LJ_PME_Direct_Force_With_Atom_Energy_And_Virial(
                 d_LJ_energy_atom,
                 need_atom_energy != 0,
                 need_virial != 0};
-            Launch_Clustered_Regular_LJ(
-                clustered_view, *clustered_workspace,
-                gmxpacked_lj_comb_table_compatible, kernel_input);
+            Launch_Clustered_Regular_LJ(clustered_view, *clustered_workspace,
+                                        gmxpacked_lj_comb_table_compatible,
+                                        kernel_input);
 #endif
         }
     }

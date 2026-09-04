@@ -492,9 +492,8 @@ struct SW_CLUSTERED_CENTER_NEIGHBOR_CURSOR
     int neighbor_lane = 0;
 };
 
-static __host__ __device__ __forceinline__ int
-SW_Clustered_Find_Cluster(const CLUSTERED_SPATIAL_VIEW& view,
-                          const int sorted_atom)
+static __host__ __device__ __forceinline__ int SW_Clustered_Find_Cluster(
+    const CLUSTERED_SPATIAL_VIEW& view, const int sorted_atom)
 {
     int low = 0;
     int high = view.cluster_numbers;
@@ -510,10 +509,11 @@ SW_Clustered_Find_Cluster(const CLUSTERED_SPATIAL_VIEW& view,
 }
 
 static __host__ __device__ __forceinline__ bool
-SW_Clustered_Neighbor_Within_Cut(
-    const int type_i, const int atom_neighbor, const float distance,
-    const int* atom_types, const float* parameters,
-    const int atom_type_numbers, const float margin = 0.0f)
+SW_Clustered_Neighbor_Within_Cut(const int type_i, const int atom_neighbor,
+                                 const float distance, const int* atom_types,
+                                 const float* parameters,
+                                 const int atom_type_numbers,
+                                 const float margin = 0.0f)
 {
     const int type_neighbor = atom_types[atom_neighbor];
     const int pair_index = type_i * atom_type_numbers + type_neighbor;
@@ -522,11 +522,10 @@ SW_Clustered_Neighbor_Within_Cut(
     return distance < a * sigma + margin;
 }
 
-static __host__ __device__ __forceinline__ float
-SW_Two_Body_Analytic(
-    const float distance, const float A, const float B,
-    const float epsilon, const float p, const float q,
-    const float a, const float sigma, float* radial_derivative)
+static __host__ __device__ __forceinline__ float SW_Two_Body_Analytic(
+    const float distance, const float A, const float B, const float epsilon,
+    const float p, const float q, const float a, const float sigma,
+    float* radial_derivative)
 {
     const float reduced_distance = distance / sigma;
     const float power_p = powf(reduced_distance, -p);
@@ -538,57 +537,48 @@ SW_Two_Body_Analytic(
         (-p * B * power_p + q * power_q) / reduced_distance;
     *radial_derivative =
         A * epsilon * exponential *
-        (shape_derivative - shape * inverse_gap * inverse_gap) /
-        sigma;
+        (shape_derivative - shape * inverse_gap * inverse_gap) / sigma;
     return A * epsilon * shape * exponential;
 }
 
-static __host__ __device__ __forceinline__ float
-SW_Three_Body_Analytic(
+static __host__ __device__ __forceinline__ float SW_Three_Body_Analytic(
     const VECTOR drij, const VECTOR drik, const float rij, const float rik,
-    const float sigma1, const float a1, const float gamma1,
-    const float sigma2, const float a2, const float gamma2,
-    const float lambda, const float epsilon, const float b,
-    VECTOR* j_force, VECTOR* k_force)
+    const float sigma1, const float a1, const float gamma1, const float sigma2,
+    const float a2, const float gamma2, const float lambda, const float epsilon,
+    const float b, VECTOR* j_force, VECTOR* k_force)
 {
     const float inv_rij = 1.0f / rij;
     const float inv_rik = 1.0f / rik;
     const float inv_rij_sq = inv_rij * inv_rij;
     const float inv_rik_sq = inv_rik * inv_rik;
-    const float dot =
-        drij.x * drik.x + drij.y * drik.y + drij.z * drik.z;
+    const float dot = drij.x * drik.x + drij.y * drik.y + drij.z * drik.z;
     const float cosine = dot * inv_rij * inv_rik;
     const float angular = cosine - b;
     const float reduced_rij = rij / sigma1 - a1;
     const float reduced_rik = rik / sigma2 - a2;
     const float exponential1 = expf(gamma1 / reduced_rij);
     const float exponential2 = expf(gamma2 / reduced_rik);
-    const float prefactor =
-        lambda * epsilon * exponential1 * exponential2;
+    const float prefactor = lambda * epsilon * exponential1 * exponential2;
     const float angular_gradient = 2.0f * prefactor * angular;
-    const float radial_gradient_j =
-        -prefactor * angular * angular * gamma1 /
-        (sigma1 * reduced_rij * reduced_rij * rij);
-    const float radial_gradient_k =
-        -prefactor * angular * angular * gamma2 /
-        (sigma2 * reduced_rik * reduced_rik * rik);
+    const float radial_gradient_j = -prefactor * angular * angular * gamma1 /
+                                    (sigma1 * reduced_rij * reduced_rij * rij);
+    const float radial_gradient_k = -prefactor * angular * angular * gamma2 /
+                                    (sigma2 * reduced_rik * reduced_rik * rik);
     const float cross_j = inv_rij * inv_rik;
     const float self_j = cosine * inv_rij_sq;
     const float self_k = cosine * inv_rik_sq;
-    *j_force = {
-        angular_gradient * (drik.x * cross_j - drij.x * self_j) +
-            radial_gradient_j * drij.x,
-        angular_gradient * (drik.y * cross_j - drij.y * self_j) +
-            radial_gradient_j * drij.y,
-        angular_gradient * (drik.z * cross_j - drij.z * self_j) +
-            radial_gradient_j * drij.z};
-    *k_force = {
-        angular_gradient * (drij.x * cross_j - drik.x * self_k) +
-            radial_gradient_k * drik.x,
-        angular_gradient * (drij.y * cross_j - drik.y * self_k) +
-            radial_gradient_k * drik.y,
-        angular_gradient * (drij.z * cross_j - drik.z * self_k) +
-            radial_gradient_k * drik.z};
+    *j_force = {angular_gradient * (drik.x * cross_j - drij.x * self_j) +
+                    radial_gradient_j * drij.x,
+                angular_gradient * (drik.y * cross_j - drij.y * self_j) +
+                    radial_gradient_j * drij.y,
+                angular_gradient * (drik.z * cross_j - drij.z * self_j) +
+                    radial_gradient_j * drij.z};
+    *k_force = {angular_gradient * (drij.x * cross_j - drik.x * self_k) +
+                    radial_gradient_k * drik.x,
+                angular_gradient * (drij.y * cross_j - drik.y * self_k) +
+                    radial_gradient_k * drik.y,
+                angular_gradient * (drij.z * cross_j - drik.z * self_k) +
+                    radial_gradient_k * drik.z};
     return prefactor * angular * angular;
 }
 
@@ -602,8 +592,8 @@ SW_Clustered_Center_Neighbor_Cursor_Begin(
         return false;
     }
     *cursor = {};
-    if (!Clustered_Gmxpacked_Center_Cursor_Begin(
-            view, center_cluster, &cursor->center))
+    if (!Clustered_Gmxpacked_Center_Cursor_Begin(view, center_cluster,
+                                                 &cursor->center))
     {
         return false;
     }
@@ -611,38 +601,33 @@ SW_Clustered_Center_Neighbor_Cursor_Begin(
     return true;
 }
 
-static __host__ __device__ __forceinline__ bool
-SW_Clustered_Center_Tile_Atom(
+static __host__ __device__ __forceinline__ bool SW_Clustered_Center_Tile_Atom(
     const CLUSTERED_SPATIAL_VIEW& view,
-    const CLUSTERED_GMXPACKED_CENTER_TILE& tile,
-    const int center_lane, const int center_atom,
-    const int neighbor_cluster_offset, const int neighbor_lane,
-    const bool require_pair_shift_active, int* atom_neighbor)
+    const CLUSTERED_GMXPACKED_CENTER_TILE& tile, const int center_lane,
+    const int center_atom, const int neighbor_cluster_offset,
+    const int neighbor_lane, const bool require_pair_shift_active,
+    int* atom_neighbor)
 {
     if (atom_neighbor == NULL || center_lane < 0 ||
         center_lane >= view.cluster_size || neighbor_lane < 0 ||
-        neighbor_lane >= view.cluster_size ||
-        neighbor_cluster_offset < 0 ||
+        neighbor_lane >= view.cluster_size || neighbor_cluster_offset < 0 ||
         neighbor_cluster_offset >= kClusteredSuperClusterClusters ||
         (tile.neighbor_cluster_mask &
-         (1u << static_cast<unsigned int>(
-              neighbor_cluster_offset))) == 0u)
+         (1u << static_cast<unsigned int>(neighbor_cluster_offset))) == 0u)
     {
         return false;
     }
     const int neighbor_cluster =
         tile.neighbor_cluster_base + neighbor_cluster_offset;
-    if (neighbor_cluster < 0 ||
-        neighbor_cluster >= view.cluster_numbers)
+    if (neighbor_cluster < 0 || neighbor_cluster >= view.cluster_numbers)
     {
         return false;
     }
     const unsigned int neighbor_lane_bit =
         1u << static_cast<unsigned int>(neighbor_lane);
-    if ((view.cluster_valid_masks[neighbor_cluster] &
-         neighbor_lane_bit) == 0u ||
-        (view.cluster_local_masks[neighbor_cluster] &
-         neighbor_lane_bit) == 0u)
+    if ((view.cluster_valid_masks[neighbor_cluster] & neighbor_lane_bit) ==
+            0u ||
+        (view.cluster_local_masks[neighbor_cluster] & neighbor_lane_bit) == 0u)
     {
         return false;
     }
@@ -651,38 +636,31 @@ SW_Clustered_Center_Tile_Atom(
     int original_i_local = tile.original_i_local;
     int original_i_lane = center_lane;
     int original_j_lane = neighbor_lane;
-    if (tile.orientation ==
-        CLUSTERED_ENDPOINT_ORIENTATION::TRANSPOSED_J)
+    if (tile.orientation == CLUSTERED_ENDPOINT_ORIENTATION::TRANSPOSED_J)
     {
         original_i_local = neighbor_cluster_offset;
         original_i_lane = neighbor_lane;
         original_j_lane = center_lane;
     }
-    const int split =
-        original_j_lane / kClusteredSplitJClusterSize;
+    const int split = original_j_lane / kClusteredSplitJClusterSize;
     const int split_j_lane =
         original_j_lane - split * kClusteredSplitJClusterSize;
-    const CLUSTERED_GMXPACKED_SPLIT& split_entry =
-        packed.split[split];
+    const CLUSTERED_GMXPACKED_SPLIT& split_entry = packed.split[split];
     const unsigned int packed_bit =
-        1u << (static_cast<int>(tile.jm) *
-                   kClusteredSuperClusterClusters +
+        1u << (static_cast<int>(tile.jm) * kClusteredSuperClusterClusters +
                original_i_local);
     if ((split_entry.imask & packed_bit) == 0u)
     {
         return false;
     }
-    if (require_pair_shift_active &&
-        view.pair_shift_metadata_ready &&
+    if (require_pair_shift_active && view.pair_shift_metadata_ready &&
         view.pair_shift_bits != NULL)
     {
         const uint64_t shift_bits =
-            view.pair_shift_bits[
-                tile.cjpacked_id * kClusteredJGroupSize + tile.jm];
-        if ((Clustered_Get_Pair_Active_I_Mask(
-                 shift_bits, split) &
-             (1u << static_cast<unsigned int>(
-                  original_i_local))) == 0u)
+            view.pair_shift_bits[tile.cjpacked_id * kClusteredJGroupSize +
+                                 tile.jm];
+        if ((Clustered_Get_Pair_Active_I_Mask(shift_bits, split) &
+             (1u << static_cast<unsigned int>(original_i_local))) == 0u)
         {
             return false;
         }
@@ -691,8 +669,7 @@ SW_Clustered_Center_Tile_Atom(
     {
         const unsigned int pair_bits =
             view.gmxpacked_exclusions[split_entry.exclusion_index]
-                .pair[split_j_lane * kClusteredClusterSize +
-                      original_i_lane];
+                .pair[split_j_lane * kClusteredClusterSize + original_i_lane];
         if ((pair_bits & packed_bit) == 0u)
         {
             return false;
@@ -705,52 +682,47 @@ SW_Clustered_Center_Tile_Atom(
 }
 
 static __host__ __device__ __forceinline__ bool
-SW_Clustered_Center_Tile_Neighbor(
-    const CLUSTERED_SPATIAL_VIEW& view,
-    const CLUSTERED_GMXPACKED_CENTER_TILE& tile,
-    const int center_lane, const int center_atom,
-    const int neighbor_cluster_offset, const int neighbor_lane,
-    const VECTOR* crd, const LTMatrix3 cell,
-    SW_CLUSTERED_NEIGHBOR* neighbor)
+SW_Clustered_Center_Tile_Neighbor(const CLUSTERED_SPATIAL_VIEW& view,
+                                  const CLUSTERED_GMXPACKED_CENTER_TILE& tile,
+                                  const int center_lane, const int center_atom,
+                                  const int neighbor_cluster_offset,
+                                  const int neighbor_lane, const VECTOR* crd,
+                                  const LTMatrix3 cell,
+                                  SW_CLUSTERED_NEIGHBOR* neighbor)
 {
     if (neighbor == NULL)
     {
         return false;
     }
     int atom_neighbor = -1;
-    if (!SW_Clustered_Center_Tile_Atom(
-            view, tile, center_lane, center_atom,
-            neighbor_cluster_offset, neighbor_lane, true,
-            &atom_neighbor))
+    if (!SW_Clustered_Center_Tile_Atom(view, tile, center_lane, center_atom,
+                                       neighbor_cluster_offset, neighbor_lane,
+                                       true, &atom_neighbor))
     {
         return false;
     }
-    const int shift_id =
-        Clustered_Gmxpacked_Center_Tile_Pair_Shift_Id(
-            view, tile, neighbor_cluster_offset);
+    const int shift_id = Clustered_Gmxpacked_Center_Tile_Pair_Shift_Id(
+        view, tile, neighbor_cluster_offset);
     if (shift_id < 0)
     {
         return false;
     }
-    const VECTOR shift =
-        Clustered_Shift_Vector_From_Id(shift_id, cell);
-    const VECTOR displacement =
-        (crd[center_atom] - crd[atom_neighbor]) + shift;
+    const VECTOR shift = Clustered_Shift_Vector_From_Id(shift_id, cell);
+    const VECTOR displacement = (crd[center_atom] - crd[atom_neighbor]) + shift;
     neighbor->atom = atom_neighbor;
     neighbor->displacement = displacement;
-    neighbor->distance =
-        sqrtf(displacement.x * displacement.x +
-              displacement.y * displacement.y +
-              displacement.z * displacement.z);
+    neighbor->distance = sqrtf(displacement.x * displacement.x +
+                               displacement.y * displacement.y +
+                               displacement.z * displacement.z);
     return true;
 }
 
 static __host__ __device__ __forceinline__ bool
-SW_Clustered_Center_Neighbor_Next(
-    const CLUSTERED_SPATIAL_VIEW& view, const int center_lane,
-    const int center_atom, SW_CLUSTERED_CENTER_NEIGHBOR_CURSOR* cursor,
-    const VECTOR* crd, const LTMatrix3 cell,
-    SW_CLUSTERED_NEIGHBOR* neighbor)
+SW_Clustered_Center_Neighbor_Next(const CLUSTERED_SPATIAL_VIEW& view,
+                                  const int center_lane, const int center_atom,
+                                  SW_CLUSTERED_CENTER_NEIGHBOR_CURSOR* cursor,
+                                  const VECTOR* crd, const LTMatrix3 cell,
+                                  SW_CLUSTERED_NEIGHBOR* neighbor)
 {
     if (neighbor == NULL || cursor == NULL || center_lane < 0 ||
         center_lane >= view.cluster_size)
@@ -761,8 +733,8 @@ SW_Clustered_Center_Neighbor_Next(
     {
         if (!cursor->has_tile)
         {
-            if (!Clustered_Gmxpacked_Center_Cursor_Next(
-                    view, &cursor->center, &cursor->tile))
+            if (!Clustered_Gmxpacked_Center_Cursor_Next(view, &cursor->center,
+                                                        &cursor->tile))
             {
                 return false;
             }
@@ -771,16 +743,14 @@ SW_Clustered_Center_Neighbor_Next(
             cursor->neighbor_lane = 0;
         }
         const CLUSTERED_GMXPACKED_CENTER_TILE& tile = cursor->tile;
-        for (int neighbor_cluster_offset =
-                 cursor->neighbor_cluster_offset;
+        for (int neighbor_cluster_offset = cursor->neighbor_cluster_offset;
              neighbor_cluster_offset < kClusteredSuperClusterClusters;
              neighbor_cluster_offset += 1, cursor->neighbor_lane = 0)
         {
-            cursor->neighbor_cluster_offset =
-                neighbor_cluster_offset;
+            cursor->neighbor_cluster_offset = neighbor_cluster_offset;
             if ((tile.neighbor_cluster_mask &
-                 (1u << static_cast<unsigned int>(
-                      neighbor_cluster_offset))) == 0u)
+                 (1u << static_cast<unsigned int>(neighbor_cluster_offset))) ==
+                0u)
             {
                 continue;
             }
@@ -790,8 +760,8 @@ SW_Clustered_Center_Neighbor_Next(
                 cursor->neighbor_lane = neighbor_lane + 1;
                 if (SW_Clustered_Center_Tile_Neighbor(
                         view, tile, center_lane, center_atom,
-                        neighbor_cluster_offset, neighbor_lane,
-                        crd, cell, neighbor))
+                        neighbor_cluster_offset, neighbor_lane, crd, cell,
+                        neighbor))
                 {
                     return true;
                 }
@@ -802,48 +772,24 @@ SW_Clustered_Center_Neighbor_Next(
     }
 }
 
-template <typename T>
-static void SW_Reserve_Clustered_Neighbor_Buffer(
-    T** pointer, int* capacity, const int required)
-{
-    if (required <= *capacity && *pointer != NULL)
-    {
-        return;
-    }
-    Free_Single_Device_Pointer(
-        reinterpret_cast<void**>(pointer));
-    *capacity = 0;
-    if (required > 0)
-    {
-        Device_Malloc_Safely(
-            reinterpret_cast<void**>(pointer),
-            sizeof(T) * static_cast<size_t>(required));
-        *capacity = required;
-    }
-}
-
 template <bool fill>
 static __global__ void SW_Build_Clustered_Center_Atoms(
     const CLUSTERED_SPATIAL_VIEW view, const int atom_numbers,
     const VECTOR* crd, const LTMatrix3 cell, const int* atom_types,
     const float* parameters, const int atom_type_numbers,
-    const int* neighbor_offsets, int* neighbor_atoms,
-    int* neighbor_counts)
+    const int* neighbor_offsets, int* neighbor_atoms, int* neighbor_counts)
 {
 #ifdef USE_GPU
-    const int sorted_i =
-        static_cast<int>(threadIdx.y) +
-        static_cast<int>(blockDim.y * blockIdx.x);
+    const int sorted_i = static_cast<int>(threadIdx.y) +
+                         static_cast<int>(blockDim.y * blockIdx.x);
     if (sorted_i < atom_numbers)
 #else
 #pragma omp parallel for
     for (int sorted_i = 0; sorted_i < atom_numbers; sorted_i += 1)
 #endif
     {
-        const int center_cluster =
-            SW_Clustered_Find_Cluster(view, sorted_i);
-        const int center_lane =
-            sorted_i - view.cluster_offsets[center_cluster];
+        const int center_cluster = SW_Clustered_Find_Cluster(view, sorted_i);
+        const int center_lane = sorted_i - view.cluster_offsets[center_cluster];
         const int atom_i = view.sort_permutation[sorted_i];
         const int type_i = atom_types[atom_i];
 #ifdef USE_GPU
@@ -856,24 +802,22 @@ static __global__ void SW_Build_Clustered_Center_Atoms(
         int fill_has_range = 0;
         if (threadIdx.x == 0)
         {
-            fill_has_range =
-                Clustered_Gmxpacked_Center_Cursor_Begin(
-                    view, center_cluster, &fill_center)
-                    ? 1
-                    : 0;
+            fill_has_range = Clustered_Gmxpacked_Center_Cursor_Begin(
+                                 view, center_cluster, &fill_center)
+                                 ? 1
+                                 : 0;
         }
-        fill_has_range = deviceShfl(
-            FULL_MASK, fill_has_range, 0, warpSize);
-        fill_center.center_cluster = deviceShfl(
-            FULL_MASK, fill_center.center_cluster, 0, warpSize);
-        fill_center.center_supercluster = deviceShfl(
-            FULL_MASK, fill_center.center_supercluster, 0, warpSize);
-        fill_center.center_i_local = deviceShfl(
-            FULL_MASK, fill_center.center_i_local, 0, warpSize);
-        fill_center.next_reference = deviceShfl(
-            FULL_MASK, fill_center.next_reference, 0, warpSize);
-        fill_center.end_reference = deviceShfl(
-            FULL_MASK, fill_center.end_reference, 0, warpSize);
+        fill_has_range = deviceShfl(FULL_MASK, fill_has_range, 0, warpSize);
+        fill_center.center_cluster =
+            deviceShfl(FULL_MASK, fill_center.center_cluster, 0, warpSize);
+        fill_center.center_supercluster =
+            deviceShfl(FULL_MASK, fill_center.center_supercluster, 0, warpSize);
+        fill_center.center_i_local =
+            deviceShfl(FULL_MASK, fill_center.center_i_local, 0, warpSize);
+        fill_center.next_reference =
+            deviceShfl(FULL_MASK, fill_center.next_reference, 0, warpSize);
+        fill_center.end_reference =
+            deviceShfl(FULL_MASK, fill_center.end_reference, 0, warpSize);
         if (fill_has_range)
         {
             for (int reference_index = fill_center.next_reference;
@@ -885,86 +829,65 @@ static __global__ void SW_Build_Clustered_Center_Atoms(
                 if (threadIdx.x == 0)
                 {
                     CLUSTERED_GMXPACKED_CENTER_CURSOR
-                        reference_cursor = fill_center;
-                    reference_cursor.next_reference =
-                        reference_index;
-                    reference_cursor.end_reference =
-                        reference_index + 1;
-                    has_tile =
-                        Clustered_Gmxpacked_Center_Cursor_Next(
-                            view, &reference_cursor, &tile)
-                            ? 1
-                            : 0;
+                    reference_cursor = fill_center;
+                    reference_cursor.next_reference = reference_index;
+                    reference_cursor.end_reference = reference_index + 1;
+                    has_tile = Clustered_Gmxpacked_Center_Cursor_Next(
+                                   view, &reference_cursor, &tile)
+                                   ? 1
+                                   : 0;
                 }
-                has_tile = deviceShfl(
-                    FULL_MASK, has_tile, 0, warpSize);
-                tile.sci_id = deviceShfl(
-                    FULL_MASK, tile.sci_id, 0, warpSize);
-                tile.cjpacked_id = deviceShfl(
-                    FULL_MASK, tile.cjpacked_id, 0, warpSize);
-                tile.center_cluster = deviceShfl(
-                    FULL_MASK, tile.center_cluster, 0, warpSize);
+                has_tile = deviceShfl(FULL_MASK, has_tile, 0, warpSize);
+                tile.sci_id = deviceShfl(FULL_MASK, tile.sci_id, 0, warpSize);
+                tile.cjpacked_id =
+                    deviceShfl(FULL_MASK, tile.cjpacked_id, 0, warpSize);
+                tile.center_cluster =
+                    deviceShfl(FULL_MASK, tile.center_cluster, 0, warpSize);
                 tile.neighbor_cluster_base = deviceShfl(
-                    FULL_MASK, tile.neighbor_cluster_base, 0,
-                    warpSize);
-                tile.neighbor_cluster_mask =
-                    deviceShfl(
-                        FULL_MASK, tile.neighbor_cluster_mask,
-                        0, warpSize);
+                    FULL_MASK, tile.neighbor_cluster_base, 0, warpSize);
+                tile.neighbor_cluster_mask = deviceShfl(
+                    FULL_MASK, tile.neighbor_cluster_mask, 0, warpSize);
                 const int tile_jm = deviceShfl(
-                    FULL_MASK, static_cast<int>(tile.jm), 0,
-                    warpSize);
+                    FULL_MASK, static_cast<int>(tile.jm), 0, warpSize);
                 const int tile_original_i_local = deviceShfl(
-                    FULL_MASK,
-                    static_cast<int>(tile.original_i_local), 0,
+                    FULL_MASK, static_cast<int>(tile.original_i_local), 0,
                     warpSize);
                 const int tile_orientation = deviceShfl(
-                    FULL_MASK,
-                    static_cast<int>(tile.orientation), 0,
-                    warpSize);
+                    FULL_MASK, static_cast<int>(tile.orientation), 0, warpSize);
                 tile.jm = static_cast<unsigned char>(tile_jm);
                 tile.original_i_local =
-                    static_cast<unsigned char>(
-                        tile_original_i_local);
-                tile.orientation =
-                    static_cast<CLUSTERED_ENDPOINT_ORIENTATION>(
-                        tile_orientation);
+                    static_cast<unsigned char>(tile_original_i_local);
+                tile.orientation = static_cast<CLUSTERED_ENDPOINT_ORIENTATION>(
+                    tile_orientation);
                 if (!has_tile)
                 {
                     continue;
                 }
-                for (int candidate =
-                         static_cast<int>(threadIdx.x);
+                for (int candidate = static_cast<int>(threadIdx.x);
                      candidate <
-                     kClusteredSuperClusterClusters *
-                         view.cluster_size;
+                     kClusteredSuperClusterClusters * view.cluster_size;
                      candidate += static_cast<int>(blockDim.x))
                 {
                     const int neighbor_cluster_offset =
                         candidate / view.cluster_size;
                     const int neighbor_lane =
-                        candidate -
-                        neighbor_cluster_offset *
-                            view.cluster_size;
+                        candidate - neighbor_cluster_offset * view.cluster_size;
                     SW_CLUSTERED_NEIGHBOR neighbor;
                     if (!SW_Clustered_Center_Tile_Neighbor(
                             view, tile, center_lane, atom_i,
-                            neighbor_cluster_offset, neighbor_lane,
-                            crd, cell, &neighbor) ||
+                            neighbor_cluster_offset, neighbor_lane, crd, cell,
+                            &neighbor) ||
                         !SW_Clustered_Neighbor_Within_Cut(
-                            type_i, neighbor.atom,
-                            neighbor.distance, atom_types,
-                            parameters, atom_type_numbers,
+                            type_i, neighbor.atom, neighbor.distance,
+                            atom_types, parameters, atom_type_numbers,
                             view.rebuild_skin))
                     {
                         continue;
                     }
-                    const int slot =
-                        atomicAdd(neighbor_counts + sorted_i, 1);
+                    const int slot = atomicAdd(neighbor_counts + sorted_i, 1);
                     if constexpr (fill)
                     {
-                        neighbor_atoms[
-                            neighbor_offsets[sorted_i] + slot] =
+                        neighbor_atoms[neighbor_offsets[sorted_i] + slot] =
                             neighbor.atom;
                     }
                 }
@@ -972,21 +895,18 @@ static __global__ void SW_Build_Clustered_Center_Atoms(
         }
 #else
         int count = 0;
-        int write_index =
-            fill ? neighbor_offsets[sorted_i] : 0;
+        int write_index = fill ? neighbor_offsets[sorted_i] : 0;
         SW_CLUSTERED_CENTER_NEIGHBOR_CURSOR cursor;
-        if (SW_Clustered_Center_Neighbor_Cursor_Begin(
-                view, center_cluster, &cursor))
+        if (SW_Clustered_Center_Neighbor_Cursor_Begin(view, center_cluster,
+                                                      &cursor))
         {
             SW_CLUSTERED_NEIGHBOR neighbor;
             while (SW_Clustered_Center_Neighbor_Next(
-                view, center_lane, atom_i, &cursor, crd, cell,
-                &neighbor))
+                view, center_lane, atom_i, &cursor, crd, cell, &neighbor))
             {
                 if (SW_Clustered_Neighbor_Within_Cut(
-                        type_i, neighbor.atom, neighbor.distance,
-                        atom_types, parameters, atom_type_numbers,
-                        view.rebuild_skin))
+                        type_i, neighbor.atom, neighbor.distance, atom_types,
+                        parameters, atom_type_numbers, view.rebuild_skin))
                 {
                     if constexpr (fill)
                     {
@@ -1010,108 +930,75 @@ static __global__ void SW_Build_Clustered_Center_Atoms(
 
 #ifdef USE_CPU
 static bool SW_Build_Gmxpacked_Center_Atoms_CPU(
-    STILLINGER_WEBER_INFORMATION* sw,
-    const CLUSTERED_SPATIAL_VIEW& view, const VECTOR* crd,
-    const LTMatrix3 cell)
+    STILLINGER_WEBER_INFORMATION* sw, const CLUSTERED_SPATIAL_VIEW& view,
+    const VECTOR* crd, const LTMatrix3 cell)
 {
     std::vector<std::vector<int>> center_atoms(
         static_cast<size_t>(sw->atom_numbers));
     for (int sci = 0; sci < view.gmxpacked_sci_numbers; sci += 1)
     {
-        const CLUSTERED_GMXPACKED_SCI& sci_entry =
-            view.gmxpacked_sci[sci];
-        const int cluster_i_begin =
-            view.super_cluster_offsets[sci_entry.supercluster_id];
-        const int cluster_i_end =
-            view.super_cluster_offsets[sci_entry.supercluster_id + 1];
-        const int cluster_i_numbers = cluster_i_end - cluster_i_begin;
+        const CLUSTERED_GMXPACKED_SCI& sci_entry = view.gmxpacked_sci[sci];
         const VECTOR shift =
             Clustered_Shift_Vector_From_Id(sci_entry.shift_id, cell);
-        for (int i_local = 0; i_local < cluster_i_numbers; i_local += 1)
+        auto consume_tile =
+            [&](const CLUSTERED_GMXPACKED_CPU_I_TILE_CANDIDATE& tile)
         {
-            const int cluster_i = cluster_i_begin + i_local;
+            const int cluster_i = tile.cluster_i;
+            const int cluster_j = tile.cluster_j;
             const unsigned int valid_local_i_mask =
                 view.cluster_valid_masks[cluster_i] &
                 view.cluster_local_masks[cluster_i];
-            for (int packed_index = sci_entry.cjpacked_begin;
-                 packed_index < sci_entry.cjpacked_end; packed_index += 1)
+            const unsigned int valid_local_j_mask =
+                view.cluster_valid_masks[cluster_j] &
+                view.cluster_local_masks[cluster_j];
+            unsigned int active_i_mask = valid_local_i_mask;
+            while (active_i_mask != 0u)
             {
-                const CLUSTERED_GMXPACKED_CJ& packed =
-                    view.gmxpacked_cjpacked[packed_index];
-                for (int jm = 0; jm < kClusteredJGroupSize; jm += 1)
+                const int i_lane = __builtin_ctz(active_i_mask);
+                active_i_mask &= active_i_mask - 1u;
+                const int sorted_i = view.cluster_offsets[cluster_i] + i_lane;
+                const int atom_i = view.sort_permutation[sorted_i];
+                const int type_i = sw->d_atom_type[atom_i];
+                unsigned int active_j_mask =
+                    static_cast<unsigned int>(
+                        tile.pair_mask >> (i_lane * kClusteredClusterSize)) &
+                    valid_local_j_mask;
+                while (active_j_mask != 0u)
                 {
-                    const int cluster_j = packed.cj[jm];
-                    if (cluster_j < 0)
+                    const int j_lane = __builtin_ctz(active_j_mask);
+                    active_j_mask &= active_j_mask - 1u;
+                    const int sorted_j =
+                        view.cluster_offsets[cluster_j] + j_lane;
+                    const int atom_j = view.sort_permutation[sorted_j];
+                    if (atom_i == atom_j)
                     {
                         continue;
                     }
-                    const unsigned int packed_bit =
-                        1u << (jm * kClusteredSuperClusterClusters + i_local);
-                    const uint64_t pair_mask =
-                        Clustered_Gmxpacked_CPU_Pair_Mask(
-                            packed, packed_bit, view.gmxpacked_exclusions);
-                    if (pair_mask == 0ull)
+                    const VECTOR displacement =
+                        (crd[atom_i] - crd[atom_j]) + shift;
+                    const float distance = sqrtf(displacement * displacement);
+                    if (SW_Clustered_Neighbor_Within_Cut(
+                            type_i, atom_j, distance, sw->d_atom_type,
+                            sw->d_parameters, sw->atom_type_numbers,
+                            view.rebuild_skin))
                     {
-                        continue;
+                        center_atoms[atom_i].push_back(atom_j);
                     }
-                    const unsigned int valid_local_j_mask =
-                        view.cluster_valid_masks[cluster_j] &
-                        view.cluster_local_masks[cluster_j];
-                    unsigned int active_i_mask = valid_local_i_mask;
-                    while (active_i_mask != 0u)
+                    const int type_j = sw->d_atom_type[atom_j];
+                    if (SW_Clustered_Neighbor_Within_Cut(
+                            type_j, atom_i, distance, sw->d_atom_type,
+                            sw->d_parameters, sw->atom_type_numbers,
+                            view.rebuild_skin))
                     {
-                        const int i_lane = __builtin_ctz(active_i_mask);
-                        active_i_mask &= active_i_mask - 1u;
-                        const int sorted_i =
-                            view.cluster_offsets[cluster_i] + i_lane;
-                        const int atom_i = view.sort_permutation[sorted_i];
-                        const int type_i = sw->d_atom_type[atom_i];
-                        unsigned int active_j_mask =
-                            static_cast<unsigned int>(
-                                pair_mask >>
-                                (i_lane * kClusteredClusterSize)) &
-                            valid_local_j_mask;
-                        while (active_j_mask != 0u)
-                        {
-                            const int j_lane = __builtin_ctz(active_j_mask);
-                            active_j_mask &= active_j_mask - 1u;
-                            const int sorted_j =
-                                view.cluster_offsets[cluster_j] + j_lane;
-                            const int atom_j = view.sort_permutation[sorted_j];
-                            if (atom_i == atom_j)
-                            {
-                                continue;
-                            }
-                            const VECTOR displacement =
-                                (crd[atom_i] - crd[atom_j]) + shift;
-                            const float distance =
-                                sqrtf(displacement * displacement);
-                            if (SW_Clustered_Neighbor_Within_Cut(
-                                    type_i, atom_j, distance,
-                                    sw->d_atom_type, sw->d_parameters,
-                                    sw->atom_type_numbers,
-                                    view.rebuild_skin))
-                            {
-                                center_atoms[atom_i].push_back(atom_j);
-                            }
-                            const int type_j = sw->d_atom_type[atom_j];
-                            if (SW_Clustered_Neighbor_Within_Cut(
-                                    type_j, atom_i, distance,
-                                    sw->d_atom_type, sw->d_parameters,
-                                    sw->atom_type_numbers,
-                                    view.rebuild_skin))
-                            {
-                                center_atoms[atom_j].push_back(atom_i);
-                            }
-                        }
+                        center_atoms[atom_j].push_back(atom_i);
                     }
                 }
             }
-        }
+        };
+        Clustered_Gmxpacked_CPU_For_Each_I_Tile_In_SCI(view, sci, consume_tile);
     }
 
-    std::vector<int> offsets(
-        static_cast<size_t>(sw->atom_numbers + 1), 0);
+    std::vector<int> offsets(static_cast<size_t>(sw->atom_numbers + 1), 0);
     long long total = 0;
     for (int sorted_i = 0; sorted_i < sw->atom_numbers; sorted_i += 1)
     {
@@ -1124,45 +1011,34 @@ static bool SW_Build_Gmxpacked_Center_Atoms_CPU(
         }
     }
     offsets[sw->atom_numbers] = static_cast<int>(total);
-    sw->clustered_neighbor_numbers = static_cast<int>(total);
-    SW_Reserve_Clustered_Neighbor_Buffer(
-        &sw->d_clustered_neighbor_offsets,
-        &sw->clustered_neighbor_offsets_capacity,
-        sw->atom_numbers + 1);
-    SW_Reserve_Clustered_Neighbor_Buffer(
-        &sw->d_clustered_neighbor_atoms,
-        &sw->clustered_neighbor_atoms_capacity,
-        sw->clustered_neighbor_numbers);
-    deviceMemcpy(
-        sw->d_clustered_neighbor_offsets, offsets.data(),
-        sizeof(int) * static_cast<size_t>(sw->atom_numbers + 1),
-        deviceMemcpyHostToDevice);
+    ClusteredCSRStorage& storage = sw->clustered_neighbors;
+    storage.item_count = static_cast<int>(total);
+    storage.ReserveOffsets(sw->atom_numbers + 1);
+    storage.ReserveItems(storage.item_count);
+    deviceMemcpy(storage.offsets, offsets.data(),
+                 sizeof(int) * static_cast<size_t>(sw->atom_numbers + 1),
+                 deviceMemcpyHostToDevice);
     for (int sorted_i = 0; sorted_i < sw->atom_numbers; sorted_i += 1)
     {
         const int atom_i = view.sort_permutation[sorted_i];
         const std::vector<int>& row = center_atoms[atom_i];
         if (!row.empty())
         {
-            deviceMemcpy(
-                sw->d_clustered_neighbor_atoms + offsets[sorted_i],
-                row.data(), sizeof(int) * row.size(),
-                deviceMemcpyHostToDevice);
+            deviceMemcpy(storage.items + offsets[sorted_i], row.data(),
+                         sizeof(int) * row.size(), deviceMemcpyHostToDevice);
         }
     }
     return true;
 }
 #endif
 
-static bool SW_Ensure_Clustered_Center_Atoms(
-    STILLINGER_WEBER_INFORMATION* sw,
-    const CLUSTERED_SPATIAL_VIEW& view, const VECTOR* crd,
-    const LTMatrix3 cell)
+static bool SW_Ensure_Clustered_Center_Atoms(STILLINGER_WEBER_INFORMATION* sw,
+                                             const CLUSTERED_SPATIAL_VIEW& view,
+                                             const VECTOR* crd,
+                                             const LTMatrix3 cell)
 {
-    const long long payload_generation = view.gmxpacked_payload_generation;
-    if (sw->clustered_neighbor_provider_incarnation ==
-            view.provider_incarnation &&
-        sw->clustered_neighbor_payload_generation ==
-            payload_generation)
+    ClusteredCSRStorage& storage = sw->clustered_neighbors;
+    if (sw->clustered_neighbor_stamp.Matches(view))
     {
         return true;
     }
@@ -1172,96 +1048,48 @@ static bool SW_Ensure_Clustered_Center_Atoms(
         return false;
     }
 #else
-    SW_Reserve_Clustered_Neighbor_Buffer(
-        &sw->d_clustered_neighbor_counts,
-        &sw->clustered_neighbor_counts_capacity,
-        sw->atom_numbers);
-    SW_Reserve_Clustered_Neighbor_Buffer(
-        &sw->d_clustered_neighbor_offsets,
-        &sw->clustered_neighbor_offsets_capacity,
-        sw->atom_numbers + 1);
+    storage.ReserveCounts(sw->atom_numbers);
+    storage.ReserveOffsets(sw->atom_numbers + 1);
     constexpr int kBuilderWarpsPerBlock = 8;
-    const dim3 block_size(
-        static_cast<unsigned int>(CONTROLLER::device_warp),
-        static_cast<unsigned int>(kBuilderWarpsPerBlock), 1u);
-    const dim3 grid_size(
-        static_cast<unsigned int>(
-            (sw->atom_numbers + kBuilderWarpsPerBlock - 1) /
-            kBuilderWarpsPerBlock),
-        1u, 1u);
-    Launch_Device_Kernel(
-        SW_Build_Clustered_Center_Atoms<false>,
-        grid_size, block_size,
-        0, NULL, view, sw->atom_numbers, crd, cell,
-        sw->d_atom_type, sw->d_parameters,
-        sw->atom_type_numbers, NULL, NULL,
-        sw->d_clustered_neighbor_counts);
-
-    std::vector<int> host_counts(
-        static_cast<size_t>(sw->atom_numbers));
-    std::vector<int> host_offsets(
-        static_cast<size_t>(sw->atom_numbers + 1), 0);
-    deviceMemcpy(
-        host_counts.data(), sw->d_clustered_neighbor_counts,
-        sizeof(int) * static_cast<size_t>(sw->atom_numbers),
-        deviceMemcpyDeviceToHost);
-    long long total = 0;
-    for (int i = 0; i < sw->atom_numbers; i += 1)
+    const dim3 block_size(static_cast<unsigned int>(CONTROLLER::device_warp),
+                          static_cast<unsigned int>(kBuilderWarpsPerBlock), 1u);
+    const dim3 grid_size(static_cast<unsigned int>(
+                             (sw->atom_numbers + kBuilderWarpsPerBlock - 1) /
+                             kBuilderWarpsPerBlock),
+                         1u, 1u);
+    Launch_Device_Kernel(SW_Build_Clustered_Center_Atoms<false>, grid_size,
+                         block_size, 0, NULL, view, sw->atom_numbers, crd, cell,
+                         sw->d_atom_type, sw->d_parameters,
+                         sw->atom_type_numbers, NULL, NULL, storage.counts);
+    if (!Clustered_CSR_Device_Exclusive_Scan(&storage, sw->atom_numbers))
     {
-        if (host_counts[i] < 0)
-        {
-            return false;
-        }
-        host_offsets[i] = static_cast<int>(total);
-        total += host_counts[i];
-        if (total > INT_MAX)
-        {
-            return false;
-        }
+        return false;
     }
-    host_offsets[sw->atom_numbers] = static_cast<int>(total);
-    sw->clustered_neighbor_numbers = static_cast<int>(total);
-    deviceMemcpy(
-        sw->d_clustered_neighbor_offsets, host_offsets.data(),
-        sizeof(int) * static_cast<size_t>(sw->atom_numbers + 1),
-        deviceMemcpyHostToDevice);
-    SW_Reserve_Clustered_Neighbor_Buffer(
-        &sw->d_clustered_neighbor_atoms,
-        &sw->clustered_neighbor_atoms_capacity,
-        sw->clustered_neighbor_numbers);
-    if (sw->clustered_neighbor_numbers > 0)
+    storage.ReserveItems(storage.item_count);
+    if (storage.item_count > 0)
     {
-        Launch_Device_Kernel(
-            SW_Build_Clustered_Center_Atoms<true>,
-            grid_size, block_size,
-            0, NULL, view, sw->atom_numbers, crd, cell,
-            sw->d_atom_type, sw->d_parameters,
-            sw->atom_type_numbers,
-            sw->d_clustered_neighbor_offsets,
-            sw->d_clustered_neighbor_atoms,
-            sw->d_clustered_neighbor_counts);
+        Launch_Device_Kernel(SW_Build_Clustered_Center_Atoms<true>, grid_size,
+                             block_size, 0, NULL, view, sw->atom_numbers, crd,
+                             cell, sw->d_atom_type, sw->d_parameters,
+                             sw->atom_type_numbers, storage.offsets,
+                             storage.items, storage.counts);
     }
 #endif
-    sw->clustered_neighbor_provider_incarnation =
-        view.provider_incarnation;
-    sw->clustered_neighbor_payload_generation =
-        payload_generation;
+    sw->clustered_neighbor_stamp.Capture(view);
     return true;
 }
 
 #ifdef USE_GPU
 template <bool full_output>
-static __device__ __forceinline__ void
-SW_Clustered_Process_Cached_J(
+static __device__ __forceinline__ void SW_Clustered_Process_Cached_J(
     const int atom_i, const int type_i, const int j, const int lane,
     const int cached_neighbor_count, const int* cached_atoms,
-    const int* cached_types,
-    const float* cached_dx, const float* cached_dy,
+    const int* cached_types, const float* cached_dx, const float* cached_dy,
     const float* cached_dz, const float* cached_distances,
     const float* parameters, const int atom_type_numbers,
-    const int pair_type_numbers,
-    const bool store_virial, VECTOR* neighbor_force, VECTOR* i_force,
-    float* local_energy, LTMatrix3* local_virial)
+    const int pair_type_numbers, const bool store_virial,
+    VECTOR* neighbor_force, VECTOR* i_force, float* local_energy,
+    LTMatrix3* local_virial)
 {
     const int atom_j = cached_atoms[j];
     const int type_j = cached_types[j];
@@ -1279,11 +1107,9 @@ SW_Clustered_Process_Cached_J(
     if (lane == j && atom_j > atom_i && rij < a1 * sigma1)
     {
         float radial_derivative = 0.0f;
-        *local_energy += SW_Two_Body_Analytic(
-            rij, A, B, epsilon, p, q, a1, sigma1,
-            &radial_derivative);
-        const VECTOR pair_force =
-            radial_derivative / rij * drij;
+        *local_energy += SW_Two_Body_Analytic(rij, A, B, epsilon, p, q, a1,
+                                              sigma1, &radial_derivative);
+        const VECTOR pair_force = radial_derivative / rij * drij;
         *i_force = *i_force - pair_force;
         *neighbor_force = *neighbor_force + pair_force;
         if constexpr (full_output)
@@ -1291,8 +1117,7 @@ SW_Clustered_Process_Cached_J(
             if (store_virial)
             {
                 *local_virial =
-                    *local_virial -
-                    Get_Virial_From_Force_Dis(pair_force, drij);
+                    *local_virial - Get_Virial_From_Force_Dis(pair_force, drij);
             }
         }
     }
@@ -1300,8 +1125,7 @@ SW_Clustered_Process_Cached_J(
     if (lane > j && lane < cached_neighbor_count)
     {
         const int type_k = cached_types[lane];
-        const VECTOR drik = {
-            cached_dx[lane], cached_dy[lane], cached_dz[lane]};
+        const VECTOR drik = {cached_dx[lane], cached_dy[lane], cached_dz[lane]};
         const float rik = cached_distances[lane];
         const int pair_index_2 = type_i * atom_type_numbers + type_k;
         const float a2 = parameters[8 * pair_index_2 + 5];
@@ -1314,15 +1138,13 @@ SW_Clustered_Process_Cached_J(
                 type_j * atom_type_numbers + type_k;
             const float lambda =
                 parameters[8 * pair_type_numbers + 3 * triple_index];
-            epsilon =
-                parameters[8 * pair_type_numbers + 3 * triple_index + 1];
+            epsilon = parameters[8 * pair_type_numbers + 3 * triple_index + 1];
             const float b =
                 parameters[8 * pair_type_numbers + 3 * triple_index + 2];
             VECTOR k_three_force;
             const float three_body_energy = SW_Three_Body_Analytic(
-                drij, drik, rij, rik, sigma1, a1, gamma1,
-                sigma2, a2, gamma2, lambda, epsilon, b,
-                &j_three_force, &k_three_force);
+                drij, drik, rij, rik, sigma1, a1, gamma1, sigma2, a2, gamma2,
+                lambda, epsilon, b, &j_three_force, &k_three_force);
             *neighbor_force = *neighbor_force + k_three_force;
             *i_force = *i_force - j_three_force - k_three_force;
             *local_energy += three_body_energy;
@@ -1332,10 +1154,8 @@ SW_Clustered_Process_Cached_J(
                 {
                     *local_virial =
                         *local_virial -
-                        Get_Virial_From_Force_Dis(
-                            j_three_force, drij) -
-                        Get_Virial_From_Force_Dis(
-                            k_three_force, drik);
+                        Get_Virial_From_Force_Dis(j_three_force, drij) -
+                        Get_Virial_From_Force_Dis(k_three_force, drik);
                 }
             }
         }
@@ -1367,8 +1187,8 @@ static void SW_Clustered_Process_Cached_Center_CPU(
     const int* neighbor_atoms, const VECTOR* crd, VECTOR* frc,
     const LTMatrix3 cell, const LTMatrix3 rcell, const int* atom_types,
     const float* parameters, const int atom_type_numbers,
-    const int pair_type_numbers, const bool store_virial,
-    VECTOR* i_force, float* local_energy, LTMatrix3* local_virial)
+    const int pair_type_numbers, const bool store_virial, VECTOR* i_force,
+    float* local_energy, LTMatrix3* local_virial)
 {
     const VECTOR ri = crd[atom_i];
     for (int j = 0; j < neighbor_count; j += 1)
@@ -1378,8 +1198,7 @@ static void SW_Clustered_Process_Cached_Center_CPU(
         const VECTOR drij =
             Get_Periodic_Displacement(ri, crd[atom_j], cell, rcell);
         const float rij = sqrtf(drij * drij);
-        const int pair_index_1 =
-            type_i * atom_type_numbers + type_j;
+        const int pair_index_1 = type_i * atom_type_numbers + type_j;
         const float A = parameters[8 * pair_index_1];
         const float B = parameters[8 * pair_index_1 + 1];
         float epsilon = parameters[8 * pair_index_1 + 2];
@@ -1392,20 +1211,17 @@ static void SW_Clustered_Process_Cached_Center_CPU(
         if (atom_j > atom_i && rij < a1 * sigma1)
         {
             float radial_derivative = 0.0f;
-            *local_energy += SW_Two_Body_Analytic(
-                rij, A, B, epsilon, p, q, a1, sigma1,
-                &radial_derivative);
-            const VECTOR pair_force =
-                radial_derivative / rij * drij;
+            *local_energy += SW_Two_Body_Analytic(rij, A, B, epsilon, p, q, a1,
+                                                  sigma1, &radial_derivative);
+            const VECTOR pair_force = radial_derivative / rij * drij;
             *i_force = *i_force - pair_force;
             j_force = j_force + pair_force;
             if constexpr (full_output)
             {
                 if (store_virial)
                 {
-                    *local_virial =
-                        *local_virial -
-                        Get_Virial_From_Force_Dis(pair_force, drij);
+                    *local_virial = *local_virial -
+                                    Get_Virial_From_Force_Dis(pair_force, drij);
                 }
             }
         }
@@ -1414,41 +1230,32 @@ static void SW_Clustered_Process_Cached_Center_CPU(
             const int atom_k = neighbor_atoms[k];
             const int type_k = atom_types[atom_k];
             const VECTOR drik =
-                Get_Periodic_Displacement(
-                    ri, crd[atom_k], cell, rcell);
+                Get_Periodic_Displacement(ri, crd[atom_k], cell, rcell);
             const float rik = sqrtf(drik * drik);
-            const int pair_index_2 =
-                type_i * atom_type_numbers + type_k;
+            const int pair_index_2 = type_i * atom_type_numbers + type_k;
             const float a2 = parameters[8 * pair_index_2 + 5];
             const float sigma2 = parameters[8 * pair_index_2 + 7];
             VECTOR k_force = {};
             if (rij < a1 * sigma1 && rik < a2 * sigma2)
             {
-                const float gamma2 =
-                    parameters[8 * pair_index_2 + 6];
+                const float gamma2 = parameters[8 * pair_index_2 + 6];
                 const int triple_index =
                     type_i * atom_type_numbers * atom_type_numbers +
                     type_j * atom_type_numbers + type_k;
                 const float lambda =
-                    parameters[8 * pair_type_numbers +
-                               3 * triple_index];
+                    parameters[8 * pair_type_numbers + 3 * triple_index];
                 epsilon =
-                    parameters[8 * pair_type_numbers +
-                               3 * triple_index + 1];
+                    parameters[8 * pair_type_numbers + 3 * triple_index + 1];
                 const float b =
-                    parameters[8 * pair_type_numbers +
-                               3 * triple_index + 2];
+                    parameters[8 * pair_type_numbers + 3 * triple_index + 2];
                 VECTOR j_three_force;
                 VECTOR k_three_force;
-                const float three_body_energy =
-                    SW_Three_Body_Analytic(
-                        drij, drik, rij, rik, sigma1, a1, gamma1,
-                        sigma2, a2, gamma2, lambda, epsilon, b,
-                        &j_three_force, &k_three_force);
+                const float three_body_energy = SW_Three_Body_Analytic(
+                    drij, drik, rij, rik, sigma1, a1, gamma1, sigma2, a2,
+                    gamma2, lambda, epsilon, b, &j_three_force, &k_three_force);
                 j_force = j_force + j_three_force;
                 k_force = k_force + k_three_force;
-                *i_force =
-                    *i_force - j_three_force - k_three_force;
+                *i_force = *i_force - j_three_force - k_three_force;
                 *local_energy += three_body_energy;
                 if constexpr (full_output)
                 {
@@ -1456,10 +1263,8 @@ static void SW_Clustered_Process_Cached_Center_CPU(
                     {
                         *local_virial =
                             *local_virial -
-                            Get_Virial_From_Force_Dis(
-                                j_three_force, drij) -
-                            Get_Virial_From_Force_Dis(
-                                k_three_force, drik);
+                            Get_Virial_From_Force_Dis(j_three_force, drij) -
+                            Get_Virial_From_Force_Dis(k_three_force, drik);
                     }
                 }
             }
@@ -1471,45 +1276,41 @@ static void SW_Clustered_Process_Cached_Center_CPU(
 #endif
 
 template <bool full_output>
-static __global__ __launch_bounds__(512) void
-SW_Clustered_Center_Cached(
+static __global__ __launch_bounds__(512) void SW_Clustered_Center_Cached(
     const CLUSTERED_SPATIAL_VIEW view, const int atom_numbers,
-    const int* neighbor_offsets, const int* neighbor_atoms,
-    const VECTOR* crd, VECTOR* frc, const LTMatrix3 cell,
-    const LTMatrix3 rcell, float* atom_energy,
-    LTMatrix3* atom_virial, const int* atom_types,
+    const int* neighbor_offsets, const int* neighbor_atoms, const VECTOR* crd,
+    VECTOR* frc, const LTMatrix3 cell, const LTMatrix3 rcell,
+    float* atom_energy, LTMatrix3* atom_virial, const int* atom_types,
     const float* parameters, const int atom_type_numbers,
-    const int pair_type_numbers, float* this_energy,
-    const bool store_energy, const bool store_virial)
+    const int pair_type_numbers, float* this_energy, const bool store_energy,
+    const bool store_virial)
 {
 #ifdef USE_GPU
-    __shared__ int cached_neighbor_atoms
-        [kSWClusteredWarpsPerBlock][kSWClusteredCachedNeighborCapacity];
-    __shared__ int cached_neighbor_types
-        [kSWClusteredWarpsPerBlock][kSWClusteredCachedNeighborCapacity];
-    __shared__ float cached_neighbor_dx
-        [kSWClusteredWarpsPerBlock][kSWClusteredCachedNeighborCapacity];
-    __shared__ float cached_neighbor_dy
-        [kSWClusteredWarpsPerBlock][kSWClusteredCachedNeighborCapacity];
-    __shared__ float cached_neighbor_dz
-        [kSWClusteredWarpsPerBlock][kSWClusteredCachedNeighborCapacity];
-    __shared__ float cached_neighbor_distances
-        [kSWClusteredWarpsPerBlock][kSWClusteredCachedNeighborCapacity];
+    __shared__ int cached_neighbor_atoms[kSWClusteredWarpsPerBlock]
+                                        [kSWClusteredCachedNeighborCapacity];
+    __shared__ int cached_neighbor_types[kSWClusteredWarpsPerBlock]
+                                        [kSWClusteredCachedNeighborCapacity];
+    __shared__ float cached_neighbor_dx[kSWClusteredWarpsPerBlock]
+                                       [kSWClusteredCachedNeighborCapacity];
+    __shared__ float cached_neighbor_dy[kSWClusteredWarpsPerBlock]
+                                       [kSWClusteredCachedNeighborCapacity];
+    __shared__ float cached_neighbor_dz[kSWClusteredWarpsPerBlock]
+                                       [kSWClusteredCachedNeighborCapacity];
+    __shared__ float
+        cached_neighbor_distances[kSWClusteredWarpsPerBlock]
+                                 [kSWClusteredCachedNeighborCapacity];
 #endif
 #ifdef USE_GPU
-    const int sorted_i =
-        static_cast<int>(threadIdx.y) +
-        static_cast<int>(blockDim.y * blockIdx.x);
+    const int sorted_i = static_cast<int>(threadIdx.y) +
+                         static_cast<int>(blockDim.y * blockIdx.x);
     if (sorted_i < atom_numbers)
 #else
 #pragma omp parallel for
     for (int sorted_i = 0; sorted_i < atom_numbers; sorted_i += 1)
 #endif
     {
-        const int center_cluster =
-            SW_Clustered_Find_Cluster(view, sorted_i);
-        const int center_lane =
-            sorted_i - view.cluster_offsets[center_cluster];
+        const int center_cluster = SW_Clustered_Find_Cluster(view, sorted_i);
+        const int center_lane = sorted_i - view.cluster_offsets[center_cluster];
         const int atom_i = view.sort_permutation[sorted_i];
         const int type_i = atom_types[atom_i];
         float local_energy = 0.0f;
@@ -1528,8 +1329,7 @@ SW_Clustered_Center_Cached(
         const int neighbor_begin = neighbor_offsets[sorted_i];
         const int neighbor_end = neighbor_offsets[sorted_i + 1];
         int cached_neighbor_total = 0;
-        for (int neighbor_base = neighbor_begin;
-             neighbor_base < neighbor_end;
+        for (int neighbor_base = neighbor_begin; neighbor_base < neighbor_end;
              neighbor_base += static_cast<int>(blockDim.x))
         {
             const int neighbor_index =
@@ -1541,53 +1341,44 @@ SW_Clustered_Center_Cached(
             if (neighbor_index < neighbor_end)
             {
                 atom_neighbor = neighbor_atoms[neighbor_index];
-                displacement = Get_Periodic_Displacement(
-                    ri, crd[atom_neighbor], cell, rcell);
-                distance =
-                    sqrtf(displacement.x * displacement.x +
-                          displacement.y * displacement.y +
-                          displacement.z * displacement.z);
+                displacement = Get_Periodic_Displacement(ri, crd[atom_neighbor],
+                                                         cell, rcell);
+                distance = sqrtf(displacement.x * displacement.x +
+                                 displacement.y * displacement.y +
+                                 displacement.z * displacement.z);
                 keep_neighbor = SW_Clustered_Neighbor_Within_Cut(
-                    type_i, atom_neighbor, distance, atom_types,
-                    parameters, atom_type_numbers);
+                    type_i, atom_neighbor, distance, atom_types, parameters,
+                    atom_type_numbers);
             }
             const device_mask_t keep_mask =
                 deviceBallot(FULL_MASK, keep_neighbor);
             const unsigned int lane_prefix_mask =
                 threadIdx.x == 0
                     ? 0u
-                    : (1u << static_cast<unsigned int>(threadIdx.x)) -
-                          1u;
+                    : (1u << static_cast<unsigned int>(threadIdx.x)) - 1u;
             const int cached_slot =
                 cached_neighbor_total +
                 devicePopCount(keep_mask & lane_prefix_mask);
             if (keep_neighbor &&
                 cached_slot < kSWClusteredCachedNeighborCapacity)
             {
-                cached_neighbor_atoms[warp_slot][cached_slot] =
-                    atom_neighbor;
+                cached_neighbor_atoms[warp_slot][cached_slot] = atom_neighbor;
                 cached_neighbor_types[warp_slot][cached_slot] =
                     atom_types[atom_neighbor];
-                cached_neighbor_dx[warp_slot][cached_slot] =
-                    displacement.x;
-                cached_neighbor_dy[warp_slot][cached_slot] =
-                    displacement.y;
-                cached_neighbor_dz[warp_slot][cached_slot] =
-                    displacement.z;
-                cached_neighbor_distances[warp_slot][cached_slot] =
-                    distance;
+                cached_neighbor_dx[warp_slot][cached_slot] = displacement.x;
+                cached_neighbor_dy[warp_slot][cached_slot] = displacement.y;
+                cached_neighbor_dz[warp_slot][cached_slot] = displacement.z;
+                cached_neighbor_distances[warp_slot][cached_slot] = distance;
             }
             cached_neighbor_total += devicePopCount(keep_mask);
         }
         __syncwarp();
         const int cached_neighbor_count =
-            cached_neighbor_total <
-                    kSWClusteredCachedNeighborCapacity
+            cached_neighbor_total < kSWClusteredCachedNeighborCapacity
                 ? cached_neighbor_total
                 : kSWClusteredCachedNeighborCapacity;
         const bool use_cached_neighbors =
-            cached_neighbor_total <=
-            kSWClusteredCachedNeighborCapacity;
+            cached_neighbor_total <= kSWClusteredCachedNeighborCapacity;
         if (use_cached_neighbors)
         {
             const int lane = static_cast<int>(threadIdx.x);
@@ -1601,165 +1392,151 @@ SW_Clustered_Center_Cached(
                     cached_neighbor_dx[warp_slot],
                     cached_neighbor_dy[warp_slot],
                     cached_neighbor_dz[warp_slot],
-                    cached_neighbor_distances[warp_slot],
-                    parameters, atom_type_numbers,
-                    pair_type_numbers, store_virial,
-                    &neighbor_force, &i_force, &local_energy,
-                    &local_virial);
+                    cached_neighbor_distances[warp_slot], parameters,
+                    atom_type_numbers, pair_type_numbers, store_virial,
+                    &neighbor_force, &i_force, &local_energy, &local_virial);
             }
             if (lane < cached_neighbor_count)
             {
-                atomicAdd(
-                    frc + cached_neighbor_atoms[warp_slot][lane],
-                    neighbor_force);
+                atomicAdd(frc + cached_neighbor_atoms[warp_slot][lane],
+                          neighbor_force);
             }
         }
         if (!use_cached_neighbors)
 #endif
         {
 #ifdef USE_GPU
-        SW_CLUSTERED_CENTER_NEIGHBOR_CURSOR j_cursor;
-        if (SW_Clustered_Center_Neighbor_Cursor_Begin(
-                view, center_cluster, &j_cursor))
-        {
-            int j_ordinal = 0;
-            SW_CLUSTERED_NEIGHBOR neighbor_j;
-            while (SW_Clustered_Center_Neighbor_Next(
-                view, center_lane, atom_i, &j_cursor, crd, cell,
-                &neighbor_j))
+            SW_CLUSTERED_CENTER_NEIGHBOR_CURSOR j_cursor;
+            if (SW_Clustered_Center_Neighbor_Cursor_Begin(view, center_cluster,
+                                                          &j_cursor))
             {
-                if (!SW_Clustered_Neighbor_Within_Cut(
-                        type_i, neighbor_j.atom, neighbor_j.distance,
-                        atom_types, parameters, atom_type_numbers))
-                {
-                    continue;
-                }
-                const bool lane_owns_j =
-                    j_ordinal >= j_begin &&
-                    ((j_ordinal - j_begin) % j_stride) == 0;
-                if (!lane_owns_j)
-                {
-                    j_ordinal += 1;
-                    continue;
-                }
-                const int atom_j = neighbor_j.atom;
-                const int type_j = atom_types[atom_j];
-                const VECTOR drij = neighbor_j.displacement;
-                const float rij = neighbor_j.distance;
-                const int pair_index_1 =
-                    type_i * atom_type_numbers + type_j;
-                const float A = parameters[8 * pair_index_1];
-                const float B = parameters[8 * pair_index_1 + 1];
-                float epsilon = parameters[8 * pair_index_1 + 2];
-                const float p = parameters[8 * pair_index_1 + 3];
-                const float q = parameters[8 * pair_index_1 + 4];
-                const float a1 = parameters[8 * pair_index_1 + 5];
-                const float gamma1 = parameters[8 * pair_index_1 + 6];
-                const float sigma1 = parameters[8 * pair_index_1 + 7];
-                VECTOR j_force = {};
-                if (atom_j > atom_i && rij < a1 * sigma1)
-                {
-                    float radial_derivative = 0.0f;
-                    local_energy += SW_Two_Body_Analytic(
-                        rij, A, B, epsilon, p, q, a1, sigma1,
-                        &radial_derivative);
-                    const VECTOR pair_force =
-                        radial_derivative / rij * drij;
-                    i_force = i_force - pair_force;
-                    j_force = j_force + pair_force;
-                    if constexpr (full_output)
-                    {
-                        if (store_virial)
-                        {
-                            local_virial =
-                                local_virial -
-                                Get_Virial_From_Force_Dis(
-                                    pair_force, drij);
-                        }
-                    }
-                }
-                SW_CLUSTERED_CENTER_NEIGHBOR_CURSOR k_cursor = j_cursor;
-                SW_CLUSTERED_NEIGHBOR neighbor_k;
-                while (SW_Clustered_Center_Neighbor_Next(
-                    view, center_lane, atom_i, &k_cursor, crd, cell,
-                    &neighbor_k))
+                int j_ordinal = 0;
+                SW_CLUSTERED_NEIGHBOR neighbor_j;
+                while (SW_Clustered_Center_Neighbor_Next(view, center_lane,
+                                                         atom_i, &j_cursor, crd,
+                                                         cell, &neighbor_j))
                 {
                     if (!SW_Clustered_Neighbor_Within_Cut(
-                            type_i, neighbor_k.atom,
-                            neighbor_k.distance, atom_types,
-                            parameters, atom_type_numbers))
+                            type_i, neighbor_j.atom, neighbor_j.distance,
+                            atom_types, parameters, atom_type_numbers))
                     {
                         continue;
                     }
-                    const int atom_k = neighbor_k.atom;
-                    const int type_k = atom_types[atom_k];
-                    const VECTOR drik = neighbor_k.displacement;
-                    const float rik = neighbor_k.distance;
-                    const int pair_index_2 =
-                        type_i * atom_type_numbers + type_k;
-                    const float a2 =
-                        parameters[8 * pair_index_2 + 5];
-                    const float sigma2 =
-                        parameters[8 * pair_index_2 + 7];
-                    VECTOR k_force = {};
-                    if (rij < a1 * sigma1 && rik < a2 * sigma2)
+                    const bool lane_owns_j =
+                        j_ordinal >= j_begin &&
+                        ((j_ordinal - j_begin) % j_stride) == 0;
+                    if (!lane_owns_j)
                     {
-                        const float gamma2 =
-                            parameters[8 * pair_index_2 + 6];
-                        const int triple_index =
-                            type_i * atom_type_numbers *
-                                atom_type_numbers +
-                            type_j * atom_type_numbers + type_k;
-                        const float lambda =
-                            parameters[8 * pair_type_numbers +
-                                       3 * triple_index];
-                        epsilon =
-                            parameters[8 * pair_type_numbers +
-                                       3 * triple_index + 1];
-                        const float b =
-                            parameters[8 * pair_type_numbers +
-                                       3 * triple_index + 2];
-                        VECTOR j_three_force;
-                        VECTOR k_three_force;
-                        const float three_body_energy =
-                            SW_Three_Body_Analytic(
-                                drij, drik, rij, rik, sigma1, a1,
-                                gamma1, sigma2, a2, gamma2, lambda,
-                                epsilon, b, &j_three_force,
-                                &k_three_force);
-                        k_force = k_force + k_three_force;
-                        j_force = j_force + j_three_force;
-                        i_force =
-                            i_force - j_three_force - k_three_force;
-                        local_energy += three_body_energy;
+                        j_ordinal += 1;
+                        continue;
+                    }
+                    const int atom_j = neighbor_j.atom;
+                    const int type_j = atom_types[atom_j];
+                    const VECTOR drij = neighbor_j.displacement;
+                    const float rij = neighbor_j.distance;
+                    const int pair_index_1 =
+                        type_i * atom_type_numbers + type_j;
+                    const float A = parameters[8 * pair_index_1];
+                    const float B = parameters[8 * pair_index_1 + 1];
+                    float epsilon = parameters[8 * pair_index_1 + 2];
+                    const float p = parameters[8 * pair_index_1 + 3];
+                    const float q = parameters[8 * pair_index_1 + 4];
+                    const float a1 = parameters[8 * pair_index_1 + 5];
+                    const float gamma1 = parameters[8 * pair_index_1 + 6];
+                    const float sigma1 = parameters[8 * pair_index_1 + 7];
+                    VECTOR j_force = {};
+                    if (atom_j > atom_i && rij < a1 * sigma1)
+                    {
+                        float radial_derivative = 0.0f;
+                        local_energy +=
+                            SW_Two_Body_Analytic(rij, A, B, epsilon, p, q, a1,
+                                                 sigma1, &radial_derivative);
+                        const VECTOR pair_force =
+                            radial_derivative / rij * drij;
+                        i_force = i_force - pair_force;
+                        j_force = j_force + pair_force;
                         if constexpr (full_output)
                         {
                             if (store_virial)
                             {
                                 local_virial =
                                     local_virial -
-                                    Get_Virial_From_Force_Dis(
-                                        j_three_force, drij) -
-                                    Get_Virial_From_Force_Dis(
-                                        k_three_force, drik);
+                                    Get_Virial_From_Force_Dis(pair_force, drij);
                             }
                         }
                     }
-                    atomicAdd(frc + atom_k, k_force);
+                    SW_CLUSTERED_CENTER_NEIGHBOR_CURSOR k_cursor = j_cursor;
+                    SW_CLUSTERED_NEIGHBOR neighbor_k;
+                    while (SW_Clustered_Center_Neighbor_Next(
+                        view, center_lane, atom_i, &k_cursor, crd, cell,
+                        &neighbor_k))
+                    {
+                        if (!SW_Clustered_Neighbor_Within_Cut(
+                                type_i, neighbor_k.atom, neighbor_k.distance,
+                                atom_types, parameters, atom_type_numbers))
+                        {
+                            continue;
+                        }
+                        const int atom_k = neighbor_k.atom;
+                        const int type_k = atom_types[atom_k];
+                        const VECTOR drik = neighbor_k.displacement;
+                        const float rik = neighbor_k.distance;
+                        const int pair_index_2 =
+                            type_i * atom_type_numbers + type_k;
+                        const float a2 = parameters[8 * pair_index_2 + 5];
+                        const float sigma2 = parameters[8 * pair_index_2 + 7];
+                        VECTOR k_force = {};
+                        if (rij < a1 * sigma1 && rik < a2 * sigma2)
+                        {
+                            const float gamma2 =
+                                parameters[8 * pair_index_2 + 6];
+                            const int triple_index =
+                                type_i * atom_type_numbers * atom_type_numbers +
+                                type_j * atom_type_numbers + type_k;
+                            const float lambda =
+                                parameters[8 * pair_type_numbers +
+                                           3 * triple_index];
+                            epsilon = parameters[8 * pair_type_numbers +
+                                                 3 * triple_index + 1];
+                            const float b = parameters[8 * pair_type_numbers +
+                                                       3 * triple_index + 2];
+                            VECTOR j_three_force;
+                            VECTOR k_three_force;
+                            const float three_body_energy =
+                                SW_Three_Body_Analytic(
+                                    drij, drik, rij, rik, sigma1, a1, gamma1,
+                                    sigma2, a2, gamma2, lambda, epsilon, b,
+                                    &j_three_force, &k_three_force);
+                            k_force = k_force + k_three_force;
+                            j_force = j_force + j_three_force;
+                            i_force = i_force - j_three_force - k_three_force;
+                            local_energy += three_body_energy;
+                            if constexpr (full_output)
+                            {
+                                if (store_virial)
+                                {
+                                    local_virial = local_virial -
+                                                   Get_Virial_From_Force_Dis(
+                                                       j_three_force, drij) -
+                                                   Get_Virial_From_Force_Dis(
+                                                       k_three_force, drik);
+                                }
+                            }
+                        }
+                        atomicAdd(frc + atom_k, k_force);
+                    }
+                    atomicAdd(frc + atom_j, j_force);
+                    j_ordinal += 1;
                 }
-                atomicAdd(frc + atom_j, j_force);
-                j_ordinal += 1;
             }
-        }
 #else
-        const int neighbor_begin = neighbor_offsets[sorted_i];
-        const int neighbor_end = neighbor_offsets[sorted_i + 1];
-        SW_Clustered_Process_Cached_Center_CPU<full_output>(
-            atom_i, type_i, neighbor_end - neighbor_begin,
-            neighbor_atoms + neighbor_begin, crd, frc, cell, rcell,
-            atom_types, parameters, atom_type_numbers,
-            pair_type_numbers, store_virial, &i_force, &local_energy,
-            &local_virial);
+            const int neighbor_begin = neighbor_offsets[sorted_i];
+            const int neighbor_end = neighbor_offsets[sorted_i + 1];
+            SW_Clustered_Process_Cached_Center_CPU<full_output>(
+                atom_i, type_i, neighbor_end - neighbor_begin,
+                neighbor_atoms + neighbor_begin, crd, frc, cell, rcell,
+                atom_types, parameters, atom_type_numbers, pair_type_numbers,
+                store_virial, &i_force, &local_energy, &local_virial);
 #endif
         }
 #ifdef USE_GPU
@@ -1768,8 +1545,7 @@ SW_Clustered_Center_Cached(
         {
             if (store_energy)
             {
-                Warp_Sum_To(atom_energy + atom_i, local_energy,
-                            warpSize);
+                Warp_Sum_To(atom_energy + atom_i, local_energy, warpSize);
                 if (threadIdx.x == 0)
                 {
                     atomicAdd(this_energy + atom_i, local_energy);
@@ -1777,8 +1553,7 @@ SW_Clustered_Center_Cached(
             }
             if (store_virial)
             {
-                Warp_Sum_To(atom_virial + atom_i, local_virial,
-                            warpSize);
+                Warp_Sum_To(atom_virial + atom_i, local_virial, warpSize);
             }
         }
 #else
@@ -1838,22 +1613,19 @@ bool STILLINGER_WEBER_INFORMATION::SW_Force_Clustered(
         return false;
     }
 
-    dim3 blockSize = {
-        CONTROLLER::device_warp, kSWClusteredWarpsPerBlock};
+    dim3 blockSize = {CONTROLLER::device_warp, kSWClusteredWarpsPerBlock};
     dim3 gridSize = (atom_numbers + blockSize.y - 1) / blockSize.y;
     auto f = SW_Clustered_Center_Cached<false>;
     if (need_atom_energy || need_virial)
     {
         f = SW_Clustered_Center_Cached<true>;
     }
-    Launch_Device_Kernel(f, gridSize, blockSize, 0, NULL, view,
-                         atom_numbers, d_clustered_neighbor_offsets,
-                         d_clustered_neighbor_atoms, crd, frc, cell,
-                         rcell, atom_energy, atom_virial,
-                         this->d_atom_type, this->d_parameters,
-                         this->atom_type_numbers, this->pair_type_numbers,
-                         this->d_energy_atom, need_atom_energy != 0,
-                         need_virial != 0);
+    Launch_Device_Kernel(
+        f, gridSize, blockSize, 0, NULL, view, atom_numbers,
+        clustered_neighbors.offsets, clustered_neighbors.items, crd, frc, cell,
+        rcell, atom_energy, atom_virial, this->d_atom_type, this->d_parameters,
+        this->atom_type_numbers, this->pair_type_numbers, this->d_energy_atom,
+        need_atom_energy != 0, need_virial != 0);
     if (failure_reason != NULL)
     {
         *failure_reason = NULL;

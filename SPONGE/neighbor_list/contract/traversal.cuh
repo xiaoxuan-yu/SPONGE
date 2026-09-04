@@ -117,6 +117,43 @@ Clustered_Get_Pair_Active_I_Mask(uint64_t packed_shift_bits, int split)
         ((1ull << kClusteredPairActiveMaskBits) - 1ull));
 }
 
+// A null exclusion table leaves the split imask unchanged. A non-null table
+// must contain every non-zero exclusion index referenced by the payload.
+// Keeping this layout-only decode here gives host and device consumers one
+// authoritative interpretation of packed exclusions.
+__host__ __device__ __forceinline__ unsigned int
+Clustered_Gmxpacked_Effective_Imask(
+    const CLUSTERED_GMXPACKED_CJ& packed,
+    const CLUSTERED_GMXPACKED_EXCLUSION* exclusions, int split,
+    int split_j_lane, int i_lane,
+    int i_cluster_size = kClusteredClusterSize)
+{
+    const CLUSTERED_GMXPACKED_SPLIT& split_entry = packed.split[split];
+    unsigned int pair_bits = 0xffffffffu;
+    if (split_entry.exclusion_index != 0 && exclusions != nullptr)
+    {
+        pair_bits =
+            exclusions[split_entry.exclusion_index]
+                .pair[split_j_lane * i_cluster_size + i_lane];
+    }
+    return split_entry.imask & pair_bits;
+}
+
+__host__ __device__ __forceinline__ bool
+Clustered_Gmxpacked_I_Entry_Is_Active(unsigned int effective_imask,
+                                      uint64_t pair_shift_bits, int split,
+                                      int jm, int i_local)
+{
+    const unsigned int packed_bit =
+        1u << (Clustered_Jm_Imask_Shift(jm) +
+               static_cast<unsigned int>(i_local));
+    const unsigned int i_local_bit =
+        1u << static_cast<unsigned int>(i_local);
+    return (effective_imask & packed_bit) != 0u &&
+           (Clustered_Get_Pair_Active_I_Mask(pair_shift_bits, split) &
+            i_local_bit) != 0u;
+}
+
 // The caller guarantees that the I lane is locally owned. A ghost J lane is
 // always consumed on this rank; two local lanes use one lexicographic
 // cluster/lane orientation so mixed local/ghost clusters cannot be culled as a
